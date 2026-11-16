@@ -216,6 +216,88 @@ mod tests {
         assert!(is_broad_workspace_root(Path::new("/")));
         assert!(is_broad_workspace_root(Path::new("relative/project")));
     }
+
+    /// A worktree at `wt` linked to `<repo>/.git` the way `git worktree add`
+    /// lays it out.
+    fn link_worktree(repo: &Path, wt: &Path) {
+        let admin = repo.join(".git/worktrees").join(wt.file_name().unwrap());
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::create_dir_all(wt).unwrap();
+        let admin = std::fs::canonicalize(&admin).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repair_folds_worktree_spaces_and_rehomes_their_orphans_only_when_allowed() {
+        use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+        use mast_doc::{REGISTRY_DOC_ID, RegistryDoc};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = base.join("repo");
+        let wt = repo.join(".worktrees/feature");
+        link_worktree(&repo, &wt);
+        let space = |id: &str, path: &Path| mast_proto::Space {
+            id: id.into(),
+            device_id: "dev".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: chrono::Utc::now(),
+        };
+        let mut doc = RegistryDoc::new("dev");
+        let prompts = mast_proto::PrReviewPrompts::neutral();
+        doc.create_space_with_pr_prompts(&space("repo", &repo), &prompts)
+            .unwrap();
+        doc.create_space_with_pr_prompts(&space("wt", &wt), &prompts)
+            .unwrap();
+        let now = chrono::Utc::now();
+        doc.claim_chat("in-wt", wt.to_str(), Some("wt"), now);
+        doc.claim_chat("orphan-wt", wt.to_str(), Some("gone"), now);
+        doc.claim_chat("orphan-plain", base.to_str(), Some("gone"), now);
+        let store = Arc::new(mast_sync::DocsStore::open(&dir.path().join("store")).unwrap());
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "dev".into(),
+                device_name: "Test".into(),
+                platform: "macos".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let space_of = |chat: &str| host.chat(chat).unwrap().map(|c| c.space_id.unwrap());
+        let spaces = || {
+            let mut ids: Vec<String> = host.watch_spaces().borrow().iter().map(|s| s.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+
+        // Not synced: nothing at all, not even the orphan deletes.
+        super::repair_spaces(&host, "dev", false, false);
+        assert_eq!(spaces(), ["repo", "wt"]);
+        assert_eq!(space_of("orphan-plain").as_deref(), Some("gone"));
+
+        // Outline writes switched off: no fold, but orphans still resolve.
+        super::repair_spaces(&host, "dev", true, true);
+        assert_eq!(spaces(), ["repo", "wt"]);
+        assert_eq!(space_of("in-wt").as_deref(), Some("wt"));
+        assert_eq!(space_of("orphan-wt").as_deref(), Some("repo"));
+        assert_eq!(space_of("orphan-plain"), None);
+
+        super::repair_spaces(&host, "dev", true, false);
+        assert_eq!(spaces(), ["repo"]);
+        assert_eq!(space_of("in-wt").as_deref(), Some("repo"));
+    }
 }
 
 /// Per-space task: trailing-debounce kicks, then recheck git presence.
@@ -288,28 +370,38 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
 /// Host-side repair: delete OUR chats whose `spaceId` dangles (create-vs-delete
 /// race). Chats hosted by other devices are left alone.
 fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
+    repair_spaces(
+        &inner.workspace,
+        &inner.device_id,
+        inner.workspace.registry_synced(),
+        crate::work_outline::writes_disabled(),
+    );
+}
+
+/// [`sweep_orphans`] with its gates passed in.
+fn repair_spaces(workspace: &WorkspaceHost, device_id: &str, synced: bool, writes_disabled: bool) {
     // NEVER sweep off a replica that hasn't heard from the server this boot:
     // a gapped/pre-heal/offline-at-boot view is missing rows, and "space row
     // absent" on it is not evidence the space was deleted — sweeping there
     // globally destroys live chats (2026-08-23 missing-sessions audit).
-    if !inner.workspace.registry_synced() {
+    if !synced {
         tracing::debug!("spaces: orphan sweep skipped (registry not yet synced this boot)");
         return;
     }
     // Worktree Spaces (minted before claims and imports resolved worktrees to
     // their checkout's Space) fold into that Space; same synced gate, since
     // the fold deletes the emptied Space.
-    if !crate::work_outline::writes_disabled() {
-        let folded = inner.workspace.fold_worktree_spaces();
+    if !writes_disabled {
+        let folded = workspace.fold_worktree_spaces();
         if folded > 0 {
             tracing::info!(spaces = folded, "folded worktree spaces");
         }
     }
-    let spaces = inner.workspace.watch_spaces().borrow().clone();
+    let spaces = workspace.watch_spaces().borrow().clone();
     let live: std::collections::HashSet<&str> = spaces.iter().map(|s| s.id.as_str()).collect();
-    let chats = inner.workspace.watch_chats().borrow().clone();
+    let chats = workspace.watch_chats().borrow().clone();
     for chat in chats {
-        if chat.device_id != inner.device_id {
+        if chat.device_id != device_id {
             continue;
         }
         let Some(space_id) = chat.space_id.as_deref() else {
@@ -318,12 +410,12 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
         if live.contains(space_id) {
             continue;
         }
-        if inner.workspace.rehome_worktree_chat(&chat) {
+        if workspace.rehome_worktree_chat(&chat) {
             tracing::info!(chat = %chat.id, space = %space_id, "re-homed orphaned worktree chat");
             continue;
         }
         tracing::info!(chat = %chat.id, space = %space_id, "deleting orphaned chat (space gone)");
-        if let Err(err) = inner.workspace.delete_chat(&chat.id) {
+        if let Err(err) = workspace.delete_chat(&chat.id) {
             tracing::warn!(chat = %chat.id, error = %err, "spaces: orphan delete failed");
         }
     }
@@ -331,8 +423,8 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
     // `delete_space` cascade missed, or a peer that predates the cascade).
     // Any device may sweep: the dead Space's owner cannot be consulted. Same
     // synced gate as above; the write kill switch covers deletes too.
-    if !crate::work_outline::writes_disabled() {
-        let swept = inner.workspace.sweep_work_outline_orphans();
+    if !writes_disabled {
+        let swept = workspace.sweep_work_outline_orphans();
         if swept > 0 {
             tracing::info!(
                 rows = swept,

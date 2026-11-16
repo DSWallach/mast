@@ -1415,19 +1415,26 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.sweep_work_outline_orphans())
     }
 
-    /// Re-home a chat whose Space is gone when its cwd is a worktree: a chat
-    /// created in a worktree Space while it was being folded belongs where
-    /// the fold sent the rest. `false` (nothing written) for any other chat.
+    /// Re-home a chat whose Space is gone when its cwd is a worktree whose
+    /// home Space exists: a chat created in a worktree Space while it was
+    /// being folded belongs where the fold sent the rest. Never creates a
+    /// Space, so a Space the user deleted stays deleted. `false` (nothing
+    /// written) for any other chat.
     pub fn rehome_worktree_chat(&self, chat: &Chat) -> bool {
         let Some(cwd) = chat.cwd.as_deref() else {
             return false;
         };
-        if worktree_origin(std::path::Path::new(cwd)).is_none() {
+        if worktree_home_origin(std::path::Path::new(cwd)).is_none() {
             return false;
         }
-        let result = self
-            .space_for_path(cwd)
-            .and_then(|space| Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?));
+        let result = self.read(|doc| doc.read_spaces()).map_err(EngineError::from).and_then(|spaces| {
+            match space_home(&spaces, &self.inner.config.device_id, cwd) {
+                SpaceHome::Existing(space) => {
+                    Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?)
+                }
+                SpaceHome::New(_) => Ok(false),
+            }
+        });
         match result {
             Ok(written) => written,
             Err(err) => {
@@ -1455,7 +1462,7 @@ impl WorkspaceHost {
         };
         let mut folded = 0;
         for space in spaces.iter().filter(|s| s.device_id == *device_id) {
-            if worktree_origin(std::path::Path::new(&space.path)).is_none()
+            if worktree_home_origin(std::path::Path::new(&space.path)).is_none()
                 || !self
                     .read(|doc| doc.space_foldable(&space.id))
                     .unwrap_or(false)
@@ -1598,10 +1605,6 @@ impl WorkspaceHost {
     }
 
     /// The own-device Space [`space_home`] picks, created when none fits.
-    ///
-    /// A linked-worktree cwd never resolves to a Space at the worktree path:
-    /// that minted a phantom sidebar space named after the worktree folder
-    /// ("clever-ember") next to the project's real space.
     fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
         let spaces = self.read(|doc| doc.read_spaces())?;
@@ -2745,40 +2748,59 @@ pub(crate) enum SpaceHome {
 /// worktree folder (a flagship worktree under `workspace/.worktrees` belongs
 /// to `workspace`, not `workspace/flagship`), short of a broad root like
 /// HOME; else the checkout's own Space. Never a Space at the worktree path
-/// itself. Any other path belongs to the Space at exactly that path. Paths
-/// compare resolved: git writes `gitdir:` with symlinks resolved, Space paths
-/// are stored as entered.
+/// itself. Any other path, a worktree whose checkout is a broad root
+/// included, belongs to the Space at exactly that path.
+///
+/// Only worktrees compare paths resolved (git writes `gitdir:` with symlinks
+/// resolved, Space paths are stored as entered), and only after an exact
+/// match fails: resolving touches the filesystem of every Space.
 pub(crate) fn space_home(spaces: &[Space], device_id: &str, path: &str) -> SpaceHome {
     use crate::execution_scope::canonical_lenient;
-    let own: Vec<(&str, std::path::PathBuf)> = spaces
-        .iter()
-        .filter(|s| s.device_id == device_id)
-        .map(|s| (s.id.as_str(), canonical_lenient(std::path::Path::new(&s.path))))
-        .collect();
-    let at = |dir: &std::path::Path| {
-        let dir = canonical_lenient(dir);
-        own.iter()
-            .find(|(_, space)| *space == dir)
-            .map(|(id, _)| id.to_string())
+    let own: Vec<&Space> = spaces.iter().filter(|s| s.device_id == device_id).collect();
+    let exact = |at: &str| own.iter().find(|s| s.path == at).map(|s| s.id.clone());
+    let Some(origin) = worktree_home_origin(std::path::Path::new(path)) else {
+        return exact(path).map_or_else(|| SpaceHome::New(path.to_string()), SpaceHome::Existing);
     };
-    let worktree = std::path::Path::new(path);
-    let Some(origin) = worktree_origin(worktree) else {
-        return at(worktree).map_or_else(|| SpaceHome::New(path.to_string()), SpaceHome::Existing);
+    let resolved = std::cell::OnceCell::new();
+    let at = |dir: &std::path::Path| {
+        if let Some(id) = dir.to_str().and_then(exact) {
+            return Some(id);
+        }
+        let dir = canonical_lenient(dir);
+        resolved
+            .get_or_init(|| {
+                own.iter()
+                    .map(|s| (s.id.clone(), canonical_lenient(std::path::Path::new(&s.path))))
+                    .collect::<Vec<_>>()
+            })
+            .iter()
+            .find(|(_, space)| *space == dir)
+            .map(|(id, _)| id.clone())
     };
     let checkout = std::path::Path::new(&origin);
-    let worktree = canonical_lenient(worktree);
+    let worktree = canonical_lenient(std::path::Path::new(path));
     checkout
         .ancestors()
-        .take_while(|dir| !crate::repos::is_broad_workspace_root(dir))
+        .take_while(|dir| !crate::repos::is_broad_workspace_root_resolved(dir))
         .filter(|dir| worktree.starts_with(canonical_lenient(dir)))
         .find_map(at)
         .or_else(|| at(checkout))
         .map_or(SpaceHome::New(origin), SpaceHome::Existing)
 }
 
+/// [`worktree_origin`], unless the worktree came from a broad root like HOME
+/// (a deleted `~/.claude/worktrees/<name>`): no Space should collect those.
+fn worktree_home_origin(path: &std::path::Path) -> Option<String> {
+    worktree_origin(path)
+        .filter(|origin| !crate::repos::is_broad_workspace_root_resolved(std::path::Path::new(origin)))
+}
+
 /// [`linked_worktree_root`], plus a worktree folder that is already gone:
-/// anything under `.worktrees` (Mast and the agent-mode scripts) or
-/// `.claude/worktrees` (Claude Code) came from the folder holding that.
+/// anything under `.worktrees` (the agent-mode scripts and chat worktrees) or
+/// `.claude/worktrees` (Claude Code) came from the folder holding that. A
+/// deleted worktree under Mast's own worktrees root (`~/.mast/worktrees/
+/// <repoName>/<name>`) is not recognized: its path names only the repo's
+/// folder, not where the repo lives.
 fn worktree_origin(path: &std::path::Path) -> Option<String> {
     if let Some(root) = linked_worktree_root(path) {
         return Some(root);
@@ -3846,7 +3868,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
         let module = ws.join(".git/modules/flagship");
-        let wt = ws.join(".worktrees/flagship-ask1336");
+        let wt = ws.join(".worktrees/flagship-x");
         link_worktree(&module, &wt);
         let expected = ws.join("flagship");
 
@@ -3989,7 +4011,7 @@ mod tests {
         // A deleted worktree still maps to the folder holding its worktrees.
         let gone = ws.join(".worktrees/flagship/long-gone");
         assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
-        let gone = ws.join(".claude/worktrees/angry-dewdney");
+        let gone = ws.join(".claude/worktrees/long-gone");
         assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
         // Anything else is matched exactly.
         assert_eq!(space_home(&spaces, "dev", &s(&mast)), existing("mast"));
@@ -4110,5 +4132,27 @@ mod tests {
         assert_eq!(space_of("c-late"), "repo");
         assert!(!host.rehome_worktree_chat(&host.chat("c-plain").unwrap().unwrap()));
         assert_eq!(space_of("c-plain"), "live");
+
+        // A worktree whose home Space doesn't exist (the user deleted it) is
+        // left to the sweep rather than bringing a Space back.
+        let other_wt = base.join("other/.worktrees/x");
+        link_worktree(&base.join("other/.git"), &other_wt);
+        host.mutate(|doc| {
+            doc.claim_chat("c-homeless", other_wt.to_str(), Some("live"), Utc::now());
+        });
+        let before = host.read(|doc| doc.read_spaces()).unwrap().len();
+        assert!(!host.rehome_worktree_chat(&host.chat("c-homeless").unwrap().unwrap()));
+        assert_eq!(host.read(|doc| doc.read_spaces()).unwrap().len(), before);
+    }
+
+    #[test]
+    fn worktrees_made_from_a_broad_root_belong_to_no_home_space() {
+        use super::{SpaceHome, space_home};
+        let home = crate::repos::home_dir();
+        let gone = home.join(".claude/worktrees/mast-test-long-gone-worktree");
+        assert!(!gone.exists());
+        let spaces = vec![space_at("home", "dev", &home)];
+        let gone = gone.to_str().unwrap();
+        assert_eq!(space_home(&spaces, "dev", gone), SpaceHome::New(gone.into()));
     }
 }
