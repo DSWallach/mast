@@ -28,6 +28,10 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 94: menu-bar redraw fix** (2026-11-16; UI 2646/0). menu_bar::MenuSync sets the status-item icon only when the
+  glyph changes and the tooltip only when its text changes, and rebuilds the NSMenu only in menuWillOpen: or while the
+  menu is open (menuDidClose: tracks open/closed). Before, a full menu rebuild about every 900 ms took ≈40% of the main
+  thread. Backup: `~/zeron-dev-app-backups/mast-release-93`.
 - **Release 93: startup watch-storm fix** (2026-11-16, urgent; diff_sync tests 20/20, worker's full mast-engine 711/1
   with the 1 the known instance_lock flake; installed build only, no full release run because of the load emergency).
   After each restart Mast pinned about 8 cores for many minutes: every diff-sync entry walked up to 8000 dirs in
