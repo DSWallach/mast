@@ -1895,6 +1895,8 @@ fn header_and_item_tab_follow_the_selected_checkout(cx: &mut TestAppContext) {
     assert_eq!(before.branch.as_deref(), Some("feature/header"));
     assert_eq!(before.runs_in.as_deref(), Some(format!("/work/{CHAT_API}").as_str()));
     assert_eq!(before.execution_root, None);
+    assert!(has(vcx, "chat-header-chip-branch"));
+    assert!(has(vcx, "chat-item-runs-in"));
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, cx| {
             state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
@@ -1913,7 +1915,17 @@ fn header_and_item_tab_follow_the_selected_checkout(cx: &mut TestAppContext) {
     assert_eq!(after.branch.as_deref(), Some("feature/bound"));
     assert_eq!(after.runs_in.as_deref(), Some("/work/checkout"));
     assert_eq!(after.execution_root.as_deref(), Some(format!("/work/{CHAT_API}").as_str()));
+    assert!(has(vcx, "chat-header-chip-branch"));
     assert!(has(vcx, "chat-item-runs-in"));
     expand(&shell, vcx, &["runs-in"]);
     assert!(has(vcx, "chat-item-runs-in"));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, cx| {
+        state.set_chat_diff_targets_for_test(vec![]);
+        cx.notify();
+    }));
+    draw(vcx);
+    let restored = shell.read_with(vcx, |shell, cx| shell.chat_item_facts(CHAT_API, cx).unwrap());
+    assert_eq!(restored.branch, before.branch);
+    assert_eq!(restored.runs_in, before.runs_in);
+    assert_eq!(restored.execution_root, None);
 }
