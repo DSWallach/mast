@@ -92,6 +92,8 @@ pub(crate) struct MessageFrame {
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct MessageBody {
     #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub usage: Option<Value>,
@@ -154,6 +156,8 @@ pub(crate) struct RateLimitInfo {
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResultFrame {
+    #[serde(default)]
+    pub uuid: Option<String>,
     #[serde(default, rename = "modelUsage")]
     pub model_usage: std::collections::BTreeMap<String, Value>,
     #[serde(default)]

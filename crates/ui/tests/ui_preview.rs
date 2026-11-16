@@ -109,6 +109,10 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "linear",
         "linear-settings",
         "workflow-pack",
+        "token-usage",
+        "token-usage-tools",
+        "token-usage-rules",
+        "token-usage-trends",
         "team",
         "side-chat",
         "question",
@@ -433,3 +437,6 @@ fn render_browser(
         },
     )
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

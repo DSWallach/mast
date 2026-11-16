@@ -2150,6 +2150,7 @@ impl EngineRpc {
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
+                if let Some(usage) = self.sessions.token_usage() { usage.request_delete_chat(&chat_id); }
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
@@ -2242,6 +2243,7 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::LIST_HARNESSES
+            | methods::TOKEN_USAGE
             | methods::GET_PERMISSION_RULES
             | methods::REMOVE_PERMISSION_RULE
             | methods::INSTALL_HARNESS
@@ -2662,6 +2664,9 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
+            if method==methods::TOKEN_USAGE && self.workspace.read_devices().ok().and_then(|devices|devices.into_iter().find(|device|device.id==target)).is_some_and(|device|!device.supports(mast_proto::capabilities::TOKEN_USAGE_V1)) {
+                return Err(RpcError::Failed("Update Mast on the selected device to view token usage.".into()));
+            }
             let target = target.to_string();
             return self.forward(&target, method, params).await;
         }
@@ -5386,6 +5391,13 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::TOKEN_USAGE => {
+                let query: mast_proto::token_usage::TokenUsageQuery = parse_params(params)?;
+                let usage = self.sessions.token_usage().ok_or_else(|| RpcError::Failed("Token usage recording is unavailable on this engine".into()))?;
+                let snapshot = tokio::task::spawn_blocking(move || usage.snapshot(&query)).await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
             }
             methods::SCHEDULED_TASKS => {
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;

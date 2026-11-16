@@ -41,6 +41,7 @@ struct Inner {
     registry: Arc<HarnessRegistry>,
     repos: Repos,
     in_flight: Mutex<HashSet<String>>,
+    token_usage: std::sync::OnceLock<crate::token_usage::TokenUsage>,
     /// Titles run on the chat's pinned account when the title harness is the
     /// chat's own; otherwise on Default.
     managed_accounts: std::sync::OnceLock<crate::managed_accounts::ManagedAccounts>,
@@ -61,6 +62,7 @@ pub(crate) fn branch_rename_blocked(
 }
 
 impl TitleGenerator {
+    pub fn set_token_usage(&self, usage: crate::token_usage::TokenUsage) { let _ = self.inner.token_usage.set(usage); }
     pub fn new(workspace: WorkspaceHost, registry: Arc<HarnessRegistry>, repos: Repos) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -68,6 +70,7 @@ impl TitleGenerator {
                 registry,
                 repos,
                 in_flight: Mutex::new(HashSet::new()),
+                token_usage: std::sync::OnceLock::new(),
                 managed_accounts: std::sync::OnceLock::new(),
             }),
         }
@@ -295,13 +298,15 @@ impl TitleGenerator {
                 worktree: None,
                 instructions: None,
             };
-            match tokio::time::timeout(
+            let capture = self.inner.token_usage.get().map(|usage| (usage.clone(), usage.begin_title(chat_id, &request)));
+            let result = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request),
+                collect_text_observed(harness.as_ref(), request, capture.clone()),
             )
             .await
-            .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
-            {
+            .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())));
+            if let Some((usage,key)) = capture { usage.finish_title(&key); }
+            match result {
                 Ok(raw) => {
                     let candidate = clean_title(&raw);
                     if !candidate.is_empty() {
@@ -475,9 +480,15 @@ fn contextualize_title(candidate: &str, context: &TitleContext) -> String {
 
 /// Drive one titling run through the harness: no steering, questions resolved
 /// empty immediately (a titling prompt must never block on input).
-async fn collect_text(
+#[cfg(test)]
+async fn collect_text(harness: &dyn mast_harness::Harness, request: RunRequest) -> Result<String, EngineError> {
+    collect_text_observed(harness,request,None).await
+}
+
+async fn collect_text_observed(
     harness: &dyn mast_harness::Harness,
     request: RunRequest,
+    capture: Option<(crate::token_usage::TokenUsage,String)>,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
@@ -495,7 +506,9 @@ async fn collect_text(
     let mut text = String::new();
     let mut completed = false;
     while let Some(event) = stream.next().await {
-        match event? {
+        let event = event?;
+        if let Some((usage,key)) = &capture { usage.observe(key, &event); }
+        match event {
             AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
             AgentEvent::ToolCall { .. } => {
                 return Err(EngineError::Other(

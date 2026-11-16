@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod agent;
+pub mod token_usage;
 pub mod artifacts;
 pub mod chat_diff_target;
 pub mod diff_review;

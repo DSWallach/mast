@@ -71,6 +71,7 @@ pub mod subagent_transcript;
 pub mod swr;
 pub mod terminals;
 pub mod titles;
+pub mod token_usage;
 mod transcript_history;
 pub mod typesafe;
 pub mod uploads;
@@ -237,6 +238,7 @@ pub struct EngineCore {
     /// The PR/ticket sweep — owned so shutdown can end it. It reaches the
     /// doc host through the merged-PR wakes.
     pr_ticket_sweep: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token_usage_retention: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -315,6 +317,10 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        match token_usage::TokenUsage::open(profile.store_root()) {
+            Ok(usage)=>sessions.set_token_usage(usage),
+            Err(error)=>tracing::error!(%error,"token usage recording unavailable"),
+        }
         sessions.set_auto_capture_friction(registry.friction_settings().auto_capture);
         let doc_host = DocHost::new(
             store.clone(),
@@ -335,6 +341,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         )?;
+        let token_usage_retention=sessions.token_usage().map(|usage|usage.follow_deletions(workspace.clone()));
         doc_host.set_workspace(workspace.clone());
         doc_host.set_instruction_registry(Arc::new(workspace.clone()));
         // Everything the dispatch gate needs (workspace + repos, so
@@ -614,6 +621,7 @@ impl EngineCore {
         context_usage.set_managed_accounts(managed_accounts.clone());
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
         let titles = TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone());
+        if let Some(usage) = sessions.token_usage() { titles.set_token_usage(usage); }
         titles.set_managed_accounts(managed_accounts.clone());
         sessions.set_titles(titles);
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
@@ -689,6 +697,7 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             pr_ticket_sweep: std::sync::Mutex::new(Some(pr_ticket_sweep)),
+            token_usage_retention:std::sync::Mutex::new(token_usage_retention),
             _instance_lock: lock,
         })
     }
@@ -857,6 +866,8 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally

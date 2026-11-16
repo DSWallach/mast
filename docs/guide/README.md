@@ -10,6 +10,7 @@
 - [Plans and artifacts](plans-and-artifacts.md)
 - [GitHub and Linear](github-and-linear.md)
 - [Accounts](accounts.md)
+- [Token usage](token-usage.md)
 - [Scheduled tasks](scheduled-tasks.md)
 - [Permission rules](permissions.md)
 - [Keyboard](keyboard.md)

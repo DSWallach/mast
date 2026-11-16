@@ -17,6 +17,7 @@ use mast_proto::{AuthState, WorkspaceScope};
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
+pub mod token_usage;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
