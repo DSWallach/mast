@@ -1126,21 +1126,22 @@ async fn a_user_message_interrupts_an_event_started_turn_and_runs_next() {
 async fn settings_default_and_gate_event_kinds() {
     let rig = Rig::new().await;
     assert_eq!(rig.wakes.settings(ORCH), WakeSettings::default());
-    // Turn-finished is off by default: it is logged (unseen mark) not held.
+    // Turn-finished is on by default: it is held and logged.
     rig.wakes
         .ingest_sessions(&[session("w1", SessionStatus::Idle)])
         .await;
     let status = rig.wakes.status(ORCH);
-    assert!(status.held.is_empty());
+    assert_eq!(status.held.len(), 1);
     assert_eq!(status.recent.len(), 1);
     assert_eq!(status.recent[0].kind, WakeEventKind::TurnFinished);
     assert!(status.recent[0].unseen);
 
+    // Turning turn_finished off logs new turn-finished events without holding them.
     rig.wakes
         .set_settings(
             ORCH,
             WakeSettings {
-                turn_finished: true,
+                turn_finished: false,
                 ..WakeSettings::default()
             },
         )
@@ -1148,7 +1149,10 @@ async fn settings_default_and_gate_event_kinds() {
     rig.wakes
         .ingest_sessions(&[session("w2", SessionStatus::Idle)])
         .await;
-    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    let status = rig.wakes.status(ORCH);
+    assert!(status.held.is_empty());
+    assert_eq!(status.recent.len(), 2);
+    assert_eq!(status.recent[0].kind, WakeEventKind::TurnFinished);
 
     // Master switch off clears what was held and holds nothing new.
     rig.wakes

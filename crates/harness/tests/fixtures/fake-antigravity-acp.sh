@@ -54,6 +54,11 @@ while read -r line; do
       SETS="$SETS$set;"
       emit "{\"id\":$id,\"result\":{\"configOptions\":$OPTIONS}}"
     fi
+  elif has "$line" '"method":"session/prompt"' && has "$line" 'usage-overflow'; then
+    emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"usage_update\",\"used\":158946,\"size\":1048576}}}"
+    emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"done\"}}}}"
+    emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":428192,\"outputTokens\":9626,\"totalTokens\":2710669}}}"
+    exit 0
   elif has "$line" '"method":"session/prompt"' && has "$line" 'echo-wakeup'; then
     # the model parroting a background-task wakeup, split mid-tag across chunks
     for text in 'Waiting for the build.\n\n<SYSTEM_' 'MESSAGE>\n[Message] timestamp=2026-09-18T10:07:35Z sender=c1/task-156 priority=MESSAGE_PRIORITY_HIGH content=Task id \"c1/task-156\" finished with result:\n\nThe command exited with code 0.\n</SYSTEM_MES' 'SAGE>\n\nThe build finished.'; do

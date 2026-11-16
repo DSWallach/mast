@@ -164,6 +164,39 @@ impl ArtifactStore {
             .or_else(|| self.all().find(matches))
     }
 
+    /// The one live artifact whose stored file is named `file_name` (a bare
+    /// name such as `plan.md`, as agents often write it in chat). Artifacts of
+    /// `space_id` win over other Spaces'; `None` when no artifact or more than
+    /// one in the winning scope has that name, so an ambiguous name never
+    /// opens the wrong file.
+    pub(crate) fn artifact_by_file_name(
+        &self,
+        file_name: &str,
+        space_id: Option<&str>,
+    ) -> Option<&ArtifactView> {
+        let file_name = file_name.trim();
+        if file_name.is_empty() || file_name.contains('/') {
+            return None;
+        }
+        let named = |artifact: &&ArtifactView| {
+            artifact.archived_at.is_none()
+                && artifact.stored_path.rsplit('/').next() == Some(file_name)
+        };
+        let in_space: Vec<&ArtifactView> = space_id
+            .and_then(|space| self.snapshot(space))
+            .map(|snapshot| snapshot.artifacts.iter().filter(named).collect())
+            .unwrap_or_default();
+        let found = if in_space.is_empty() {
+            self.all().filter(named).collect()
+        } else {
+            in_space
+        };
+        match found.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
     /// The Details list of one work item: the pinned plan first, then the
     /// rest newest first (`updatedAt`), archived artifacts excluded.
     pub(crate) fn for_work_item(&self, space_id: &str, work_item_id: &str) -> Vec<&ArtifactView> {

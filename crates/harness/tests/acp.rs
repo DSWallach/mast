@@ -2020,5 +2020,32 @@ async fn antigravity_detection_subprocess() {
     );
 }
 
+#[tokio::test]
+async fn antigravity_turn_completion_preserves_usage_update_context_occupancy() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("usage-overflow");
+    req.model = Some("gemini-3.7-flash".into());
+    req.reasoning = Some(ReasoningLevel::High);
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    let context_events: Vec<(Option<u64>, Option<u64>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ContextUsage { tokens, window } => Some((*tokens, *window)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        context_events,
+        vec![(None, Some(1_000_000)), (Some(158_946), Some(1_048_576))],
+        "{events:?}"
+    );
+    assert!(events.contains(&AgentEvent::Usage {
+        input_tokens: 428_192,
+        output_tokens: 9_626,
+    }));
+}
+
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;

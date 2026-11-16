@@ -81,7 +81,7 @@ impl Default for WakeSettings {
             enabled: true,
             required_actions: true,
             errors: true,
-            turn_finished: false,
+            turn_finished: true,
             prs: false,
             worker_reports: true,
             awaiting_input: true,

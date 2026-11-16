@@ -3386,6 +3386,12 @@ impl Shell {
             ) {
                 return LinkOutcome::Rejected;
             }
+            if let Some(artifact_id) = self.artifact_for_bare_file_link(&activation.target.original, cx)
+            {
+                self.leave_overview_for_chat(cx);
+                self.open_artifact(artifact_id, window, cx);
+                return LinkOutcome::Internal;
+            }
             if self.open_workspace_file_link(&activation.target.original, window, cx) {
                 self.leave_overview_for_chat(cx);
                 return LinkOutcome::Internal;
@@ -3538,6 +3544,32 @@ impl Shell {
         let root = crate::files::client::FilesRequestContext::for_chat(state, &self.active_chat)?.cwd;
         let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
         Some((root, local))
+    }
+
+    /// An artifact id for a bare file-name link (`plan.md`) that names no file
+    /// in the chat's checkout but exactly one registered artifact. Agents link
+    /// artifacts by name, yet the files live under `.mast/artifacts/<folder>/`
+    /// rather than the checkout root, so the file viewer would say "not found".
+    fn artifact_for_bare_file_link(&self, target: &str, cx: &App) -> Option<String> {
+        let (root, local) = self.active_checkout(cx)?;
+        let link = resolve_workspace_file_link(target, &root)?;
+        if link.path.contains('/') {
+            return None;
+        }
+        // A real checkout file of that name wins (checked only where we can).
+        if local && std::path::Path::new(&root).join(&link.path).is_file() {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let space_id = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == self.active_chat)
+            .and_then(|chat| chat.space_id.clone());
+        state
+            .artifacts()
+            .artifact_by_file_name(&link.path, space_id.as_deref())
+            .map(|artifact| artifact.id.clone())
     }
 
     /// Route Codex visualization files and the explicit file actions. `None`

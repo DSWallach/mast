@@ -2502,13 +2502,13 @@ fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> 
     })
 }
 
-/// Settled context usage snapshot from a finished `session/prompt` response.
-fn context_usage_from_response(
-    res: &Result<Value, HarnessError>,
-    harness: HarnessId,
-    model: Option<&str>,
-    model_options: &serde_json::Map<String, Value>,
-) -> Option<AgentEvent> {
+/// Settled context usage snapshot from a finished `session/prompt` response,
+/// when the response carries explicit context-occupancy (`used`) or capacity
+/// fields. Turn-cumulative `totalTokens` and `inputTokens` are billing totals
+/// across all model steps in the turn (emitted via [`usage_from_response`]),
+/// never context window occupancy; session start already seeds the fallback
+/// window from `effective_context_window`.
+fn context_usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> {
     let resp = res.as_ref().ok()?;
     let usage = resp.get("usage").or_else(|| resp.get("_meta"))?;
     let count = |keys: &[&str]| {
@@ -2516,9 +2516,8 @@ fn context_usage_from_response(
             .find_map(|k| usage.get(*k))
             .and_then(Value::as_u64)
     };
-    let tokens = count(&["totalTokens", "total_tokens", "used"])
-        .or_else(|| count(&["inputTokens", "input_tokens"]));
-    let wire_window = count(&[
+    let tokens = count(&["used"]);
+    let window = count(&[
         "max",
         "limit",
         "size",
@@ -2528,8 +2527,6 @@ fn context_usage_from_response(
         "model_context_window",
     ])
     .filter(|n| *n > 0);
-    let window = wire_window
-        .or_else(|| antigravity_context::effective_context_window(harness, model, model_options));
     (tokens.is_some() || window.is_some()).then_some(AgentEvent::ContextUsage { tokens, window })
 }
 
@@ -3136,6 +3133,24 @@ fn steering_call_future(
     prompt_like_request(client.clone(), "_session/steering", params)
 }
 
+const ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE: &str = "\
+<mast_acp_constraints>\n\
+Do not start an in-process background command or background subagent and end your turn saying you will report back when finished: this ACP transport cannot wake you when an in-process background task completes. Wait for long-running commands in the foreground, or delegate background work to a Mast worker chat with `create_chat`.\n\
+</mast_acp_constraints>\n";
+
+fn antigravity_system_prompt_append(request: &RunRequest) -> String {
+    match &request.instructions {
+        Some(delivery) if !delivery.envelope.rendered.is_empty() => {
+            if delivery.envelope.rendered.ends_with('\n') {
+                format!("{}{}", delivery.envelope.rendered, ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE)
+            } else {
+                format!("{}\n{}", delivery.envelope.rendered, ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE)
+            }
+        }
+        _ => ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE.to_owned(),
+    }
+}
+
 fn build_session_params(
     harness: HarnessId,
     request: &RunRequest,
@@ -3149,13 +3164,11 @@ fn build_session_params(
         "cwd": request.cwd,
         "mcpServers": mcp_servers,
     });
-    if harness == HarnessId::Antigravity
-        && let Some(delivery) = &request.instructions
-    {
+    if harness == HarnessId::Antigravity {
         params["_meta"] = json!({
             "antigravity": {
                 "systemPrompt": {
-                    "append": delivery.envelope.rendered,
+                    "append": antigravity_system_prompt_append(request),
                 }
             }
         });
@@ -3713,12 +3726,8 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                if let Some(context_usage) = context_usage_from_response(
-                    &res,
-                    harness,
-                    request.model.as_deref(),
-                    &request.model_options,
-                ) && !send(&event_tx, context_usage).await
+                if let Some(context_usage) = context_usage_from_response(&res)
+                    && !send(&event_tx, context_usage).await
                 {
                     break 'main;
                 }
@@ -3898,12 +3907,7 @@ async fn run_session(session: Session) {
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
                         }
-                        if let Some(context_usage) = context_usage_from_response(
-                            &res,
-                            harness,
-                            request.model.as_deref(),
-                            &request.model_options,
-                        ) {
+                        if let Some(context_usage) = context_usage_from_response(&res) {
                             let _ = send(&event_tx, context_usage).await;
                         }
                         let (status, error) = stop_outcome(&res, interrupted);
@@ -5432,7 +5436,14 @@ mod tests {
         );
         assert_eq!(
             params["_meta"]["antigravity"]["systemPrompt"]["append"],
-            rendered
+            format!("{rendered}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
+        );
+
+        req.instructions = None;
+        let params_without_instructions = build_session_params(HarnessId::Antigravity, &req, None);
+        assert_eq!(
+            params_without_instructions["_meta"]["antigravity"]["systemPrompt"]["append"],
+            ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE
         );
     }
 
@@ -5574,4 +5585,43 @@ fn explicit_program_launches_do_not_get_archive_scratch_roots() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh"),
     );
     assert!(harness.adapter_scratch().unwrap().is_none());
+}
+
+#[test]
+fn prompt_response_cumulative_usage_does_not_emit_context_usage() {
+    let res = Ok(json!({
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 428_192,
+            "outputTokens": 9_626,
+            "totalTokens": 16_734_637,
+        }
+    }));
+    assert_eq!(context_usage_from_response(&res), None);
+    assert_eq!(
+        usage_from_response(&res),
+        Some(AgentEvent::Usage {
+            input_tokens: 428_192,
+            output_tokens: 9_626,
+        })
+    );
+}
+
+#[test]
+fn prompt_response_explicit_context_occupancy_is_preserved() {
+    let res = Ok(json!({
+        "stopReason": "end_turn",
+        "usage": {
+            "used": 158_946,
+            "size": 1_048_576,
+            "totalTokens": 2_006_197,
+        }
+    }));
+    assert_eq!(
+        context_usage_from_response(&res),
+        Some(AgentEvent::ContextUsage {
+            tokens: Some(158_946),
+            window: Some(1_048_576),
+        })
+    );
 }

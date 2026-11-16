@@ -133,6 +133,38 @@ fn links_resolve_by_id_and_by_stored_origin_or_preview_path() {
 }
 
 #[test]
+fn bare_file_names_open_the_one_artifact_stored_under_that_name() {
+    // `artifact()` stores `/repo/.zeron/artifacts/api-12345678/<title>.md`.
+    let plan = artifact(&id(1), "filiacare_plan", ArtifactKind::Markdown);
+    let other = artifact(&id(2), "notes", ArtifactKind::Markdown);
+    let mut archived = artifact(&id(3), "old", ArtifactKind::Markdown);
+    archived.archived_at = Some(3_000);
+    let store = ready_store(vec![plan, other, archived]);
+    let find = |name: &str| {
+        store
+            .artifact_by_file_name(name, Some(SPACE))
+            .map(|artifact| artifact.id.clone())
+    };
+    assert_eq!(find("filiacare_plan.md"), Some(id(1)));
+    // Another Space's artifacts are still found when this Space has none.
+    assert_eq!(
+        store
+            .artifact_by_file_name("notes.md", Some("elsewhere"))
+            .map(|artifact| artifact.id.clone()),
+        Some(id(2))
+    );
+    assert_eq!(find("missing.md"), None);
+    assert_eq!(find("old.md"), None, "archived artifacts are skipped");
+    assert_eq!(find("api-12345678/notes.md"), None, "only bare names");
+
+    // The same name twice in one Space is ambiguous, so nothing opens.
+    let mut twin = artifact(&id(4), "filiacare_plan", ArtifactKind::Markdown);
+    twin.stored_path = "/repo/.mast/artifacts/_chats/c1/filiacare_plan.md".into();
+    let store = ready_store(vec![artifact(&id(1), "filiacare_plan", ArtifactKind::Markdown), twin]);
+    assert!(store.artifact_by_file_name("filiacare_plan.md", Some(SPACE)).is_none());
+}
+
+#[test]
 fn both_artifact_roots_give_a_canonical_root_and_document_path() {
     for root in [".mast", ".zeron"] {
         let stored = format!("/repo/{root}/artifacts/item-1/plan.md");

@@ -541,7 +541,7 @@ mod tests {
         assert!(s.wakes_for(WakeEventKind::ActionRaised));
         assert!(s.wakes_for(WakeEventKind::ActionResolved));
         assert!(s.wakes_for(WakeEventKind::Errored));
-        assert!(!s.wakes_for(WakeEventKind::TurnFinished));
+        assert!(s.wakes_for(WakeEventKind::TurnFinished));
         assert!(!s.wakes_for(WakeEventKind::PrOpened));
         assert!(!s.wakes_for(WakeEventKind::PrMerged));
         let off = WakeSettings {
@@ -722,10 +722,10 @@ mod tests {
     #[test]
     fn settings_gate_which_kinds_are_held_but_all_are_logged() {
         let mut core = WakeCore::new();
-        let turn = event(&mut core, "w1", WakeEventKind::TurnFinished, "turn:w1:0", 0);
+        let pr = event(&mut core, "w1", WakeEventKind::PrOpened, "pr:w1:0", 0);
         assert!(
-            !core.record(ORCH, turn, 0),
-            "turn-finished is off by default"
+            !core.record(ORCH, pr, 0),
+            "prs is off by default"
         );
         assert!(!core.has_held(ORCH));
         let status = core.status(ORCH, 1, IDLE);
@@ -734,12 +734,12 @@ mod tests {
         core.set_settings(
             ORCH,
             WakeSettings {
-                turn_finished: true,
+                prs: true,
                 ..WakeSettings::default()
             },
         );
-        let turn = event(&mut core, "w1", WakeEventKind::TurnFinished, "turn:w1:1", 2);
-        assert!(core.record(ORCH, turn, 2));
+        let pr = event(&mut core, "w1", WakeEventKind::PrOpened, "pr:w1:1", 2);
+        assert!(core.record(ORCH, pr, 2));
         // Master switch off drops what is held.
         core.set_settings(
             ORCH,
