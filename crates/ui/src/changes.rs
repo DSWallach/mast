@@ -61,6 +61,7 @@ use crate::theme::Theme;
 use mast_syntax::LanguageId as Lang;
 
 mod code_ref;
+mod expand_context;
 mod file_list;
 mod explanation;
 mod ref_picker;
@@ -1470,6 +1471,8 @@ pub enum DiffRow {
         file: u32,
         hunk: u32,
     },
+    ContextControl { file: u32, gap: u32 },
+    ContextLine { file: u32, gap: u32, line: u32 },
     Line {
         file: u32,
         hunk: u32,
@@ -1513,6 +1516,8 @@ impl DiffRow {
             Self::FileHeader { file }
             | Self::Notice { file, .. }
             | Self::HunkHeader { file, .. }
+            | Self::ContextControl { file, .. }
+            | Self::ContextLine { file, .. }
             | Self::Line { file, .. }
             | Self::SplitLine { file, .. }
             | Self::CommentCard { file, .. }
@@ -1530,6 +1535,8 @@ impl DiffRow {
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::Notice { .. } => NOTICE_HEIGHT,
             DiffRow::HunkHeader { .. } => HUNK_HEADER_HEIGHT,
+            DiffRow::ContextControl { .. } => HUNK_HEADER_HEIGHT,
+            DiffRow::ContextLine { .. } => line_h,
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
@@ -1977,6 +1984,8 @@ pub struct Changes {
     /// Missing means open, matching ordinary files' expanded default.
     submodule_folds: HashMap<String, bool>,
     highlights: HashMap<String, HighlightSlot>,
+    word_spans: word_diff::Cache,
+    expanded_context: expand_context::Cache,
     /// The flattened row model the list virtualizes over (line granularity;
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
@@ -2039,6 +2048,7 @@ pub struct Changes {
     mode: DiffMode,
     /// Wrap long source lines instead of exposing the horizontal code plane.
     wrap_lines: bool,
+    word_diff: bool,
     /// Comparison ref for [`DiffScope::Branch`] — preset to the repo's
     /// default branch once the branch list lands.
     base_ref: Option<String>,
@@ -2220,6 +2230,7 @@ impl Changes {
             owner,
             mode,
             wrap_lines: settings.diff_wrap,
+            word_diff: settings.diff_word,
             diffs: Vec::new(),
             started: false,
             error: None,
@@ -2231,6 +2242,8 @@ impl Changes {
             folds: HashMap::new(),
             submodule_folds: HashMap::new(),
             highlights: HashMap::new(),
+            word_spans: word_diff::Cache::default(),
+            expanded_context: expand_context::Cache::default(),
             rows: Vec::new(),
             file_filter,
             file_tree_collapsed: HashMap::new(),
@@ -3104,7 +3117,7 @@ impl Changes {
                 changes.highlights.clear();
                 let staged = changes.staged_comments(cx);
                 let draft = changes.draft_anchor();
-                let (rows, ranges, section_headers) = flatten_diff_tree(
+                let (rows, mut ranges, mut section_headers) = flatten_diff_tree(
                     &files,
                     &submodules,
                     &layout,
@@ -3121,6 +3134,9 @@ impl Changes {
                     },
                     |_| false,
                 );
+                let (rows, indices) = expand_context::add_rows(rows, &files, &key, &changes.expanded_context);
+                for range in ranges.iter_mut().flatten() { *range = indices[range.start]..indices[range.end]; }
+                for index in &mut section_headers { *index = indices[*index]; }
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
                 // The uniform hint keeps offsets for never-rendered rows
                 // sane (most rows ARE lines); real heights land as rows
@@ -3157,6 +3173,9 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        let new_body = if let Some(parsed) = &self.parsed {
+            expand_context::add_rows(new_body, &parsed.files, &parsed.key, &self.expanded_context).0
+        } else { new_body };
         if self.explanation_selection.take().is_some() {
             self.explanation_unified_rows = None;
             self.explanation_hunk = None;
@@ -3430,20 +3449,20 @@ impl Changes {
                     .filter(|comment| !comment.is_file() && comment.path == file.path)
                     .cloned()
                     .collect();
-                body_rows(
+                let body = body_rows(
                     file_ix as u32,
                     file,
                     &comments,
                     self.draft_anchor_in(&file.path),
                     self.mode,
-                )
-                .len()
+                );
+                expand_context::add_rows(body, &files, &parsed.key, &self.expanded_context).0.len()
             };
             if body.len() != new_len {
                 self.list.splice(body, new_len);
             }
         }
-        let (rows, ranges) = flatten_rows(
+        let (rows, mut ranges) = flatten_rows(
             &files,
             &staged,
             draft
@@ -3452,6 +3471,8 @@ impl Changes {
             self.mode,
             |_| collapse,
         );
+        let (rows, indices) = expand_context::add_rows(rows, &files, &parsed.key, &self.expanded_context);
+        for range in &mut ranges { *range = indices[range.start]..indices[range.end]; }
         self.rows = rows;
         self.row_ranges = ranges.into_iter().map(Some).collect();
         self.section_headers = self
@@ -3520,6 +3541,7 @@ impl Changes {
         let groups = parsed.submodules.clone();
         let layout = parsed.layout.clone();
         let top = self.list.logical_scroll_top().item_ix;
+        let anchor_row = self.rows.get(top).copied();
         let anchor_file = self
             .row_ranges
             .iter()
@@ -3547,7 +3569,7 @@ impl Changes {
                     .unwrap_or(false)
             })
             .collect::<Vec<_>>();
-        let (rows, ranges, section_headers) = flatten_diff_tree(
+        let (rows, mut ranges, mut section_headers) = flatten_diff_tree(
             &files,
             &groups,
             &layout,
@@ -3559,15 +3581,18 @@ impl Changes {
             |ix| collapsed.get(ix).copied().unwrap_or(false),
             |ix| group_collapsed.get(ix).copied().unwrap_or(false),
         );
+        let (rows, indices) = expand_context::add_rows(rows, &files, &parsed.key, &self.expanded_context);
+        for range in ranges.iter_mut().flatten() { *range = indices[range.start]..indices[range.end]; }
+        for index in &mut section_headers { *index = indices[*index]; }
         let row_height = px(diff_line_height(Theme::of(cx)));
         self.list.reset_with_uniform_height(rows.len(), row_height);
         self.rows = rows;
         self.row_ranges = ranges;
         self.section_headers = section_headers;
-        let anchor = anchor_file
+        let anchor = anchor_row.and_then(|row| self.rows.iter().position(|candidate| *candidate == row)).or_else(|| anchor_file
             .and_then(|ix| self.row_ranges.get(ix))
             .and_then(|range| range.as_ref())
-            .map(|range| range.start)
+            .map(|range| range.start))
             .or_else(|| {
                 anchor_group.and_then(|group| {
                     self.rows.iter().position(|row| {
@@ -4173,6 +4198,66 @@ impl Changes {
         }).detach();
     }
 
+    fn expand_context(&mut self, file_ix: u32, gap: u32, all: bool, cx: &mut Context<Self>) {
+        let Some(parsed) = self.parsed.as_ref() else { return; };
+        let key = (parsed.key.clone(), file_ix);
+        if self.expanded_context.entries.contains_key(&key) {
+            if self.expanded_context.expand(&key, gap as usize, all) { self.reflatten(cx); }
+            return;
+        }
+        let Some(file) = parsed.files.get(file_ix as usize).cloned() else { return; };
+        let Some(origin) = parsed.origins.get(file_ix as usize).cloned() else { return; };
+        let (Some(diff), Some(engine)) = (self.active_diff(cx), self.state.read(cx).engine().cloned()) else { return; };
+        let mode = self.scope.mode().to_string();
+        let (base_ref, head_ref) = match (self.scope, self.owner.as_ref().and_then(|o| o.range.as_ref())) {
+            (DiffScope::Range, Some(range)) => (Some(range.base_ref.clone()), Some(range.head_ref.clone())),
+            _ => (self.base_ref.clone(), None),
+        };
+        let commit = (self.scope == DiffScope::Commit).then(|| self.commit.as_ref().map(|c| c.sha.clone())).flatten();
+        let request = file_diff_text_request(&diff, &origin, mode, base_ref, self.owner_chat_id_owned(), commit, head_ref);
+        let target = self.desired_target(cx);
+        if !self.expanded_context.begin(key.clone(), gap as usize, all) { return; }
+        self.reflatten(cx);
+        cx.spawn(async move |this, cx| {
+            let mut params = serde_json::to_value(request).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
+            if let Some(target) = target { params.insert("targetDeviceId".into(), serde_json::Value::String(target)); }
+            let response = engine.client().call(methods::GET_CHECKOUT_FILE_DIFF_TEXT, serde_json::Value::Object(params)).await.ok()
+                .and_then(|v| serde_json::from_value::<mast_proto::CheckoutFileDiffText>(v).ok());
+            let gaps = cx.background_executor().spawn(async move {
+                let response = response?;
+                if response.binary || response.truncated || response.stale { return None; }
+                expand_context::gaps(&file, response.new_text.as_deref()?)
+            }).await;
+            this.update(cx, |this, cx| {
+                let Some(expand_context::Entry::Loading { gap, all }) = this.expanded_context.entries.remove(&key) else { return; };
+                let entry = match gaps {
+                    Some(gaps) => {
+                        let mut shown = vec![0; gaps.len()];
+                        if let (Some(data), Some(count)) = (gaps.get(gap), shown.get_mut(gap)) { *count = if all { data.lines.len() } else { data.lines.len().min(20) }; }
+                        expand_context::Entry::Ready { gaps, shown }
+                    }
+                    None => expand_context::Entry::Failed,
+                };
+                this.expanded_context.entries.insert(key, entry);
+                this.reflatten(cx);
+            }).ok();
+        }).detach();
+    }
+
+    fn request_word_spans(&mut self, key: word_diff::Key, hunk: &Hunk, cx: &mut Context<Self>) -> Option<word_diff::HunkSpans> {
+        if !self.word_diff { return None; }
+        if let Some(spans) = self.word_spans.get(&key) { return Some(spans); }
+        if !self.word_spans.begin(&key) { return None; }
+        let lines = if hunk.lines.len() <= word_diff::MAX_HUNK_LINES
+            && hunk.lines.iter().map(|line| line.text.len()).sum::<usize>() <= 32_000
+        { hunk.lines.clone() } else { Vec::new() };
+        cx.spawn(async move |this, cx| {
+            let spans = cx.background_executor().spawn(async move { Arc::new(word_diff::spans(&lines)) }).await;
+            this.update(cx, |this, cx| { this.word_spans.finish(key, spans); cx.notify(); }).ok();
+        }).detach();
+        None
+    }
+
     /// Start excerpt parsing and a lazy full-source fetch for an expanded file.
     fn request_highlight(
         &mut self,
@@ -4347,6 +4432,12 @@ impl Changes {
             .get(file_ix)
             .zip(origins.get(file_ix))
             .and_then(|(file, origin)| self.request_highlight(file, origin, &parsed_key, cx));
+        let hunk_index = match row {
+            DiffRow::Line { hunk, .. } | DiffRow::SplitLine { hunk, .. } => Some(hunk),
+            _ => None,
+        };
+        let word_spans = hunk_index.and_then(|hunk| files.get(file_ix)?.hunks.get(hunk as usize)
+            .and_then(|data| self.request_word_spans((parsed_key.clone(), file_ix as u32, hunk), data, cx)));
         let horizontal = &self.parsed.as_ref().unwrap().horizontal[file_ix];
         let code_width = match files.get(file_ix) {
             Some(file) if !self.wrap_lines => DiffCodeWidth::Scrollable(horizontal.metrics(
@@ -4364,6 +4455,31 @@ impl Changes {
         };
         match row {
             DiffRow::SubmoduleHeader { .. } => gpui::Empty.into_any_element(),
+            DiffRow::ContextControl { file, gap } => {
+                let entry = self.expanded_context.entries.get(&(parsed_key.clone(), file));
+                let loading = matches!(entry, Some(expand_context::Entry::Loading { .. }));
+                let failed = matches!(entry, Some(expand_context::Entry::Failed));
+                div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center().gap(px(12.0))
+                    .text_color(theme.text_muted).text_size(px(10.0))
+                    .child(div().id(("expand-context", ix)).cursor_pointer().child(if loading { "Loading…" } else if failed { "Context unavailable" } else { "Expand 20 lines" })
+                        .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, false, cx))))
+                    .when(!loading && !failed, |el| el.child(div().id(("expand-context-all", ix)).cursor_pointer().child("Expand all")
+                        .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, true, cx)))))
+                    .into_any_element()
+            }
+            DiffRow::ContextLine { file, gap, line } => {
+                let Some(expand_context::Entry::Ready { gaps, .. }) = self.expanded_context.entries.get(&(parsed_key.clone(), file)) else { return gpui::Empty.into_any_element(); };
+                let Some(line) = gaps.get(gap as usize).and_then(|gap| gap.lines.get(line as usize)) else { return gpui::Empty.into_any_element(); };
+                let gutter = files.get(file as usize).map(gutter_width).unwrap_or(40.0);
+                if self.mode == DiffMode::Unified {
+                    diff_line_row(line, &[], &[], &theme, gutter, code_width, Some(code_scroll.slot("unified")))
+                } else {
+                    let runs = line_runs(line, None, &theme);
+                    let left = split_line_cell(line, line.old_no, runs.clone(), &theme, gutter, code_width, Some(code_scroll.slot("old"))).into_any_element();
+                    let right = split_line_cell(line, line.new_no, runs, &theme, gutter, code_width, Some(code_scroll.slot("new"))).into_any_element();
+                    split_row(left, right, self.wrap_lines, &theme).into_any_element()
+                }
+            }
             DiffRow::FileHeader { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
@@ -4423,6 +4539,7 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
+                let line_index = line;
                 let Some(line) = file_diff
                     .hunks
                     .get(hunk as usize)
@@ -4438,6 +4555,7 @@ impl Changes {
                 let row = diff_line_row(
                     line,
                     spans,
+                    word_spans.as_ref().and_then(|spans| spans.get(line_index as usize)).map(Vec::as_slice).unwrap_or(&[]),
                     &theme,
                     gutter_px,
                     code_width,
@@ -4500,6 +4618,7 @@ impl Changes {
                 // Same slot on both sides = a context row: one line, drawn in
                 // both columns.
                 let mirrored = left.is_some() && left == right;
+                let (left_slot, right_slot) = (left, right);
                 let left = left.and_then(|slot| lines.get(slot as usize));
                 let right = right.and_then(|slot| lines.get(slot as usize));
                 // `\ No newline at end of file` is not code on one side — it
@@ -4523,11 +4642,13 @@ impl Changes {
                 let shared_runs = mirrored
                     .then(|| left.map(|line| line_runs(line, highlight.as_deref(), &theme)))
                     .flatten();
-                let cell = |line: Option<&DiffLine>, old: bool| {
+                let cell = |line: Option<&DiffLine>, slot: Option<u32>, old: bool| {
                     line.map(|line| {
                         let runs = shared_runs
                             .clone()
                             .unwrap_or_else(|| line_runs(line, highlight.as_deref(), &theme));
+                        let ranges = slot.and_then(|slot| word_spans.as_ref()?.get(slot as usize)).map(Vec::as_slice).unwrap_or(&[]);
+                        let runs = word_diff::tint_runs(runs, ranges, word_tint(line, &theme));
                         let number = if old { line.old_no } else { line.new_no };
                         split_line_cell(
                             line,
@@ -4550,7 +4671,7 @@ impl Changes {
                 let left_number = left.and_then(|line| line.old_no);
                 let left_path = path.clone();
                 let left_move_path = path.clone();
-                let left = cell(left, true)
+                let left = cell(left, left_slot, true)
                     .map(|cell| cell.id(("split-old", ix)).relative()
                         .when(left_number.is_some_and(|number| self.explanation_line_selected(&path, SourceSide::Old, number)), |el| el.bg(theme.element_active))
                         .when(left_number.is_some_and(|number| self.explanation_selection.as_ref().is_some_and(|s| s.path == path.as_ref() && s.side == SourceSide::Old && s.extent == number)), |el| el.child(self.render_explanation(&theme, cx)))
@@ -4565,7 +4686,7 @@ impl Changes {
                         }))
                         .into_any_element())
                     .unwrap_or_else(|| split_filler().into_any_element());
-                let right = match (cell(right, false), right.and_then(line_anchor)) {
+                let right = match (cell(right, right_slot, false), right.and_then(line_anchor)) {
                     (Some(cell), Some(anchor)) => {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
@@ -5077,6 +5198,20 @@ impl Changes {
         .into_any_element()
     }
 
+    fn word_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        Self::header_toggle("changes-word-diff", crate::icons::PEN, self.word_diff, theme)
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.word_diff = !this.word_diff;
+                let enabled = this.word_diff;
+                crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| settings.diff_word = enabled);
+                cx.notify();
+            }))
+            .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Highlight changed text".into())).into())
+            .tooltip_show_delay(Duration::from_millis(350))
+            .into_any_element()
+    }
+
     /// The pane-header controls: scope dropdown, `{branch} → {base ⌄}` ref
     /// selector (branch scope), fold-all. Rendered BY THE SHELL inside the
     /// session titlebar's trailing section (the band above the pane) — the
@@ -5131,6 +5266,7 @@ impl Changes {
                 )
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
+                .child(self.word_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -5161,6 +5297,7 @@ impl Changes {
                 )
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
+                .child(self.word_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -5330,6 +5467,7 @@ impl Changes {
                 .gap(px(crate::surface_chrome::CONTROL_GAP))
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
+                .child(self.word_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -6170,6 +6308,10 @@ fn del_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_del // red-400
 }
 
+fn word_tint(line: &DiffLine, theme: &Theme) -> gpui::Hsla {
+    match line.kind { LineKind::Add => add_color(theme), LineKind::Del => del_color(theme), _ => theme.text }.opacity(0.25)
+}
+
 /// One notice row ("New file", "Binary file — contents not shown", …).
 fn notice_row(notice: String, theme: &Theme) -> AnyElement {
     div()
@@ -6264,6 +6406,7 @@ fn code_text_viewport(
 fn diff_line_row(
     line: &DiffLine,
     spans: &[mast_syntax::HighlightSpan],
+    word_spans: &[std::ops::Range<usize>],
     theme: &Theme,
     gutter_px: f32,
     code_width: DiffCodeWidth,
@@ -6329,6 +6472,7 @@ fn diff_line_row(
         theme.text.opacity(0.92),
         theme,
     );
+    let runs = word_diff::tint_runs(runs, word_spans, word_tint(line, theme));
     let content_width = match code_width {
         DiffCodeWidth::Clipped => None,
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.unified_content_width(gutter_px)),
@@ -6656,6 +6800,7 @@ pub(crate) fn render_file_body_with_syntax(
             children.push(diff_line_row(
                 line,
                 spans,
+                &[],
                 theme,
                 gutter_px,
                 DiffCodeWidth::Clipped,
@@ -6716,6 +6861,7 @@ fn render_file_body_upto(
                         children.push(diff_line_row(
                             line,
                             spans_for(line),
+                            &[],
                             theme,
                             gutter_px,
                             code_width,
