@@ -44,11 +44,12 @@ impl Changes {
         old_side: bool,
         cx: &mut Context<Self>,
     ) {
-        let key = self.owner_chat_id_owned().unwrap_or_default();
-        let state = self.state.read(cx);
-        let Some(member) = state.selected_execution_member(&key) else {
+        let Some(key) = self.owner_chat_id_owned() else {
+            self.error = Some("Open a chat to add this hunk.".into());
+            cx.notify();
             return;
         };
+        let state = self.state.read(cx);
         let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, &key) else {
             return;
         };
@@ -68,7 +69,6 @@ impl Changes {
                 .as_ref()
                 .and_then(|owner| owner.range.as_ref())
                 .and_then(|range| range.head_sha.clone()),
-            DiffScope::WorkingTree if old_side => member.head_sha.clone(),
             _ => None,
         };
         let lookup_head = old_side && self.scope == DiffScope::WorkingTree && commit.is_none();
@@ -76,6 +76,8 @@ impl Changes {
             && !lookup_head
             && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range))
         {
+            self.error = Some("The base revision for this deleted hunk is unavailable.".into());
+            cx.notify();
             return;
         }
         let request = mast_proto::ReadWorkspaceFileRequest {
