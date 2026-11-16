@@ -217,6 +217,27 @@ pub enum ReviewDraftSource {
     Agent,
 }
 
+/// A GitHub review thread as a read-only snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    pub line: Option<u32>,
+    pub side: Option<ReviewSide>,
+    pub outdated: bool,
+    pub resolved: bool,
+    pub comments: Vec<ReviewThreadComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThreadComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReviewTarget;
@@ -230,6 +251,28 @@ mod tests {
         .unwrap();
         assert_eq!(comment.id, None);
         assert!(serde_json::to_value(comment).unwrap().get("id").is_none());
+    }
+
+    #[test]
+    fn review_thread_round_trips() {
+        let thread = super::ReviewThread {
+            id: "thread".into(),
+            path: "a.rs".into(),
+            line: Some(4),
+            side: Some(super::ReviewSide::Right),
+            outdated: false,
+            resolved: true,
+            comments: vec![super::ReviewThreadComment {
+                id: "comment".into(),
+                author: "reviewer".into(),
+                body: "Why?".into(),
+            }],
+        };
+        let json = serde_json::to_value(&thread).unwrap();
+        assert_eq!(
+            serde_json::from_value::<super::ReviewThread>(json).unwrap(),
+            thread
+        );
     }
 
     #[test]
