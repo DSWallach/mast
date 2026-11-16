@@ -46,6 +46,27 @@ pub(super) fn hunk_selection(
     Some((path, range, snippet, old_side))
 }
 
+fn apply_owner_context(
+    context: &mut crate::files::client::FilesRequestContext,
+    owner: &ChangesTarget,
+    local_device_id: Option<&str>,
+) {
+    if let Some(cwd) = &owner.cwd {
+        // The chat's own checkout must keep checkout_path unset: the
+        // workspace API accepts an explicit path only for a bound target.
+        if context.cwd != *cwd {
+            context.target.checkout_path = Some(cwd.clone());
+        }
+        context.cwd = cwd.clone();
+        context.checkout_id = owner
+            .checkout_id
+            .clone()
+            .or_else(|| context.checkout_id.clone());
+    }
+    context.target_device_id =
+        (local_device_id != Some(owner.device_id.as_str())).then(|| owner.device_id.clone());
+}
+
 impl Changes {
     pub(super) fn add_indexed_hunk_to_chat(
         &mut self,
@@ -74,18 +95,7 @@ impl Changes {
     ) -> Option<crate::files::client::FilesRequestContext> {
         let mut context = crate::files::client::FilesRequestContext::for_chat(state, key)?;
         if let Some(owner) = &self.owner {
-            if let Some(cwd) = &owner.cwd {
-                // The chat's own checkout must keep checkout_path unset: the
-                // workspace API accepts an explicit path only for a bound target.
-                if context.cwd != *cwd {
-                    context.target.checkout_path = Some(cwd.clone());
-                }
-                context.cwd = cwd.clone();
-                context.checkout_id = owner.checkout_id.clone().or(context.checkout_id);
-            }
-            context.target_device_id = (state.local_device_id.as_deref()
-                != Some(owner.device_id.as_str()))
-            .then(|| owner.device_id.clone());
+            apply_owner_context(&mut context, owner, state.local_device_id.as_deref());
         }
         Some(context)
     }
@@ -224,6 +234,33 @@ impl Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_checkout_does_not_become_an_explicit_bound_target() {
+        let mut context = crate::files::client::FilesRequestContext {
+            target: mast_proto::WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            target_device_id: None,
+            cwd: "/repo".into(),
+            checkout_id: Some("checkout".into()),
+        };
+        let owner = ChangesTarget {
+            chat_id: "chat".into(),
+            device_id: "local".into(),
+            cwd: Some("/repo".into()),
+            checkout_id: Some("checkout".into()),
+            branch: None,
+            unconfirmed: None,
+            exact_checkout: false,
+            range: None,
+        };
+        apply_owner_context(&mut context, &owner, Some("local"));
+        assert_eq!(context.target.checkout_path, None);
+        assert_eq!(context.checkout_id.as_deref(), Some("checkout"));
+    }
 
     #[test]
     fn deleted_only_detection_uses_hunk_header() {
