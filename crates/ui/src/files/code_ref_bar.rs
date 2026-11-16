@@ -40,6 +40,7 @@ impl super::FilesSurface {
                     .id("add-selection-to-chat")
                     .cursor_pointer()
                     .child("Add to chat")
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.add_selected_code_to_chat(cx))),
             )
             .child(
@@ -47,6 +48,7 @@ impl super::FilesSurface {
                     .id("copy-selection-ref")
                     .cursor_pointer()
                     .child("Copy ref")
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.copy_selected_reference(cx))),
             )
     }
