@@ -98,9 +98,6 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         }
         let (snippet, rest) = body.split_once(&format!("\n{fence}{END}"))?;
         let snippet = snippet.to_string();
-        if !result.is_empty() {
-            result.push(' ');
-        }
         let staged = StagedCodeRef {
             id: String::new(),
             reference,
@@ -114,6 +111,9 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
                 remaining = rest;
                 continue;
             }
+        }
+        if !result.is_empty() {
+            result.push(' ');
         }
         let start = result.len();
         result.push_str(&staged.label());
