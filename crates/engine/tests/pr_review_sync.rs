@@ -19,6 +19,7 @@
 //! - `PrStatus` caching, `PrMyOpen` / `PrReviewRequested` filtering, and
 //!   `StartPrReview` assigning the review Chat to a synced item.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

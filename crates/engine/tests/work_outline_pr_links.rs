@@ -11,6 +11,7 @@
 //!   Chat's old link stays (and does not follow it); a reference the user
 //!   removed is not added back; one item can link several PRs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;

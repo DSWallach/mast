@@ -102,14 +102,8 @@ impl PrReviewTools {
             )
         };
         let mut command = match &self.gh {
-            Some(path) => Command::new(path),
-            None => {
-                let executable =
-                    mast_harness::resolve_login_shell_executable("gh").ok_or_else(unavailable)?;
-                let mut command = Command::new(executable);
-                mast_harness::compose_login_shell_path_std(&mut command);
-                command
-            }
+            Some(path) => mast_harness::command(path),
+            None => mast_harness::gh_command().ok_or_else(unavailable)?,
         };
         command
             .env("GH_PROMPT_DISABLED", "1")

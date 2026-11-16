@@ -5684,6 +5684,7 @@ impl RpcService for EngineRpc {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     #[tokio::test]

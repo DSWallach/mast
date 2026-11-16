@@ -1,5 +1,6 @@
 //! Observe only this user's listeners. HTTP probes run only after project
 //! ownership has been established from the process's actual working directory.
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (3 non-test sites) through mast_harness::command / git_command
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 use std::{

@@ -6400,6 +6400,7 @@ mod transfer_progress_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod source_context_tests {
     use super::{DocHost, DocHostConfig};

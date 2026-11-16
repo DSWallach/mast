@@ -9,6 +9,7 @@
 //! full capture whose row writes triggered the next reconcile. These tests pin
 //! the two dampers: memoized identity resolution and the orphan grace period.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

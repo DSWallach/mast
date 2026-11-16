@@ -1,6 +1,7 @@
 //! End-to-end coverage for the workspace file RPC surface over the real
 //! in-memory transport.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

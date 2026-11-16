@@ -14,6 +14,10 @@
 //! first uncorrelated idle), manufacturing done-status bugs the native
 //! wires don't have (decision record: docs/research/acp.md).
 
+// The harness owns spawning: its helpers and agent drivers are the only
+// non-test code that may call `Command::new` (clippy.toml, post-mortem P3).
+#![allow(clippy::disallowed_methods)]
+
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
@@ -498,6 +502,39 @@ pub fn git_spawn_count() -> u64 {
 /// Async counterpart to [`git_command`].
 pub fn git_command_async() -> tokio::process::Command {
     tokio::process::Command::from(git_command())
+}
+
+/// The one spawn entry for programs other than `git`/`gh`. A bare name is
+/// resolved to an absolute path ([`resolve_program`]) so std can use
+/// `posix_spawn`; a path is used as given. Post-mortem 2026-11-16 (P3): clippy
+/// forbids `Command::new` outside this crate and tests.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let program = program.as_ref();
+    match program.to_str() {
+        Some(name) if std::path::Path::new(name).components().count() == 1 => {
+            std::process::Command::new(resolve_program(name))
+        }
+        _ => std::process::Command::new(program),
+    }
+}
+
+/// Async counterpart to [`command`].
+pub fn command_async(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    tokio::process::Command::from(command(program))
+}
+
+/// A `gh` command resolved through the login shell with its PATH composed, or
+/// `None` when the GitHub CLI is not installed.
+pub fn gh_command() -> Option<std::process::Command> {
+    let executable = resolve_login_shell_executable("gh")?;
+    let mut command = std::process::Command::new(executable);
+    compose_login_shell_path_std(&mut command);
+    Some(command)
+}
+
+/// Async counterpart to [`gh_command`].
+pub fn gh_command_async() -> Option<tokio::process::Command> {
+    gh_command().map(tokio::process::Command::from)
 }
 
 fn retain_absolute_deduped(paths: &mut Vec<std::path::PathBuf>) {

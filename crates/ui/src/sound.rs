@@ -11,6 +11,7 @@
 //! - failures are logged and swallowed — a missing player must never bother
 //!   the session flow.
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

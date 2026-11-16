@@ -5,6 +5,7 @@
 //! createWorkItemFromLinear over RPC, the linked-item sync, agent context,
 //! and that the key never appears in replies, agent payloads, or logs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};

@@ -40,6 +40,7 @@
 //! `forceUsage` on page mount/refresh. Cached results (60s TTL) are served to
 //! non-forced lists in between.
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (2 non-test sites) through mast_harness::command / git_command
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

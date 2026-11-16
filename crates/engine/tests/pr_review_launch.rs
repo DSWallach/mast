@@ -12,6 +12,7 @@
 //!   assigned to a work item, and a retry with the same `operationId` returns
 //!   the same Chat without touching git again.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

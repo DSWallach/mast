@@ -5,6 +5,7 @@
 //! branch. A second spec-carrying Run for the same chat REUSES the checkout
 //! instead of minting another.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};

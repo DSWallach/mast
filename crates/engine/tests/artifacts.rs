@@ -5,6 +5,7 @@
 //! and preview pairs, options manifests, the marker fallback, the watcher,
 //! promote, register, render-check routing, and agent scoping.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

@@ -2356,6 +2356,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

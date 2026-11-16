@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // build script (post-mortem P3)
 /// Run git in the manifest dir; `None` when git or the repository is missing
 /// (a source tarball build), which just leaves the build id unset.
 fn git(args: &[&str]) -> Option<String> {

@@ -7,6 +7,7 @@
 //! - mutations run as `Actor { kind: agent, chatId }` and dedupe by
 //!   `(token Chat, idempotencyKey)` across Runs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};

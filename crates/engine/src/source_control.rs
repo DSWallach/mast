@@ -786,15 +786,12 @@ struct SystemProcessRunner;
 impl ProcessRunner for SystemProcessRunner {
     async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
         let mut command = if request.program == "gh" {
-            let executable = mast_harness::resolve_login_shell_executable("gh")
-                .ok_or(ProcessRunError::Spawn(io::ErrorKind::NotFound))?;
-            let mut command = tokio::process::Command::new(executable);
-            mast_harness::compose_login_shell_path(&mut command);
-            command
+            mast_harness::gh_command_async()
+                .ok_or(ProcessRunError::Spawn(io::ErrorKind::NotFound))?
         } else if request.program == "git" {
             mast_harness::git_command_async()
         } else {
-            tokio::process::Command::new(&request.program)
+            mast_harness::command_async(&request.program)
         };
         #[cfg(windows)]
         {
@@ -866,6 +863,7 @@ async fn read_capped(
     Ok((output, truncated))
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

@@ -31,6 +31,7 @@
 //! actually fire. `lsof -a -d cwd -p <pid>` reads the real cwd off the
 //! process's file descriptor table instead.
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (2 non-test sites) through mast_harness::command / git_command
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
