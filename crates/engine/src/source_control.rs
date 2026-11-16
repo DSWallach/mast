@@ -807,7 +807,8 @@ impl ProcessRunner for SystemProcessRunner {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let _git_permit = if request.program == "git" {
-            Some(crate::git_gate::acquire().await)
+            let args: Vec<&str> = request.args.iter().map(String::as_str).collect();
+            Some(crate::git_gate::acquire(crate::git_gate::default_tag("source_control", &args)).await)
         } else {
             None
         };
