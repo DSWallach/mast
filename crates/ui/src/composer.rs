@@ -4374,7 +4374,7 @@ struct ComposerSlice {
     devices: Vec<(mast_proto::Device, bool)>,
     queue: Vec<mast_doc::QueuedMessage>,
     comments: Vec<crate::comments::ReviewComment>,
-    code_refs: Vec<crate::code_ref::StagedCodeRef>,
+    code_refs: Vec<String>,
     code_ref_pending: bool,
     comment_flush_pending: bool,
     delivery_degraded: bool,
@@ -4401,7 +4401,7 @@ impl ComposerSlice {
                 .collect(),
             queue: state.queue.clone(),
             comments: state.review_comments(key).to_vec(),
-            code_refs: state.code_refs(key).to_vec(),
+            code_refs: state.code_refs(key).iter().map(|reference| reference.id.clone()).collect(),
             code_ref_pending: state.code_ref_load_pending(key),
             comment_flush_pending: state.review_comment_flush_pending(key),
             delivery_degraded: selected.is_some_and(|id| state.chat_delivery_degraded(id)),
@@ -4458,7 +4458,6 @@ pub struct Composer {
     /// send — the model keeps a loaded skill in context for the rest of the
     /// chat, so nothing persists per chat.
     skills: HashMap<String, Vec<String>>,
-    code_ref_loads: HashMap<String, usize>,
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
@@ -4791,7 +4790,6 @@ impl Composer {
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             skills: HashMap::new(),
-            code_ref_loads: HashMap::new(),
             appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
@@ -6685,7 +6683,7 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
-        if self.queue_edit_finishing || self.code_ref_loads.get(&self.current_key).copied().unwrap_or(0) > 0 {
+        if self.queue_edit_finishing {
             return true;
         }
         let state = self.state.read(cx);
@@ -6710,7 +6708,7 @@ impl Composer {
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
             self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count()
-                + usize::from(self.state.read(cx).code_ref_load_pending(&self.current_key) || self.code_ref_loads.get(&self.current_key).copied().unwrap_or(0) > 0),
+                + usize::from(self.state.read(cx).code_ref_load_pending(&self.current_key)),
         );
         send_button_mode(self.run_live(cx), has_text)
     }

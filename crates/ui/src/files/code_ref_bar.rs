@@ -69,12 +69,25 @@ impl super::FilesSurface {
             return;
         };
         let key = self.chat_id.clone();
-        self.state.update(cx, |state, cx| {
-            state.begin_code_ref_load(&key);
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.error = Some("Too many code references are loading.".into());
             cx.notify();
+            return;
+        };
+        let accepted = self.state.update(cx, |state, cx| {
+            let accepted = state.begin_code_ref_load(&key);
+            cx.notify();
+            accepted
         });
+        if !accepted {
+            self.error = Some("Too many code references are loading.".into());
+            cx.notify();
+            return;
+        }
         let state_handle = self.state.clone();
         cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
             let _ = state_handle.update(cx, |state, cx| {
                 state.end_code_ref_load(&key);

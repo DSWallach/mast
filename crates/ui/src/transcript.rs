@@ -4567,6 +4567,7 @@ impl Transcript {
             self.code_ref_context = code_ref_context;
             self.code_ref_resolutions.clear();
             self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
+            cx.notify();
         }
         if self.last_identity.as_ref() != Some(&identity) {
             self.last_identity = Some(identity);

@@ -40,6 +40,9 @@ impl Transcript {
             if self.code_ref_resolutions.contains_key(&id) {
                 continue;
             }
+            let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+                break;
+            };
             self.code_ref_resolutions.insert(id.clone(), None);
             self.code_ref_inflight += 1;
             let range = reference.reference.range;
@@ -50,6 +53,8 @@ impl Transcript {
             let client =
                 crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
             cx.spawn(async move |this, cx| {
+                let _queue_permit = queue_permit;
+                let _permit = crate::code_ref::acquire_io_permit().await;
                 let result = client.read_file(request).await;
                 let resolution = match result {
                     Err(crate::files::client::FilesClientError::Request(message))
@@ -182,7 +187,12 @@ pub(super) fn activate(
     };
     let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
     let handle = window.window_handle();
+    let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+        return;
+    };
     cx.spawn(async move |cx| {
+        let _queue_permit = queue_permit;
+        let _permit = crate::code_ref::acquire_io_permit().await;
         let result = client.read_file(request).await;
         let resolution = match result {
             Ok(file)

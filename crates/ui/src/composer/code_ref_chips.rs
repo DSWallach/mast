@@ -13,7 +13,7 @@ impl Composer {
             .code_refs(&self.current_key)
             .iter()
             .filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File)
-            .cloned()
+            .map(|reference| (reference.id.clone(), reference.label()))
             .collect();
         if references.is_empty() {
             return None;
@@ -28,9 +28,8 @@ impl Composer {
             .overflow_hidden()
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
-        for (index, reference) in references.into_iter().enumerate() {
-            let id = reference.id.clone();
-            let label: SharedString = reference.label().into();
+        for (index, (id, label)) in references.into_iter().enumerate() {
+            let label: SharedString = label.into();
             row = row.child(
                 crate::components::conversation_skill_chip(theme, index)
                     .child(label)
@@ -69,9 +68,27 @@ impl Composer {
         };
         let client =
             crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
-        *self.code_ref_loads.entry(key.clone()).or_default() += 1;
-        cx.notify();
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.failure = Some("Too many code references are loading.".into());
+            self.failure_key = Some(key);
+            cx.notify();
+            return true;
+        };
+        let state_handle = self.state.clone();
+        let accepted = state_handle.update(cx, |state, cx| {
+            let accepted = state.begin_code_ref_load(&key);
+            cx.notify();
+            accepted
+        });
+        if !accepted {
+            self.failure = Some("Too many code references are loading.".into());
+            self.failure_key = Some(key);
+            cx.notify();
+            return true;
+        }
         cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
             let result = client.read_file(request).await;
             let reference = identity.and_then(|identity| {
@@ -101,13 +118,11 @@ impl Composer {
                     })
                 })
             });
+            let _ = state_handle.update(cx, |state, cx| {
+                state.end_code_ref_load(&key);
+                cx.notify();
+            });
             let _ = this.update(cx, |this, cx| {
-                if let Some(count) = this.code_ref_loads.get_mut(&key) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        this.code_ref_loads.remove(&key);
-                    }
-                }
                 let current =
                     crate::files::client::FilesRequestContext::for_chat(this.state.read(cx), &key);
                 if current.as_ref() != Some(&context) {

@@ -129,11 +129,24 @@ impl Changes {
         let client =
             crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
         let state_handle = self.state.clone();
-        state_handle.update(cx, |state, cx| {
-            state.begin_code_ref_load(&key);
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.error = Some("Too many code references are loading.".into());
             cx.notify();
+            return;
+        };
+        let accepted = state_handle.update(cx, |state, cx| {
+            let accepted = state.begin_code_ref_load(&key);
+            cx.notify();
+            accepted
         });
+        if !accepted {
+            self.error = Some("Too many code references are loading.".into());
+            cx.notify();
+            return;
+        }
         cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
             let snapshot = if let Some((base_ref, head_ref, head)) = source_refs {
                 let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "baseRef": base_ref, "headRef": head_ref, "path": path.clone(), "head": head });

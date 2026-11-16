@@ -33,6 +33,29 @@ impl StagedCodeRef {
     }
 }
 
+/// Bound queued reference work across the application, not just per chat.
+pub fn try_queue_io() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    static QUEUE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    QUEUE
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)))
+        .clone()
+        .try_acquire_owned()
+        .ok()
+}
+
+/// Bound all background workspace reads caused by reference staging and resolution.
+pub async fn acquire_io_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    PERMITS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("reference semaphore remains open")
+}
+
 /// Stable cache key computed during message projection, outside the render path.
 pub fn resolution_key(reference: &StagedCodeRef) -> String {
     let value = serde_json::to_string(&reference.reference).unwrap_or_default();
