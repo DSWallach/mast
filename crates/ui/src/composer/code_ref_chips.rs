@@ -86,7 +86,7 @@ impl Composer {
                             version: 1,
                             location: mast_proto::CodeRefLocation {
                                 repo_id: identity.repo_id,
-                                worktree_id: Some(identity.checkout_id),
+                                worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()),
                                 path,
                             },
                             kind: mast_proto::CodeRefKind::File,

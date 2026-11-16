@@ -56,7 +56,7 @@ impl super::FilesSurface {
                 }
                 if let Some(identity) = identity {
                     reference.reference.location.repo_id = identity.repo_id;
-                    reference.reference.location.worktree_id = Some(identity.checkout_id);
+                    reference.reference.location.worktree_id = Some(identity.checkout_id).filter(|id| !id.is_empty());
                     this.state.update(cx, |state, cx| {
                         state.add_code_ref(&key, reference);
                         cx.notify();

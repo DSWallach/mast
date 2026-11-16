@@ -3788,7 +3788,7 @@ impl Changes {
                     let reference = crate::code_ref::StagedCodeRef {
                         id: uuid::Uuid::new_v4().to_string(),
                         reference: mast_proto::CodeRef { version: 1,
-                            location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id), path },
+                            location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), path },
                             kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None, at,
                         }, snippet,
                     };
