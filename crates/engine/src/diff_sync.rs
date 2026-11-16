@@ -2741,14 +2741,15 @@ pub async fn resolve_range(
     })
 }
 
-/// Resolve a diff's base and read one immutable source file at that base.
-pub async fn resolve_code_ref_base(root: &Path, base_ref: &str, head_ref: &str, path: &str) -> Result<(String, String), EngineError> {
+/// Resolve a diff range and read one immutable source file at either revision.
+pub async fn resolve_code_ref_source(root: &Path, base_ref: &str, head_ref: &str, path: &str, head: bool) -> Result<(String, String), EngineError> {
     let path = validate_diff_path(path)?;
     let range = resolve_range(root, base_ref, head_ref).await?;
-    let source = read_git_source(root, &range.merge_base, path).await?;
+    let revision = if head { range.head } else { range.merge_base };
+    let source = read_git_source(root, &revision, path).await?;
     if source.truncated { return Err(EngineError::Other("code reference source exceeds size limit".into())); }
     let text = String::from_utf8(source.stdout).map_err(|_| EngineError::Other("code reference source is not UTF-8".into()))?;
-    Ok((range.merge_base, text))
+    Ok((revision, text))
 }
 
 /// Resolve a branch against the local remote-default ref, without fetching.
@@ -3180,10 +3181,10 @@ mod watch_budget_tests {
         git(&["checkout", "-b", "feature"]);
         git(&["rm", "file.rs"]);
         git(&["commit", "-m", "delete"]);
-        let (sha, text) = super::resolve_code_ref_base(directory.path(), "main", "HEAD", "file.rs").await.unwrap();
+        let (sha, text) = super::resolve_code_ref_source(directory.path(), "main", "HEAD", "file.rs", false).await.unwrap();
         assert_eq!(sha, base);
         assert_eq!(text, "before\n");
-        assert!(super::resolve_code_ref_base(directory.path(), "main", "HEAD", "../file.rs").await.is_err());
+        assert!(super::resolve_code_ref_source(directory.path(), "main", "HEAD", "../file.rs", false).await.is_err());
     }
 
     #[test]
