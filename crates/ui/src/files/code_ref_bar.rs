@@ -27,6 +27,40 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
+    pub(super) fn stage_reference(
+        &mut self,
+        mut reference: crate::code_ref::StagedCodeRef,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(context) = self.request_context.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let key = self.chat_id.clone();
+        cx.spawn(async move |this, cx| {
+            let identity = crate::code_ref::repository_identity(&engine, &context).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request_context.as_ref() != Some(&context) {
+                    return;
+                }
+                if let Some(identity) = identity {
+                    reference.reference.location.repo_id = identity.repo_id;
+                    reference.reference.location.worktree_id = Some(identity.checkout_id);
+                    this.state.update(cx, |state, cx| {
+                        state.add_code_ref(&key, reference);
+                        cx.notify();
+                    });
+                } else {
+                    this.error = Some("Could not identify the workspace repository.".into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn add_selected_code_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(path) = self.editor_path.clone() else {
             return;
@@ -70,10 +104,6 @@ impl super::FilesSurface {
             },
             snippet,
         };
-        let key = self.chat_id.clone();
-        self.state.update(cx, |state, cx| {
-            state.add_code_ref(&key, reference);
-            cx.notify();
-        });
+        self.stage_reference(reference, cx);
     }
 }

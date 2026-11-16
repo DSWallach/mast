@@ -382,3 +382,32 @@ mod tests {
         assert_ne!(content_hash(text), content_hash("one\nfour"));
     }
 }
+
+/// Resolve the repository identity on the device that owns the workspace.
+pub async fn repository_identity(
+    engine: &crate::state::EngineHandle,
+    context: &crate::files::client::FilesRequestContext,
+) -> Option<mast_proto::ExecutionRepositoryIdentity> {
+    let params = mast_proto::DescribeExecutionRepositoryParams {
+        path: context.cwd.clone(),
+        target_device_id: context.target_device_id.clone(),
+    };
+    let value = engine
+        .client()
+        .call(
+            mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY,
+            serde_json::to_value(params).ok()?,
+        )
+        .await
+        .ok()?;
+    let identity: mast_proto::ExecutionRepositoryIdentity = serde_json::from_value(value).ok()?;
+    if identity.repo_id.is_empty()
+        || context
+            .checkout_id
+            .as_ref()
+            .is_some_and(|expected| expected != &identity.checkout_id)
+    {
+        return None;
+    }
+    Some(identity)
+}

@@ -2573,7 +2573,6 @@ impl FilesSurface {
             };
             let action_bar = selected.and_then(|(range, snippet, hash, top)| {
                 let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;
-                let key = self.chat_id.clone();
                 let path = path.to_string();
                 let location = format!("{}:{}-{}", path, range.start_line, range.end_line);
                 let reference = crate::code_ref::StagedCodeRef {
@@ -2588,7 +2587,7 @@ impl FilesSurface {
                 Some(crate::components::code_ref::selection_action_bar(theme, top)
                     .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference.clone()); cx.notify(); });
+                            this.stage_reference(reference.clone(), cx);
                         })))
                     .child(div().id("copy-selection-ref").cursor_pointer().child("Copy ref")
                         .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(location.clone())))))
