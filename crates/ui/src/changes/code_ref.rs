@@ -71,9 +71,30 @@ impl Changes {
                 .and_then(|range| range.head_sha.clone()),
             _ => None,
         };
-        let lookup_head = old_side && self.scope == DiffScope::WorkingTree && commit.is_none();
+        let base_refs = if old_side {
+            match self.scope {
+                DiffScope::WorkingTree => Some(("HEAD".to_string(), "HEAD".to_string())),
+                DiffScope::Branch => self.base_ref.clone().map(|base| (base, "HEAD".to_string())),
+                DiffScope::Range => self
+                    .owner
+                    .as_ref()
+                    .and_then(|owner| owner.range.as_ref())
+                    .map(|range| {
+                        (
+                            range.base_ref.clone(),
+                            range
+                                .head_sha
+                                .clone()
+                                .unwrap_or_else(|| range.head_ref.clone()),
+                        )
+                    }),
+                _ => None,
+            }
+        } else {
+            None
+        };
         if commit.is_none()
-            && !lookup_head
+            && base_refs.is_none()
             && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range))
         {
             self.error = Some("The base revision for this deleted hunk is unavailable.".into());
@@ -93,15 +114,17 @@ impl Changes {
         });
         cx.spawn(async move |this, cx| {
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
-            let commit = if lookup_head {
-                let params = serde_json::json!({ "cwd": context.cwd.clone(), "targetDeviceId": context.target_device_id.clone(), "cursor": 0, "limit": 1 });
-                engine.client().call(mast_rpc::methods::LIST_GIT_HISTORY, params).await.ok()
-                    .and_then(|value| serde_json::from_value::<mast_proto::GitHistoryPage>(value).ok())
-                    .and_then(|page| page.head_sha)
-            } else { commit };
-            let snapshot = if let Some(commit) = commit {
+            let snapshot = if let Some((base_ref, head_ref)) = base_refs {
+                let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "baseRef": base_ref, "headRef": head_ref, "path": path.clone() });
+                engine.client().call(mast_rpc::methods::RESOLVE_CODE_REF_BASE, params).await.ok().and_then(|value| {
+                    let sha = value.get("baseSha")?.as_str()?.to_string();
+                    let contents = value.get("text")?.as_str()?;
+                    let snippet = crate::code_ref::snippet(contents, range)?;
+                    (snippet == expected).then(|| (mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
+                })
+            } else if let Some(commit) = commit {
                 Some((mast_proto::CodeRefRevision::Commit { commit }, expected.clone()))
-            } else if lookup_head { None } else {
+            } else {
                 match client.read_file(request).await {
                     Ok(file) if !file.truncated => file.text.and_then(|contents| {
                         let snippet = crate::code_ref::snippet(&contents, range)?;
