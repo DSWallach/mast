@@ -9638,6 +9638,10 @@ impl Shell {
             && self.sidebar_is_overlay()
             && !self.settings.sidebar_collapsed
             && !self.overview_overlay_dismissed
+            && !self
+                .overview_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).search_focused(window, cx))
             && !self.overlay_owns_keyboard(cx)
         {
             self.dismiss_overview_overlay(cx);

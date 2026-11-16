@@ -142,6 +142,10 @@ impl Shell {
             .filter(|chat| {
                 chat.parent_chat_id.is_none()
                     && !chat.is_side_chat()
+                    && chat
+                        .space_id
+                        .as_deref()
+                        .is_none_or(|id| state.space_row(id).is_some())
                     && self
                         .settings
                         .space_filter
@@ -503,6 +507,19 @@ mod tests {
         vcx.run_until_parked();
         shell.read_with(vcx, |shell, _| assert!(shell.overview_overlay_dismissed));
         shell.update(vcx, |shell, cx| shell.open_overview(cx));
+        vcx.run_until_parked();
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        page.update(vcx, |page, cx| page.set_search_text_for_test("needle", cx));
+        vcx.update(|window, cx| {
+            assert!(page.update(cx, |page, cx| page.focus_search(window, cx)));
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        page.update(vcx, |page, cx| {
+            assert!(page.sidebar_filter_ids(cx).is_none())
+        });
+        shell.read_with(vcx, |shell, _| assert!(!shell.overview_overlay_dismissed));
+        page.update(vcx, |page, cx| page.request_navigation_focus(cx));
         vcx.run_until_parked();
         vcx.simulate_keystrokes("escape");
         vcx.run_until_parked();

@@ -134,7 +134,7 @@ Final validation before review:
 - 342 Overview-related tests passed, two ignored, with the previously confirmed baseline stalled-badge failure skipped.
 - The full shell suite has 401 passing tests and five ignored tests. Its four failures were reproduced on the original `4cc809e2` base: the wake-switch settings test, two outline-group sidebar-section fixtures, and the Start Chat auto-approve fixture. These are pre-existing failures, not waivers of findings in this feature.
 - Nine unified-column integration tests pass after review corrections. They cover workspace/draft return, presentation switching, pin geometry, filtered pins, full-history/archived filtering and reset, custom membership without outline duplication, session-jump preferences, Escape/New Chat dismissal, and the 600 px overlay restoring its wide layout.
-- Settings persistence: 87 tests passed. Native light/dark preview and artifact render checks passed; a fresh narrow native preview is being generated for final QA evidence.
+- Settings persistence: 87 tests passed. Native light/dark preview and artifact render checks passed; the final 600 px native light/dark preview was inspected and its artifact render checks passed without warnings.
 
 The requested deliverable is a signed **Mast Dev.app** built from this feature branch after the required review passes. It uses the Dev bundle identity and isolated Dev data/IPC configuration. No merge into `david-rolling` or `main` is part of this request.
 
@@ -149,4 +149,4 @@ The requested deliverable is a signed **Mast Dev.app** built from this feature b
 
 ### Review corrections
 
-The first Sonnet review identified four findings. All are addressed: full-chat filters preserve archived and older scheduled matches, collection filtering has a hidden count and Clear filters action, numbered jumps preserve the saved presentation, narrow overlays support Escape and all primary destinations, and touched Rust files are formatted. Custom collection membership remains separate from outline-derived groups to avoid showing the same groups twice. Regression tests cover these behaviors; final review and build receipts are added to the linked plan after completion.
+The first Sonnet review identified four findings. All are addressed: full-chat filters preserve archived and older scheduled matches, collection filtering has a hidden count and Clear filters action, numbered jumps preserve the saved presentation, narrow overlays support Escape and all primary destinations, with the focused search field retaining first priority to clear its query, and touched Rust files are formatted. Custom collection membership remains separate from outline-derived groups to avoid showing the same groups twice. Regression tests cover these behaviors; final review and build receipts are added to the linked plan after completion.
