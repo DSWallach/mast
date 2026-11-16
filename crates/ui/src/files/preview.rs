@@ -2562,34 +2562,18 @@ impl FilesSurface {
                 state.set_editor_style(super::editor_adapter::editor_style(theme));
             });
             let overlays = self.render_editor_comment_overlays(path, &editor, theme, cx);
-            let selected = {
+            let action_bar = {
                 let state = editor.read(cx);
-                let value = state.value().to_string();
                 let selection = state.selected_range();
-                let input_bounds = state.input_bounds();
-                let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
-                    let left = f32::from(bounds.origin.x - input_bounds.origin.x).clamp(0.0, (f32::from(input_bounds.size.width) - 160.0).max(0.0));
-                    (bounds.origin.y + bounds.size.height - input_bounds.origin.y, px(left))
-                }).unwrap_or((px(12.0), px(12.0)));
-                crate::code_ref::selection_lines(&value, selection).and_then(|range| {
-                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value), top, left))
-                })
+                if selection.is_empty() { None } else {
+                    let input_bounds = state.input_bounds();
+                    let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
+                        let left = f32::from(bounds.origin.x - input_bounds.origin.x).clamp(0.0, (f32::from(input_bounds.size.width) - 160.0).max(0.0));
+                        (bounds.origin.y + bounds.size.height - input_bounds.origin.y, px(left))
+                    }).unwrap_or((px(12.0), px(12.0)));
+                    Some(self.selection_actions(theme, top, left, cx))
+                }
             };
-            let action_bar = selected.and_then(|(range, snippet, hash, top, left)| {
-                let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;
-                let path = path.to_string();
-                let location = format!("{}:{}-{}", path, range.start_line, range.end_line);
-                let reference = crate::code_ref::StagedCodeRef {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    reference: mast_proto::CodeRef {
-                        version: 1,
-                        location: mast_proto::CodeRefLocation { repo_id: member.repo_id, worktree_id: self.request_context.as_ref().and_then(|context| context.checkout_id.clone()), path },
-                        kind: mast_proto::CodeRefKind::Lines, range: Some(range), symbol: None,
-                        at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
-                    }, snippet,
-                };
-                Some(self.selection_actions(reference, location, theme, top, left, cx))
-            });
             return div()
                 .id("files-editor-body")
                 .flex_1()

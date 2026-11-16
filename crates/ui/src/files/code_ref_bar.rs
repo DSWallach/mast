@@ -29,8 +29,6 @@ pub(super) fn pinned_view(
 impl super::FilesSurface {
     pub(super) fn selection_actions(
         &self,
-        reference: crate::code_ref::StagedCodeRef,
-        location: String,
         theme: &crate::theme::Theme,
         top: gpui::Pixels,
         left: gpui::Pixels,
@@ -42,19 +40,38 @@ impl super::FilesSurface {
                     .id("add-selection-to-chat")
                     .cursor_pointer()
                     .child("Add to chat")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.stage_reference(reference.clone(), cx)
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.add_selected_code_to_chat(cx))),
             )
             .child(
                 div()
                     .id("copy-selection-ref")
                     .cursor_pointer()
                     .child("Copy ref")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(location.clone()))
-                    }),
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_selected_reference(cx))),
             )
+    }
+
+    fn copy_selected_reference(&self, cx: &mut gpui::Context<Self>) {
+        let Some(path) = self.editor_path.as_deref() else {
+            return;
+        };
+        let Some(editor) = self
+            .preview
+            .documents
+            .get(path)
+            .and_then(|document| document.editor.as_ref())
+        else {
+            return;
+        };
+        let state = editor.read(cx);
+        let Some(range) = crate::code_ref::selection_lines(state.value(), state.selected_range())
+        else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+            "{}:{}-{}",
+            path, range.start_line, range.end_line
+        )));
     }
 
     pub(super) fn stage_reference(
