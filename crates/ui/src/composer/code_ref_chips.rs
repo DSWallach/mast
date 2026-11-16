@@ -64,6 +64,8 @@ impl Composer {
             path: path.clone(),
         };
         let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
+        *self.code_ref_loads.entry(key.clone()).or_default() += 1;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.read_file(request).await;
             let reference = result.ok().and_then(|file| {
@@ -92,6 +94,12 @@ impl Composer {
                 })
             });
             let _ = this.update(cx, |this, cx| {
+                if let Some(count) = this.code_ref_loads.get_mut(&key) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        this.code_ref_loads.remove(&key);
+                    }
+                }
                 if let Some(reference) = reference {
                     this.state.update(cx, |state, cx| {
                         state.add_code_ref(&key, reference);

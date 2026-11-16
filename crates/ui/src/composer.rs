@@ -4454,6 +4454,7 @@ pub struct Composer {
     /// send — the model keeps a loaded skill in context for the rest of the
     /// chat, so nothing persists per chat.
     skills: HashMap<String, Vec<String>>,
+    code_ref_loads: HashMap<String, usize>,
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
@@ -4786,6 +4787,7 @@ impl Composer {
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             skills: HashMap::new(),
+            code_ref_loads: HashMap::new(),
             appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
@@ -6681,7 +6683,7 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
-        if self.queue_edit_finishing {
+        if self.queue_edit_finishing || self.code_ref_loads.get(&self.current_key).copied().unwrap_or(0) > 0 {
             return true;
         }
         let state = self.state.read(cx);
