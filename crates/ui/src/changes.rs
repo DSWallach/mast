@@ -2554,6 +2554,10 @@ impl Changes {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
+            let mut backoff = mast_harness::backoff::Backoff::new(
+                Duration::from_secs(2),
+                Duration::from_secs(30),
+            );
             loop {
                 let params = watch_checkout_params(
                     target.as_deref(),
@@ -2567,6 +2571,7 @@ impl Changes {
                 match subscribed {
                     Ok(mut rx) => {
                         while let Some(value) = rx.recv().await {
+                            backoff.reset();
                             let alive = this.update(cx, |changes, cx| {
                                 changes.error = None;
                                 if apply_diff_frame(&mut changes.diffs, value) {
@@ -2602,7 +2607,7 @@ impl Changes {
                         }
                     }
                 }
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                cx.background_executor().timer(backoff.next_delay()).await;
             }
         })
     }
