@@ -2149,6 +2149,7 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
+                if let Some(usage) = self.sessions.token_usage() { usage.delete_chat(&chat_id).map_err(failed)?; }
                 self.doc_host.purge_chat(&chat_id);
                 Ok(())
             }
@@ -2242,6 +2243,7 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::LIST_HARNESSES
+            | methods::TOKEN_USAGE
             | methods::GET_PERMISSION_RULES
             | methods::REMOVE_PERMISSION_RULE
             | methods::INSTALL_HARNESS
@@ -5386,6 +5388,13 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::TOKEN_USAGE => {
+                let query: mast_proto::token_usage::TokenUsageQuery = parse_params(params)?;
+                let usage = self.sessions.token_usage().ok_or_else(|| RpcError::Failed("Token usage recording is unavailable on this engine".into()))?;
+                let snapshot = tokio::task::spawn_blocking(move || usage.snapshot(&query)).await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
             }
             methods::SCHEDULED_TASKS => {
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;

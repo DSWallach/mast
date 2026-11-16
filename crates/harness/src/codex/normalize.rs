@@ -662,6 +662,7 @@ pub(crate) fn user_message_text(item: &Value) -> Option<String> {
 #[derive(Default)]
 pub(super) struct ChildStream {
     reasoning: ReasoningStream,
+    usage: super::usage::UsageTracker,
     streamed_text: std::collections::HashSet<String>,
     completed_items: std::collections::VecDeque<String>,
     completed_turns: std::collections::VecDeque<String>,
@@ -684,6 +685,7 @@ fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
 
 impl ChildStream {
     pub(super) fn map(&mut self, child: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
+        if method == "thread/tokenUsage/updated" { return self.usage.observe(params).into_iter().collect(); }
         if method == "turn/started" {
             let id = turn_id(params);
             if !id.is_empty() && self.completed_turns.contains(&id) {
@@ -865,12 +867,12 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         | "turn/failed"
         | "turn/aborted"
         | "error"
-        | "thread/closed" => ChildRoute::Subagent,
+        | "thread/closed"
+        | "thread/tokenUsage/updated" => ChildRoute::Subagent,
         // Child status bookkeeping with no subagent meaning: consumed
         // so it can never settle the PARENT turn (the exact bug class the
         // explicit table exists for).
         "thread/status/changed"
-        | "thread/tokenUsage/updated"
         // Child chatter with no consumer on this wire.
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta"

@@ -575,6 +575,10 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Additive device-local billing telemetry; not folded into transcripts.
+    UsageMeasurement { measurement: crate::token_usage::UsageMeasurement },
+    /// Content metadata only. Never contains prompt, command, or result bodies.
+    UsageDiagnostic { diagnostic: crate::token_usage::UsageDiagnostic },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.

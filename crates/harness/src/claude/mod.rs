@@ -36,6 +36,7 @@ mod discovery;
 pub mod instructions;
 mod normalize;
 mod wire;
+mod usage;
 
 pub use normalize::decode_tool_use;
 

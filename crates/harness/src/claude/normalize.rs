@@ -247,6 +247,7 @@ fn is_synthetic_user_text(text: &str) -> bool {
 /// the wake turn's own frames flow through and the engine's parked-session
 /// resume turns them into the done→Working→done wake.
 pub(crate) struct Normalizer {
+    usage_tracker: super::usage::UsageTracker,
     saw_init: bool,
     /// Hold generic assistant limit errors until a richer rate-limit frame or result arrives.
     pending_limit_error: Option<AgentEvent>,
@@ -275,6 +276,7 @@ pub(crate) struct Normalizer {
 impl Normalizer {
     pub fn new() -> Self {
         Self {
+            usage_tracker: Default::default(),
             saw_init: false,
             pending_limit_error: None,
             emitted_limit_error: false,
@@ -302,6 +304,12 @@ impl Normalizer {
     /// Normalize one stdout frame into 0+ unified events. `interrupted` folds
     /// a post-interrupt `result` into `Done { status: Interrupted }`.
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
+        let mut telemetry = self.usage_tracker.observe(&frame);
+        telemetry.extend(self.normalize_content(frame, interrupted));
+        telemetry
+    }
+
+    fn normalize_content(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
         match frame {
             Frame::System(f) => {
                 // A background subagent's completion arrives as an UNTAGGED
@@ -821,7 +829,7 @@ mod tests {
 
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
-        Normalizer::new().normalize(frame, false)
+        Normalizer::new().normalize_content(frame, false)
     }
 
     #[test]
@@ -849,7 +857,7 @@ mod tests {
             r#"{"type":"result","subtype":"error_during_execution","errors":["You've hit your 5-hour limit"]}"#,
         ];
         let events: Vec<_> = frames.into_iter().flat_map(|raw|
-            normalizer.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false)).collect();
+            normalizer.normalize_content(crate::claude::wire::parse_frame(raw).unwrap(), false)).collect();
         let errors: Vec<_> = events.iter().filter(|event| matches!(event, AgentEvent::Error { .. })).collect();
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], AgentEvent::Error { code: Some(code), resets_at: Some(1_786_985_400_000), .. } if code == "usage_5h"));
@@ -860,7 +868,7 @@ mod tests {
     fn assistant_limit_without_result_can_be_flushed() {
         let mut normalizer = Normalizer::new();
         let frame = crate::claude::wire::parse_frame(r#"{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your weekly usage limit"}]}}"#).unwrap();
-        normalizer.normalize(frame, false);
+        normalizer.normalize_content(frame, false);
         assert!(matches!(normalizer.take_pending_limit_error(), Some(AgentEvent::Error { code: Some(code), .. }) if code == "usage_weekly"));
     }
 
@@ -870,7 +878,7 @@ mod tests {
         let mut events = Vec::new();
         for _ in 0..2 {
             let frame = crate::claude::wire::parse_frame(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#).unwrap();
-            events.extend(normalizer.normalize(frame, false));
+            events.extend(normalizer.normalize_content(frame, false));
             events.extend(normalizer.take_pending_limit_error());
         }
         assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::Error { .. })).count(), 2);
@@ -961,7 +969,7 @@ mod tests {
             r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
         )
         .expect("parses");
-        let ev = norm.normalize(frame, false);
+        let ev = norm.normalize_content(frame, false);
         assert_eq!(
             ev,
             vec![AgentEvent::Subagent {
@@ -982,7 +990,7 @@ mod tests {
             r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"command output\n"}]}}"#,
         )
         .expect("parses");
-        let ev = norm.normalize(frame, false);
+        let ev = norm.normalize_content(frame, false);
         assert_eq!(
             ev,
             vec![AgentEvent::Subagent {
@@ -1090,12 +1098,12 @@ mod tests {
             r#"{"type":"system","subtype":"task_started","task_id":"a20b2336","tool_use_id":"toolu_spawn","subagent_type":"general-purpose","prompt":"p","description":"d"}"#,
         )
         .expect("parses");
-        assert!(norm.normalize(started, false).is_empty());
+        assert!(norm.normalize_content(started, false).is_empty());
         let send = crate::claude::wire::parse_frame(
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a20b2336","message":"Also read the rebuild.","summary":"s"}}]}}"#,
         )
         .expect("parses");
-        let ev = norm.normalize(send, false);
+        let ev = norm.normalize_content(send, false);
         assert!(
             ev.iter().any(|e| matches!(
                 e,
@@ -1112,14 +1120,14 @@ mod tests {
             r#"{"type":"system","subtype":"task_started","task_id":"bg1","tool_use_id":"toolu_bash","task_type":"local_bash"}"#,
         )
         .expect("parses");
-        assert!(norm.normalize(shell_task, false).is_empty());
+        assert!(norm.normalize_content(shell_task, false).is_empty());
         let send = crate::claude::wire::parse_frame(
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"SendMessage","input":{"to":"bg1","message":"x"}}]}}"#,
         )
         .expect("parses");
         assert!(
             !norm
-                .normalize(send, false)
+                .normalize_content(send, false)
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Subagent { .. }))
         );
@@ -1178,11 +1186,11 @@ mod tests {
                 r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"probe"}}]}}"#,
             )
             .expect("parses");
-            norm.normalize(frame, false);
+            norm.normalize_content(frame, false);
         };
         let notify = |norm: &mut Normalizer, raw: &str| {
             let frame = crate::claude::wire::parse_frame(raw).expect("parses");
-            norm.normalize(frame, false)
+            norm.normalize_content(frame, false)
         };
         let mut norm = Normalizer::new();
         spawn(&mut norm);
@@ -1238,13 +1246,13 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"git clone …","run_in_background":true}}]}}"#,
         ] {
             let frame = crate::claude::wire::parse_frame(raw).expect("parses");
-            norm.normalize(frame, false);
+            norm.normalize_content(frame, false);
         }
         let done = crate::claude::wire::parse_frame(
             r#"{"type":"system","subtype":"task_notification","task_id":"bg1","tool_use_id":"toolu_bash","status":"completed"}"#,
         )
         .expect("parses");
-        assert!(norm.normalize(done, false).is_empty());
+        assert!(norm.normalize_content(done, false).is_empty());
     }
 
     #[test]
@@ -1275,15 +1283,15 @@ mod tests {
         let mut norm = Normalizer::new();
         let init = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1"}"#;
         let frame = crate::claude::wire::parse_frame(init).unwrap();
-        assert_eq!(norm.normalize(frame, false).len(), 1, "first init");
+        assert_eq!(norm.normalize_content(frame, false).len(), 1, "first init");
         let frame = crate::claude::wire::parse_frame(init).unwrap();
         assert!(
-            norm.normalize(frame, false).is_empty(),
+            norm.normalize_content(frame, false).is_empty(),
             "wake init deduped — SessionStarted is the fold's run boundary"
         );
         let result = r#"{"type":"result","subtype":"success","session_id":"s1"}"#;
         let frame = crate::claude::wire::parse_frame(result).unwrap();
-        let events = norm.normalize(frame, false);
+        let events = norm.normalize_content(frame, false);
         assert!(
             matches!(
                 events.last(),
@@ -1360,18 +1368,18 @@ mod context_tests {
     #[test]
     fn context_counts_cached_prompt_and_matches_primary_model() {
         let mut normalizer = Normalizer::new();
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"primary","content":[],"usage":{"input_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1800,"output_tokens":100}}}"#).unwrap(), false);
+        let events = normalizer.normalize_content(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"primary","content":[],"usage":{"input_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1800,"output_tokens":100}}}"#).unwrap(), false);
         assert!(events.contains(&AgentEvent::ContextUsage {
             tokens: Some(42000),
             window: None
         }));
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","parent_tool_use_id":"child","message":{"model":"child","content":[],"usage":{"input_tokens":999999}}}"#).unwrap(), false);
+        let events = normalizer.normalize_content(super::super::wire::parse_frame(r#"{"type":"assistant","parent_tool_use_id":"child","message":{"model":"child","content":[],"usage":{"input_tokens":999999}}}"#).unwrap(), false);
         assert!(
             !events
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ContextUsage { .. }))
         );
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":999999},"modelUsage":{"primary":{"contextWindow":200000},"child":{"contextWindow":1000000}}}"#).unwrap(), false);
+        let events = normalizer.normalize_content(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":999999},"modelUsage":{"primary":{"contextWindow":200000},"child":{"contextWindow":1000000}}}"#).unwrap(), false);
         assert!(events.contains(&AgentEvent::ContextUsage {
             tokens: None,
             window: Some(200000)

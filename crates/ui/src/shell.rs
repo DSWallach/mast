@@ -569,6 +569,7 @@ pub fn apply_keymap(
 /// The settings sections (feature-inventory §1.5 routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
+    TokenUsage,
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
@@ -588,10 +589,11 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
+        SettingsSection::TokenUsage,
         SettingsSection::Appearance,
         SettingsSection::Developer,
         SettingsSection::Files,
@@ -610,6 +612,7 @@ impl SettingsSection {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Agents => "Accounts",
+            SettingsSection::TokenUsage => "Token usage",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Developer => "Developer",
             SettingsSection::Files => "Files",
@@ -1722,6 +1725,8 @@ pub struct Shell {
     pub(crate) pr_dash_script: Option<crate::pr_page::PrDashScript>,
     archived_page: Option<Entity<ArchivedPage>>,
     workflow_pack_page: Option<Entity<crate::settings::workflow_pack::WorkflowPackPage>>,
+    token_usage_page: Option<Entity<crate::settings::token_usage::TokenUsagePage>>,
+    token_usage_sub: Option<Subscription>,
     linear_settings_page: Option<Entity<crate::linear::settings_page::LinearSettingsPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     design_page: Option<Entity<crate::settings::design_panel::DesignPanel>>,
@@ -2136,6 +2141,7 @@ impl Shell {
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/appshots") => Route::Settings(SettingsSection::Appshots),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
+            Some("settings/token-usage") => Route::Settings(SettingsSection::TokenUsage),
             Some("settings/workflow-pack") => Route::Settings(SettingsSection::WorkflowPack),
             Some("pr-reviews") | Some("pr-review-chats") => Route::PrReviewChats,
             // `new` pins the new-chat canvas (suppresses boot auto-select).
@@ -2254,6 +2260,8 @@ impl Shell {
             pr_dash_script: None,
             archived_page: None,
             workflow_pack_page: None,
+            token_usage_page: None,
+            token_usage_sub: None,
             linear_settings_page: None,
             appearance_page: None,
             design_page: None,
@@ -5152,6 +5160,19 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match section {
+            SettingsSection::TokenUsage => {
+                if self.token_usage_page.is_none() {
+                    let state=self.state.clone();
+                    let page=cx.new(|cx|crate::settings::token_usage::TokenUsagePage::new(state,cx));
+                    self.token_usage_sub=Some(cx.subscribe(&page,|this,_,event:&crate::settings::token_usage::OpenUsageChat,cx| {
+                        this.state.update(cx,|state,cx|state.select_chat(Some(event.0.clone()),cx));
+                        this.route=Route::Chat;
+                        cx.notify();
+                    }));
+                    self.token_usage_page=Some(page);
+                }
+                self.token_usage_page.as_ref().map(|p|p.clone().into_any_element()).unwrap_or_else(||Empty.into_any_element())
+            }
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
                     let state = self.state.clone();
@@ -7338,6 +7359,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
+            SettingsSection::TokenUsage => icons::DOCUMENT_ADD,
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,

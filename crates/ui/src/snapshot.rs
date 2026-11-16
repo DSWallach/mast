@@ -481,3 +481,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         _shell: shell,
     })
 }
+
+/// Offline token usage page. No engine or user store is opened.
+pub fn token_usage_fixture(tab:usize,cx:&mut App)->Entity<impl Render + use<>> {
+    let state=cx.new(|_|crate::state::AppState::new());
+    cx.new(|cx|crate::settings::token_usage::TokenUsagePage::fixture(state,tab,cx))
+}
