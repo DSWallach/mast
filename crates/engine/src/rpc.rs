@@ -2250,6 +2250,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
+            | methods::RESOLVE_CODE_REF_BASE
             | methods::RESOLVE_BRANCH_REVIEW_BASE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
@@ -4513,6 +4514,18 @@ impl RpcService for EngineRpc {
                     }
                 }
                 RpcReply::value(&reply)
+            }
+            methods::RESOLVE_CODE_REF_BASE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P { cwd: String, checkout_id: Option<String>, base_ref: String, head_ref: String, path: String }
+                let p: P = parse_params(params)?;
+                let identity = self.repos.checkout_identity(std::path::Path::new(&p.cwd)).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.checkout_id.as_deref().is_some_and(|expected| expected != identity.id) {
+                    return Err(RpcError::Failed("checkoutId does not match canonical cwd".into()));
+                }
+                let (base_sha, text) = crate::diff_sync::resolve_code_ref_base(&identity.root, &p.base_ref, &p.head_ref, &p.path).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "baseSha": base_sha, "text": text }))
             }
             methods::GET_CHECKOUT_DIFF => {
                 // Keep the scoped-diff future off the dispatcher's stack. The
