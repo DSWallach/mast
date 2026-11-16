@@ -828,6 +828,8 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    board_watch_docs: std::collections::HashSet<String>,
+    tab_watch_docs: std::collections::HashSet<String>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -919,6 +921,8 @@ impl AppState {
             github: Default::default(),
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            board_watch_docs: Default::default(),
+            tab_watch_docs: Default::default(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1495,6 +1499,11 @@ impl AppState {
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
     pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+        self.tab_watch_docs.insert(doc_id.clone());
+        self.ensure_subagent_doc_watch(doc_id, cx);
+    }
+
+    fn ensure_subagent_doc_watch(&mut self, doc_id: String, cx: &mut Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1509,6 +1518,21 @@ impl AppState {
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
+        self.tab_watch_docs.remove(doc_id);
+        if self.board_watch_docs.contains(doc_id) { return; }
+        self.remove_subagent_doc_watch(doc_id);
+    }
+
+    pub(crate) fn set_board_watch_docs(&mut self, ids: std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        let removed: Vec<_> = self.board_watch_docs.difference(&ids).cloned().collect();
+        self.board_watch_docs = ids;
+        for id in removed {
+            if !self.tab_watch_docs.contains(&id) { self.remove_subagent_doc_watch(&id); }
+        }
+        for id in self.board_watch_docs.clone() { self.ensure_subagent_doc_watch(id, cx); }
+    }
+
+    fn remove_subagent_doc_watch(&mut self, doc_id: &str) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);

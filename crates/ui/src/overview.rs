@@ -1783,6 +1783,7 @@ impl Overview {
                 this.open_proposals(space_id.clone(), item_id.clone(), cx);
             }
             OutlineEvent::OpenRequiredActions => this.open_required_actions(cx),
+            OutlineEvent::OpenRequiredAction(id) => this.open_required_action(id.clone(), cx),
             OutlineEvent::LinearIssueDropped {
                 space_id,
                 item_id,

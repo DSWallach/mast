@@ -186,6 +186,8 @@ pub fn render(
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
+                "board" => mast_ui::snapshot::board_fixture(false, cx).into(),
+                "board-table" => mast_ui::snapshot::board_fixture(true, cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),

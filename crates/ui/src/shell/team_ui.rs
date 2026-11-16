@@ -15,6 +15,14 @@ use crate::team::{
 };
 
 impl Shell {
+    pub(crate) fn board_link_statuses(&self, ids: &[String]) -> std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus> {
+        ids.iter().filter_map(|id| Some((id.clone(), self.chat_header_links.get(id)?.status.clone()?))).collect()
+    }
+
+    pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for id in ids { self.ensure_chat_header_links(id.clone(), cx); }
+    }
+
     #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_snapshot_team(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, _| {

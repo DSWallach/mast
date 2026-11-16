@@ -26,6 +26,7 @@ use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
+#[path = "../components/coordination_board.rs"]
 mod board_view;
 pub(crate) mod templates;
 mod tree_guides_view;
@@ -166,6 +167,7 @@ pub(crate) enum OutlineEvent {
     OpenProposals { space_id: String, item_id: String },
     /// Open the Required Actions surface (Milestone 4).
     OpenRequiredActions,
+    OpenRequiredAction(String),
     /// The Space roots' order, hidden set, or reveal changed (the Overview
     /// redraws its toolbar count).
     SpacesArranged,
@@ -450,8 +452,16 @@ pub(crate) struct OutlineView {
     picker_focus: FocusHandle,
     board_mode: board_view::BoardMode,
     board_root: Option<(String, String)>,
+    board_space: Option<String>,
     board_space_scope: bool,
     board_show_all: bool,
+    board_sort: board_view::BoardSort,
+    board_expanded: HashSet<String>,
+    board_links: std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus>,
+    board_link_fingerprint: String,
+    board_shell_observe: Option<Subscription>,
+    board_activity: std::collections::HashMap<String, String>,
+    board_state_observe: Option<Subscription>,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
     model: OutlineModel,
@@ -554,8 +564,16 @@ impl OutlineView {
             picker_focus: cx.focus_handle(),
             board_mode: board_view::BoardMode::Tree,
             board_root: None,
+            board_space: None,
             board_space_scope: false,
             board_show_all: false,
+            board_sort: board_view::BoardSort::Status,
+            board_expanded: HashSet::new(),
+            board_links: Default::default(),
+            board_link_fingerprint: String::new(),
+            board_shell_observe: None,
+            board_activity: Default::default(),
+            board_state_observe: None,
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
             model: OutlineModel::default(),
@@ -622,6 +640,12 @@ impl OutlineView {
         self.retire_shown_optimistic();
         self.overlay_optimistic();
         self.reflatten();
+        if self.board_mode != board_view::BoardMode::Tree {
+            let view = cx.weak_entity();
+            cx.defer(move |cx| { let _ = view.update(cx, |this, cx| {
+                this.refresh_board_watches(cx);
+            }); });
+        }
         cx.notify();
     }
 
