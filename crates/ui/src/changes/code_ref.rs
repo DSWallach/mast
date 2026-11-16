@@ -36,6 +36,25 @@ pub(super) fn hunk_selection(
 }
 
 impl Changes {
+    fn code_ref_context(
+        &self,
+        state: &AppState,
+        key: &str,
+    ) -> Option<crate::files::client::FilesRequestContext> {
+        let mut context = crate::files::client::FilesRequestContext::for_chat(state, key)?;
+        if let Some(owner) = &self.owner {
+            if let Some(cwd) = &owner.cwd {
+                context.cwd = cwd.clone();
+                context.target.checkout_path = Some(cwd.clone());
+                context.checkout_id = owner.checkout_id.clone();
+            }
+            context.target_device_id = (state.local_device_id.as_deref()
+                != Some(owner.device_id.as_str()))
+            .then(|| owner.device_id.clone());
+        }
+        Some(context)
+    }
+
     pub(super) fn add_hunk_to_chat(
         &mut self,
         path: String,
@@ -50,7 +69,7 @@ impl Changes {
             return;
         };
         let state = self.state.read(cx);
-        let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, &key) else {
+        let Some(context) = self.code_ref_context(state, &key) else {
             return;
         };
         let Some(engine) = state.engine().cloned() else {
@@ -135,7 +154,7 @@ impl Changes {
             };
             let _ = state_handle.update(cx, |state, cx| { state.end_code_ref_load(&key); cx.notify(); });
             let _ = this.update(cx, |this, cx| {
-                let current = crate::files::client::FilesRequestContext::for_chat(this.state.read(cx), &key);
+                let current = this.code_ref_context(this.state.read(cx), &key);
                 if current.as_ref() != Some(&context) { return; }
                 if let (Some(identity), Some((at, snippet))) = (identity, snapshot) {
                     let reference = crate::code_ref::StagedCodeRef {
