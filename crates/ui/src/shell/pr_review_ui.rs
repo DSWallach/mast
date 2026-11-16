@@ -1058,7 +1058,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap()[0]["tab"], "authored");
         assert_eq!(calls.lock().unwrap()[0]["force"], false);
         // Off the page the timer fetches nothing.
-        shell.update(cx, |shell, cx| shell.open_overview(cx));
+        shell.update(cx, |shell, cx| { shell.open_new_session(cx); shell.open_overview(cx); });
         draw(cx);
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(61));
@@ -1092,10 +1092,10 @@ mod tests {
         script_dash(&shell, cx);
         draw(cx);
         for combo in ["mod-p", "mod-shift-p"] {
-            shell.update(cx, |shell, cx| shell.open_overview(cx));
+            shell.update(cx, |shell, cx| { shell.open_new_session(cx); shell.open_overview(cx); });
             draw(cx);
             shell.read_with(cx, |shell, _| {
-                assert!(matches!(shell.route, Route::Overview))
+                assert!(shell.overview_navigation_visible())
             });
             cx.simulate_keystrokes(&platform_combo(combo));
             draw(cx);
@@ -1616,7 +1616,7 @@ mod tests {
         let before = lines(&page, cx, PrDashTab::Authored);
         assert!(!before.is_empty());
         let (calls, _rows) = script_dash(&shell, cx);
-        shell.update(cx, |shell, cx| shell.open_overview(cx));
+        shell.update(cx, |shell, cx| { shell.open_new_session(cx); shell.open_overview(cx); });
         draw(cx);
         shell.update(cx, |shell, cx| shell.open_pr_review_chats(cx));
         cx.update(|window, cx| {

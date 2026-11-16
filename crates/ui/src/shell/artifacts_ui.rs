@@ -679,7 +679,8 @@ mod tests {
         // On the Overview the key is still the outline search.
         shell.update(vcx, |shell, cx| shell.open_overview(cx));
         vcx.run_until_parked();
-        vcx.update(|window, _| window.blur());
+        let navigation = shell.read_with(vcx, |shell, cx| shell.overview_page.as_ref().unwrap().read(cx).outline_entity());
+        vcx.update(|window, cx| window.focus(&gpui::Focusable::focus_handle(navigation.read(cx), cx), cx));
         vcx.simulate_keystrokes(&combo);
         vcx.run_until_parked();
         let overview = shell

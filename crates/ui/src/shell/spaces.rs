@@ -446,7 +446,8 @@ mod pinned_session_tests {
                 shell.update(cx, |shell, cx| {
                     shell.space_menu = popover::Popup::default();
                     shell.group_menu = None;
-                    shell.settings.sidebar_organization = organization;
+                    shell.settings.sidebar_overview = false;
+                shell.settings.sidebar_organization = organization;
                     shell.state.update(cx, |state, _| {
                         state.chats[0].space_id = project.then(|| "project".into());
                     });
@@ -509,6 +510,7 @@ mod pinned_session_tests {
         let shell = window
             .update(cx, |shell, _, cx| {
                 shell.settings.space_filter = None;
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -620,6 +622,7 @@ mod pinned_session_tests {
                     .sidebar_pins_mut("local".into())
                     .push("run-pinned".into());
                 shell.settings.space_filter = None;
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1297,6 +1300,7 @@ mod pinned_session_tests {
         let window = pin_test_shell(cx, dir.path());
         window
             .update(cx, |shell, _, cx| {
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 shell
                     .settings
@@ -1372,8 +1376,10 @@ mod pinned_session_tests {
                 shell.scheduled_tasks_open = true;
                 let open = ids(&["run-pinned", "a-chat", "b-chat", "run-new", "run-old", "other-run"]);
                 assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
                 assert_eq!(shell.sidebar_visible_order(cx), open);
                 shell
@@ -1638,6 +1644,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_compact = true;
                 shell.state.update(cx, |state, _| {
@@ -1749,6 +1756,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1861,6 +1869,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_show_branch = true;
                 shell.settings.sidebar_compact = compact;
@@ -5030,6 +5039,7 @@ impl Shell {
             let mut chats: Vec<_> = state
                 .sidebar_chats(now, filter.as_deref())
                 .into_iter()
+                .filter(|(_, chat)| !shortcuts_only || self.overview_visible_chat_ids.as_ref().is_none_or(|ids| ids.contains(&chat.id)))
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
             chats.sort_by(|left, right| {
@@ -6224,6 +6234,7 @@ impl Shell {
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+                .filter(|c| self.overview_visible_chat_ids.as_ref().is_none_or(|ids| ids.contains(&c.id)))
                 .filter(|c| !state.personal_assistant.covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),

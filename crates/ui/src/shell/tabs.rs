@@ -144,6 +144,7 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.dismiss_overview_overlay(cx);
         // A side chat only shows in its main chat's pane (a notification
         // or link to it lands on the main chat).
         let chat_id = self

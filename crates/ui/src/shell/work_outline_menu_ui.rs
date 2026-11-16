@@ -575,7 +575,7 @@ impl Shell {
         let Some(overview) = self.overview_page.clone() else {
             return false;
         };
-        if !matches!(self.route, Route::Overview)
+        if (!matches!(self.route, Route::Overview) && !self.overview_navigation_visible())
             || !overview.read(cx).outline_tree_focused(window, cx)
         {
             return false;
@@ -807,7 +807,7 @@ mod tests {
             reply_ok(&params)
         }));
         shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
+            shell.state.update(cx, |state, cx| {
                 state.spaces = vec![
                     serde_json::from_value(serde_json::json!({
                         "id": "s1", "deviceId": "d", "path": "/work/alpha",
@@ -829,6 +829,7 @@ mod tests {
                 state.set_work_outline_visible(vec!["s1".into()]);
                 assert!(state.apply_work_outline_frame("s1", snapshot));
                 state.work_outline_actions_override = Some(actions);
+                cx.notify();
             })
         });
         shell.update_in(cx, |shell, window, cx| {
@@ -855,7 +856,7 @@ mod tests {
             window.draw(cx).clear();
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
     }
 
     fn selector(text: String) -> &'static str {
@@ -1562,10 +1563,10 @@ mod tests {
         );
         shell.read_with(cx, |shell, cx| {
             assert!(
-                matches!(shell.route, Route::Overview),
-                "the Chat never opens"
+                matches!(shell.route, Route::Chat),
+                "archiving keeps the current workspace"
             );
-            assert_eq!(shell.state.read(cx).selected_chat, None);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some(CHAT_UI));
             assert!(shell.work_outline_modal.is_none());
         });
 

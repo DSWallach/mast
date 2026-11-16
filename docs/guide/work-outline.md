@@ -2,9 +2,25 @@
 
 The outline arranges a project's chats under work items. An item can be a workstream, a ticket, a PR or an investigation. Every key, menu and rule is in the [reference](../work-outline.md). This page covers what you use every day.
 
-## Sidebar sections
+## Overview and Sessions
 
-The sidebar follows Work Outline groups by default, in the same tree order as
+Overview now occupies the left column beside your chat. Search, repository and
+attention filters apply to the outline and its shortcut collections. The open
+chat remains reachable above the filter, even when it falls outside the scope.
+Click a chat or press Enter to open it in the main workspace; arrows only move
+the navigation selection. Work Item Details, Required Actions and Inbox open in
+the workspace without mounting a second live chat.
+
+Choose **Sessions** for the previous session list, grouping, sorting, and metadata
+controls. Its presentation is independent of Overview's search and filters;
+both use the Space selector. Pins, custom sections, archived sessions and
+scheduled-task groups remain available. On a narrow window the column floats
+over the workspace; choosing a destination or clicking outside closes it.
+Expanding the window restores the saved sidebar width and collapsed preference.
+
+## Sections in the Sessions presentation
+
+The Sessions list follows Work Outline groups by default, in the same tree order as
 Overview. You can turn off **Settings → Appearance → Use Work Outline groups
 in the sidebar** to restore your custom sections without changing their saved
 membership.

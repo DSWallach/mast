@@ -1786,6 +1786,10 @@ impl Overview {
                 this.outline_preview = None;
                 this.leave_work_item_details(DetailsExit::OpenChat(chat_id.clone()), cx);
             }
+            OutlineEvent::OpenChatFromClick(chat_id) => {
+                this.outline_preview = None;
+                this.leave_work_item_details(DetailsExit::OpenChatFromClick(chat_id.clone()), cx);
+            }
             OutlineEvent::SelectionMoved => this.schedule_outline_preview(cx),
             OutlineEvent::RenameChat(chat_id) => {
                 if let Some(shell) = this.shell.upgrade() {
@@ -6171,6 +6175,10 @@ impl Overview {
     fn apply_details_exit(&mut self, exit: DetailsExit, cx: &mut Context<Self>) {
         match exit {
             DetailsExit::Close => self.close_work_item_details(cx),
+            DetailsExit::OpenChatFromClick(chat_id) => {
+                self.apply_details_exit(DetailsExit::OpenChat(chat_id), cx);
+                let _ = self.shell.update(cx, |shell, cx| shell.keep_outline_navigation_focus(cx));
+            }
             DetailsExit::OpenChat(chat_id) => {
                 self.close_work_item_details(cx);
                 self.close_required_actions(cx);
@@ -6961,6 +6969,7 @@ pub(crate) struct OutlineChatReturn {
 enum DetailsExit {
     Close,
     OpenChat(String),
+    OpenChatFromClick(String),
     OpenItem { space_id: String, item_id: String },
 }
 

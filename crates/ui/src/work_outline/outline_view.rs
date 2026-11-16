@@ -148,6 +148,8 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum OutlineEvent {
     /// Open the Chat's transcript.
     OpenChat(String),
+    /// A sidebar click opens the workspace while keeping navigation focus.
+    OpenChatFromClick(String),
     /// The user moved the selection to another row (arrow keys, Home / End,
     /// sibling jumps, a click). The Overview previews a Chat row in its chat
     /// panel without taking focus. Programmatic selection never sends it.
@@ -507,6 +509,7 @@ pub(crate) struct OutlineView {
     show_hidden_spaces: bool,
     /// Fold a single-chat item's Chat into its row (on in the app).
     compact_single_chat: bool,
+    single_click_opens: bool,
     _editor_events: Subscription,
     /// Focus gained / lost diagnostics (registered on first render, which
     /// has the window).
@@ -565,6 +568,7 @@ impl OutlineView {
             move_toast_seq: 0,
             templates: Default::default(),
             compact_single_chat: crate::settings::current(cx).compact_single_chat,
+            single_click_opens: false,
             log_busy: false,
             skip_log: false,
             glyph_press: false,
@@ -597,6 +601,10 @@ impl OutlineView {
     // ----------------------------------------------------------------------
     // Inputs and model
     // ----------------------------------------------------------------------
+
+    pub(crate) fn set_single_click_opens(&mut self, value: bool) {
+        self.single_click_opens = value;
+    }
 
     pub(crate) fn set_compact_single_chat(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.compact_single_chat != on {
@@ -3180,9 +3188,14 @@ impl OutlineView {
                     this.clear_multi(cx);
                     let moved = this.selected.as_deref() != Some(click_key.as_str());
                     this.select(&click_key, cx);
-                    let opens_details = event.click_count() >= 2;
+                    let opens_details = event.click_count() >= 2 || this.single_click_opens;
                     if opens_details {
-                        this.open_row(&open_row, cx);
+                        if this.single_click_opens && event.click_count() < 2
+                            && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling) {
+                            cx.emit(OutlineEvent::OpenChatFromClick(chat.chat.id.clone()));
+                        } else {
+                            this.open_row(&open_row, cx);
+                        }
                     } else if moved {
                         cx.emit(OutlineEvent::SelectionMoved);
                     }

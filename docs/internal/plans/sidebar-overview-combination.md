@@ -1,6 +1,6 @@
 # Combine Overview and Sidebar
 
-Status: implementation in progress; the persistent left-column host and workspace routing are implemented.
+Status: implementation complete; final review and the requested Mast Dev QA build are pending.
 Work item: Sidebar and Overview combination (`22ac3419111b39808a8565dbc57c6498`).
 Branch: `david/sidebar-overview-combination`, based on local `david-rolling` at `4cc809e2` (three commits ahead of fetched `origin/david-rolling` on 2026-11-16).
 
@@ -118,3 +118,31 @@ Validation:
 - New module formatting and whitespace checks passed. All Mast builds used the shared Cargo target directory.
 
 Remaining before the full consolidation is merge-ready: finish the capability-by-capability parity audit, check filter behavior across the shortcut collections and Sessions, validate narrow native windows and the proposed overlay, exercise the full context-menu and remote-preference workflows, and run the required `pr-review` gate on the final commit. The branch has not been merged; the work item remains active.
+
+
+### Final implementation and parity audit
+
+- Narrow windows below 780 px use a dismissible Overview overlay. Opening a destination or clicking outside closes it without changing the saved wide-window width or collapse preference. Wide windows restore the normal column.
+- Overview's search, repository, stale and attention filters now apply to pinned/custom/scheduled/archived collections as well as the tree. The current-chat access row remains fixed. Sessions keeps its own presentation and the shared Space scope.
+- Single-click opens a chat or work-item destination. Clicking a chat keeps navigation focus for continued browsing; Enter focuses its composer. Shift/multi-selection and disclosure controls retain their existing behavior.
+- Fixed the Outline archive shortcut to use navigation focus even while a Chat occupies the main workspace. Artifact Find keeps priority inside artifact tabs.
+- Audited the preservation map against the shared shell implementations: account/footer controls, assistant/current chat, Space menus, session menu actions, grouping and sort, managed-account badges, pins and section drag/drop, archived restore, scheduled grouping, outline commands, details/instructions/proposals/artifacts, Required Actions, Inbox/Linear/GitHub, and chat/subagent tools all remain reachable. The Sessions presentation retains the complete existing session menu; no new wire or sync schema was introduced.
+- Updated the user guide and Work Outline reference to the persistent navigation, focus and workspace behavior.
+
+Final validation before review:
+
+- 342 Overview-related tests passed, two ignored, with the previously confirmed baseline stalled-badge failure skipped.
+- The full shell suite has 401 passing tests and five ignored tests. Its four failures were reproduced on the original `4cc809e2` base: the wake-switch settings test, two outline-group sidebar-section fixtures, and the Start Chat auto-approve fixture. These are pre-existing failures, not waivers of findings in this feature.
+- The five unified-column integration tests cover workspace/draft return, presentation switching, pin geometry, filtered pins, and the 600 px overlay restoring its wide layout.
+- Settings persistence: 87 tests passed. Native light/dark preview and artifact render checks passed; a fresh narrow native preview is being generated for final QA evidence.
+
+The requested deliverable is a signed **Mast Dev.app** built from this feature branch after the required review passes. It uses the Dev bundle identity and isolated Dev data/IPC configuration. No merge into `david-rolling` or `main` is part of this request.
+
+### Manual QA in Mast Dev
+
+1. Open a Chat, type an unsent draft, browse with arrows, click another Chat, and use the focus toggle. Confirm drafts survive navigation.
+2. Pin/reorder a Chat and move it between custom sections. Exercise search, repository/attention filters, archive and restore. Confirm the current Chat remains reachable outside the scope.
+3. Switch to Sessions and try project/device/list organization, sorting, metadata toggles and the session context menu.
+4. Open item details, edit/cancel instructions, open Compare from a drift marker, Required Actions and Inbox. Close panels and confirm the selected Chat/draft returns.
+5. Resize to about 600 px, open Overview, select a destination and reopen it. Resize wide and confirm the saved width/collapse setting returns.
+6. Try artifact Find, the archive shortcut with the tree focused, New Chat, Space switching and the footer's Settings/Back flow.

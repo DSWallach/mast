@@ -2,15 +2,89 @@
 use super::*;
 
 impl Shell {
+    pub(crate) fn keep_outline_navigation_focus(&mut self, cx: &mut Context<Self>) {
+        // The row's mouse handler already focused the tree. A click should
+        // display the chat without replaying the composer's pending focus.
+        self.composer
+            .update(cx, |composer, _| composer.focus_pending = false);
+    }
+
+    pub(super) fn sidebar_is_overlay(&self) -> bool {
+        self.viewport_width > 0.0
+            && self.viewport_width < 780.0
+            && !matches!(self.route, Route::Settings(_))
+    }
+
+    pub(super) fn dismiss_overview_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_is_overlay() && !self.overview_overlay_dismissed {
+            self.overview_overlay_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn place_overview_sidebar(
+        &mut self,
+        sidebar: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>) {
+        if !self.sidebar_is_overlay() {
+            return (sidebar, None);
+        }
+        let floating = if !self.settings.sidebar_collapsed && !self.overview_overlay_dismissed {
+            let theme = Theme::of(cx).clone();
+            Some(
+                div()
+                    .id("overview-sidebar-overlay")
+                    .debug_selector(|| "overview-sidebar-overlay".into())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(
+                        div()
+                            .id("overview-sidebar-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .bg(theme.text.opacity(0.14))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.dismiss_overview_overlay(cx);
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(self.sidebar_shown_width()))
+                            .bg(theme.surface_raised)
+                            .child(sidebar),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        (div().w(px(0.0)).flex_none().into_any_element(), floating)
+    }
+
     pub(crate) fn overview_navigation_visible(&self) -> bool {
         self.settings.sidebar_overview
             && !self.settings.sidebar_collapsed
+            && !(self.sidebar_is_overlay() && self.overview_overlay_dismissed)
             && !matches!(self.route, Route::Settings(_))
     }
 
     pub(super) fn reveal_overview_navigation(&mut self, cx: &mut Context<Self>) {
         let changed = !self.settings.sidebar_overview || self.settings.sidebar_collapsed;
         self.settings.sidebar_overview = true;
+        self.overview_overlay_dismissed = false;
         self.settings.sidebar_collapsed = false;
         if matches!(self.route, Route::Settings(_)) {
             self.route = Route::Chat;
@@ -25,6 +99,7 @@ impl Shell {
     }
 
     pub(crate) fn show_overview_workspace(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_overview_overlay(cx);
         if self.route != Route::Overview {
             self.route = Route::Overview;
             self.nav.push(NavEntry::Overview);
@@ -109,10 +184,16 @@ mod tests {
     impl Render for Host {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
+                shell.viewport_width = f32::from(window.viewport_size().width);
                 let theme = Theme::of(cx).clone();
                 let sidebar = shell.render_chat_sidebar(&theme, cx);
+                let (sidebar, floating) = shell.place_overview_sidebar(sidebar, cx);
                 let main = shell.render_main(window, 800.0, 800.0, cx);
-                div().size_full().flex().child(sidebar).child(main)
+                div()
+                    .size_full()
+                    .relative()
+                    .child(div().size_full().flex().child(sidebar).child(main))
+                    .children(floating)
             })
         }
     }
@@ -226,6 +307,90 @@ mod tests {
         let bounds = vcx.debug_bounds("overview-shortcut-collections").unwrap();
         assert!(f32::from(bounds.size.height) > 20.0);
         assert!(vcx.debug_bounds("overview-navigation").is_some());
+    }
+
+    #[gpui::test]
+    fn narrow_overview_overlays_then_restores_the_saved_wide_layout(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        let width = shell.read_with(vcx, |shell, _| shell.settings.sidebar_width);
+        vcx.simulate_resize(gpui::size(px(600.0), px(900.0)));
+        shell.update(vcx, |shell, cx| shell.open_overview(cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(vcx.debug_bounds("overview-sidebar-overlay").is_some());
+        shell.read_with(vcx, |shell, _| assert_eq!(shell.sidebar_target(), 0.0));
+        shell.update(vcx, |shell, cx| shell.open_chat("chat".into(), cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(vcx.debug_bounds("overview-sidebar-overlay").is_none());
+        vcx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(vcx.debug_bounds("overview-navigation").is_some());
+        shell.read_with(vcx, |shell, _| {
+            assert_eq!(shell.settings.sidebar_width, width);
+            assert!(!shell.settings.sidebar_collapsed);
+        });
+    }
+
+    #[gpui::test]
+    fn overview_search_filters_pins_but_sessions_keeps_its_own_presentation(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        shell.update(vcx, |shell, cx| {
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            *shell.settings.sidebar_pins_mut(key) = vec!["chat".into()];
+        });
+        page.update(vcx, |page, cx| {
+            page.set_search_text_for_test("no matching chat", cx)
+        });
+        shell.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert_eq!(
+            f32::from(
+                vcx.debug_bounds("overview-shortcut-collections")
+                    .unwrap()
+                    .size
+                    .height
+            ),
+            0.0
+        );
+        shell.update(vcx, |shell, cx| {
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+            shell.settings.sidebar_overview = false;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        shell.read_with(vcx, |shell, _| {
+            assert!(shell.overview_visible_chat_ids.is_none())
+        });
+        assert!(
+            f32::from(
+                vcx.debug_bounds("overview-shortcut-collections")
+                    .unwrap()
+                    .size
+                    .height
+            ) > 20.0
+        );
     }
 
     #[gpui::test]

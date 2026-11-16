@@ -34,6 +34,23 @@ impl Overview {
         }
     }
 
+    pub(crate) fn sidebar_filter_ids(&mut self, cx: &mut Context<Self>) -> Option<HashSet<String>> {
+        self.ensure_prefs_loaded(cx);
+        let rows = self.rows(cx);
+        let filtering = !self.search.read(cx).text().trim().is_empty()
+            || self.hide_stale
+            || self.attention_filter != AttentionFilter::All
+            || !self.hidden_repos.is_empty()
+            || !self.work_item_filter.is_empty();
+        filtering.then(|| rows.iter().map(|row| row.chat.id.clone()).collect())
+    }
+
+    pub(crate) fn navigation_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.outline_tree_focused(window, cx)
+            || self.body_focus.contains_focused(window, cx)
+            || gpui::Focusable::focus_handle(self.search.read(cx), cx).contains_focused(window, cx)
+    }
+
     pub(crate) fn navigation_list_focused(&self, window: &Window) -> bool {
         self.view_mode == OverviewMode::List && self.body_focus.is_focused(window)
     }

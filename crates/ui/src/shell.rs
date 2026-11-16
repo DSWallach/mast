@@ -1705,6 +1705,8 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
     overview_navigation: Option<Entity<crate::overview::OverviewNavigation>>,
+    overview_overlay_dismissed: bool,
+    overview_visible_chat_ids: Option<std::collections::HashSet<String>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
     scheduled_tasks_events: Option<Subscription>,
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
@@ -2241,6 +2243,8 @@ impl Shell {
             devices_page: None,
             overview_page: None,
             overview_navigation: None,
+            overview_overlay_dismissed: false,
+            overview_visible_chat_ids: None,
             scheduled_tasks_page: None,
             scheduled_tasks_events: None,
             pr_review_chats_page: None,
@@ -2849,7 +2853,7 @@ impl Shell {
     // ---- layout state ----
 
     fn sidebar_target(&self) -> f32 {
-        if self.settings.sidebar_collapsed {
+        if self.settings.sidebar_collapsed || self.sidebar_is_overlay() {
             0.0
         } else {
             self.sidebar_shown_width()
@@ -2860,7 +2864,11 @@ impl Shell {
     /// `CHAT_PANEL_MIN` in this window. The saved preference is untouched,
     /// so widening the window restores it.
     fn sidebar_shown_width(&self) -> f32 {
-        sidebar_width_for_viewport(self.settings.sidebar_width, self.viewport_width)
+        if self.sidebar_is_overlay() {
+            self.settings.sidebar_width.min((self.viewport_width - 24.0).max(0.0))
+        } else {
+            sidebar_width_for_viewport(self.settings.sidebar_width, self.viewport_width)
+        }
     }
 
     /// Does the selected space's folder have git? Owner-stamped and synced —
@@ -2925,6 +2933,17 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_is_overlay() {
+            if self.settings.sidebar_collapsed || self.overview_overlay_dismissed {
+                self.settings.sidebar_collapsed = false;
+                self.overview_overlay_dismissed = false;
+                self.schedule_save(cx);
+            } else {
+                self.overview_overlay_dismissed = true;
+            }
+            cx.notify();
+            return;
+        }
         let from = self.sidebar_now();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
@@ -5032,6 +5051,7 @@ impl Shell {
         let page = cx.new(|cx| {
             let mut page = crate::overview::Overview::new(state, weak, transcript, composer, cx);
             page.in_sidebar = true;
+            page.outline_entity().update(cx, |outline, _| outline.set_single_click_opens(true));
             page
         });
         self.overview_page = Some(page.clone());
@@ -7328,7 +7348,9 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let width = self.sidebar_now();
+        let width = if self.sidebar_is_overlay() {
+            if self.settings.sidebar_collapsed || self.overview_overlay_dismissed { 0.0 } else { self.sidebar_shown_width() }
+        } else { self.sidebar_now() };
         if width <= 0.0 {
             return div().w(px(0.0)).h_full().flex_none().into_any_element();
         }
@@ -8061,6 +8083,13 @@ impl Shell {
         {
             self.cancel_pinned_session_drag(cx);
         }
+        self.overview_visible_chat_ids = if self.settings.sidebar_overview {
+            let page = self.ensure_overview_page(cx);
+            page.update(cx, |page, cx| {
+                page.set_sidebar_scope(self.settings.space_filter.clone(), cx);
+                page.sidebar_filter_ids(cx)
+            })
+        } else { None };
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
             (state.auth_user().cloned(), state.workspace_scope)
@@ -12296,10 +12325,9 @@ impl Render for Shell {
                         Route::Overview | Route::Chat
                             if this.is_overview_route()
                                 || (this.overview_navigation_visible()
-                                    && !this
-                                        .composer
-                                        .focus_handle(cx)
-                                        .contains_focused(window, cx)) =>
+                                    && (this.overview_page.as_ref().is_some_and(|page| page.read(cx).navigation_focused(window, cx))
+                                        || (this.state.read(cx).selected_chat.is_none()
+                                            && !this.composer.focus_handle(cx).contains_focused(window, cx)))) =>
                         {
                             let page = this.ensure_overview_page(cx);
                             page.update(cx, |overview, cx| {
@@ -12488,6 +12516,7 @@ impl Render for Shell {
                 });
 
                 let sidebar = self.render_sidebar(cx);
+                let (sidebar, sidebar_overlay) = self.place_overview_sidebar(sidebar, cx);
                 let sidebar_handle = self.resize_handle(
                     "sidebar-resize",
                     PaneResizeKind::Sidebar,
@@ -12615,7 +12644,7 @@ impl Render for Shell {
                             .flex()
                             .flex_row()
                             .child(sidebar)
-                            .child(sidebar_seam)
+                            .when(!self.sidebar_is_overlay(), |el| el.child(sidebar_seam))
                             .child(card)
                             // The right pane is ONE container: the surface
                             // host column and the docked explorer column
@@ -12637,6 +12666,7 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
+                    .children(sidebar_overlay)
                     .child(crate::components::shell_parts::titlebar_overlay(&theme, title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
