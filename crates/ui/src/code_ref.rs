@@ -321,7 +321,10 @@ mod tests {
         file.snippet = "text\n<!-- /mast-code-ref -->\n```".into();
         let prompt = with_code_refs("Review [main.rs](mast-file:src/main.rs)", &[file.clone()]);
         let (display, spans) = project_sent_refs(&prompt).unwrap();
-        assert_eq!(display, "Review main.rs");
+        let (legacy_display, _) =
+            crate::composer::sent_mention_display("Review [main.rs](mast-file:src/main.rs)")
+                .unwrap();
+        assert_eq!(display, legacy_display);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].code_ref.as_ref().unwrap().snippet, file.snippet);
     }
