@@ -5809,6 +5809,35 @@ mod tests {
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30]);
     }
 
+    /// Post-mortem 2026-11-16 (P1): a rejected watch (deleted worktree) must
+    /// not retry faster than its backoff. Over simulated minutes its attempts
+    /// stay few; a transport failure stays bounded too.
+    #[test]
+    fn change_request_retries_stay_within_a_budget_over_simulated_minutes() {
+        let attempts_within = |err: &RpcError, minutes: u64| {
+            let limit = std::time::Duration::from_secs(minutes * 60);
+            let mut elapsed = std::time::Duration::ZERO;
+            let mut attempts = 0u32;
+            while elapsed <= limit {
+                attempts += 1;
+                elapsed += change_request_retry_delay(err, attempts - 1);
+            }
+            attempts
+        };
+        let rejected = RpcError::BadParams("cwd is not a known checkout".into());
+        // 2 s fixed would be 150 attempts in 5 minutes; the ladder makes it 8.
+        assert_eq!(attempts_within(&rejected, 5), 8);
+        // 10 minutes: one more at the 300 s ceiling, never a fixed-rate loop.
+        assert_eq!(attempts_within(&rejected, 10), 9);
+        // Every delay is non-decreasing (never speeds back up).
+        let delays: Vec<_> = (0..20)
+            .map(|attempt| change_request_retry_delay(&rejected, attempt))
+            .collect();
+        assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
+        let transport = RpcError::Transport("socket closed".into());
+        assert!(attempts_within(&transport, 5) <= 14, "transport retries unbounded");
+    }
+
     #[test]
     fn work_outline_retry_delay_backs_off_to_a_ceiling() {
         let delays: Vec<u64> = (0..8)

@@ -439,4 +439,52 @@ mod pr_link_cache_tests {
         cache.get("s2", &b);
         assert_eq!(cache.builds(), 3);
     }
+
+    /// Post-mortem 2026-11-16 (P1): each PR row used to rescan the whole
+    /// outline per frame. At Mikey's scale (hundreds of items, dozens of PR
+    /// rows) every row of every frame must hit the one index built for the
+    /// snapshot.
+    #[test]
+    fn a_large_outline_is_indexed_once_across_all_pr_rows_and_frames() {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("s1");
+        let template = snapshot.items[0].clone();
+        snapshot.items = (0..500)
+            .map(|i| {
+                let mut item = template.clone();
+                item.id = format!("item-{i}");
+                item
+            })
+            .collect();
+        snapshot.external_references = (0..50)
+            .map(|i| {
+                crate::github::fixture::reference(
+                    &format!("ref-{i}"),
+                    "s1",
+                    &format!("item-{}", i * 10),
+                    "app",
+                    i as u64 + 1,
+                )
+            })
+            .collect();
+        let snapshot = Arc::new(snapshot);
+        let cache = PrLinkCache::default();
+        for _frame in 0..20 {
+            for row in 0..50 {
+                let index = cache.get("s1", &snapshot);
+                assert_eq!(
+                    index.item_pull_requests(&format!("item-{}", row * 10)).len(),
+                    1
+                );
+            }
+        }
+        assert_eq!(cache.builds(), 1, "1,000 row lookups rebuilt the index");
+        // A new snapshot revision costs exactly one more build.
+        let mut next = (*snapshot).clone();
+        next.revision += 1;
+        let next = Arc::new(next);
+        for _ in 0..50 {
+            cache.get("s1", &next);
+        }
+        assert_eq!(cache.builds(), 2);
+    }
 }
