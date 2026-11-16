@@ -695,6 +695,44 @@ pub struct ArtifactsService {
     inner: Arc<Inner>,
 }
 
+fn deserialize_review_field<T: serde::de::DeserializeOwned>(
+    field: &str,
+    value: Value,
+) -> Outcome<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let mut location = if path == "." { field.to_owned() } else { format!("{field}.{path}") };
+        let message = error.inner().to_string();
+        if let Some(name) = message.strip_prefix("missing field `").and_then(|s| s.strip_suffix('`')) {
+            location.push('.');
+            location.push_str(name);
+        }
+        ArtifactError::invalid(format!("{location}: {message}"))
+    })
+}
+
+fn deserialize_review_target(value: Value) -> Outcome<mast_proto::ReviewTarget> {
+    // Internally tagged enum deserialization buffers fields and loses their paths.
+    if let Some(object) = value.as_object() {
+        let fields: &[&str] = match object.get("kind").and_then(Value::as_str) {
+            Some("pr") => &["repo", "number", "headSha", "baseSha"],
+            Some("branch") => &["repo", "checkoutPath", "checkout", "branch", "baseRef", "baseSha", "headSha"],
+            _ => &[],
+        };
+        for &field in fields {
+            if let Some(field_value) = object.get(field) {
+                let path = format!("target.{field}");
+                if field == "number" {
+                    let _: u64 = deserialize_review_field(&path, field_value.clone())?;
+                } else if !field_value.is_null() || field == "headSha" || matches!(field, "repo" | "baseSha") && object.get("kind").and_then(Value::as_str) == Some("pr") {
+                    let _: String = deserialize_review_field(&path, field_value.clone())?;
+                }
+            }
+        }
+    }
+    deserialize_review_field("target", value)
+}
+
 impl ArtifactsService {
     pub fn new(workspace: WorkspaceHost) -> Self {
         let snapshots = workspace.store_root().join("artifacts");
@@ -2346,13 +2384,18 @@ impl ArtifactsService {
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         let mut value = arguments
             .get("review")
             .cloned()
-            .ok_or_else(|| ArtifactError::invalid("review is required"))?;
+            .ok_or_else(|| ArtifactError::invalid("review: expected an object; received missing field"))?;
+        if value.get("target").is_some() {
+            return Err(ArtifactError::invalid("review.target is not accepted; use the top-level target field"));
+        }
+        if target.is_none() && arguments.get("prUrl").and_then(Value::as_str).is_none() {
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
+        }
         let head = match &target {
             Some(mast_proto::ReviewTarget::Branch {
                 repo,
@@ -2416,11 +2459,10 @@ impl ArtifactsService {
             None => arguments
                 .get("headSha")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ArtifactError::invalid("headSha is required"))?
+                .ok_or_else(|| ArtifactError::invalid("headSha: expected a full commit SHA string when target is absent; received missing or non-string value"))?
                 .to_owned(),
         };
-        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(value)
-            .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        let mut review: mast_proto::ReviewSidecar = deserialize_review_field("review", value)?;
         if arguments
             .get("headSha")
             .and_then(Value::as_str)
@@ -2464,7 +2506,7 @@ impl ArtifactsService {
                 return Err(ArtifactError::invalid("review.pr does not match prUrl"));
             }
         } else if target.is_none() {
-            return Err(ArtifactError::invalid("prUrl or target is required"));
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
         }
         if let Some(mast_proto::ReviewTarget::PullRequest {
             repo,
@@ -2527,9 +2569,8 @@ impl ArtifactsService {
         let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
             && repo.as_deref().is_none_or(str::is_empty)
         {
