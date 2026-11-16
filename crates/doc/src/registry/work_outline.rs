@@ -428,16 +428,19 @@ impl RegistryDoc {
             applications,
             revisions,
             sessions,
-            chats: self
-                .read_chats()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|chat| OutlineChat {
-                    id: chat.id,
-                    space_id: chat.space_id,
-                    archived: chat.archived,
-                })
-                .collect(),
+            chats: {
+                let chats = self.read_chats().unwrap_or_default();
+                let hidden = mast_proto::hidden_task_chat_ids(&chats);
+                chats
+                    .iter()
+                    .map(|chat| OutlineChat {
+                        id: chat.id.clone(),
+                        space_id: chat.space_id.clone(),
+                        archived: chat.archived,
+                        hidden_run: hidden.contains(chat.id.as_str()),
+                    })
+                    .collect()
+            },
         }
     }
 
@@ -466,11 +469,18 @@ impl RegistryDoc {
     pub fn work_outline_chat_session_fingerprint(&self, space_id: &str) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut chats: Vec<(String, bool)> = Vec::new();
+        // Scheduled-run identity decides which runs the outline hides.
+        let mut chats: Vec<(String, bool, String)> = Vec::new();
         self.visit_rows(KIND_CHATS, |row| {
             if row.fields.get("spaceId").and_then(Value::as_str) == Some(space_id) {
                 let archived = row.fields.get("archived").and_then(Value::as_bool);
-                chats.push((row.id.clone(), archived.unwrap_or(false)));
+                let run = row
+                    .fields
+                    .get("scheduledTaskInfo")
+                    .filter(|v| v.is_object())
+                    .map(|v| format!("{}{v}", row.fields.get("deviceId").unwrap_or(&Value::Null)))
+                    .unwrap_or_default();
+                chats.push((row.id.clone(), archived.unwrap_or(false), run));
             }
         });
         chats.sort();

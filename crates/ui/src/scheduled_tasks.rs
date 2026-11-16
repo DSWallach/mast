@@ -430,6 +430,7 @@ impl ScheduledTasksPage {
                     enabled: false,
                     grace_minutes: 360,
                     cutover_confirmed: false,
+                    work_item_id: None,
                 },
             )
         };

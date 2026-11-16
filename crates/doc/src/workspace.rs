@@ -1132,6 +1132,7 @@ mod tests {
             task_name: "Daily".into(),
             run_id: "run-id".into(),
             session_created_at: Some(123),
+            ..Default::default()
         });
         ws.upsert_chat(&row).unwrap();
         assert_eq!(ws.read_chats().unwrap(), vec![row]);

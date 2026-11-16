@@ -298,6 +298,7 @@ fn scheduled_metadata_preserves_the_legacy_name() {
         task_name: "Daily".into(),
         run_id: "run-id".into(),
         session_created_at: Some(123),
+        ..Default::default()
     };
     assert!(doc.set_chat_scheduled_task_info("scheduled", &info).unwrap());
     let read = doc.chat("scheduled").unwrap().unwrap();

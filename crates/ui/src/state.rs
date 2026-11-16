@@ -6432,6 +6432,7 @@ mod tests {
                 task_name: "Briefing".into(),
                 run_id: id.into(),
                 session_created_at: Some(created),
+                ..Default::default()
             });
             c
         };

@@ -1958,6 +1958,24 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_scheduled_task_info(chat_id, task))?)
     }
 
+    /// [`Self::set_chat_scheduled_task_info`] for many chats in one registry
+    /// write. Returns how many rows existed.
+    pub fn set_chats_scheduled_task_info(
+        &self,
+        updates: &[(String, mast_proto::ScheduledChat)],
+    ) -> Result<usize, EngineError> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.mutate(|doc| {
+            let mut written = 0;
+            for (chat_id, task) in updates {
+                written += usize::from(doc.set_chat_scheduled_task_info(chat_id, task)?);
+            }
+            Ok::<_, mast_doc::DocError>(written)
+        })?)
+    }
+
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.

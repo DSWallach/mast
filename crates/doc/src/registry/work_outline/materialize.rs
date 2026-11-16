@@ -53,6 +53,9 @@ pub struct OutlineChat {
     /// The Chat is archived (Milestone 4: an archived origin Chat makes a
     /// request's `originChatAvailable` false).
     pub archived: bool,
+    /// A scheduled run that is not its task's latest (or whose task is
+    /// retired): no outline list shows it as a chat of its own.
+    pub hidden_run: bool,
 }
 
 /// Everything [`materialize_work_outline`] reads, cloned from the overlay
@@ -749,6 +752,12 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     let mut item_associated: BTreeMap<&str, u32> = BTreeMap::new();
     let mut associated_chats: BTreeSet<&str> = BTreeSet::new();
     let mut associated_item: BTreeMap<&str, &str> = BTreeMap::new();
+    let hidden_runs: BTreeSet<&str> = inputs
+        .chats
+        .iter()
+        .filter(|c| c.hidden_run)
+        .map(|c| c.id.as_str())
+        .collect();
     for row in &inputs.assignments {
         let chat_id = row.id.as_str();
         let chat_space = chats.get(chat_id).copied();
@@ -799,10 +808,12 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
                 WorkItemChatAssignmentState::Associated | WorkItemChatAssignmentState::DanglingChat
             )
         {
-            item_chats
+            if !hidden_runs.contains(chat_id) {
+                item_chats
                 .entry(key.as_str())
                 .or_default()
                 .push(chat_id.into());
+            }
             if state == WorkItemChatAssignmentState::Associated {
                 *item_associated.entry(key.as_str()).or_default() += 1;
                 associated_chats.insert(chat_id);
@@ -958,12 +969,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     }
 
     // Unassociated Chats of this Space: live Chats with no effective
-    // association (archived and child Chats included; projectless never).
+    // association (archived and child Chats included; projectless never;
+    // superseded scheduled runs never).
     let unassociated_chat_ids: Vec<String> = inputs
         .chats
         .iter()
         .filter(|c| c.space_id.as_deref() == Some(space_id))
         .filter(|c| !associated_chats.contains(c.id.as_str()))
+        .filter(|c| !c.hidden_run)
         .map(|c| c.id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()

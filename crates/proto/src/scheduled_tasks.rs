@@ -2,7 +2,7 @@
 use crate::ChatConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledChat {
     pub task_id: String,
@@ -10,6 +10,13 @@ pub struct ScheduledChat {
     pub run_id: String,
     #[serde(default)]
     pub session_created_at: Option<i64>,
+    /// The identity an imported run carried before it joined its native task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_task_id: Option<String>,
+    /// The run's task was deleted or never became a native task; default
+    /// views hide it, the Scheduled tasks page still lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +47,9 @@ pub struct ScheduledTaskDraft {
     /// Explicit source handoff acknowledgment for an imported task.
     #[serde(default)]
     pub cutover_confirmed: bool,
+    /// Work Outline item each run is attached to; runs inherit its instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,10 +178,11 @@ pub enum ScheduledTasksRequest {
 }
 
 /// Default sidebar/overview projection; activity on an older run never promotes it.
+/// Retired runs have no latest run at all.
 pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
     let mut latest = std::collections::HashMap::new();
     for chat in chats.iter().filter(|c| !c.archived) {
-        let Some(task) = &chat.scheduled_task_info else {
+        let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| !t.retired) else {
             continue;
         };
         let key = (&chat.device_id, &chat.space_id, &task.task_id);
@@ -181,6 +192,17 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
         }
     }
     latest.into_values().map(|c| c.id.as_str()).collect()
+}
+
+/// Scheduled runs that no default view lists as a loose chat: every run that
+/// is not its task's latest, and every retired run. Run history still reaches them.
+pub fn hidden_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
+    let latest = latest_task_chat_ids(chats);
+    chats
+        .iter()
+        .filter(|c| c.scheduled_task_info.is_some() && !latest.contains(c.id.as_str()))
+        .map(|c| c.id.as_str())
+        .collect()
 }
 
 pub fn task_chat_order(chat: &crate::Chat) -> (i64, &str) {
@@ -215,6 +237,40 @@ mod tests {
         assert!(ids.contains("newer"));
         assert!(ids.contains("same-name"));
         assert!(ids.contains("other-device"));
+    }
+    #[test]
+    fn retired_runs_have_no_latest_and_older_runs_are_hidden() {
+        let mut retired = chat("retired", "a", "gone", 30);
+        retired.scheduled_task_info.as_mut().unwrap().retired = true;
+        let mut plain = chat("plain", "a", "x", 0);
+        plain.scheduled_task_info = None;
+        let chats = vec![
+            retired,
+            chat("old", "a", "one", 10),
+            chat("new", "a", "one", 20),
+            plain,
+        ];
+        assert_eq!(
+            latest_task_chat_ids(&chats),
+            std::collections::HashSet::from(["new"])
+        );
+        assert_eq!(
+            hidden_task_chat_ids(&chats),
+            std::collections::HashSet::from(["retired", "old"])
+        );
+    }
+    #[test]
+    fn new_fields_are_additive_on_the_wire() {
+        let info = ScheduledChat {
+            task_id: "t".into(),
+            task_name: "n".into(),
+            run_id: "r".into(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert!(value.get("retired").is_none() && value.get("legacyTaskId").is_none());
+        let draft: serde_json::Value = serde_json::json!({"retired": true, "taskId": "t", "taskName": "n", "runId": "r"});
+        assert!(serde_json::from_value::<ScheduledChat>(draft).unwrap().retired);
     }
     #[test]
     fn stable_ties() {
