@@ -16,11 +16,11 @@ use super::*;
 use gpui::WeakEntity;
 
 use crate::work_outline::hints::{self, HintKey, WithHint as _};
-use crate::work_outline::templates::TemplateMenuAction;
 use crate::work_outline::outline_view::OutlineView;
 use crate::work_outline::outline_view::context_menu::{
     MenuAction, MenuEntry, MenuKind, OutlineContextMenu,
 };
+use crate::work_outline::templates::TemplateMenuAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MenuPage {
@@ -176,10 +176,15 @@ impl Shell {
     /// A compact row's Item menu carries its one Chat's entries (spliced in
     /// by the menu builder); the admin ones follow the Chat's Archive.
     fn add_compact_chat_admin_entries(&self, menu: &mut OutlineContextMenu, cx: &App) {
-        let Some((at, chat_id)) = menu.entries.iter().enumerate().find_map(|(i, e)| match &e.action {
-            MenuAction::ArchiveChat(id) => Some((i, id.clone())),
-            _ => None,
-        }) else {
+        let Some((at, chat_id)) =
+            menu.entries
+                .iter()
+                .enumerate()
+                .find_map(|(i, e)| match &e.action {
+                    MenuAction::ArchiveChat(id) => Some((i, id.clone())),
+                    _ => None,
+                })
+        else {
             return;
         };
         let state = self.state.read(cx);
@@ -189,10 +194,26 @@ impl Shell {
         let entries = self.admin_menu_entries(chat, &chat_id, cx);
         menu.entries.splice(at + 1..at + 1, entries);
         if self.can_ask_on_side(&chat_id, cx) {
-            menu.entries.insert(at, MenuEntry::new("ask-on-side", "Ask on the side…", icons::CHAT_ROUND_LINE, MenuAction::AskOnSide(chat_id.clone())));
+            menu.entries.insert(
+                at,
+                MenuEntry::new(
+                    "ask-on-side",
+                    "Ask on the side…",
+                    icons::CHAT_ROUND_LINE,
+                    MenuAction::AskOnSide(chat_id.clone()),
+                ),
+            );
         }
         if self.has_hand_off_workers(&chat_id, cx) {
-            menu.entries.insert(at, MenuEntry::new("hand-off-chat", "Hand off to new chat…", icons::CHAT_ROUND_LINE, MenuAction::HandOffChat(chat_id)));
+            menu.entries.insert(
+                at,
+                MenuEntry::new(
+                    "hand-off-chat",
+                    "Hand off to new chat…",
+                    icons::CHAT_ROUND_LINE,
+                    MenuAction::HandOffChat(chat_id),
+                ),
+            );
         }
     }
 
@@ -222,10 +243,20 @@ impl Shell {
         };
         let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
         if self.has_hand_off_workers(&chat_id, cx) {
-            menu.entries.push(MenuEntry::new("hand-off-chat", "Hand off to new chat…", icons::CHAT_ROUND_LINE, MenuAction::HandOffChat(chat_id.clone())));
+            menu.entries.push(MenuEntry::new(
+                "hand-off-chat",
+                "Hand off to new chat…",
+                icons::CHAT_ROUND_LINE,
+                MenuAction::HandOffChat(chat_id.clone()),
+            ));
         }
         if self.can_ask_on_side(&chat_id, cx) {
-            menu.entries.push(MenuEntry::new("ask-on-side", "Ask on the side…", icons::CHAT_ROUND_LINE, MenuAction::AskOnSide(chat_id.clone())));
+            menu.entries.push(MenuEntry::new(
+                "ask-on-side",
+                "Ask on the side…",
+                icons::CHAT_ROUND_LINE,
+                MenuAction::AskOnSide(chat_id.clone()),
+            ));
         }
         menu.entries
             .extend(self.admin_menu_entries(chat, &chat_id, cx));
@@ -856,7 +887,10 @@ mod tests {
             window.draw(cx).clear();
         });
         cx.run_until_parked();
-        cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
     }
 
     fn selector(text: String) -> &'static str {
@@ -922,11 +956,17 @@ mod tests {
         assert!(!ids(&shell, cx).contains(&"hand-off-chat"));
         press(cx, "escape");
         settle(&shell, cx);
-        shell.update(cx, |shell, cx| shell.state.update(cx, |state, cx| {
-            let worker = state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap();
-            worker.parent_chat_id = Some(CHAT_API.into());
-            cx.notify();
-        }));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let worker = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == CHAT_UI)
+                    .unwrap();
+                worker.parent_chat_id = Some(CHAT_API.into());
+                cx.notify();
+            })
+        });
         redraw(cx);
         right_click(cx, &row_key::chat(CHAT_API));
         assert!(ids(&shell, cx).contains(&"hand-off-chat"));
@@ -2047,14 +2087,29 @@ mod tests {
         let (shell, _outline, _calls, cx) = two_space_shell(cx, dir.path());
         let accounts = script_accounts(&shell, cx);
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
-        let flow = cx.new(|cx| AccountFlow::new(
-            state, mast_proto::HarnessId::ClaudeCode, None, Some("d".into()), cx,
-        ));
-        flow.update(cx, |flow, cx| flow.sign_in_again("a1".into(), Some("Work".into()), cx));
+        let flow = cx.new(|cx| {
+            AccountFlow::new(
+                state,
+                mast_proto::HarnessId::ClaudeCode,
+                None,
+                Some("d".into()),
+                cx,
+            )
+        });
+        flow.update(cx, |flow, cx| {
+            flow.sign_in_again("a1".into(), Some("Work".into()), cx)
+        });
         cx.run_until_parked();
         let calls = accounts.lock().unwrap();
-        assert!(!calls.iter().any(|(method, _)| method == mast_rpc::methods::CREATE_MANAGED_ACCOUNT));
-        let login = calls.iter().find(|(method, _)| method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN).unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|(method, _)| method == mast_rpc::methods::CREATE_MANAGED_ACCOUNT)
+        );
+        let login = calls
+            .iter()
+            .find(|(method, _)| method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN)
+            .unwrap();
         assert_eq!(login.1["accountId"], "a1");
     }
 
@@ -2065,10 +2120,18 @@ mod tests {
         let accounts = script_accounts(&shell, cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                for chat in state.chats.iter_mut().filter(|chat| chat.id == "chat-api" || chat.id == "chat-ui") {
-                    chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
-                        harness: mast_proto::HarnessId::ClaudeCode, model: None, reasoning: None,
-                        model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+                for chat in state
+                    .chats
+                    .iter_mut()
+                    .filter(|chat| chat.id == "chat-api" || chat.id == "chat-ui")
+                {
+                    chat.config = Some(mast_proto::ChatConfig {
+                        approval_rules: false,
+                        harness: mast_proto::HarnessId::ClaudeCode,
+                        model: None,
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
                         auto_approve: false,
                     });
                 }
@@ -2076,13 +2139,29 @@ mod tests {
             shell.sign_in_for_chat("chat-api".into(), cx);
         });
         cx.run_until_parked();
-        assert!(accounts.lock().unwrap().iter().any(|(method, params)|
-            method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN && params["accountId"] == "a1"));
+        assert!(
+            accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(
+                    |(method, params)| method == mast_rpc::methods::START_MANAGED_ACCOUNT_LOGIN
+                        && params["accountId"] == "a1"
+                )
+        );
         assert!(cx.debug_bounds("managed-account-a1").is_some());
         shell.update(cx, |shell, cx| shell.sign_in_for_chat("chat-ui".into(), cx));
         cx.run_until_parked();
-        assert!(accounts.lock().unwrap().iter().any(|(method, params)|
-            method == mast_rpc::methods::START_AGENT_LOGIN && params["harness"] == "claude-code"));
+        assert!(
+            accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(
+                    |(method, params)| method == mast_rpc::methods::START_AGENT_LOGIN
+                        && params["harness"] == "claude-code"
+                )
+        );
     }
 
     /// The sign-in sheet follows the CLI's output (URL, code prompt) and a

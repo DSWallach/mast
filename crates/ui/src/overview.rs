@@ -5392,9 +5392,8 @@ impl Overview {
         );
         let (dim, ribbon) = card_dimming(row.chat.archived, row.stale, unread);
         // A chat needing interaction or stalled stays at full opacity.
-        let dim = dim.filter(|_| {
-            row.chat.archived || !(row.needs_interaction() || row.is_stalled())
-        });
+        let dim =
+            dim.filter(|_| row.chat.archived || !(row.needs_interaction() || row.is_stalled()));
         let needs_input_pill = (row.status == ChatIndicator::AwaitingInput).then(|| {
             let color = crate::status_style::status_style(
                 crate::status_style::Status::Waiting,
@@ -6177,7 +6176,9 @@ impl Overview {
             DetailsExit::Close => self.close_work_item_details(cx),
             DetailsExit::OpenChatFromClick(chat_id) => {
                 self.apply_details_exit(DetailsExit::OpenChat(chat_id), cx);
-                let _ = self.shell.update(cx, |shell, cx| shell.keep_outline_navigation_focus(cx));
+                let _ = self
+                    .shell
+                    .update(cx, |shell, cx| shell.keep_outline_navigation_focus(cx));
             }
             DetailsExit::OpenChat(chat_id) => {
                 self.close_work_item_details(cx);
@@ -6936,7 +6937,9 @@ impl Overview {
         );
         self.set_mode(OverviewMode::Outline, cx);
         self.sync_outline(cx);
-        self.outline.update(cx, |outline, cx| outline.select(&row_key::item("fixture-space", "w-api"), cx));
+        self.outline.update(cx, |outline, cx| {
+            outline.select(&row_key::item("fixture-space", "w-api"), cx)
+        });
     }
 
     #[cfg(feature = "snapshot")]
@@ -6944,7 +6947,15 @@ impl Overview {
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
         snapshot.space_settings.linear_enabled = true;
-        self.set_outline_loads([("fixture-space".into(), WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)))].into_iter().collect(), cx);
+        self.set_outline_loads(
+            [(
+                "fixture-space".into(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+            )]
+            .into_iter()
+            .collect(),
+            cx,
+        );
         self.set_mode(OverviewMode::Outline, cx);
         self.sync_outline(cx);
         self.open_snapshot_linear(cx);
@@ -8458,7 +8469,8 @@ mod logic_tests {
     fn card_model_label_uses_explicit_id_or_honest_default() {
         let mut chat = row("c", "/r/zeron", None).chat;
         assert_eq!(chat_model_label(&chat), "default model");
-        chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
+        chat.config = Some(mast_proto::ChatConfig {
+            approval_rules: false,
             harness: mast_proto::HarnessId::Codex,
             model: Some("gpt-6-codex".into()),
             reasoning: None,
@@ -9036,9 +9048,7 @@ mod logic_tests {
     }
 
     #[gpui::test]
-    fn overview_indicates_sessions_needing_interaction_or_stalled(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -9110,10 +9120,19 @@ mod logic_tests {
         };
         draw(vcx);
 
-        assert!(vcx.debug_bounds("overview-row-needs-input-c-awaiting").is_some());
-        assert!(vcx.debug_bounds("overview-row-stalled-c-failed-tools").is_some());
+        assert!(
+            vcx.debug_bounds("overview-row-needs-input-c-awaiting")
+                .is_some()
+        );
+        assert!(
+            vcx.debug_bounds("overview-row-stalled-c-failed-tools")
+                .is_some()
+        );
         assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
-        assert!(vcx.debug_bounds("overview-row-needs-input-c-idle").is_none());
+        assert!(
+            vcx.debug_bounds("overview-row-needs-input-c-idle")
+                .is_none()
+        );
         assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
 
         overview.read_with(vcx, |o, _| {
@@ -9123,7 +9142,9 @@ mod logic_tests {
         });
 
         // Clicking the "need interaction" pill filters to just c-awaiting.
-        let needs_pill = vcx.debug_bounds("overview-filter-needs-interaction").unwrap();
+        let needs_pill = vcx
+            .debug_bounds("overview-filter-needs-interaction")
+            .unwrap();
         vcx.simulate_click(needs_pill.center(), gpui::Modifiers::default());
         draw(vcx);
         overview.read_with(vcx, |o, _| {

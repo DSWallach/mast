@@ -128,6 +128,45 @@ impl Shell {
             .clone()
     }
 
+    pub(super) fn render_overview_filter_notice(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let ids = self.overview_visible_chat_ids.as_ref()?;
+        let page = self.overview_page.clone()?;
+        let state = self.state.read(cx);
+        let hidden = state
+            .chats
+            .iter()
+            .filter(|chat| {
+                chat.parent_chat_id.is_none()
+                    && !chat.is_side_chat()
+                    && self
+                        .settings
+                        .space_filter
+                        .as_deref()
+                        .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
+                    && !ids.contains(&chat.id)
+            })
+            .count();
+        Some(
+            div()
+                .id("overview-clear-filters")
+                .debug_selector(|| "overview-clear-filters".into())
+                .mx(px(8.0))
+                .py(px(4.0))
+                .text_size(crate::typography::ui_rems(10.0))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .child(format!("{hidden} chats filtered out · Clear filters"))
+                .on_click(move |_, _, cx| {
+                    page.update(cx, |page, cx| page.clear_sidebar_filters(cx))
+                })
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_overview_switch(
         &self,
         theme: &Theme,
@@ -192,6 +231,7 @@ mod tests {
                 div()
                     .size_full()
                     .relative()
+                    .capture_key_down(cx.listener(Shell::on_key_down_capture))
                     .child(div().size_full().flex().child(sidebar).child(main))
                     .children(floating)
             })
@@ -391,6 +431,129 @@ mod tests {
                     .height
             ) > 20.0
         );
+    }
+
+    #[gpui::test]
+    fn filters_include_archived_and_historical_task_runs_and_can_be_cleared(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let mut archived = state.chats[0].clone();
+                archived.id = "archived".into();
+                archived.title = Some("needle archived".into());
+                archived.archived = true;
+                let mut historical = state.chats[0].clone();
+                historical.id = "historical".into();
+                historical.title = Some("needle historical".into());
+                historical.scheduled_task = Some("Task".into());
+                historical.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                    task_id: "task".into(),
+                    task_name: "Task".into(),
+                    run_id: "old".into(),
+                    session_created_at: Some(1),
+                });
+                let mut latest = historical.clone();
+                latest.id = "latest".into();
+                latest.title = Some("Latest run".into());
+                latest
+                    .scheduled_task_info
+                    .as_mut()
+                    .unwrap()
+                    .session_created_at = Some(2);
+                state.chats.extend([archived, historical, latest]);
+                cx.notify();
+            });
+            cx.notify();
+        });
+        page.update(vcx, |page, cx| {
+            page.set_search_text_for_test("needle", cx);
+            let ids = page.sidebar_filter_ids(cx).unwrap();
+            assert!(ids.contains("archived"));
+            assert!(ids.contains("historical"));
+            assert!(!ids.contains("latest"));
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        shell.update(vcx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            let rows = shell.render_sidebar_collection_rows(&theme, true, cx);
+            assert_eq!(
+                rows.regular_count, 1,
+                "matching historical run remains in collections"
+            );
+        });
+        let clear = vcx.debug_bounds("overview-clear-filters").unwrap().center();
+        vcx.simulate_click(clear, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        page.update(vcx, |page, cx| {
+            assert!(page.sidebar_filter_ids(cx).is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn narrow_overlay_starts_closed_and_escape_and_new_chat_dismiss_it(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        vcx.simulate_resize(gpui::size(px(600.0), px(900.0)));
+        vcx.run_until_parked();
+        shell.read_with(vcx, |shell, _| assert!(shell.overview_overlay_dismissed));
+        shell.update(vcx, |shell, cx| shell.open_overview(cx));
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        shell.read_with(vcx, |shell, _| assert!(shell.overview_overlay_dismissed));
+        shell.update(vcx, |shell, cx| {
+            shell.open_overview(cx);
+            shell.open_new_session(cx);
+            assert!(shell.overview_overlay_dismissed);
+            assert!(shell.settings.sidebar_overview);
+        });
+    }
+
+    #[gpui::test]
+    fn overview_collections_keep_custom_membership_without_duplicating_outline_groups(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        shell.update(vcx, |shell, cx| {
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            shell.settings.sidebar_sections_by_profile.insert(key, vec![crate::settings::SidebarSection {
+                id: "custom".into(), name: "Custom".into(), collapsed: false, session_ids: vec!["chat".into()],
+            }]);
+            let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
+            snapshot.available = true;
+            snapshot.items = serde_json::from_value(serde_json::json!([
+                {"id":"item","spaceId":"space","title":"Item","chatIds":["chat"]}
+            ])).unwrap();
+            shell.state.update(cx, |state, cx| {
+                state.chats[0].space_id = Some("space".into());
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id":"space","deviceId":"local","path":"/workspace","createdAt":"2026-09-20T00:00:00Z"
+                })).unwrap()];
+                state.set_work_outline_for_test(snapshot);
+                cx.notify();
+            });
+            shell.settings.sidebar_outline_groups = true;
+            let custom = shell.custom_sidebar_sections(cx);
+            assert_eq!(custom.len(), 1);
+            assert_eq!(custom[0].session_ids, vec!["chat"]);
+            let theme = Theme::of(cx).clone();
+            assert_eq!(shell.render_sidebar_collection_rows(&theme, true, cx).custom_count, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn session_jump_preserves_the_overview_preference(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        shell.update(vcx, |shell, cx| {
+            shell.jump_to_session(0, cx);
+            assert!(shell.settings.sidebar_overview);
+        });
     }
 
     #[gpui::test]

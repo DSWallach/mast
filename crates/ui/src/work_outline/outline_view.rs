@@ -2543,7 +2543,9 @@ impl OutlineView {
             .map(|list_ix| {
                 let depth_at = |index: usize| match create {
                     Some((slot, depth)) if index == slot => Some(depth),
-                    Some((slot, _)) if index > slot => self.model.rows.get(index - 1).map(|row| row.depth),
+                    Some((slot, _)) if index > slot => {
+                        self.model.rows.get(index - 1).map(|row| row.depth)
+                    }
                     _ => self.model.rows.get(index).map(|row| row.depth),
                 };
                 let depth = depth_at(list_ix).unwrap_or(0);
@@ -2553,10 +2555,19 @@ impl OutlineView {
                 let (key, row) = match create {
                     Some((slot, editor_depth)) if list_ix == slot => (
                         "editor".to_owned(),
-                        self.render_editor_row(if horizon { 0 } else { editor_depth }, compact, &theme, cx),
+                        self.render_editor_row(
+                            if horizon { 0 } else { editor_depth },
+                            compact,
+                            &theme,
+                            cx,
+                        ),
                     ),
                     _ => {
-                        let model_ix = if create.is_some_and(|(slot, _)| list_ix > slot) { list_ix - 1 } else { list_ix };
+                        let model_ix = if create.is_some_and(|(slot, _)| list_ix > slot) {
+                            list_ix - 1
+                        } else {
+                            list_ix
+                        };
                         let key = self.model.rows[model_ix].key.clone();
                         (key, self.render_row(model_ix, compact, focused, &theme, cx))
                     }
@@ -2607,29 +2618,37 @@ impl OutlineView {
         );
         crate::components::outline_first_use(theme)
             .child(
-                crate::components::outline_first_use_button("outline-first-use-create", true, theme)
-                    .child("Create work item")
-                    .when_some(create_keys, |el, keys| {
-                        el.child(crate::popover::kbd_hint(theme, &keys))
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Err(notice) = this.begin_create(false, window, cx) {
-                            this.show_notice(notice, cx);
-                        }
-                    })),
+                crate::components::outline_first_use_button(
+                    "outline-first-use-create",
+                    true,
+                    theme,
+                )
+                .child("Create work item")
+                .when_some(create_keys, |el, keys| {
+                    el.child(crate::popover::kbd_hint(theme, &keys))
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Err(notice) = this.begin_create(false, window, cx) {
+                        this.show_notice(notice, cx);
+                    }
+                })),
             )
             .child(
-                crate::components::outline_first_use_button("outline-first-use-learn-more", false, theme)
-                    .child("Learn more")
-                    .hint(
-                        "Outline keys and commands",
-                        HintKey::Outline(OutlineNavKey::ShowShortcuts),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(shell) = this.shell.as_ref().and_then(WeakEntity::upgrade) {
-                            shell.update(cx, |shell, cx| shell.open_outline_shortcuts(cx));
-                        }
-                    })),
+                crate::components::outline_first_use_button(
+                    "outline-first-use-learn-more",
+                    false,
+                    theme,
+                )
+                .child("Learn more")
+                .hint(
+                    "Outline keys and commands",
+                    HintKey::Outline(OutlineNavKey::ShowShortcuts),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(shell) = this.shell.as_ref().and_then(WeakEntity::upgrade) {
+                        shell.update(cx, |shell, cx| shell.open_outline_shortcuts(cx));
+                    }
+                })),
             )
             .into_any_element()
     }
@@ -2749,15 +2768,18 @@ impl OutlineView {
             .is_some_and(|state| state.drift);
         (drift && !chat.dangling).then(|| {
             let chat_id = chat.chat.id.clone();
-            crate::components::outline_drift_button(SharedString::from(format!("outline-drift-{key}")), theme)
-                .hint(chips::INSTRUCTION_DRIFT_TOOLTIP, HintKey::None)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    if let Some(shell) = this.shell.as_ref().and_then(WeakEntity::upgrade) {
-                        shell.update(cx, |shell, cx| shell.open_instruction_compare(&chat_id, cx));
-                    }
-                }))
-                .into_any_element()
+            crate::components::outline_drift_button(
+                SharedString::from(format!("outline-drift-{key}")),
+                theme,
+            )
+            .hint(chips::INSTRUCTION_DRIFT_TOOLTIP, HintKey::None)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if let Some(shell) = this.shell.as_ref().and_then(WeakEntity::upgrade) {
+                    shell.update(cx, |shell, cx| shell.open_instruction_compare(&chat_id, cx));
+                }
+            }))
+            .into_any_element()
         })
     }
 
@@ -2788,20 +2810,24 @@ impl OutlineView {
         let disclosure = if row.has_children {
             let toggle_key = key.clone();
             let collapsed = row.collapsed;
-            crate::components::outline_disclosure(SharedString::from(format!("outline-disclosure-{key}")), collapsed, theme)
-                .hint(
-                    if collapsed { "Expand" } else { "Collapse" },
-                    HintKey::Outline(if collapsed {
-                        OutlineNavKey::Expand
-                    } else {
-                        OutlineNavKey::Collapse
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_collapsed(&toggle_key, !collapsed, cx);
-                }))
-                .into_any_element()
+            crate::components::outline_disclosure(
+                SharedString::from(format!("outline-disclosure-{key}")),
+                collapsed,
+                theme,
+            )
+            .hint(
+                if collapsed { "Expand" } else { "Collapse" },
+                HintKey::Outline(if collapsed {
+                    OutlineNavKey::Expand
+                } else {
+                    OutlineNavKey::Collapse
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.set_collapsed(&toggle_key, !collapsed, cx);
+            }))
+            .into_any_element()
         } else {
             crate::components::outline_disclosure_space().into_any_element()
         };
@@ -2835,17 +2861,21 @@ impl OutlineView {
                             .child("Hidden"),
                     )
                     .child(
-                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-unhide-{key}")), format!("outline-space-unhide-{space_id}"), "Unhide", theme.text_muted, theme)
-                            .hint("Show this Space in the Outline again", HintKey::None)
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if !this.is_editing() {
-                                    this.set_space_hidden(&unhide, false, cx);
-                                }
-                            })),
+                        crate::components::outline_inline_action(
+                            SharedString::from(format!("outline-space-unhide-{key}")),
+                            format!("outline-space-unhide-{space_id}"),
+                            "Unhide",
+                            theme.text_muted,
+                            theme,
+                        )
+                        .hint("Show this Space in the Outline again", HintKey::None)
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if !this.is_editing() {
+                                this.set_space_hidden(&unhide, false, cx);
+                            }
+                        })),
                     )
                     .into_any_element()
             }
@@ -2868,7 +2898,12 @@ impl OutlineView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .children(crate::components::outline_space_dot(theme, space_id, totals.is_some_and(|totals| totals.user_action_required > 0), selected))
+                    .children(crate::components::outline_space_dot(
+                        theme,
+                        space_id,
+                        totals.is_some_and(|totals| totals.user_action_required > 0),
+                        selected,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -2885,24 +2920,38 @@ impl OutlineView {
                             theme,
                         ))
                     })
-                    .when(proposals > 0 && crate::components::outline_row_extras(theme), |el| {
-                        el.child(self.proposals_chip(&key, space_id, "", proposals, theme, cx))
-                    })
-                    .children(Some(
-                        crate::components::outline_inline_action(SharedString::from(format!("outline-space-instructions-{key}")), format!("outline-space-instructions-{space_id}"), "Instructions", theme.text_faint, theme)
+                    .when(
+                        proposals > 0 && crate::components::outline_row_extras(theme),
+                        |el| {
+                            el.child(self.proposals_chip(&key, space_id, "", proposals, theme, cx))
+                        },
+                    )
+                    .children(
+                        Some(
+                            crate::components::outline_inline_action(
+                                SharedString::from(format!("outline-space-instructions-{key}")),
+                                format!("outline-space-instructions-{space_id}"),
+                                "Instructions",
+                                theme.text_faint,
+                                theme,
+                            )
                             .tooltip(|_, cx| {
                                 cx.new(|_| TextTooltip("Space-root instructions".into()))
                                     .into()
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if !this.is_editing() {
-                                    cx.emit(OutlineEvent::OpenSpaceRoot {
-                                        space_id: open_space.clone(),
-                                    });
-                                }
-                            })),
-                    ).filter(|_| crate::components::outline_row_extras(theme)))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.is_editing() {
+                                        cx.emit(OutlineEvent::OpenSpaceRoot {
+                                            space_id: open_space.clone(),
+                                        });
+                                    }
+                                },
+                            )),
+                        )
+                        .filter(|_| crate::components::outline_row_extras(theme)),
+                    )
                     .into_any_element()
             }
             OutlineRowKind::Unassociated { label, .. } => div()
@@ -2918,13 +2967,16 @@ impl OutlineView {
                         .text_color(theme.text_muted)
                         .child(SharedString::from(label.clone())),
                 )
-                .children(Some(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(row.child_count.to_string())),
-                ).filter(|_| crate::components::outline_row_extras(theme)))
+                .children(
+                    Some(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(row.child_count.to_string())),
+                    )
+                    .filter(|_| crate::components::outline_row_extras(theme)),
+                )
                 .into_any_element(),
             OutlineRowKind::Notice { text, tone, .. } => div()
                 .flex_1()
@@ -3015,34 +3067,42 @@ impl OutlineView {
         // Row action: Start Chat on the selected, live work item.
         let start_chat = row
             .item()
-            .filter(|item| selected && !renaming && !item.archived && crate::components::outline_row_extras(theme))
+            .filter(|item| {
+                selected
+                    && !renaming
+                    && !item.archived
+                    && crate::components::outline_row_extras(theme)
+            })
             .map(|item| {
                 let space_id = item.space_id.clone();
                 let item_id = item.item_id.clone();
-                crate::components::outline_start_chat_button(SharedString::from(format!("outline-start-chat-{key}")), theme)
-                    .hint(
-                        "Start a Chat in this work item",
-                        HintKey::Outline(OutlineNavKey::StartChat),
-                    )
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        if !this.is_editing() {
-                            cx.emit(OutlineEvent::StartChat {
-                                space_id: space_id.clone(),
-                                item_id: item_id.clone(),
-                            });
-                        }
-                    }))
+                crate::components::outline_start_chat_button(
+                    SharedString::from(format!("outline-start-chat-{key}")),
+                    theme,
+                )
+                .hint(
+                    "Start a Chat in this work item",
+                    HintKey::Outline(OutlineNavKey::StartChat),
+                )
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if !this.is_editing() {
+                        cx.emit(OutlineEvent::StartChat {
+                            space_id: space_id.clone(),
+                            item_id: item_id.clone(),
+                        });
+                    }
+                }))
             });
         let open_row = row.clone();
         let click_key = key.clone();
         let dimmed = row
             .item()
             .is_some_and(|item| item.archived || item.kept_for_descendants)
-            || row
-                .chat()
-                .is_some_and(|chat| chat.chat.archived || (chat.dangling && !theme.appearance.is_dark()))
+            || row.chat().is_some_and(|chat| {
+                chat.chat.archived || (chat.dangling && !theme.appearance.is_dark())
+            })
             || matches!(row.kind, OutlineRowKind::Space { hidden: true, .. });
         // Drag and drop: rows drag while nothing is being edited; live work
         // items are the drop targets. The indicator is static (no motion).
@@ -3073,153 +3133,174 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), if crate::components::outline_uses_rounded_nesting(&theme) { 8.0 } else { Self::indent(row.depth) }, theme)
-            .when(highlighted, |el| el.border_color(crate::components::outline_row_highlight(theme)))
-            .when((selected || in_group) && focused, |el| {
-                el.bg(theme.element_active)
+        crate::components::outline_row(
+            SharedString::from(format!("outline-row-{key}")),
+            Self::row_height(compact, theme.ui_style.tokens),
+            if crate::components::outline_uses_rounded_nesting(&theme) {
+                8.0
+            } else {
+                Self::indent(row.depth)
+            },
+            theme,
+        )
+        .when(highlighted, |el| {
+            el.border_color(crate::components::outline_row_highlight(theme))
+        })
+        .when((selected || in_group) && focused, |el| {
+            el.bg(theme.element_active)
+        })
+        .when((selected || in_group) && !focused, |el| {
+            el.bg(theme.element_hover)
+        })
+        .when(!(selected || in_group), |el| {
+            el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
+        })
+        .when(true, |el| {
+            crate::components::outline_row_selection(el, theme, selected)
+        })
+        .when(
+            crate::components::outline_uses_rounded_nesting(&theme),
+            |el| el.max_w(px(10000.)),
+        )
+        .when(dimmed, |el| el.opacity(0.6))
+        .relative()
+        .when(drop_zone == Some(DropZone::Into), |el| {
+            el.bg(theme.accent_wash).border_color(theme.accent)
+        })
+        .cursor_pointer()
+        .when_some(drag, |el, drag| {
+            el.on_drag(drag, |drag, _, _, cx| {
+                cx.stop_propagation();
+                let title = SharedString::from(drag.title().to_string());
+                cx.new(|_| OutlineDragGhost { title })
             })
-            .when((selected || in_group) && !focused, |el| {
-                el.bg(theme.element_hover)
-            })
-            .when(!(selected || in_group), |el| {
-                el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
-            })
-            .when(true, |el| crate::components::outline_row_selection(el, theme, selected))
-            .when(crate::components::outline_uses_rounded_nesting(&theme), |el| el.max_w(px(10000.)))
-            .when(dimmed, |el| el.opacity(0.6))
-            .relative()
-            .when(drop_zone == Some(DropZone::Into), |el| {
-                el.bg(theme.accent_wash).border_color(theme.accent)
-            })
-            .cursor_pointer()
-            .when_some(drag, |el, drag| {
-                el.on_drag(drag, |drag, _, _, cx| {
-                    cx.stop_propagation();
-                    let title = SharedString::from(drag.title().to_string());
-                    cx.new(|_| OutlineDragGhost { title })
-                })
-            })
-            .when_some(drop_target, |el, (space_id, item_id)| {
-                let move_key = key.clone();
-                let move_target = (space_id.clone(), item_id.clone());
-                let drop_key = key.clone();
-                el.on_drag_move::<OutlineDrag>(cx.listener(
-                    move |this, event: &gpui::DragMoveEvent<OutlineDrag>, _, cx| {
-                        let drag = event.drag(cx).clone();
-                        this.drag_over_item(
-                            &move_key,
-                            (&move_target.0, &move_target.1),
-                            &drag,
-                            event.event.position,
-                            event.bounds,
-                            cx,
-                        );
-                    },
-                ))
-                .on_drop::<OutlineDrag>(cx.listener(
-                    move |this, drag: &OutlineDrag, _, cx| {
-                        this.drop_on_item(&drop_key, (&space_id, &item_id), drag, cx);
-                    },
-                ))
-            })
-            .when_some(space_drop_target, |el, space_id| {
-                let move_key = key.clone();
-                let move_target = space_id.clone();
-                let drop_key = key.clone();
-                el.on_drag_move::<OutlineDrag>(cx.listener(
-                    move |this, event: &gpui::DragMoveEvent<OutlineDrag>, _, cx| {
-                        let drag = event.drag(cx).clone();
-                        this.drag_over_space(
-                            &move_key,
-                            &move_target,
-                            &drag,
-                            event.event.position,
-                            event.bounds,
-                            cx,
-                        );
-                    },
-                ))
-                .on_drop::<OutlineDrag>(cx.listener(
-                    move |this, drag: &OutlineDrag, _, cx| {
-                        this.drop_on_space(&drop_key, &space_id, drag, cx);
-                    },
-                ))
-            })
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                context_menu::row_listener(key.clone(), cx),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.glyph_press = false;
-                    if !this.is_editing() {
-                        window.focus(&this.focus, cx);
-                    }
-                }),
-            )
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    let kind = row_kind_name(&open_row.kind);
-                    if std::mem::take(&mut this.glyph_press) {
-                        return;
-                    }
-                    if this.is_editing() {
-                        tracing::info!(
-                            target: "work_outline_keys",
-                            row = %click_key, kind,
-                            inline_editor = this.editing.is_some(),
-                            picker = this.picker.is_some(),
-                            "row click ignored: editing"
-                        );
-                        return;
-                    }
-                    let modifiers = event.modifiers();
-                    if event.click_count() < 2 && open_row.item().is_some() {
-                        if modifiers.secondary() {
-                            this.toggle_multi(&click_key, cx);
-                            return;
-                        }
-                        if modifiers.shift {
-                            this.extend_multi_to(&click_key, cx);
-                            return;
-                        }
-                    }
-                    this.clear_multi(cx);
-                    let moved = this.selected.as_deref() != Some(click_key.as_str());
-                    this.select(&click_key, cx);
-                    let opens_details = event.click_count() >= 2 || this.single_click_opens;
-                    if opens_details {
-                        if this.single_click_opens && event.click_count() < 2
-                            && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling) {
-                            cx.emit(OutlineEvent::OpenChatFromClick(chat.chat.id.clone()));
-                        } else {
-                            this.open_row(&open_row, cx);
-                        }
-                    } else if moved {
-                        cx.emit(OutlineEvent::SelectionMoved);
-                    }
+        })
+        .when_some(drop_target, |el, (space_id, item_id)| {
+            let move_key = key.clone();
+            let move_target = (space_id.clone(), item_id.clone());
+            let drop_key = key.clone();
+            el.on_drag_move::<OutlineDrag>(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<OutlineDrag>, _, cx| {
+                    let drag = event.drag(cx).clone();
+                    this.drag_over_item(
+                        &move_key,
+                        (&move_target.0, &move_target.1),
+                        &drag,
+                        event.event.position,
+                        event.bounds,
+                        cx,
+                    );
+                },
+            ))
+            .on_drop::<OutlineDrag>(cx.listener(
+                move |this, drag: &OutlineDrag, _, cx| {
+                    this.drop_on_item(&drop_key, (&space_id, &item_id), drag, cx);
+                },
+            ))
+        })
+        .when_some(space_drop_target, |el, space_id| {
+            let move_key = key.clone();
+            let move_target = space_id.clone();
+            let drop_key = key.clone();
+            el.on_drag_move::<OutlineDrag>(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<OutlineDrag>, _, cx| {
+                    let drag = event.drag(cx).clone();
+                    this.drag_over_space(
+                        &move_key,
+                        &move_target,
+                        &drag,
+                        event.event.position,
+                        event.bounds,
+                        cx,
+                    );
+                },
+            ))
+            .on_drop::<OutlineDrag>(cx.listener(
+                move |this, drag: &OutlineDrag, _, cx| {
+                    this.drop_on_space(&drop_key, &space_id, drag, cx);
+                },
+            ))
+        })
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            context_menu::row_listener(key.clone(), cx),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                this.glyph_press = false;
+                if !this.is_editing() {
+                    window.focus(&this.focus, cx);
+                }
+            }),
+        )
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                let kind = row_kind_name(&open_row.kind);
+                if std::mem::take(&mut this.glyph_press) {
+                    return;
+                }
+                if this.is_editing() {
                     tracing::info!(
                         target: "work_outline_keys",
                         row = %click_key, kind,
-                        clicks = event.click_count(),
-                        opens_details = opens_details && kind == "item",
-                        selected = ?this.selected.as_deref(),
-                        outline_focused = this.focus.is_focused(window),
-                        outline_contains_focus = this.focus.contains_focused(window, cx),
-                        context_stack = ?window.context_stack(),
-                        "row click"
+                        inline_editor = this.editing.is_some(),
+                        picker = this.picker.is_some(),
+                        "row click ignored: editing"
                     );
-                }),
-            )
-            .children(flash)
-            .children(guides.filter(|_| !crate::components::outline_uses_rounded_nesting(theme) && crate::components::outline_row_extras(theme)))
-            .child(disclosure)
-            .child(body)
-            .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
-            .children(drop_line)
-            .children(drop_label)
-            .into_any_element()
+                    return;
+                }
+                let modifiers = event.modifiers();
+                if event.click_count() < 2 && open_row.item().is_some() {
+                    if modifiers.secondary() {
+                        this.toggle_multi(&click_key, cx);
+                        return;
+                    }
+                    if modifiers.shift {
+                        this.extend_multi_to(&click_key, cx);
+                        return;
+                    }
+                }
+                this.clear_multi(cx);
+                let moved = this.selected.as_deref() != Some(click_key.as_str());
+                this.select(&click_key, cx);
+                let opens_details = event.click_count() >= 2 || this.single_click_opens;
+                if opens_details {
+                    if this.single_click_opens
+                        && event.click_count() < 2
+                        && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling)
+                    {
+                        cx.emit(OutlineEvent::OpenChatFromClick(chat.chat.id.clone()));
+                    } else {
+                        this.open_row(&open_row, cx);
+                    }
+                } else if moved {
+                    cx.emit(OutlineEvent::SelectionMoved);
+                }
+                tracing::info!(
+                    target: "work_outline_keys",
+                    row = %click_key, kind,
+                    clicks = event.click_count(),
+                    opens_details = opens_details && kind == "item",
+                    selected = ?this.selected.as_deref(),
+                    outline_focused = this.focus.is_focused(window),
+                    outline_contains_focus = this.focus.contains_focused(window, cx),
+                    context_stack = ?window.context_stack(),
+                    "row click"
+                );
+            }),
+        )
+        .children(flash)
+        .children(guides.filter(|_| {
+            !crate::components::outline_uses_rounded_nesting(theme)
+                && crate::components::outline_row_extras(theme)
+        }))
+        .child(disclosure)
+        .child(body)
+        .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
+        .children(drop_line)
+        .children(drop_label)
+        .into_any_element()
     }
 
     /// "N proposed instructions" (compact: icon + count, full text in the
@@ -3263,10 +3344,11 @@ impl OutlineView {
         let placement = matches!(picker.purpose, PickerPurpose::Move { .. }).then(|| {
             let chip = |label: &'static str, first: bool, cx: &mut Context<Self>| {
                 let active = picker.place_first == first;
-                crate::components::outline_picker_place(label, active, theme)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                crate::components::outline_picker_place(label, active, theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         this.set_picker_place_first(first, cx);
-                    }))
+                    },
+                ))
             };
             div()
                 .id("outline-picker-placement")
@@ -3290,10 +3372,16 @@ impl OutlineView {
         });
         let rows = picker.entries.iter().enumerate().map(|(ix, entry)| {
             let active = ix == picker.active;
-            crate::components::outline_picker_entry(ix, entry.depth, entry.label.clone(), active, theme)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.choose_picker_entry(ix, window, cx);
-                }))
+            crate::components::outline_picker_entry(
+                ix,
+                entry.depth,
+                entry.label.clone(),
+                active,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.choose_picker_entry(ix, window, cx);
+            }))
         });
         Some(
             crate::components::outline_picker(theme)
@@ -3357,16 +3445,24 @@ fn status_totals_element(
         .when_some(totals.active_label(), |el, label| {
             el.child(SharedString::from(label))
         })
-        .when(totals.active > 0 && totals.user_action_required > 0 && crate::components::outline_row_extras(theme), |el| {
-            el.child("\u{b7}")
-        })
-        .when_some(totals.attention_label().filter(|_| crate::components::outline_row_extras(theme)), |el, label| {
-            el.child(
-                div()
-                    .text_color(chips::attention_color(theme))
-                    .child(SharedString::from(label)),
-            )
-        })
+        .when(
+            totals.active > 0
+                && totals.user_action_required > 0
+                && crate::components::outline_row_extras(theme),
+            |el| el.child("\u{b7}"),
+        )
+        .when_some(
+            totals
+                .attention_label()
+                .filter(|_| crate::components::outline_row_extras(theme)),
+            |el, label| {
+                el.child(
+                    div()
+                        .text_color(chips::attention_color(theme))
+                        .child(SharedString::from(label)),
+                )
+            },
+        )
         .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into())
         .into_any_element()
 }
@@ -3398,7 +3494,11 @@ fn item_body(
         .then(|| super::required_actions::status_totals(&item.rollup))
         .flatten();
     let (glyph, label, color) = chips::status_style(item.effective_status, theme);
-    let color = crate::components::outline_selected_dot_color(theme, selected, crate::components::outline_attention_color(theme, item.needs_user_action(), color));
+    let color = crate::components::outline_selected_dot_color(
+        theme,
+        selected,
+        crate::components::outline_attention_color(theme, item.needs_user_action(), color),
+    );
     let status_tip: SharedString = format!("Status: {label}").into();
     let chats_tip: SharedString = format!(
         "{} associated chat{}",
@@ -3423,7 +3523,9 @@ fn item_body(
                 .w(px(12.0))
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(color)
-                .child(crate::components::outline_item_indicator(glyph, color, theme))
+                .child(crate::components::outline_item_indicator(
+                    glyph, color, theme,
+                ))
                 .map(|el| match open_details {
                     Some((press, open)) => el
                         .cursor_pointer()
@@ -3447,13 +3549,28 @@ fn item_body(
                 .child(SharedString::from(item.title.clone())),
         )
         .children(compact_chat)
-        .when_some(item.waiting_until.filter(|_| crate::components::outline_row_extras(theme)), |el, until| {
-            let due = until <= chrono::Utc::now().timestamp_millis();
-            let date = chrono::DateTime::from_timestamp_millis(until)
-                .map(|date| date.with_timezone(&chrono::Local).format("%b %-d").to_string())
-                .unwrap_or_default();
-            el.child(crate::components::outline_waiting_chip(if due { format!("due · {date}") } else { format!("waiting · {date}") }, theme))
-        })
+        .when_some(
+            item.waiting_until
+                .filter(|_| crate::components::outline_row_extras(theme)),
+            |el, until| {
+                let due = until <= chrono::Utc::now().timestamp_millis();
+                let date = chrono::DateTime::from_timestamp_millis(until)
+                    .map(|date| {
+                        date.with_timezone(&chrono::Local)
+                            .format("%b %-d")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                el.child(crate::components::outline_waiting_chip(
+                    if due {
+                        format!("due · {date}")
+                    } else {
+                        format!("waiting · {date}")
+                    },
+                    theme,
+                ))
+            },
+        )
         .when_some(
             chips::attention_indicator(
                 format!("outline-attention-{key}"),
@@ -3473,7 +3590,8 @@ fn item_body(
         })
         .children(proposals)
         .when_some(
-            item.template_changed.filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
+            item.template_changed
+                .filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
             |el, (from, to)| {
                 let tip: SharedString =
                     "The blueprint this item came from changed. Open details to review".into();
@@ -3491,37 +3609,68 @@ fn item_body(
                 )
             },
         )
-        .when(item.follows_template && !item.archived && crate::components::outline_row_extras(theme), |el| {
-            el.child(
-                crate::components::outline_glyph_marker(SharedString::from(format!("outline-follows-template-{key}")), "◇", theme)
-                    .hint("Follows its parent\u{2019}s child template", HintKey::None),
-            )
-        })
         .when(
-            item.chat_count > 0 && !compact_pr && item.compact_chat.is_none() && crate::components::outline_row_extras(theme),
+            item.follows_template && !item.archived && crate::components::outline_row_extras(theme),
             |el| {
                 el.child(
-                    crate::components::outline_count_marker(SharedString::from(format!("outline-chats-{key}")), crate::icons::CHAT_ROUND_LINE, item.chat_count.to_string(), theme.text_faint, theme)
-                        .tooltip(move |_, cx| cx.new(|_| TextTooltip(chats_tip.clone())).into()),
+                    crate::components::outline_glyph_marker(
+                        SharedString::from(format!("outline-follows-template-{key}")),
+                        "◇",
+                        theme,
+                    )
+                    .hint("Follows its parent\u{2019}s child template", HintKey::None),
                 )
             },
         )
-        .when(item.execution_exceptions > 0 && crate::components::outline_row_extras(theme), |el| {
-            let tip = super::execution::exception_tooltip(item.execution_exceptions as usize);
-            el.child(
-                crate::components::outline_count_marker(SharedString::from(format!("outline-execution-exceptions-{key}")), crate::icons::FOLDER_WITH_FILES, item.execution_exceptions.to_string(), theme.accent, theme)
+        .when(
+            item.chat_count > 0
+                && !compact_pr
+                && item.compact_chat.is_none()
+                && crate::components::outline_row_extras(theme),
+            |el| {
+                el.child(
+                    crate::components::outline_count_marker(
+                        SharedString::from(format!("outline-chats-{key}")),
+                        crate::icons::CHAT_ROUND_LINE,
+                        item.chat_count.to_string(),
+                        theme.text_faint,
+                        theme,
+                    )
+                    .tooltip(move |_, cx| cx.new(|_| TextTooltip(chats_tip.clone())).into()),
+                )
+            },
+        )
+        .when(
+            item.execution_exceptions > 0 && crate::components::outline_row_extras(theme),
+            |el| {
+                let tip = super::execution::exception_tooltip(item.execution_exceptions as usize);
+                el.child(
+                    crate::components::outline_count_marker(
+                        SharedString::from(format!("outline-execution-exceptions-{key}")),
+                        crate::icons::FOLDER_WITH_FILES,
+                        item.execution_exceptions.to_string(),
+                        theme.accent,
+                        theme,
+                    )
                     .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
-            )
-        })
-        .when(item.has_references && !compact_pr && crate::components::outline_row_extras(theme), |el| {
-            el.child(
-                crate::components::outline_reference_marker(SharedString::from(format!("outline-refs-{key}")), theme)
+                )
+            },
+        )
+        .when(
+            item.has_references && !compact_pr && crate::components::outline_row_extras(theme),
+            |el| {
+                el.child(
+                    crate::components::outline_reference_marker(
+                        SharedString::from(format!("outline-refs-{key}")),
+                        theme,
+                    )
                     .tooltip(|_, cx| {
                         cx.new(|_| TextTooltip("Has external references".into()))
                             .into()
                     }),
-            )
-        })
+                )
+            },
+        )
         .children(pr_slots)
         .into_any_element()
 }
@@ -3538,7 +3687,14 @@ fn compact_chat_segment(
 ) -> AnyElement {
     let chat = &row.chat;
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::components::outline_chat_indicator(status, format!("outline-compact-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, cx.entity_id(), cx);
+    let indicator = crate::components::outline_chat_indicator(
+        status,
+        format!("outline-compact-status-{key}"),
+        crate::status_style::status_style(status, theme.appearance).color,
+        theme,
+        cx.entity_id(),
+        cx,
+    );
     let tip: SharedString = format!("Chat: {}", chat.title).into();
     div()
         .flex_none()
@@ -3558,14 +3714,19 @@ fn compact_chat_segment(
         )
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.harness.clone(), |el, harness| {
-            el.child(
-                crate::components::outline_harness_badge(harness, theme),
-            )
+            el.child(crate::components::outline_harness_badge(harness, theme))
         })
         .into_any_element()
 }
 
-fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool, theme: &Theme, cx: &mut Context<OutlineView>) -> AnyElement {
+fn chat_body(
+    key: &str,
+    row: &ChatRow,
+    drift: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+    cx: &mut Context<OutlineView>,
+) -> AnyElement {
     let chat = &row.chat;
     if row.dangling {
         if let Some(missing) = crate::components::outline_missing_chat(theme, &chat.id) {
@@ -3601,7 +3762,15 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
     }
     let status = crate::status_style::Status::from(chat.status);
     let status_color = crate::status_style::status_style(status, theme.appearance).color;
-    let indicator = crate::components::outline_selected_chat_indicator(status, format!("outline-chat-status-{key}"), status_color, theme, selected, cx.entity_id(), cx);
+    let indicator = crate::components::outline_selected_chat_indicator(
+        status,
+        format!("outline-chat-status-{key}"),
+        status_color,
+        theme,
+        selected,
+        cx.entity_id(),
+        cx,
+    );
     let status_label = match chat.status {
         mast_proto::ChatIndicator::Working => "Working",
         mast_proto::ChatIndicator::AwaitingInput => "Needs you",
@@ -3616,9 +3785,11 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
         _ => theme.text_muted,
     };
     let tool_failures_pill = chat.tool_failures.as_ref().map(|failures| {
-        let error_color =
-            crate::status_style::status_style(crate::status_style::Status::Errored, theme.appearance)
-                .color;
+        let error_color = crate::status_style::status_style(
+            crate::status_style::Status::Errored,
+            theme.appearance,
+        )
+        .color;
         let label = if failures.count == 1 {
             "1 tool call failed".to_string()
         } else {
@@ -3649,7 +3820,11 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
         .items_center()
         .gap(px(6.0))
         .child(indicator)
-        .children(crate::components::outline_status_word(status_label, word_color, theme))
+        .children(crate::components::outline_status_word(
+            status_label,
+            word_color,
+            theme,
+        ))
         .child(
             div()
                 .flex_1()
@@ -3659,22 +3834,41 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
                 .child(SharedString::from(chat.title.clone())),
         )
         .when_some(tool_failures_pill, |el, pill| el.child(pill))
-        .when_some(drift.filter(|_| crate::components::outline_row_extras(theme)), |el, drift| el.child(drift))
-        .when_some(chat.branch.clone().filter(|_| crate::components::outline_row_extras(theme)), |el, branch| {
-            el.child(
-                crate::components::outline_chat_reference(crate::icons::GIT_BRANCH, branch, Some(140.0), theme),
-            )
-        })
-        .when_some(chat.pr_number.filter(|n| *n > 0 && crate::components::outline_row_extras(theme)), |el, number| {
-            el.child(
-                crate::components::outline_chat_reference(crate::icons::PULL_REQUEST, format!("#{number}"), None, theme),
-            )
-        })
-        .when_some(chat.harness.clone().filter(|_| crate::components::outline_row_extras(theme)), |el, harness| {
-            el.child(
-                crate::components::outline_harness_badge(harness, theme),
-            )
-        })
+        .when_some(
+            drift.filter(|_| crate::components::outline_row_extras(theme)),
+            |el, drift| el.child(drift),
+        )
+        .when_some(
+            chat.branch
+                .clone()
+                .filter(|_| crate::components::outline_row_extras(theme)),
+            |el, branch| {
+                el.child(crate::components::outline_chat_reference(
+                    crate::icons::GIT_BRANCH,
+                    branch,
+                    Some(140.0),
+                    theme,
+                ))
+            },
+        )
+        .when_some(
+            chat.pr_number
+                .filter(|n| *n > 0 && crate::components::outline_row_extras(theme)),
+            |el, number| {
+                el.child(crate::components::outline_chat_reference(
+                    crate::icons::PULL_REQUEST,
+                    format!("#{number}"),
+                    None,
+                    theme,
+                ))
+            },
+        )
+        .when_some(
+            chat.harness
+                .clone()
+                .filter(|_| crate::components::outline_row_extras(theme)),
+            |el, harness| el.child(crate::components::outline_harness_badge(harness, theme)),
+        )
         .into_any_element()
 }
 
@@ -3963,7 +4157,12 @@ impl Render for OutlineView {
                         .child(SharedString::from(notice)),
                 )
             })
-            .children(crate::ui_style::help_card("outline", "Group work items and chats here to share context and instructions.", &theme, cx))
+            .children(crate::ui_style::help_card(
+                "outline",
+                "Group work items and chats here to share context and instructions.",
+                &theme,
+                cx,
+            ))
             .when_some(space_root_entry, |el, entry| el.child(entry))
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.

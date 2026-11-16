@@ -184,6 +184,11 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
+                "overview-column" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
+                    shell.into()
+                }
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
@@ -192,9 +197,15 @@ pub fn render(
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
                 "question" => mast_ui::snapshot::question_fixture(data_dir, cx).into(),
-                "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
-                "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
-                "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),
+                "changes-expanded" => {
+                    mast_ui::snapshot::changes_fixture(false, false, window, cx).into()
+                }
+                "changes-collapsed" => {
+                    mast_ui::snapshot::changes_fixture(true, false, window, cx).into()
+                }
+                "changes-focus-resize" => {
+                    mast_ui::snapshot::changes_fixture(false, true, window, cx).into()
+                }
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

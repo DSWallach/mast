@@ -471,49 +471,60 @@ pub(crate) fn log_restructure_keystroke(
 /// the actions of `work_outline::outline_view`.
 pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) {
     use crate::work_outline::outline_view::{
-        Collapse, CreateChild, CreateSibling, Expand, IndentItem, MoveItemDown, MoveItemUp,
-        OpenDetailsSelected, OpenSelected, OutdentItem, RedoChange, RenameSelected, SelectFirst,
-        SelectLast, SelectNext, SelectNextSibling, SelectPrevious, SelectPreviousSibling,
-        GroupSelected, StartChatSelected, UndoChange,
+        Collapse, CreateChild, CreateSibling, Expand, GroupSelected, IndentItem, MoveItemDown,
+        MoveItemUp, OpenDetailsSelected, OpenSelected, OutdentItem, RedoChange, RenameSelected,
+        SelectFirst, SelectLast, SelectNext, SelectNextSibling, SelectPrevious,
+        SelectPreviousSibling, StartChatSelected, UndoChange,
     };
     let context = Some(OUTLINE_NAVIGATION_CONTEXT);
     cx.bind_keys(OutlineNavKey::ALL.into_iter().flat_map(|key| {
-        keymap.combos(key.shortcut_id()).into_iter().filter_map(move |combo| {
-        let combo = crate::work_outline::hints::validated_combo(combo, key.shortcut_id())?;
-        let keys = platform_combo(&combo);
-        let keys = keys.as_str();
-        Some(match key {
-            OutlineNavKey::SelectNext => KeyBinding::new(keys, SelectNext, context),
-            OutlineNavKey::SelectPrevious => KeyBinding::new(keys, SelectPrevious, context),
-            OutlineNavKey::SelectFirst => KeyBinding::new(keys, SelectFirst, context),
-            OutlineNavKey::SelectLast => KeyBinding::new(keys, SelectLast, context),
-            OutlineNavKey::SelectNextSibling => KeyBinding::new(keys, SelectNextSibling, context),
-            OutlineNavKey::SelectPreviousSibling => {
-                KeyBinding::new(keys, SelectPreviousSibling, context)
-            }
-            OutlineNavKey::Expand => KeyBinding::new(keys, Expand, context),
-            OutlineNavKey::Collapse => KeyBinding::new(keys, Collapse, context),
-            OutlineNavKey::OpenSelected => KeyBinding::new(keys, OpenSelected, context),
-            OutlineNavKey::OpenDetails => KeyBinding::new(keys, OpenDetailsSelected, context),
-            OutlineNavKey::StartChat => KeyBinding::new(keys, StartChatSelected, context),
-            OutlineNavKey::RenameSelected => KeyBinding::new(keys, RenameSelected, context),
-            OutlineNavKey::CreateSibling => KeyBinding::new(keys, CreateSibling, context),
-            OutlineNavKey::CreateChild => KeyBinding::new(keys, CreateChild, context),
-            OutlineNavKey::MoveItemUp => KeyBinding::new(keys, MoveItemUp, context),
-            OutlineNavKey::MoveItemDown => KeyBinding::new(keys, MoveItemDown, context),
-            OutlineNavKey::IndentItem => KeyBinding::new(keys, IndentItem, context),
-            OutlineNavKey::OutdentItem => KeyBinding::new(keys, OutdentItem, context),
-            OutlineNavKey::GroupInto => KeyBinding::new(keys, GroupSelected, context),
-            OutlineNavKey::Undo => KeyBinding::new(keys, UndoChange, context),
-            OutlineNavKey::Redo => KeyBinding::new(keys, RedoChange, context),
-            OutlineNavKey::OpenContextMenu => KeyBinding::new(keys, crate::work_outline::outline_view::context_menu::OpenContextMenu, context),
-            OutlineNavKey::ShowShortcuts => KeyBinding::new(
-                keys,
-                RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
-                context,
-            ),
-        })
-        })
+        keymap
+            .combos(key.shortcut_id())
+            .into_iter()
+            .filter_map(move |combo| {
+                let combo = crate::work_outline::hints::validated_combo(combo, key.shortcut_id())?;
+                let keys = platform_combo(&combo);
+                let keys = keys.as_str();
+                Some(match key {
+                    OutlineNavKey::SelectNext => KeyBinding::new(keys, SelectNext, context),
+                    OutlineNavKey::SelectPrevious => KeyBinding::new(keys, SelectPrevious, context),
+                    OutlineNavKey::SelectFirst => KeyBinding::new(keys, SelectFirst, context),
+                    OutlineNavKey::SelectLast => KeyBinding::new(keys, SelectLast, context),
+                    OutlineNavKey::SelectNextSibling => {
+                        KeyBinding::new(keys, SelectNextSibling, context)
+                    }
+                    OutlineNavKey::SelectPreviousSibling => {
+                        KeyBinding::new(keys, SelectPreviousSibling, context)
+                    }
+                    OutlineNavKey::Expand => KeyBinding::new(keys, Expand, context),
+                    OutlineNavKey::Collapse => KeyBinding::new(keys, Collapse, context),
+                    OutlineNavKey::OpenSelected => KeyBinding::new(keys, OpenSelected, context),
+                    OutlineNavKey::OpenDetails => {
+                        KeyBinding::new(keys, OpenDetailsSelected, context)
+                    }
+                    OutlineNavKey::StartChat => KeyBinding::new(keys, StartChatSelected, context),
+                    OutlineNavKey::RenameSelected => KeyBinding::new(keys, RenameSelected, context),
+                    OutlineNavKey::CreateSibling => KeyBinding::new(keys, CreateSibling, context),
+                    OutlineNavKey::CreateChild => KeyBinding::new(keys, CreateChild, context),
+                    OutlineNavKey::MoveItemUp => KeyBinding::new(keys, MoveItemUp, context),
+                    OutlineNavKey::MoveItemDown => KeyBinding::new(keys, MoveItemDown, context),
+                    OutlineNavKey::IndentItem => KeyBinding::new(keys, IndentItem, context),
+                    OutlineNavKey::OutdentItem => KeyBinding::new(keys, OutdentItem, context),
+                    OutlineNavKey::GroupInto => KeyBinding::new(keys, GroupSelected, context),
+                    OutlineNavKey::Undo => KeyBinding::new(keys, UndoChange, context),
+                    OutlineNavKey::Redo => KeyBinding::new(keys, RedoChange, context),
+                    OutlineNavKey::OpenContextMenu => KeyBinding::new(
+                        keys,
+                        crate::work_outline::outline_view::context_menu::OpenContextMenu,
+                        context,
+                    ),
+                    OutlineNavKey::ShowShortcuts => KeyBinding::new(
+                        keys,
+                        RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
+                        context,
+                    ),
+                })
+            })
     }));
 }
 
@@ -599,9 +610,9 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .child(
-                    crate::components::shell_parts::shortcuts_footer(theme, &keymap),
-                )
+                .child(crate::components::shell_parts::shortcuts_footer(
+                    theme, &keymap,
+                ))
                 .child(
                     popover::btn_ghost(theme, "Close", "work-outline-shortcuts-close")
                         .id("work-outline-shortcuts-close")
@@ -718,7 +729,12 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
 impl Shell {
     /// Whether a Work Outline modal is open.
     pub(super) fn work_outline_modal_open(&self) -> bool {
-        self.work_outline_modal.is_some() && !(matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))))
+        self.work_outline_modal.is_some()
+            && !(matches!(self.route, Route::Settings(SettingsSection::Agents))
+                && matches!(
+                    self.work_outline_modal,
+                    Some(WorkOutlineModal::StartChat(_))
+                ))
     }
 
     /// Escape inside a modal closes its open `/` skill popup or Start Chat's
@@ -943,7 +959,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting()) {
+        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting())
+        {
             return true;
         }
         self.resolve_work_outline_modal(false, window, cx)
@@ -1163,7 +1180,14 @@ impl Shell {
                 deliver_decision(superseded, false, window, cx)
             });
         }
-        if matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))) { return None; }
+        if matches!(self.route, Route::Settings(SettingsSection::Agents))
+            && matches!(
+                self.work_outline_modal,
+                Some(WorkOutlineModal::StartChat(_))
+            )
+        {
+            return None;
+        }
         let theme = Theme::of(cx).for_popup();
         self.refresh_hand_off_details(cx);
         // Start Chat's picker closed (Esc / its chip): back to the prompt.
@@ -1265,7 +1289,9 @@ impl Shell {
                 &theme,
                 cx,
             ),
-            WorkOutlineModal::HandOff(dialog) => super::hand_off_ui::hand_off_card(dialog, &theme, cx),
+            WorkOutlineModal::HandOff(dialog) => {
+                super::hand_off_ui::hand_off_card(dialog, &theme, cx)
+            }
             WorkOutlineModal::Shortcuts => shortcuts_card(&theme, f32::from(viewport.height), cx),
             WorkOutlineModal::Confirm(dialog) => {
                 let accept = if dialog.destructive {
@@ -1997,7 +2023,9 @@ mod tests {
         let button = cx.debug_bounds("overview-pull-requests").unwrap().center();
         cx.simulate_click(button, gpui::Modifiers::default());
         cx.run_until_parked();
-        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::PrReviewChats)));
+        shell.read_with(cx, |shell, _| {
+            assert!(matches!(shell.route, Route::PrReviewChats))
+        });
     }
 
     #[gpui::test]
@@ -2016,7 +2044,11 @@ mod tests {
         assert!(shortcuts_open(&shell, cx));
         redraw(cx);
         assert!(cx.debug_bounds("work-outline-shortcuts").is_some());
-        let height = cx.debug_bounds("work-outline-shortcuts").unwrap().size.height;
+        let height = cx
+            .debug_bounds("work-outline-shortcuts")
+            .unwrap()
+            .size
+            .height;
         cx.update(|window, _| assert!(height <= window.viewport_size().height * 0.7));
         for group in ["navigate", "edit", "restructure", "commands"] {
             let selector: &'static str =
@@ -2252,23 +2284,37 @@ mod tests {
                 OutlineNavKey::GroupInto => Box::new(GroupSelected),
                 OutlineNavKey::Undo => Box::new(UndoChange),
                 OutlineNavKey::Redo => Box::new(RedoChange),
-                OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts)),
-                OutlineNavKey::OpenContextMenu => Box::new(crate::work_outline::outline_view::context_menu::OpenContextMenu),
+                OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(
+                    WorkOutlineCommand::ShowOutlineShortcuts,
+                )),
+                OutlineNavKey::OpenContextMenu => {
+                    Box::new(crate::work_outline::outline_view::context_menu::OpenContextMenu)
+                }
             };
             let key = Keystroke::parse(&platform_combo(combo)).unwrap();
             let bindings = cx.update(|_, cx| cx.all_bindings_for_input(&[key]));
-            assert!(bindings.iter().any(|binding| binding.action().partial_eq(expected.as_ref())
-                && binding.predicate().is_some_and(|p| p.to_string() == OUTLINE_NAVIGATION_CONTEXT)), "{combo}");
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.action().partial_eq(expected.as_ref())
+                        && binding
+                            .predicate()
+                            .is_some_and(|p| p.to_string() == OUTLINE_NAVIGATION_CONTEXT)),
+                "{combo}"
+            );
         }
     }
 
     #[gpui::test]
-    fn outline_rebind_replaces_default_and_editing_excludes_navigation(cx: &mut gpui::TestAppContext) {
+    fn outline_rebind_replaces_default_and_editing_excludes_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (_, _, outline, cx) = toggle_shell(cx, dir.path());
         let mut keymap = KeymapConfig::default();
         keymap.set(OutlineNavKey::SelectNext.shortcut_id(), "x".into());
-        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
         cx.update(|_, cx| crate::shell::apply_keymap(cx, &restored, Default::default()));
         redraw(cx);
         let before = outline_selection(&outline, cx);
@@ -2279,7 +2325,15 @@ mod tests {
         redraw(cx);
         let selected = outline_selection(&outline, cx);
         assert_ne!(selected, before);
-        outline.update(cx, |outline, cx| outline.select(&crate::work_outline::model::row_key::item("s1", crate::work_outline::store::fixture_ids::LAUNCH), cx));
+        outline.update(cx, |outline, cx| {
+            outline.select(
+                &crate::work_outline::model::row_key::item(
+                    "s1",
+                    crate::work_outline::store::fixture_ids::LAUNCH,
+                ),
+                cx,
+            )
+        });
         let selected = outline_selection(&outline, cx);
         cx.simulate_keystrokes("r");
         redraw(cx);
@@ -2640,7 +2694,9 @@ mod tests {
         outline.update(cx, |outline, cx| {
             outline.reveal(&row_key::chat(CHAT_API), cx);
         });
-        cx.update(|window, cx| window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx));
+        cx.update(|window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx)
+        });
         redraw(cx);
         cx.simulate_keystrokes("down");
         wait_ms(cx, 200);
@@ -2894,7 +2950,9 @@ mod tests {
         outline.update(cx, |outline, cx| {
             outline.select(&row_key::chat(CHAT_AUTH), cx)
         });
-        cx.update(|window, cx| window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx));
+        cx.update(|window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx)
+        });
         redraw(cx);
         cx.simulate_keystrokes("enter");
         redraw(cx);

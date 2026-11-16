@@ -14,7 +14,7 @@ Proposed layout:
 - **Main workspace:** the selected chat, work-item details, Required Actions, subagent transcript, Inbox/Linear/GitHub content, or another existing destination. The current transcript/composer remain the single live chat surface.
 - **Existing right workspace panes:** files, diffs, browser, artifacts, and other chat tools continue to open beside the active content. Where space is insufficient, use the existing takeover/overlay pattern rather than squeezing the outline and chat beyond usable widths.
 
-The column stays available when opening a chat or another destination. Collapse/expand and resize continue to work. On a narrow window, it becomes a dismissible overlay; selecting content closes that overlay while preserving its navigation state. Settings may keep its current section navigation while open, with Back returning to the unified Overview.
+The column stays available when opening a chat or another destination. Collapse/expand and resize continue to work. On a narrow window, it becomes a dismissible overlay; Escape, selecting content, or clicking outside closes that overlay while preserving its navigation state. Settings may keep its current section navigation while open, with Back returning to the unified Overview.
 
 ## Verified baseline and preservation map
 
@@ -122,7 +122,7 @@ Remaining before the full consolidation is merge-ready: finish the capability-by
 
 ### Final implementation and parity audit
 
-- Narrow windows below 780 px use a dismissible Overview overlay. Opening a destination or clicking outside closes it without changing the saved wide-window width or collapse preference. Wide windows restore the normal column.
+- Narrow windows below 780 px start with Overview closed and use a dismissible overlay when opened. Opening a destination or clicking outside closes it without changing the saved wide-window width or collapse preference. Wide windows restore the normal column.
 - Overview's search, repository, stale and attention filters now apply to pinned/custom/scheduled/archived collections as well as the tree. The current-chat access row remains fixed. Sessions keeps its own presentation and the shared Space scope.
 - Single-click opens a chat or work-item destination. Clicking a chat keeps navigation focus for continued browsing; Enter focuses its composer. Shift/multi-selection and disclosure controls retain their existing behavior.
 - Fixed the Outline archive shortcut to use navigation focus even while a Chat occupies the main workspace. Artifact Find keeps priority inside artifact tabs.
@@ -133,7 +133,7 @@ Final validation before review:
 
 - 342 Overview-related tests passed, two ignored, with the previously confirmed baseline stalled-badge failure skipped.
 - The full shell suite has 401 passing tests and five ignored tests. Its four failures were reproduced on the original `4cc809e2` base: the wake-switch settings test, two outline-group sidebar-section fixtures, and the Start Chat auto-approve fixture. These are pre-existing failures, not waivers of findings in this feature.
-- The five unified-column integration tests cover workspace/draft return, presentation switching, pin geometry, filtered pins, and the 600 px overlay restoring its wide layout.
+- Nine unified-column integration tests pass after review corrections. They cover workspace/draft return, presentation switching, pin geometry, filtered pins, full-history/archived filtering and reset, custom membership without outline duplication, session-jump preferences, Escape/New Chat dismissal, and the 600 px overlay restoring its wide layout.
 - Settings persistence: 87 tests passed. Native light/dark preview and artifact render checks passed; a fresh narrow native preview is being generated for final QA evidence.
 
 The requested deliverable is a signed **Mast Dev.app** built from this feature branch after the required review passes. It uses the Dev bundle identity and isolated Dev data/IPC configuration. No merge into `david-rolling` or `main` is part of this request.
@@ -146,3 +146,7 @@ The requested deliverable is a signed **Mast Dev.app** built from this feature b
 4. Open item details, edit/cancel instructions, open Compare from a drift marker, Required Actions and Inbox. Close panels and confirm the selected Chat/draft returns.
 5. Resize to about 600 px, open Overview, select a destination and reopen it. Resize wide and confirm the saved width/collapse setting returns.
 6. Try artifact Find, the archive shortcut with the tree focused, New Chat, Space switching and the footer's Settings/Back flow.
+
+### Review corrections
+
+The first Sonnet review identified four findings. All are addressed: full-chat filters preserve archived and older scheduled matches, collection filtering has a hidden count and Clear filters action, numbered jumps preserve the saved presentation, narrow overlays support Escape and all primary destinations, and touched Rust files are formatted. Custom collection membership remains separate from outline-derived groups to avoid showing the same groups twice. Regression tests cover these behaviors; final review and build receipts are added to the linked plan after completion.

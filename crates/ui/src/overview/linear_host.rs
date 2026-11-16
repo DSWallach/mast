@@ -27,7 +27,8 @@ use crate::work_outline::model::{OutlineRowKind, row_key};
 
 /// The narrowest the Outline/List body gets while the Linear column
 /// is inline; past that the column shrinks, then overlays.
-pub(crate) const OVERVIEW_BODY_MIN_W: f32 = crate::components::linear_parts::OVERVIEW_BODY_MIN_WIDTH;
+pub(crate) const OVERVIEW_BODY_MIN_W: f32 =
+    crate::components::linear_parts::OVERVIEW_BODY_MIN_WIDTH;
 /// Hit target of the column's right-edge resize grabber.
 const RESIZE_HANDLE_W: f32 = crate::components::linear_parts::RESIZE_HANDLE_WIDTH;
 
@@ -153,9 +154,10 @@ impl Overview {
                 crate::linear::fixture::issue("ENG-42", "Review the workspace"),
                 crate::linear::fixture::issue("ENG-43", "Validate the release"),
             ]);
-            panel.my_projects = crate::linear::panel::Load::Ready(vec![
-                crate::linear::fixture::project("p-launch", "Launch"),
-            ]);
+            panel.my_projects =
+                crate::linear::panel::Load::Ready(vec![crate::linear::fixture::project(
+                    "p-launch", "Launch",
+                )]);
         });
         self.linear_column.open = true;
     }

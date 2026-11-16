@@ -36,13 +36,122 @@ impl Overview {
 
     pub(crate) fn sidebar_filter_ids(&mut self, cx: &mut Context<Self>) -> Option<HashSet<String>> {
         self.ensure_prefs_loaded(cx);
-        let rows = self.rows(cx);
-        let filtering = !self.search.read(cx).text().trim().is_empty()
+        let _ = self.rows(cx);
+        let query = self.search.read(cx).text().trim().to_lowercase();
+        let filtering = !query.is_empty()
             || self.hide_stale
             || self.attention_filter != AttentionFilter::All
             || !self.hidden_repos.is_empty()
             || !self.work_item_filter.is_empty();
-        filtering.then(|| rows.iter().map(|row| row.chat.id.clone()).collect())
+        if !filtering {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let now = Utc::now();
+        Some(
+            state
+                .chats
+                .iter()
+                .filter(|chat| {
+                    if chat.parent_chat_id.is_some()
+                        || chat.is_side_chat()
+                        || chat
+                            .space_id
+                            .as_deref()
+                            .is_some_and(|id| state.space_row(id).is_none())
+                        || !self
+                            .sidebar_scope
+                            .as_deref()
+                            .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
+                    {
+                        return false;
+                    }
+                    let status = state.display_status_for(chat, now);
+                    let space = chat.space_id.as_deref().and_then(|id| state.space_row(id));
+                    if (self.hide_stale && is_stale(chat, status, now))
+                        || self.hidden_repos.contains(&repo_key_for_chat(chat, space))
+                        || !work_item_filter::chat_passes(
+                            &self.work_item_filter,
+                            &self.work_item_index,
+                            &chat.id,
+                        )
+                    {
+                        return false;
+                    }
+                    match self.attention_filter {
+                        AttentionFilter::NeedsInteraction
+                            if status != ChatIndicator::AwaitingInput
+                                && !self.work_item_index.attention_for_chat(&chat.id).0 =>
+                        {
+                            return false;
+                        }
+                        AttentionFilter::Stalled
+                            if status != ChatIndicator::Errored
+                                && state
+                                    .session_for(&chat.id)
+                                    .and_then(|s| s.last_turn_tool_failures.as_ref())
+                                    .is_none() =>
+                        {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                    let link = self.link_status.get(&chat.id).map(|entry| &entry.status);
+                    let mut fields = vec![
+                        chat.title.as_deref(),
+                        chat.branch.as_deref(),
+                        chat.cwd.as_deref(),
+                        chat.last_message_preview.as_deref(),
+                        chat.linked_pr_url.as_deref(),
+                        link.and_then(|link| link.ticket.as_ref())
+                            .map(|ticket| ticket.identifier.as_str()),
+                    ];
+                    let prs = link.map(effective_pr_links).unwrap_or_default();
+                    let values: Vec<String> = prs
+                        .iter()
+                        .flat_map(|pr| {
+                            let number = pr.detail.as_ref().map_or_else(
+                                || pr_number_from_url(&pr.url),
+                                |detail| detail.number,
+                            );
+                            let mut values =
+                                vec![pr.url.clone(), number.to_string(), format!("#{number}")];
+                            if let Some(title) =
+                                pr.detail.as_ref().and_then(|detail| detail.title.clone())
+                            {
+                                values.push(title);
+                            }
+                            values
+                        })
+                        .collect();
+                    fields.extend(values.iter().map(|value| Some(value.as_str())));
+                    matches_search(&query, &fields)
+                })
+                .map(|chat| chat.id.clone())
+                .collect(),
+        )
+    }
+
+    pub(crate) fn clear_sidebar_filters(&mut self, cx: &mut Context<Self>) {
+        self.search.update(cx, |search, cx| search.set_text("", cx));
+        self.hide_stale = false;
+        self.attention_filter = AttentionFilter::All;
+        self.hidden_repos.clear();
+        self.work_item_filter.clear();
+        self.rows_dirty = true;
+        self.outline_dirty = true;
+        self.view_prefs_changed(cx);
+        self.save_string_set(
+            overview_positions::HIDDEN_REPOS_FILE,
+            &self.hidden_repos,
+            cx,
+        );
+        self.save_string_set(
+            overview_positions::WORK_ITEM_FILTER_FILE,
+            &self.work_item_filter,
+            cx,
+        );
+        cx.notify();
     }
 
     pub(crate) fn navigation_focused(&self, window: &Window, cx: &gpui::App) -> bool {
