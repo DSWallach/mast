@@ -853,7 +853,7 @@ impl Default for UiSettings {
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
-            open_diagrams_automatically: true,
+            open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::new(),
             artifact_last_viewed: HashMap::new(),
             artifact_decision_drafts: HashMap::new(),
@@ -3083,7 +3083,7 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
-            open_diagrams_automatically: true,
+            open_diagrams_automatically: false,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
             artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {

@@ -19,15 +19,56 @@ struct Key {
     theme: String,
 }
 
-#[derive(Default)]
-struct Cache(HashMap<Key, Option<Arc<Image>>>);
-impl Global for Cache {}
+#[derive(Clone)]
+enum Entry {
+    Pending(u8),
+    Ready(Arc<Image>),
+    Failed(u8),
+}
 
-fn eligible(artifact: &ArtifactView) -> bool {
-    let visual = matches!(artifact.kind, ArtifactKind::Mermaid | ArtifactKind::Image)
+struct Cache {
+    entries: HashMap<Key, Entry>,
+    order: std::collections::VecDeque<Key>,
+    renders: Arc<tokio::sync::Semaphore>,
+}
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Default::default(),
+            renders: Arc::new(tokio::sync::Semaphore::new(2)),
+        }
+    }
+}
+impl Global for Cache {}
+impl Cache {
+    fn touch(&mut self, key: &Key) {
+        self.order.retain(|item| item != key);
+        self.order.push_back(key.clone());
+    }
+    fn insert(&mut self, key: Key, entry: Entry) {
+        self.entries
+            .retain(|old, _| old.id != key.id || old.revision == key.revision);
+        self.order
+            .retain(|old| old.id != key.id || old.revision == key.revision);
+        self.entries.insert(key.clone(), entry);
+        self.touch(&key);
+        while self.order.len() > 64 {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+    }
+}
+
+pub(crate) fn is_diagram(artifact: &ArtifactView) -> bool {
+    matches!(artifact.kind, ArtifactKind::Mermaid | ArtifactKind::Image)
         || (artifact.kind == ArtifactKind::HtmlFragment
-            && artifact.role.as_deref() == Some("diagram"));
-    visual
+            && artifact.role.as_deref() == Some("diagram"))
+}
+
+pub(crate) fn eligible(artifact: &ArtifactView) -> bool {
+    is_diagram(artifact)
         && artifact
             .revisions
             .iter()
@@ -43,33 +84,75 @@ fn size_limit(kind: ArtifactKind) -> u64 {
     }
 }
 
+/// A compact copy of the metadata needed after releasing the state borrow.
+pub(crate) struct PreviewSpec {
+    id: String,
+    revision: u32,
+    kind: ArtifactKind,
+    title: String,
+    device: String,
+}
+impl PreviewSpec {
+    pub(crate) fn from_artifact(artifact: &ArtifactView) -> Option<Self> {
+        eligible(artifact).then(|| Self {
+            id: artifact.id.clone(),
+            revision: artifact.current_revision,
+            kind: artifact.kind,
+            title: artifact.title.clone(),
+            device: artifact.device_id.clone(),
+        })
+    }
+}
+
+fn successful_image(output: render_check::RenderOutput) -> Option<Arc<Image>> {
+    let report = output.report?;
+    if !report.errors.is_empty() {
+        return None;
+    }
+    output
+        .png
+        .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+}
+
 /// Returns a cached image, starting one request for a missing key.
 pub(crate) fn thumbnail<V: 'static>(
-    artifact: &ArtifactView,
+    artifact: &PreviewSpec,
     state: Entity<AppState>,
     theme: &Theme,
     window: &mut Window,
     cx: &mut Context<V>,
 ) -> Option<Arc<Image>> {
-    if !eligible(artifact) {
-        return None;
-    }
-    let fragment_theme = FragmentTheme::from_theme(theme);
+    let color = |c: gpui::Hsla| (c.h.to_bits(), c.s.to_bits(), c.l.to_bits(), c.a.to_bits());
     let key = Key {
         id: artifact.id.clone(),
-        revision: artifact.current_revision,
-        theme: format!("{fragment_theme:?}"),
+        revision: artifact.revision,
+        theme: format!(
+            "{}:{:?}:{:?}:{:?}:{:?}",
+            theme.variant_id,
+            color(theme.bg),
+            color(theme.text),
+            color(theme.accent),
+            color(theme.surface_card)
+        ),
     };
-    if let Some(value) = cx.default_global::<Cache>().0.get(&key) {
-        return value.clone();
-    }
-    cx.default_global::<Cache>().0.insert(key.clone(), None);
+    let cache = cx.default_global::<Cache>();
+    let previous = cache.entries.get(&key).cloned();
+    cache.touch(&key);
+    let attempt = match previous {
+        Some(Entry::Ready(image)) => return Some(image),
+        Some(Entry::Pending(_)) | Some(Entry::Failed(1..)) => return None,
+        Some(Entry::Failed(_)) => 1,
+        None => 0,
+    };
+    cache.insert(key.clone(), Entry::Pending(attempt));
+    let renders = cache.renders.clone();
+    let fragment_theme = FragmentTheme::from_theme(theme);
     let target_device_id = (state.read(cx).local_device_id.as_deref()
-        != Some(artifact.device_id.as_str()))
-    .then(|| artifact.device_id.clone());
+        != Some(artifact.device.as_str()))
+    .then(|| artifact.device.clone());
     let params = ArtifactContentParams {
         artifact_id: artifact.id.clone(),
-        revision: Some(artifact.current_revision),
+        revision: Some(artifact.revision),
         companion: None,
         target_device_id,
     };
@@ -94,28 +177,32 @@ pub(crate) fn thumbnail<V: 'static>(
                             std::rc::Rc<dyn render_check::ArtifactRenderer>,
                         > = None;
                         if let Some(renderer) = renderer {
-                            let html = document::web_document(
-                                kind,
-                                &source,
-                                &title,
-                                &reply.mime_type,
-                                &fragment_theme,
-                                false,
-                                true,
-                            );
-                            renderer
-                                .render(
-                                    html,
-                                    ArtifactViewport {
-                                        width: 736,
-                                        height: 420,
-                                    },
-                                    cx,
-                                )
-                                .await
-                                .ok()
-                                .and_then(|output| output.png)
-                                .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+                            let permit = renders.acquire_owned().await.ok();
+                            if permit.is_none() {
+                                None
+                            } else {
+                                let html = document::web_document(
+                                    kind,
+                                    &source,
+                                    &title,
+                                    &reply.mime_type,
+                                    &fragment_theme,
+                                    false,
+                                    true,
+                                );
+                                renderer
+                                    .render(
+                                        html,
+                                        ArtifactViewport {
+                                            width: 736,
+                                            height: 420,
+                                        },
+                                        cx,
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(successful_image)
+                            }
                         } else {
                             None
                         }
@@ -126,11 +213,23 @@ pub(crate) fn thumbnail<V: 'static>(
         } else {
             None
         };
+        let ready = image.is_some();
         cx.update(|_, cx| {
-            cx.default_global::<Cache>().0.insert(key, image);
+            let cache = cx.default_global::<Cache>();
+            if matches!(cache.entries.get(&key), Some(Entry::Pending(n)) if *n == attempt) {
+                cache.insert(
+                    key,
+                    match image {
+                        Some(image) => Entry::Ready(image),
+                        None => Entry::Failed(attempt),
+                    },
+                );
+            }
         })
         .ok();
-        view.update_in(cx, |_, _, cx| cx.notify()).ok();
+        if ready {
+            view.update_in(cx, |_, _, cx| cx.notify()).ok();
+        }
     })
     .detach();
     None
@@ -143,7 +242,7 @@ pub(crate) fn settings_row<V: 'static>(
 ) -> gpui::AnyElement {
     use crate::settings::widgets;
     widgets::card_row(theme, false)
-        .child(widgets::row_tile(theme, crate::icons::LIST))
+        .child(widgets::row_tile(theme, crate::icons::GIT_BRANCH))
         .child(
             div()
                 .flex_1()
@@ -184,17 +283,62 @@ mod tests {
             theme: "light".into(),
         };
         let mut cache = Cache::default();
-        cache.0.insert(a.clone(), None);
-        assert!(cache.0.contains_key(&a));
-        assert!(!cache.0.contains_key(&Key {
+        cache.insert(a.clone(), Entry::Failed(0));
+        assert!(cache.entries.contains_key(&a));
+        assert!(!cache.entries.contains_key(&Key {
             revision: 2,
             ..a.clone()
         }));
-        assert!(!cache.0.contains_key(&Key {
+        assert!(!cache.entries.contains_key(&Key {
             theme: "dark".into(),
             ..a
         }));
     }
+    #[test]
+    fn cache_evicts_least_recently_used_and_superseded_revisions() {
+        let mut cache = Cache::default();
+        let key = |n| Key {
+            id: n.to_string(),
+            revision: 1,
+            theme: "light".into(),
+        };
+        for n in 0..64 {
+            cache.insert(key(n), Entry::Failed(0));
+        }
+        cache.touch(&key(0));
+        cache.insert(key(64), Entry::Failed(0));
+        assert!(cache.entries.contains_key(&key(0)));
+        assert!(!cache.entries.contains_key(&key(1)));
+        cache.insert(
+            Key {
+                revision: 2,
+                ..key(0)
+            },
+            Entry::Pending(0),
+        );
+        assert!(!cache.entries.contains_key(&key(0)));
+    }
+
+    #[test]
+    fn failed_probe_does_not_return_an_image() {
+        let mut report = super::super::document::ProbeReport::default();
+        report.errors.push("Mermaid: parse error".into());
+        assert!(
+            successful_image(render_check::RenderOutput {
+                png: Some(vec![1]),
+                report: Some(report)
+            })
+            .is_none()
+        );
+        assert!(
+            successful_image(render_check::RenderOutput {
+                png: Some(vec![1]),
+                report: None
+            })
+            .is_none()
+        );
+    }
+
     #[gpui::test]
     fn cache_hits_do_not_repeat_content_requests(cx: &mut gpui::TestAppContext) {
         use crate::artifacts::tests::{Reply, artifact, content_reply, id, init_ui, scripted};
@@ -235,7 +379,14 @@ mod tests {
         let item = artifact(&id(1), "image", ArtifactKind::Image);
         let request = |host: &Entity<Host>, vcx: &mut gpui::VisualTestContext| {
             host.update_in(vcx, |host, window, cx| {
-                thumbnail(&item, host.state.clone(), &Theme::light(), window, cx).is_some()
+                thumbnail(
+                    &PreviewSpec::from_artifact(&item).unwrap(),
+                    host.state.clone(),
+                    &Theme::light(),
+                    window,
+                    cx,
+                )
+                .is_some()
             })
         };
         assert!(!request(&host, vcx));
@@ -312,6 +463,7 @@ pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render +
                     &theme,
                     Some(image),
                 ))
+                .child(settings_row(&theme, false, cx))
         }
     }
     cx.new(|_| Fixture)

@@ -6508,7 +6508,7 @@ impl Transcript {
                     self.state.read(cx).artifacts(),
                     workspace_root.as_deref(),
                 );
-                let artifact = self.state.read(cx).artifacts().artifact(card.url.trim_start_matches("mast-artifact:")).cloned();
+                let artifact = self.state.read(cx).artifacts().artifact(card.url.trim_start_matches("mast-artifact:")).and_then(crate::artifacts::preview_thumb::PreviewSpec::from_artifact);
                 let thumbnail = artifact.as_ref().and_then(|artifact| crate::artifacts::preview_thumb::thumbnail(artifact, self.state.clone(), &theme, window, cx));
                 crate::artifacts::cards::artifact_card(&row.id, card, self.link_ui(), &theme, thumbnail)
             }

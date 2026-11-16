@@ -422,7 +422,7 @@ impl ArtifactTab {
                     let revision_changed = seen.as_ref().and_then(|old| old.0.as_ref()).map(|a| a.current_revision)
                         != slice.0.as_ref().map(|a| a.current_revision);
                     seen = Some(slice);
-                    if revision_changed && this.shown.is_none() {
+                    if revision_changed && this.shown.is_none() && !matches!(this.mode, Mode::Compare | Mode::SideBySide) {
                         this.load(None, window, cx);
                     }
                     cx.notify();

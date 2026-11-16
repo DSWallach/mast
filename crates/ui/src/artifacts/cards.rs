@@ -142,8 +142,8 @@ pub(crate) fn artifact_card(
                 )
                 )
                 .when_some(thumbnail, |card, image| card.child(
-                    div().w_full().max_h(px(220.0)).overflow_hidden()
-                        .child(gpui::img(image).w_full().max_h(px(220.0)).object_fit(gpui::ObjectFit::Contain))
+                    div().w_full().h(px(200.0)).rounded(px(8.0)).border_1().border_color(theme.border).overflow_hidden()
+                        .child(gpui::img(image).w_full().h_full().object_fit(gpui::ObjectFit::Contain))
                 ))
                 .on_click(move |_, window, cx| open(window, cx)),
         )
