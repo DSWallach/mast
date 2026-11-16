@@ -2563,14 +2563,9 @@ impl FilesSurface {
                 let state = editor.read(cx);
                 let value = state.value().to_string();
                 let selection = state.selected_range();
-                if selection.start < selection.end && selection.end <= value.len()
-                    && value.is_char_boundary(selection.start) && value.is_char_boundary(selection.end) {
-                    let start_line = value[..selection.start].bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
-                    let last = selection.end.saturating_sub(1);
-                    let end_line = value.as_bytes()[..last].iter().copied().filter(|&byte| byte == b'\n').count() as u32 + 1;
-                    let range = mast_proto::CodeRefRange { start_line, end_line };
+                crate::code_ref::selection_lines(&value, selection).and_then(|range| {
                     crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value)))
-                } else { None }
+                })
             };
             let action_bar = selected.and_then(|(range, snippet, hash)| {
                 let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;

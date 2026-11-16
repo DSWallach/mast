@@ -132,6 +132,28 @@ pub fn content_hash(contents: &str) -> String {
     format!("{:x}", Sha256::digest(contents.as_bytes()))
 }
 
+/// Convert a nonempty UTF-8 byte selection to an inclusive line range.
+pub fn selection_lines(contents: &str, selection: std::ops::Range<usize>) -> Option<CodeRefRange> {
+    if selection.start >= selection.end
+        || selection.end > contents.len()
+        || !contents.is_char_boundary(selection.start)
+        || !contents.is_char_boundary(selection.end)
+    {
+        return None;
+    }
+    let line_at = |offset| {
+        contents.as_bytes()[..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() as u32
+            + 1
+    };
+    Some(CodeRefRange {
+        start_line: line_at(selection.start),
+        end_line: line_at(selection.end - 1),
+    })
+}
+
 /// Extract inclusive, one-based lines. Invalid or incomplete ranges are rejected.
 pub fn snippet(contents: &str, range: CodeRefRange) -> Option<String> {
     if range.start_line == 0 || range.end_line < range.start_line {
@@ -255,6 +277,26 @@ mod tests {
         assert_eq!(&display[spans[0].range.clone()], "main.rs:2-3");
         assert_eq!(spans[0].path.as_ref(), "src/main.rs:2");
         assert!(project_sent_refs("legacy message").is_none());
+    }
+
+    #[test]
+    fn line_selection_handles_utf8_and_exclusive_end() {
+        assert_eq!(
+            selection_lines("a\né\nc", 2..5),
+            Some(CodeRefRange {
+                start_line: 2,
+                end_line: 2
+            })
+        );
+        assert_eq!(
+            selection_lines("a\né\nc", 2..6),
+            Some(CodeRefRange {
+                start_line: 2,
+                end_line: 3
+            })
+        );
+        assert_eq!(selection_lines("a\né\nc", 3..4), None);
+        assert_eq!(selection_lines("a", 0..0), None);
     }
 
     #[test]
