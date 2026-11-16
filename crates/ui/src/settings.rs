@@ -1704,7 +1704,9 @@ pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
     !matches!(
         (left, right),
-        (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
+        (ShortcutId::AddCodeToChat, ShortcutId::OpenOutline)
+            | (ShortcutId::OpenOutline, ShortcutId::AddCodeToChat)
+            | (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
             | (ShortcutId::OpenTeamTabFromPanel, ShortcutId::Outline(_))
     )
 }

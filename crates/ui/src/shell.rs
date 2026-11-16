@@ -424,7 +424,7 @@ pub fn apply_keymap(
     ] {
         let combo = keymap.get(id);
         if combo.is_empty() { continue; }
-        let context = (id == ShortcutId::ReplaceFile).then_some("Input");
+        let context = if id == ShortcutId::AddCodeToChat { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
         let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
         if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
             cx.bind_keys([binding]);
