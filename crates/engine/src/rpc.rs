@@ -3822,12 +3822,24 @@ impl RpcService for EngineRpc {
                     .workspace
                     .chat_pr_links(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let mut status = self.pr_ticket_cache()?.status_for_chat_links(
+                let selected = {
+                    let receiver = self.diff_sync.watch_chat_diff_targets();
+                    let targets = receiver.borrow();
+                    targets
+                        .iter()
+                        .find(|view| view.chat_id == p.chat_id)
+                        .and_then(|view| view.targets.iter().find(|target| target.selected))
+                        .cloned()
+                };
+                let mut status = self.pr_ticket_cache()?.status_for_chat_links_with_checkout(
                     chat.as_ref().and_then(|c| c.space_id.as_deref()),
                     chat.as_ref().and_then(|c| c.cwd.as_deref()),
                     chat.as_ref().and_then(|c| c.branch.as_deref()),
                     &pr_links,
                     chat.as_ref().and_then(|c| c.linked_ticket_id.as_deref()),
+                    selected
+                        .as_ref()
+                        .map(|target| (target.path.as_str(), target.branch.as_deref())),
                 );
                 if let Some(chat) = &chat {
                     // `prSource`/`ticketSource`: the durable link's own

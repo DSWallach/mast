@@ -146,6 +146,7 @@ pub(super) fn mount<'a>(
             shell.chat_header_links.insert(
                 chat_id.into(),
                 ChatHeaderLinkCache {
+                checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -503,6 +504,7 @@ fn changing_chat_drops_the_card_and_its_pin(cx: &mut TestAppContext) {
         shell.chat_header_links.insert(
             CHAT_UI.into(),
             ChatHeaderLinkCache {
+                checkout: None,
                 status: None,
                 fetched_at: Instant::now(),
             },
@@ -1110,6 +1112,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
             shell.chat_header_links.insert(
                 format!("w-{i}"),
                 ChatHeaderLinkCache {
+                checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -1886,4 +1889,211 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
     });
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
     assert!(has(vcx, "required-actions-info-markdown-detail"));
+}
+
+#[gpui::test]
+fn header_and_item_tab_follow_the_selected_checkout(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let before = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(before.branch.as_deref(), Some("feature/header"));
+    assert_eq!(
+        before.runs_in.as_deref(),
+        Some(format!("/work/{CHAT_API}").as_str())
+    );
+    assert_eq!(before.execution_root, None);
+    assert!(has(vcx, "chat-header-chip-branch"));
+    assert!(has(vcx, "chat-header-label-branch:feature/header"));
+    assert!(has(vcx, "chat-item-runs-in"));
+    let before_fingerprint = shell.read_with(vcx, |shell, cx| {
+        shell.state.read(cx).shell_fingerprint(chrono::Utc::now())
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/work/checkout".into(),
+                    checkout_id: "checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "checkout".into(),
+                    branch: Some("feature/bound".into()),
+                    head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        });
+    });
+    draw(vcx);
+    let after = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(after.branch.as_deref(), Some("feature/bound"));
+    assert!(has(vcx, "chat-header-label-branch:feature/bound"));
+    let after_fingerprint = shell.read_with(vcx, |shell, cx| {
+        shell.state.read(cx).shell_fingerprint(chrono::Utc::now())
+    });
+    assert_ne!(before_fingerprint, after_fingerprint);
+    assert_eq!(after.runs_in.as_deref(), Some("/work/checkout"));
+    assert_eq!(
+        after.execution_root.as_deref(),
+        Some(format!("/work/{CHAT_API}").as_str())
+    );
+    assert!(has(vcx, "chat-header-chip-branch"));
+    assert!(has(vcx, "chat-item-runs-in"));
+    expand(&shell, vcx, &["runs-in"]);
+    assert!(has(vcx, "chat-item-runs-in"));
+    let root_selector: &'static str = Box::leak(
+        format!("chat-item-execution-root:Execution root: /work/{CHAT_API}").into_boxed_str(),
+    );
+    assert!(has(vcx, root_selector));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/work/checkout".into(),
+                    checkout_id: "checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "checkout".into(),
+                    branch: None,
+                    head_sha: Some("abc".into()),
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    assert!(!has(vcx, "chat-header-chip-branch"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    let restored = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(restored.branch, before.branch);
+    assert_eq!(restored.runs_in, before.runs_in);
+    assert_eq!(restored.execution_root, None);
+}
+
+#[gpui::test]
+fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let engine =
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.set_test_engine(engine);
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/previous".into(), checkout_id: "previous".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
+                    repo_name: "repo".into(), branch: Some("old-branch".into()), head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+        });
+        let entry = shell.chat_header_links.get_mut(CHAT_API).unwrap();
+        entry.checkout = Some(("/previous".into(), "previous".into(), Some("old-branch".into())));
+        entry.fetched_at = Instant::now() - Duration::from_secs(60);
+        shell.ensure_chat_header_links(CHAT_API.into(), cx);
+    });
+    let previous_fetch = shell.read_with(vcx, |shell, _| shell.chat_header_links[CHAT_API].fetched_at);
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let first = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("first header request")).unwrap();
+        if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS {
+            break request;
+        }
+    };
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/checkout".into(),
+                    checkout_id: "bound".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "repo".into(),
+                    branch: Some("feature".into()),
+                    head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        })
+    });
+    let status = mast_engine::pr_ticket_cache::ChatLinkStatus::default();
+    replies
+        .try_send(serde_json::json!({"id": first["id"], "ok": status}).to_string())
+        .unwrap();
+    for _ in 0..20 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if !shell.read_with(vcx, |shell, _| {
+            shell.chat_header_links_pending.contains(CHAT_API)
+        }) {
+            break;
+        }
+    }
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.chat_header_links[CHAT_API].checkout.as_ref().map(|key| key.0.as_str()), Some("/previous"));
+        assert_eq!(shell.chat_header_links[CHAT_API].fetched_at, previous_fetch);
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.ensure_chat_header_links(CHAT_API.into(), cx)
+    });
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let second = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("checkout refetch")).unwrap();
+        if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS {
+            break request;
+        }
+    };
+    replies
+        .try_send(
+            serde_json::json!({"id": second["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string(),
+        )
+        .unwrap();
+    for _ in 0..20 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if !shell.read_with(vcx, |shell, _| {
+            shell.chat_header_links_pending.contains(CHAT_API)
+        }) {
+            break;
+        }
+    }
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(
+            shell.chat_header_links[CHAT_API]
+                .checkout
+                .as_ref()
+                .map(|key| key.0.as_str()),
+            Some("/checkout")
+        )
+    });
+    drop(guard);
 }
