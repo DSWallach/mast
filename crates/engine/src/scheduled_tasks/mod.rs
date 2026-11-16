@@ -7,6 +7,7 @@ use mast_doc::SessionCommandStatus;
 use mast_proto::*;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
 pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
@@ -338,7 +339,7 @@ impl ScheduledTasks {
         }
         // Reconcile before claiming so finished runs do not block the next occurrence.
         for mut r in self.0.store.active()? {
-            let previous_state = r.state;
+            let previous = r.clone();
             let Some(chat) = r.chat_id.clone() else {
                 continue;
             };
@@ -347,6 +348,7 @@ impl ScheduledTasks {
             }
             let msg = crate::work_outline_launch::scheduled_id(&r.id, "message");
             let (command, _) = self.0.host.message_command_state(&chat, &msg)?;
+            let mut awaiting = None;
             if command
                 .as_ref()
                 .is_some_and(|c| c.status == SessionCommandStatus::Pending)
@@ -362,6 +364,9 @@ impl ScheduledTasks {
                     }
                     SessionStatus::Idle => ScheduledRunState::Interrupted,
                 };
+                awaiting = s
+                    .awaiting_input
+                    .filter(|_| r.state == ScheduledRunState::AwaitingInput);
             } else {
                 r.state = match command.map(|c| c.status) {
                     Some(SessionCommandStatus::Pending) => ScheduledRunState::Queued,
@@ -374,10 +379,39 @@ impl ScheduledTasks {
                     _ => ScheduledRunState::Interrupted,
                 };
             }
+            let request = awaiting.as_ref().map(|a| a.request_id.clone());
+            if request != r.awaiting_request_id {
+                r.awaiting_since = request.is_some().then_some(now);
+                r.awaiting_request_id = request;
+            }
+            // Nobody answers an unattended run; stop it so it frees its slot.
+            if let Some(input) = awaiting.filter(|_| {
+                r.awaiting_since
+                    .is_some_and(|since| now - since >= AWAITING_INPUT_LIMIT_MINUTES * 60_000)
+            }) {
+                match self.0.sessions.interrupt(&chat).await {
+                    Ok(true) => {
+                        r.state = ScheduledRunState::Interrupted;
+                        let header = input
+                            .questions
+                            .first()
+                            .map(|q| q.header.as_str())
+                            .filter(|h| !h.is_empty());
+                        r.detail = Some(format!(
+                            "Stopped after {AWAITING_INPUT_LIMIT_MINUTES} min waiting for input{}",
+                            header.map(|h| format!(": {h}")).unwrap_or_default()
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(chat = %chat, error = %e, "scheduled run interrupt failed")
+                    }
+                }
+            }
             if !r.state.active() {
                 r.finished_at = Some(now);
             }
-            if r.state != previous_state {
+            if r != previous {
                 self.0.store.update_run(&r)?;
             }
         }
@@ -433,9 +467,6 @@ impl ScheduledTasks {
                 self.0.store.update_run(&r)?;
                 continue;
             }
-            if running >= 2 {
-                continue;
-            }
             let deadline_base = if r.manual {
                 r.created_at
             } else {
@@ -451,6 +482,9 @@ impl ScheduledTasks {
                 r.detail = Some("Dispatch queue grace expired".into());
                 r.finished_at = Some(now);
                 self.0.store.update_run(&r)?;
+                continue;
+            }
+            if running >= 2 {
                 continue;
             }
             let model_check = tokio::select! {

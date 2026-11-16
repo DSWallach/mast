@@ -96,6 +96,11 @@ pub struct ScheduledRun {
     pub chat_id: Option<String>,
     pub task_revision: u64,
     pub snapshot: ScheduledTaskDraft,
+    /// The input request the run is parked on, and when the scheduler first saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
