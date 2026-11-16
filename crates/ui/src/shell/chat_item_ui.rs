@@ -844,12 +844,15 @@ impl Shell {
         }
 
         // Runs in.
-        let runs_summary = match (&facts.runs_in, &facts.branch) {
+        let mut runs_summary = match (&facts.runs_in, &facts.branch) {
             (Some(path), Some(branch)) => format!("{path} \u{b7} \u{2387} {branch}"),
             (Some(path), None) => path.clone(),
             (None, Some(branch)) => format!("\u{2387} {branch}"),
             (None, None) => "Not started yet".to_owned(),
         };
+        if let Some(root) = &facts.execution_root {
+            runs_summary.push_str(&format!(" \u{b7} execution root: {root}"));
+        }
         let body = self.item_tab_open.contains("runs-in").then(|| {
             let mut block = div().flex().flex_col().gap(px(2.0));
             if let Some(path) = &facts.runs_in {
