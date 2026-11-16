@@ -405,9 +405,85 @@ fn compose_path_from<'a>(
 /// would fail with "command not found". Every engine `git` spawn starts here.
 pub fn git_command() -> std::process::Command {
     GIT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut command = std::process::Command::new("git");
+    let mut command = std::process::Command::new(resolve_program("git"));
     compose_login_shell_path_std(&mut command);
     command
+}
+
+/// Absolute path of a bare program name, searched on the process PATH then the
+/// login-shell PATH and cached per name. std only uses `posix_spawn` when the
+/// program is a path or the child's PATH is untouched; a bare name plus a
+/// composed PATH falls back to `fork`, which is very costly in a large process.
+/// Falls back to the bare name when nothing is found. Symlinks are kept (not
+/// canonicalized) so the program sees the name it was installed under.
+pub fn resolve_program(name: &str) -> std::path::PathBuf {
+    static CACHE: std::sync::Mutex<
+        Option<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::Mutex::new(None);
+    let still_valid = |path: &std::path::Path| path.is_absolute() && path.is_file();
+    {
+        let cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(path) = cache.as_ref().and_then(|map| map.get(name))
+            && still_valid(path)
+        {
+            return path.clone();
+        }
+    }
+    let found = (|| {
+        let component = std::path::Path::new(name);
+        if component.components().count() != 1 || name.is_empty() {
+            return None;
+        }
+        let mut directories = Vec::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            directories.extend(std::env::split_paths(&path));
+        }
+        if let Some(path) = shell_env::login_shell_path() {
+            directories.extend(std::env::split_paths(path));
+        }
+        directories
+            .into_iter()
+            .filter(|directory| directory.is_absolute())
+            .flat_map(|directory| executable_candidates(&directory, name))
+            .find(|candidate| executable_file(candidate))
+    })();
+    match found {
+        Some(path) => {
+            CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(Default::default)
+                .insert(name.to_owned(), path.clone());
+            path
+        }
+        None => std::path::PathBuf::from(name),
+    }
+}
+
+fn executable_file(candidate: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(candidate) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    metadata.is_file()
+}
+
+#[cfg(test)]
+#[test]
+fn git_command_uses_an_absolute_program_when_git_is_installed() {
+    if resolve_program("git").is_absolute() {
+        let command = git_command();
+        assert!(std::path::Path::new(command.get_program()).is_absolute());
+    } else {
+        // No git on this machine's PATH: the bare name is the documented fallback.
+        assert_eq!(git_command().get_program(), "git");
+    }
 }
 
 static GIT_SPAWNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -691,11 +767,14 @@ mod git_command_tests {
     #[test]
     fn git_command_carries_a_composed_path_for_sync_and_async() {
         let sync = git_command();
-        assert_eq!(sync.get_program(), "git");
+        assert_eq!(sync.get_program(), resolve_program("git").as_os_str());
         assert!(sync.get_envs().any(|(key, _)| key == "PATH"));
 
         let async_command = git_command_async();
-        assert_eq!(async_command.as_std().get_program(), "git");
+        assert_eq!(
+            async_command.as_std().get_program(),
+            resolve_program("git").as_os_str()
+        );
         assert!(
             async_command
                 .as_std()
