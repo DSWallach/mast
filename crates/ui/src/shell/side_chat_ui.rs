@@ -205,6 +205,33 @@ fn absorbed_notice(reply: &mast_proto::AbsorbSideChatReply) -> String {
     }
 }
 
+impl SideChatPane {
+    /// Warning for harnesses (Antigravity) that can't run read-only.
+    fn not_read_only_banner(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
+        let harness = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == self.chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness)?;
+        if mast_proto::side_chat::harness_supports_read_only(harness) {
+            return None;
+        }
+        Some(
+            div()
+                .debug_selector(|| "side-chat-not-read-only-banner".into())
+                .px(px(12.0))
+                .py(px(6.0))
+                .bg(theme.warning.opacity(0.15))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.warning)
+                .child(SharedString::from(mast_proto::side_chat::NOT_READ_ONLY_WARNING)),
+        )
+    }
+}
+
 impl Render for SideChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -269,6 +296,7 @@ impl Render for SideChatPane {
             .flex_col()
             .debug_selector(|| "side-chat-pane".into())
             .child(header)
+            .children(self.not_read_only_banner(&theme, cx))
             .child(if empty {
                 parts::side_chat_empty(
                     &theme,

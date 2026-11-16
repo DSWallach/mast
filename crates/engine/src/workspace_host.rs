@@ -1754,7 +1754,10 @@ impl WorkspaceHost {
             // Read-only with approvals off: nobody answers a side chat's
             // prompts (dispatch re-applies this on every run).
             config: main.config.clone().map(|mut config| {
-                config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                // Antigravity has no read-only mode: keep the main sandbox.
+                if mast_proto::side_chat::harness_supports_read_only(config.harness) {
+                    config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                }
                 config.auto_approve = true;
                 config
             }),
