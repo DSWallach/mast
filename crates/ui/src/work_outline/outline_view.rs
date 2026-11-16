@@ -4005,12 +4005,20 @@ impl Render for OutlineView {
                 .justify_center()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
-                .child(div().w_full().min_w_0().px(px(12.0)).whitespace_normal().text_center()
-                    .child(if self.inputs.options.query.is_empty() {
-                        "No chats or work items"
-                    } else {
-                        "Nothing matches the search"
-                    }))
+                .child(
+                    div()
+                        .debug_selector(|| "outline-empty-copy".into())
+                        .w_full()
+                        .min_w_0()
+                        .px(px(12.0))
+                        .whitespace_normal()
+                        .text_center()
+                        .child(if self.inputs.options.query.is_empty() {
+                            "No chats or work items"
+                        } else {
+                            "Nothing matches the search"
+                        }),
+                )
                 .into_any_element()
         } else {
             gpui::uniform_list("work-outline-rows", count, cx.processor(Self::render_rows))

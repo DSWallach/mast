@@ -13,6 +13,9 @@ impl Overview {
             let current = state.selected_chat_row().cloned();
             (assistant, current)
         };
+        if assistant.is_some() {
+            self.dismiss_assistant_chooser(cx);
+        }
         let same = assistant
             .as_ref()
             .zip(current.as_ref())
@@ -141,7 +144,10 @@ impl Overview {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.open(full_id.clone(), cx);
+                                this.leave_work_item_details(
+                                    DetailsExit::OpenFullChat(full_id.clone()),
+                                    cx,
+                                );
                             })),
                     ),
             )
@@ -174,11 +180,7 @@ impl Overview {
     }
 
     fn open_top_session(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        // These surfaces otherwise take precedence over the interactive panel.
-        self.work_item_details = None;
-        self.required_actions_panel = None;
-        self._required_actions_events = None;
-        self.open_chat_panel(chat_id, cx);
+        self.leave_work_item_details(DetailsExit::OpenChat(chat_id), cx);
     }
 
     pub(super) fn open_session_menu(

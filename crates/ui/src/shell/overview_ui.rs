@@ -853,5 +853,4 @@ pub(super) mod tests {
         redraw_assistant(vcx);
         assert!(vcx.debug_bounds("overview-current-session").is_none());
     }
-
 }

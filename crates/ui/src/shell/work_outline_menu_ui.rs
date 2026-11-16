@@ -167,15 +167,12 @@ impl Shell {
             .separated(),
         );
         let is_admin = self.chat_is_admin(chat_id, cx);
-        entries.push(
-            MenuEntry::new(
-                "grant-admin",
-                crate::admin::grant_entry_label(is_admin),
-                icons::SHIELD,
-                MenuAction::GrantAdmin(chat_id.to_owned()),
-            )
-            .separated(),
-        );
+        entries.push(MenuEntry::new(
+            "grant-admin",
+            crate::admin::grant_entry_label(is_admin),
+            icons::SHIELD,
+            MenuAction::GrantAdmin(chat_id.to_owned()),
+        ));
         if is_admin {
             entries.push(MenuEntry::new(
                 "revoke-admin",
@@ -1607,7 +1604,9 @@ mod tests {
 
         // The menu entry runs the same move as its key. Reveal the earlier
         // row after keyboard navigation has scrolled to the moved chat.
-        outline.update(cx, |outline, cx| outline.reveal(&row_key::chat(CHAT_API), cx));
+        outline.update(cx, |outline, cx| {
+            outline.reveal(&row_key::chat(CHAT_API), cx)
+        });
         redraw(cx);
         right_click(cx, &row_key::chat(CHAT_API));
         assert!(menu_open(&shell, cx));

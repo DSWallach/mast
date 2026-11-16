@@ -5097,6 +5097,7 @@ impl Overview {
             .p(px(24.0))
             .child(
                 div()
+                    .debug_selector(|| "overview-empty-headline".into())
                     .w_full()
                     .min_w_0()
                     .whitespace_normal()
@@ -5108,6 +5109,7 @@ impl Overview {
             .when_some(detail, |el, detail| {
                 el.child(
                     div()
+                        .debug_selector(|| "overview-empty-detail".into())
                         .w_full()
                         .min_w_0()
                         .whitespace_normal()
@@ -5514,17 +5516,21 @@ impl Overview {
             has_subagent_overflow && self.hovered_row.as_deref() == Some(chat_id.as_str());
         let subagent_tiles = self.subagent_tiles_for(&chat_id, theme, show_all_subagents, cx);
         let detail = is_expanded.then(|| self.expanded_detail_for(row, theme, chat_id.clone(), cx));
-        let session_badge = crate::personal_assistant::session_badge(self.state.read(cx), &chat_id, theme);
+        let session_badge =
+            crate::personal_assistant::session_badge(self.state.read(cx), &chat_id, theme);
         let menu_id = chat_id.clone();
         let toggle_id = chat_id.clone();
         let row_selector = format!("overview-list-chat-{chat_id}");
         let hover_id = chat_id.clone();
         div()
             .id(("overview-row", ix))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                this.open_session_menu(menu_id.clone(), event.position, cx);
-                cx.stop_propagation();
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.open_session_menu(menu_id.clone(), event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .debug_selector(|| "overview-list-row".into())
             .relative()
             // Never shrink inside the scrolling list column. The row is
@@ -6217,6 +6223,12 @@ impl Overview {
                     full_route: false,
                 });
                 self.open_chat_panel(chat_id, cx);
+            }
+            DetailsExit::OpenFullChat(chat_id) => {
+                self.close_work_item_details(cx);
+                self.close_required_actions(cx);
+                self.prepare_full_chat(&chat_id, cx);
+                self.open(chat_id, cx);
             }
             DetailsExit::OpenItem { space_id, item_id } => {
                 self.replace_work_item_details(space_id, item_id, cx)
@@ -7030,6 +7042,7 @@ enum DetailsExit {
     Close,
     OpenChat(String),
     OpenChatFromClick(String),
+    OpenFullChat(String),
     OpenItem { space_id: String, item_id: String },
 }
 
@@ -11394,6 +11407,10 @@ mod logic_tests {
     }
     mod template_review_tests {
         include!("work_outline/template_review_tests.rs");
+    }
+
+    mod top_sessions_tests {
+        include!("overview/top_sessions_tests.rs");
     }
 
     /// First-use empty state of the Outline; shares this module's fixtures.

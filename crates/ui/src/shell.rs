@@ -4888,7 +4888,6 @@ impl Shell {
         }
     }
 
-    /// Close the session-row context menu through the exit animation.
     /// Reuse the sidebar menu on overview rows and its fixed session cards.
     pub(crate) fn open_overview_chat_menu(
         &mut self,
@@ -4914,6 +4913,7 @@ impl Shell {
         cx.notify();
     }
 
+    /// Close the session-row context menu through the exit animation.
     fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
         if self.chat_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.chat_menu);
@@ -6149,7 +6149,10 @@ impl Shell {
             || self.add_space.is_some()
             || self.work_outline_modal_open()
             || self.work_outline_menu.is_open()
-            || self.overview_page.as_ref().is_some_and(|page| page.read(cx).assistant_chooser_open())
+            || self
+                .overview_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).assistant_chooser_open())
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
 
@@ -16499,7 +16502,8 @@ impl Shell {
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
-            self.ensure_overview_page(cx).update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
+            self.ensure_overview_page(cx)
+                .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
         }
     }
 

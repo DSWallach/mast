@@ -103,7 +103,7 @@ This checkpoint is not a merge-ready implementation of the feature. The item rem
 ### Second checkpoint: persistent left-column Overview
 
 - Mounted the Overview navigation in the sidebar position. Chats use Shell's normal main workspace; work-item details, Required Actions, Inbox/Linear and PR/ticket editing use the Overview workspace outlet without a second navigation tree or live composer.
-- Added a persisted Overview/Sessions presentation switch. Sessions retains the existing project/device/list grouping, sort, metadata and context-menu controls. Overview retains the shell's assistant/current-session access, Space selector and account/connection/update/error footer.
+- Added a persisted Overview/Sessions presentation switch. Sessions retains the existing project/device/list grouping, sort, metadata and context-menu controls. Overview keeps assistant/current-session access inside its fixed header; the shell retains the Space selector and account/connection/update/error footer. Sessions keeps its original assistant/current-session section.
 - Kept pins, custom sections, scheduled-task groups and archived sessions above the outline in an independently scrolling collection region. Added an explicit height and geometry regression so populated collections cannot collapse to zero height.
 - Space scope filters navigation while leaving the open chat unchanged. Opening Overview reveals/focuses the column; arrow navigation leaves the workspace alone until Enter/click. Chat drafts survive focus toggles and opening/closing Required Actions or Inbox.
 - Fresh settings use a 360 px column. Saved widths remain intact. Added cached-sidebar invalidation for Overview changes and fixed Full Chat's shell re-entry path.
@@ -150,3 +150,10 @@ The requested deliverable is a signed **Mast Dev.app** built from this feature b
 ### Review corrections
 
 The first Sonnet review identified four findings. All are addressed: full-chat filters preserve archived and older scheduled matches, collection filtering has a hidden count and Clear filters action, numbered jumps preserve the saved presentation, narrow overlays support Escape and all primary destinations, with the focused search field retaining first priority to clear its query, and touched Rust files are formatted. Custom collection membership remains separate from outline-derived groups to avoid showing the same groups twice. Regression tests cover these behaviors; final review and build receipts are added to the linked plan after completion.
+
+
+### Follow-up: assistant/current-session integration and empty-state wrapping
+
+Moved personal assistant and current-session access into the fixed Overview header, independent of its filters. A single card carries both labels when they refer to the same chat; scheduled assistants resolve to the latest run. The chooser and context menus reuse the existing designation calls. Normal and compact outline rows retain their hierarchy and show role badges. Card and full-chat actions pass through the existing unsaved-details confirmation.
+
+Constrained empty-state and first-use text to the navigation width so Needs interaction with no matching chats wraps within the column. Geometry verification covers 240, 300 and 360 px columns. Native light/dark previews cover all three styles and layouts, including the narrow empty-filter state. Final validation and the pinned review gate are recorded in the linked work-item plan.
