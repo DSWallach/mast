@@ -7,6 +7,7 @@
 use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness};
 use serde_json::Value;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CommandSegment {
@@ -75,8 +76,8 @@ pub(crate) fn matching_rules<'a>(
     {
         return None;
     }
-    let segments = parse_command(command)?;
-    if !passes_safety_rails(&segments) {
+    let (segments, logs) = parse_approval_command(command)?;
+    if !passes_safety_rails(&segments) || !logs.iter().all(|path| log_target_is_safe(path)) {
         return None;
     }
     let mut matches = Vec::new();
@@ -212,7 +213,7 @@ pub fn matching_rule_labels(
 
 /// Prefill a disabled argument-prefix rule when exactly one segment needs a rule.
 pub fn prefill_rule_from_command(command: &Value, id: String) -> Option<ApprovalRule> {
-    let segments = parse_command(command)?;
+    let (segments, _) = parse_approval_command(command)?;
     if !passes_safety_rails(&segments) {
         return None;
     }
@@ -416,10 +417,25 @@ fn passes_safety_rails(segments: &[CommandSegment]) -> bool {
     true
 }
 
-// Preview options only select fixtures and sizes. Values cannot name paths.
+// These options choose screens, fixtures and sizes. Values have no slashes or dots.
 fn preview_option(name: &str, value: &str, argv: &[String]) -> bool {
     argv[0] == "scripts/ui-preview.sh"
-        && name.starts_with("MAST_PREVIEW_")
+        && name.strip_prefix("MAST_PREVIEW_").is_some_and(|option| {
+            matches!(
+                option,
+                "ASSISTANT"
+                    | "WIDTH"
+                    | "HARNESS"
+                    | "RETRY"
+                    | "SUBAGENTS"
+                    | "THEMES"
+                    | "SCREENS"
+                    | "STYLES"
+                    | "LAYOUTS"
+                    | "COMPARE_ROWS"
+                    | "COMPARE_SCREENS"
+            )
+        })
         && !value.is_empty()
         && value
             .bytes()
@@ -453,14 +469,30 @@ fn cargo_configuration_is_safe(argv: &[String]) -> bool {
 
 /// Parse a provider command into all executable segments, or reject ambiguous syntax.
 pub(crate) fn parse_command(command: &Value) -> Option<Vec<CommandSegment>> {
+    parse_command_with(command, false, &mut Vec::new())
+}
+
+/// Approval rules also accept log redirects and quoted operators, which user
+/// permission rules do not. The caller must check the returned log targets.
+fn parse_approval_command(command: &Value) -> Option<(Vec<CommandSegment>, Vec<String>)> {
+    let mut logs = Vec::new();
+    let segments = parse_command_with(command, true, &mut logs)?;
+    Some((segments, logs))
+}
+
+fn parse_command_with(
+    command: &Value,
+    approval: bool,
+    logs: &mut Vec<String>,
+) -> Option<Vec<CommandSegment>> {
     match command {
         Value::String(script) => {
             if let Some(argv) = parse_shell_invocation(script) {
-                return parse_argv(argv);
+                return parse_argv(argv, approval, logs);
             }
-            let segments = parse_script(script)?;
+            let segments = parse_script(script, approval, logs)?;
             if segments.len() == 1 && is_shell(&segments[0].argv) {
-                parse_argv(segments.into_iter().next()?.argv)
+                parse_argv(segments.into_iter().next()?.argv, approval, logs)
             } else {
                 Some(segments)
             }
@@ -470,7 +502,7 @@ pub(crate) fn parse_command(command: &Value) -> Option<Vec<CommandSegment>> {
                 .iter()
                 .map(|v| v.as_str().map(str::to_owned))
                 .collect::<Option<_>>()?;
-            parse_argv(argv)
+            parse_argv(argv, approval, logs)
         }
         _ => None,
     }
@@ -505,9 +537,13 @@ fn parse_shell_invocation(script: &str) -> Option<Vec<String>> {
     is_shell(&argv).then_some(argv)
 }
 
-fn parse_argv(argv: Vec<String>) -> Option<Vec<CommandSegment>> {
+fn parse_argv(
+    argv: Vec<String>,
+    approval: bool,
+    logs: &mut Vec<String>,
+) -> Option<Vec<CommandSegment>> {
     if is_shell(&argv) {
-        return parse_script(&argv[2]);
+        return parse_script(&argv[2], approval, logs);
     }
     if argv.is_empty() {
         return None;
@@ -524,12 +560,21 @@ fn is_shell(argv: &[String]) -> bool {
         && matches!(argv[1].as_str(), "-c" | "-lc")
 }
 
-fn parse_script(script: &str) -> Option<Vec<CommandSegment>> {
-    let script = strip_log_redirects(script)?;
-    let script = script.as_str();
+fn parse_script(
+    script: &str,
+    approval: bool,
+    logs: &mut Vec<String>,
+) -> Option<Vec<CommandSegment>> {
+    let stripped;
+    let script = if approval {
+        stripped = strip_log_redirects(script, logs);
+        stripped.as_str()
+    } else {
+        script
+    };
     // Do not attempt shell expansion, escaping, comments, redirection, globbing,
-    // command substitution or compound commands. Quotes make the remaining
-    // operators literal, but backquotes and backslashes are rejected anywhere.
+    // command substitution or compound commands. For approval rules, quotes make
+    // the remaining operators literal. Backquotes and backslashes are always rejected.
     let mut quote = None;
     for c in script.chars() {
         if matches!(c, '`' | '\\' | '\r' | '\0') {
@@ -537,16 +582,16 @@ fn parse_script(script: &str) -> Option<Vec<CommandSegment>> {
         }
         match quote {
             Some(q) if c == q => quote = None,
-            Some(_) => {}
+            Some(_) if approval => {}
             None if c == '\'' || c == '"' => quote = Some(c),
-            None if matches!(
+            _ if matches!(
                 c,
                 '<' | '>' | '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '#'
             ) =>
             {
                 return None;
             }
-            None => {}
+            _ => {}
         }
     }
     // Only standalone assignment words can contain this expansion. In
@@ -615,30 +660,55 @@ fn parse_script(script: &str) -> Option<Vec<CommandSegment>> {
     Some(segments)
 }
 
-/// Remove `> /tmp/<name> 2>&1` where it ends a segment outside quotes. Agents
-/// log long runs this way; the target is one plain file directly in /tmp, and
-/// an existing symlink or directory there keeps the command manual.
-fn strip_log_redirects(script: &str) -> Option<String> {
-    let redirect = regex::Regex::new(
-        r"\s>\s?((?:/private)?/tmp/[A-Za-z0-9_][A-Za-z0-9_.-]*) 2>&1([ \t]*(?:;|&&|\n|$))",
-    )
-    .ok()?;
+/// Remove `> /tmp/<name> 2>&1` where it ends a segment outside quotes, and
+/// collect the targets. Agents log long runs this way. Only spaces and tabs
+/// count as separators, because the shell splits words on nothing else.
+fn strip_log_redirects(script: &str, logs: &mut Vec<String>) -> String {
+    static REDIRECT: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"[ \t]> ?((?:/private)?/tmp/[A-Za-z0-9_][A-Za-z0-9_.-]*) 2>&1([ \t]*(?:;|&&|\n|$))",
+        )
+        .expect("valid log redirect pattern")
+    });
     let mut stripped = String::with_capacity(script.len());
     let mut last = 0;
-    for captures in redirect.captures_iter(script) {
-        let whole = captures.get(0)?;
+    for captures in REDIRECT.captures_iter(script) {
+        let (Some(whole), Some(target), Some(end)) =
+            (captures.get(0), captures.get(1), captures.get(2))
+        else {
+            continue;
+        };
         if !outside_quotes(&script[..whole.start()]) {
             continue;
         }
-        if std::fs::symlink_metadata(&captures[1]).is_ok_and(|meta| !meta.is_file()) {
-            return None;
-        }
+        logs.push(target.as_str().to_owned());
         stripped.push_str(&script[last..whole.start()]);
-        stripped.push_str(&captures[2]);
+        stripped.push_str(end.as_str());
         last = whole.end();
     }
     stripped.push_str(&script[last..]);
-    Some(stripped)
+    stripped
+}
+
+/// A log target may be missing or a regular file the engine's user owns.
+/// Best effort: the shell opens the file later, so a swap in between is possible.
+fn log_target_is_safe(path: &str) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.is_file() && owned_by_current_user(&meta),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+#[cfg(unix)]
+fn owned_by_current_user(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    meta.uid() == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn owned_by_current_user(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn outside_quotes(prefix: &str) -> bool {
@@ -1060,7 +1130,10 @@ mod tests {
             "MAST_PREVIEW_WIDTH=1440 scripts/ui-preview.sh --screens a > /tmp/wide.log 2>&1\nMAST_PREVIEW_WIDTH=640 scripts/ui-preview.sh --screens a > /tmp/narrow.log 2>&1",
             "cargo test -p mast-engine --lib token_usage -- --test-threads=1 > /tmp/tests.log 2>&1",
             "cargo test > /tmp/a.log 2>&1 && cargo nextest run > /tmp/b.log 2>&1",
+            "cargo test >/tmp/a.log 2>&1",
+            "cargo test\t--lib > /tmp/a.log 2>&1\ncargo test",
             "ps -Ao pid,etime,command | rg 'cargo (build|test)|rustc --crate-name' | cut -c1-260",
+            "ps -ax | rg \"it's [a-z]\"",
         ] {
             assert!(check(script), "{script:?}");
         }
@@ -1074,8 +1147,17 @@ mod tests {
             "cargo test > /tmp/a.log 2>&1 &",
             "cargo test > /tmp/a.log 2>&1 | sh",
             "cargo test < /tmp/a.log",
+            "cargo test 2>&1",
+            "cargo test 1> /tmp/a.log 2>&1",
+            "cargo test &> /tmp/a.log",
+            "cargo test >| /tmp/a.log 2>&1",
+            "cargo test > /tmp/a.log 2>&1 > /tmp/b.log 2>&1",
+            "cargo test\u{a0}> /tmp/a.log 2>&1",
+            "cargo test\u{c}> /tmp/a.log 2>&1",
+            "cargo test '> /tmp/a.log 2>&1",
             "MAST_PREVIEW_WIDTH=600 cargo test",
             "MAST_PREVIEW_OUT=/etc scripts/ui-preview.sh",
+            "MAST_PREVIEW_SERVE=1 scripts/ui-preview.sh",
             "MAST_PREVIEW_WIDTH= scripts/ui-preview.sh",
             "ps -ax | cut -d, -f1",
             "ps -ax | awk '{print $1}'",
@@ -1083,8 +1165,34 @@ mod tests {
         ] {
             assert!(!check(script), "{script:?}");
         }
-        let quoted = parse_command(&json!("rg '> /tmp/a.log 2>&1'")).unwrap();
-        assert_eq!(quoted[0].argv, ["rg", "> /tmp/a.log 2>&1"]);
+        for (script, argv) in [
+            ("rg '> /tmp/a.log 2>&1'", "> /tmp/a.log 2>&1"),
+            ("rg \"> /tmp/a.log 2>&1\"", "> /tmp/a.log 2>&1"),
+        ] {
+            let (segments, logs) = parse_approval_command(&json!(script)).unwrap();
+            assert_eq!(segments[0].argv, ["rg", argv]);
+            assert!(logs.is_empty());
+        }
+        let (segments, logs) = parse_approval_command(&json!(
+            "cargo test > /tmp/a.log 2>&1\ncargo build > /private/tmp/b.log 2>&1"
+        ))
+        .unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].argv, ["cargo", "build"]);
+        assert_eq!(logs, ["/tmp/a.log", "/private/tmp/b.log"]);
+        assert!(parse_approval_command(&json!("cargo test\n > /tmp/a.log 2>&1")).is_none());
+        let dir = tempfile::Builder::new()
+            .prefix("mast-approval-dir")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let name = dir.path().file_name().unwrap().to_str().unwrap();
+        assert!(!check(&format!("cargo test > /tmp/{name} 2>&1")));
+        let file = tempfile::Builder::new()
+            .prefix("mast-approval-log")
+            .tempfile_in("/tmp")
+            .unwrap();
+        let name = file.path().file_name().unwrap().to_str().unwrap();
+        assert!(check(&format!("cargo test > /tmp/{name} 2>&1")));
         #[cfg(unix)]
         {
             let name = format!("mast-approval-link-{}", std::process::id());
@@ -1094,6 +1202,18 @@ mod tests {
             let blocked = !check(&format!("cargo test > /tmp/{name} 2>&1"));
             std::fs::remove_file(&link).unwrap();
             assert!(blocked);
+        }
+    }
+
+    #[test]
+    fn permission_rules_parse_strictly() {
+        for command in [
+            "cargo test > /tmp/a.log 2>&1",
+            "awk 'BEGIN{system(\"x\")}'",
+            "find . -name '*.rs'",
+            "rg '(a|b)'",
+        ] {
+            assert!(parse_command(&json!(command)).is_none(), "{command}");
         }
     }
 

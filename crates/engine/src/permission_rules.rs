@@ -631,6 +631,15 @@ mod tests {
     }
 
     #[test]
+    fn approval_rule_syntax_does_not_widen_allow_rules() {
+        let rules = set(&["Bash(awk:*)", "Bash(find:*)", "Bash(echo:*)"], &[], &[]);
+        let allow = |s: &str| matches!(rules.decide(&cmd(s)), RuleDecision::Allow(_));
+        assert!(!allow("awk 'BEGIN{system(\"x\")}'"));
+        assert!(!allow("find . -name '*.rs'"));
+        assert!(!allow("echo x > /tmp/a.log 2>&1"));
+    }
+
+    #[test]
     fn every_segment_needs_its_own_rule() {
         let rules = set(&["Bash(git log:*)", "Bash(head:*)"], &[], &[]);
         assert_eq!(

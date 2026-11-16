@@ -28,7 +28,13 @@ Space-root details include **Approval rules**. Suggestions start off; enabling
 or creating a rule is a user action. Matching Codex command requests are answered
 and recorded in friction; requests that cannot be matched safely still ask.
 The command test uses Codex and the Space root as its working directory.
-Parsing rejects shell expansion, redirection and unrecognized command families.
+Parsing rejects shell expansion, redirection and unrecognized command families,
+with a few exceptions for the commands agents run. A segment may end with
+`> /tmp/<name> 2>&1`, a log file directly in `/tmp` that is missing or a regular
+file you own. This check is best effort, since the shell opens the file later.
+`scripts/ui-preview.sh` may take a fixed set of `MAST_PREVIEW_*` options with plain values,
+`cut -c<range>` may follow a pipe, and operators inside quotes are literal.
+User permission rules in `~/.mast/settings.json` still reject all of these.
 
 Automatic rule evaluation currently applies only to Codex. The Claude Code
 adapter does not currently surface an equivalent command approval request to
