@@ -2039,6 +2039,12 @@ pub struct Changes {
     local_draft_debounce_task: Option<Task<()>>,
     local_draft_save_ready: bool,
     local_draft_error: Option<String>,
+    review_suggestions: HashMap<String, mast_proto::ReviewSuggestedComment>,
+    suggestion_comments: Vec<ReviewComment>,
+    suggestion_target: Option<String>,
+    dismissed_suggestions: std::collections::HashSet<String>,
+    suggestion_dispositions_target: Option<String>,
+    suggestion_load_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
     review_acknowledged: HashMap<String, mast_proto::DiffReviewState>,
@@ -2307,6 +2313,12 @@ impl Changes {
             local_draft_debounce_task: None,
             local_draft_save_ready: false,
             local_draft_error: None,
+            review_suggestions: HashMap::new(),
+            suggestion_comments: Vec::new(),
+            suggestion_target: None,
+            dismissed_suggestions: std::collections::HashSet::new(),
+            suggestion_dispositions_target: None,
+            suggestion_load_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
             review_acknowledged: HashMap::new(),
@@ -3661,6 +3673,9 @@ impl Changes {
         if let Some(local) = self.review_target.as_ref().and_then(|target| self.local_draft_comments.get(target)) {
             comments.extend(local.iter().filter(|comment| self.draft.as_ref().and_then(|draft| draft.editing_id.as_ref()) != Some(&comment.id)).cloned());
         }
+        if self.suggestion_target.as_ref() == self.review_target.as_ref() {
+            comments.extend(self.suggestion_comments.iter().cloned());
+        }
         comments
     }
 
@@ -4691,6 +4706,7 @@ impl Changes {
                 };
                 let comments = self.comments_for(&file_diff.path, cx);
                 match comments.get(card as usize) {
+                    Some(comment) if self.review_suggestions.contains_key(&comment.id) => self.render_suggestion_card(comment, &theme, cx),
                     Some(comment) if self.is_local_draft(&comment.id) => self.render_local_draft_card(comment, &theme, cx),
                     Some(comment) => crate::comment_ui::render_comment_card(
                         comment,

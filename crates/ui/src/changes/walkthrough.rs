@@ -133,6 +133,7 @@ impl ReviewHost {
                         changes.update(cx, |changes, cx| {
                             changes.walkthrough_target = Some(target);
                             changes.ensure_review_state(cx);
+                            changes.set_review_suggestions(&review.target_key, &review.suggested_comments, cx);
                         });
                         this.view = Some(cx.new(|cx| Walkthrough::new(review, changes, cx)))
                     }
@@ -373,6 +374,7 @@ struct TourReview {
     steps: Vec<ReviewStep>,
     highlights: Vec<mast_proto::ReviewHighlight>,
     questions: Vec<serde_json::Value>,
+    suggested_comments: Vec<mast_proto::ReviewSuggestedComment>,
     head: String,
     target_key: String,
 }
@@ -386,6 +388,8 @@ struct ReviewDocument {
     highlights: Vec<mast_proto::ReviewHighlight>,
     #[serde(default)]
     questions: Vec<serde_json::Value>,
+    #[serde(default, rename = "suggestedComments")]
+    suggested_comments: Vec<mast_proto::ReviewSuggestedComment>,
 }
 
 impl ReviewDocument {
@@ -413,6 +417,7 @@ impl ReviewDocument {
                 steps: self.steps,
                 highlights: self.highlights,
                 questions: self.questions,
+                suggested_comments: self.suggested_comments,
                 head,
                 target_key,
             },
@@ -1232,6 +1237,7 @@ mod tests {
                 steps: sidecar.steps,
                 highlights: sidecar.highlights,
                 questions: sidecar.questions,
+                suggested_comments: sidecar.suggested_comments,
                 head: sidecar.pr.head_sha,
                 target_key: "pr:o/r#1".into(),
             }

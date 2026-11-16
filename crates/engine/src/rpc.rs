@@ -4319,6 +4319,20 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::GET_DISMISSED_REVIEW_SUGGESTIONS | methods::DISMISS_REVIEW_SUGGESTION => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                if method == methods::GET_DISMISSED_REVIEW_SUGGESTIONS {
+                    RpcReply::value(&self.workspace.dismissed_review_suggestions(target))
+                } else {
+                    let id = params.get("id").and_then(serde_json::Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                    RpcReply::value(&self.workspace.dismiss_review_suggestion(target, id)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?)
+                }
+            }
             methods::GET_REVIEW_DRAFTS => {
                 let target = params.get("target").and_then(serde_json::Value::as_str)
                     .filter(|target| !target.trim().is_empty())

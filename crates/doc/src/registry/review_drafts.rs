@@ -7,6 +7,59 @@ fn row_id(target: &str) -> String {
 }
 
 impl RegistryDoc {
+    pub fn dismissed_review_suggestions(&self, target: &str) -> Vec<String> {
+        let Some(row) = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target)) else {
+            return Vec::new();
+        };
+        if row.fields.get("target").and_then(Value::as_str) != Some(target) {
+            return Vec::new();
+        }
+        let mut ids: Vec<_> = row
+            .fields
+            .iter()
+            .filter(|(key, _)| key.starts_with("s:"))
+            .filter_map(|(_, value)| value.as_str().map(str::to_owned))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    pub fn dismiss_review_suggestion(
+        &mut self,
+        target: &str,
+        suggestion: &str,
+    ) -> Result<bool, DocError> {
+        if target.trim().is_empty() || suggestion.trim().is_empty() {
+            return Err(DocError::Schema(
+                "review suggestion needs a target and id".into(),
+            ));
+        }
+        if self
+            .dismissed_review_suggestions(target)
+            .iter()
+            .any(|id| id == suggestion)
+        {
+            return Ok(false);
+        }
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let mut set = fields([("target", json!(target))]);
+        set.insert(
+            format!("s:{}", derive_id(suggestion, "review-suggestion")),
+            json!(suggestion),
+        );
+        let hlc = self.mint_hlc();
+        self.write_ops(vec![RowOp {
+            kind: KIND_REVIEW_DRAFTS.into(),
+            id,
+            op: OpKind::Upsert,
+            set: Some(set),
+            hlc,
+            clocks: None,
+        }])?;
+        Ok(true)
+    }
+
     pub fn review_drafts(&self, target: &str) -> Vec<ReviewDraft> {
         let Some(row) = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target)) else {
             return Vec::new();
@@ -113,6 +166,7 @@ mod tests {
                 hunk_hash: Some("hash".into()),
             },
             line_hash: None,
+            end_line_hash: None,
         };
         assert!(
             registry
@@ -144,9 +198,35 @@ mod tests {
                     hunk_hash: Some("hash".into()),
                 },
                 line_hash: None,
+                end_line_hash: None,
             })
             .collect();
         assert!(registry.put_review_drafts(target, &drafts).unwrap());
         assert_eq!(registry.review_drafts(target), drafts);
+    }
+
+    #[test]
+    fn dismissed_suggestions_survive_draft_updates() {
+        let mut registry = RegistryDoc::new("device");
+        let target = "pr:o/r#1";
+        assert!(
+            registry
+                .dismiss_review_suggestion(target, "suggestion-1")
+                .unwrap()
+        );
+        assert!(
+            !registry
+                .dismiss_review_suggestion(target, "suggestion-1")
+                .unwrap()
+        );
+        assert_eq!(
+            registry.dismissed_review_suggestions(target),
+            vec!["suggestion-1"]
+        );
+        assert!(!registry.put_review_drafts(target, &[]).unwrap());
+        assert_eq!(
+            registry.dismissed_review_suggestions(target),
+            vec!["suggestion-1"]
+        );
     }
 }

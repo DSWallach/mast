@@ -198,6 +198,27 @@ pub struct ReviewSuggestedComment {
     pub suggestion: Option<String>,
 }
 
+impl ReviewSuggestedComment {
+    /// Older sidecars have no id; derive one without requiring the checkout.
+    pub fn stable_id(&self) -> String {
+        self.id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| {
+                let seed = format!(
+                    "{}\n{:?}\n{}\n{}\n{}\n{}",
+                    self.anchor.file,
+                    self.anchor.side,
+                    self.anchor.start_line,
+                    self.anchor.end_line,
+                    self.anchor.hunk_hash.as_deref().unwrap_or_default(),
+                    self.body
+                );
+                crate::derive_id(&seed, "review-suggestion")
+            })
+    }
+}
+
 /// A local review comment, keyed by the review target rather than its head.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +229,8 @@ pub struct ReviewDraft {
     /// Hash of the anchored line, used to locate it within an unchanged hunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line_hash: Option<String>,
     pub body: String,
     pub source: ReviewDraftSource,
     pub created_at: i64,

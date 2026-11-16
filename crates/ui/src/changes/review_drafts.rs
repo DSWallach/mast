@@ -11,7 +11,268 @@ pub(super) struct LocalDraftEdit {
     pub(super) original: Option<ReviewDraft>,
 }
 
+fn suggestion_body(suggestion: &mast_proto::ReviewSuggestedComment) -> String {
+    match suggestion
+        .suggestion
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        Some(block) => format!("{}\n\n```suggestion\n{}\n```", suggestion.body, block),
+        None => suggestion.body.clone(),
+    }
+}
+
 impl Changes {
+    pub(super) fn set_review_suggestions(
+        &mut self,
+        target: &str,
+        suggestions: &[mast_proto::ReviewSuggestedComment],
+        cx: &mut Context<Self>,
+    ) {
+        self.suggestion_target = Some(target.to_owned());
+        self.review_suggestions = suggestions
+            .iter()
+            .map(|suggestion| {
+                (
+                    format!("suggestion:{}", suggestion.stable_id()),
+                    suggestion.clone(),
+                )
+            })
+            .collect();
+        self.rebuild_draft_index(cx);
+    }
+
+    fn load_suggestion_dispositions(&mut self, target: &str, cx: &mut Context<Self>) {
+        if self.suggestion_dispositions_target.as_deref() == Some(target) {
+            return;
+        }
+        self.suggestion_load_task = None;
+        self.suggestion_dispositions_target = None;
+        self.dismissed_suggestions.clear();
+        self.suggestion_comments.clear();
+        let target = target.to_owned();
+        let task = self.state.update(cx, |state, cx| {
+            state.chat_diff_rpc(
+                methods::GET_DISMISSED_REVIEW_SUGGESTIONS,
+                serde_json::json!({"target": target}),
+                cx,
+            )
+        });
+        self.suggestion_load_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|value| {
+                serde_json::from_value::<Vec<String>>(value).map_err(|error| error.to_string())
+            });
+            this.update(cx, |this, cx| {
+                if this.review_target.as_deref() != Some(&target) {
+                    return;
+                }
+                this.suggestion_load_task = None;
+                match result {
+                    Ok(ids) => {
+                        this.dismissed_suggestions = ids.into_iter().collect();
+                        this.suggestion_dispositions_target = Some(target);
+                        this.rebuild_suggestion_comments(cx);
+                    }
+                    Err(error) => {
+                        this.local_draft_error = Some(error);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn rebuild_suggestion_comments(&mut self, cx: &mut Context<Self>) {
+        self.suggestion_comments.clear();
+        if self.suggestion_target != self.review_target
+            || self.suggestion_dispositions_target != self.review_target
+        {
+            self.refresh_thread_rows(cx);
+            return;
+        }
+        let mut suggestions: Vec<_> = self.review_suggestions.iter().collect();
+        suggestions.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, suggestion) in suggestions {
+            if self.dismissed_suggestions.contains(&suggestion.stable_id()) {
+                continue;
+            }
+            if self
+                .draft_anchor_index
+                .line_hash_at(&suggestion.anchor, suggestion.anchor.start_line)
+                .is_none()
+                || self
+                    .draft_anchor_index
+                    .line_hash_at(&suggestion.anchor, suggestion.anchor.end_line)
+                    .is_none()
+            {
+                continue;
+            }
+            let side = match suggestion.anchor.side {
+                ReviewSide::Left => CommentSide::Old,
+                ReviewSide::Right => CommentSide::New,
+            };
+            let mut comment = crate::comments::ReviewComment::new(
+                &suggestion.anchor.file,
+                side,
+                suggestion.anchor.end_line,
+                suggestion_body(suggestion),
+            );
+            comment.id = id.clone();
+            self.suggestion_comments.push(comment);
+        }
+        self.refresh_thread_rows(cx);
+    }
+
+    pub(super) fn render_suggestion_card(
+        &self,
+        comment: &crate::comments::ReviewComment,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let accept_id = comment.id.clone();
+        let edit_id = comment.id.clone();
+        let dismiss_id = comment.id.clone();
+        let button = |id: String, text: &'static str| {
+            div()
+                .id(SharedString::from(id))
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        div()
+            .w_full()
+            .h(px(crate::comments::card_height(&comment.body)))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .px(px(Theme::SPACE_LG))
+            .bg(crate::theme::ink(0.05))
+            .child(
+                div()
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .child("Draft · agent suggestion"),
+                    )
+                    .child(
+                        button(format!("suggestion-accept-{}", comment.id), "Accept").on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.accept_suggestion(&accept_id, false, window, cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        button(format!("suggestion-edit-{}", comment.id), "Edit").on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.accept_suggestion(&edit_id, true, window, cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        button(format!("suggestion-dismiss-{}", comment.id), "Dismiss").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.dismiss_suggestion(&dismiss_id, cx)
+                            }),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_dim)
+                    .child(SharedString::from(comment.body.clone())),
+            )
+            .into_any_element()
+    }
+
+    fn accept_suggestion(
+        &mut self,
+        id: &str,
+        edit: bool,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(suggestion) = self.review_suggestions.get(id).cloned() else {
+            return;
+        };
+        let Some(target) = self.review_target.clone() else {
+            return;
+        };
+        if !self.local_review_drafts.contains_key(&target) {
+            self.local_draft_error = Some("Review drafts are still loading.".into());
+            cx.notify();
+            return;
+        }
+        let Some(first) = self
+            .draft_anchor_index
+            .line_hash_at(&suggestion.anchor, suggestion.anchor.start_line)
+        else {
+            return;
+        };
+        let Some(last) = self
+            .draft_anchor_index
+            .line_hash_at(&suggestion.anchor, suggestion.anchor.end_line)
+        else {
+            return;
+        };
+        let draft = ReviewDraft {
+            id: uuid::Uuid::new_v4().to_string(),
+            target,
+            anchor: suggestion.anchor.clone(),
+            line_hash: Some(first),
+            end_line_hash: Some(last),
+            body: suggestion_body(&suggestion),
+            source: mast_proto::ReviewDraftSource::Agent,
+            created_at: chrono::Utc::now().timestamp_millis(),
+        };
+        let draft_id = draft.id.clone();
+        self.put_local_draft(draft, true, cx);
+        self.dismiss_suggestion(id, cx);
+        self.rebuild_draft_index(cx);
+        if edit {
+            self.edit_comment(&draft_id, window, cx);
+        }
+    }
+
+    fn dismiss_suggestion(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(suggestion) = self.review_suggestions.get(id) else {
+            return;
+        };
+        let Some(target) = self.review_target.clone() else {
+            return;
+        };
+        let stable = suggestion.stable_id();
+        self.dismissed_suggestions.insert(stable.clone());
+        self.rebuild_suggestion_comments(cx);
+        let task = self.state.update(cx, |state, cx| {
+            state.chat_diff_rpc(
+                methods::DISMISS_REVIEW_SUGGESTION,
+                serde_json::json!({"target":target, "id":stable}),
+                cx,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                this.update(cx, |this, cx| {
+                    if this.review_target.as_deref() == Some(&target) {
+                        this.dismissed_suggestions.remove(&stable);
+                        this.local_draft_error = Some(error);
+                        this.rebuild_suggestion_comments(cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
     pub(super) fn is_local_draft(&self, id: &str) -> bool {
         self.local_draft_ids.contains(id)
     }
@@ -103,7 +364,16 @@ impl Changes {
     }
 
     pub(super) fn load_local_drafts(&mut self, target: &str, cx: &mut Context<Self>) {
+        if self
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.local.as_ref())
+            .is_some_and(|edit| edit.draft.target != target)
+        {
+            self.commit_draft(cx);
+        }
         self.local_draft_load_task = None;
+        self.load_suggestion_dispositions(target, cx);
         self.rebuild_draft_index(cx);
         if self.local_review_drafts.contains_key(target) {
             return;
@@ -216,12 +486,16 @@ impl Changes {
             .and_then(|target| self.local_review_drafts.get(target))
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let suggestions: Vec<_> = self.review_suggestions.values().cloned().collect();
         self.draft_anchor_index = self
             .parsed
             .as_ref()
-            .map(|parsed| DraftAnchorIndex::new(&parsed.files, &parsed.hunk_identities, drafts))
+            .map(|parsed| {
+                DraftAnchorIndex::new(&parsed.files, &parsed.hunk_identities, drafts, &suggestions)
+            })
             .unwrap_or_default();
         self.rebuild_draft_comments(cx);
+        self.rebuild_suggestion_comments(cx);
     }
 
     pub(super) fn rebuild_draft_comments(&mut self, cx: &mut Context<Self>) {
@@ -233,7 +507,7 @@ impl Changes {
         self.local_outdated_drafts.clear();
         for draft in self.local_review_drafts.get(&target).into_iter().flatten() {
             self.local_draft_ids.insert(draft.id.clone());
-            let Some(line) = self.draft_anchor_index.resolve(draft) else {
+            let Some((_, line)) = self.draft_anchor_index.resolve(draft) else {
                 self.local_outdated_drafts.push(draft.clone());
                 continue;
             };
@@ -295,6 +569,7 @@ impl Changes {
                             .cloned(),
                     },
                     line_hash: Some(line_hash(path, side, &found.text)),
+                    end_line_hash: None,
                 });
             }
         }
@@ -609,6 +884,7 @@ use std::collections::HashMap;
 pub(super) struct DraftAnchorIndex {
     lines: HashMap<(String, String, CommentSide, String), Vec<u32>>,
     old_paths: HashMap<String, String>,
+    positions: HashMap<(String, String, CommentSide, u32), String>,
 }
 
 fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
@@ -624,16 +900,14 @@ impl DraftAnchorIndex {
         files: &[super::FileDiff],
         identities: &[Vec<String>],
         drafts: &[ReviewDraft],
+        suggestions: &[mast_proto::ReviewSuggestedComment],
     ) -> Self {
         let mut index = Self::default();
         let wanted: std::collections::HashSet<_> = drafts
             .iter()
-            .filter_map(|draft| {
-                Some((
-                    draft.anchor.file.as_str(),
-                    draft.anchor.hunk_hash.as_deref()?,
-                ))
-            })
+            .map(|draft| &draft.anchor)
+            .chain(suggestions.iter().map(|suggestion| &suggestion.anchor))
+            .filter_map(|anchor| Some((anchor.file.as_str(), anchor.hunk_hash.as_deref()?)))
             .collect();
         for (file_ix, file) in files.iter().enumerate() {
             if let Some(old_path) = &file.old_path {
@@ -653,6 +927,10 @@ impl DraftAnchorIndex {
                         (CommentSide::New, line.new_no),
                     ] {
                         if let Some(number) = number {
+                            index.positions.insert(
+                                (file.path.clone(), hash.clone(), side, number),
+                                line_hash(&file.path, side, &line.text),
+                            );
                             index
                                 .lines
                                 .entry((
@@ -671,22 +949,42 @@ impl DraftAnchorIndex {
         index
     }
 
-    pub(super) fn resolve(&self, draft: &ReviewDraft) -> Option<u32> {
-        if draft.anchor.start_line != draft.anchor.end_line {
-            return None;
-        }
+    pub(super) fn line_hash_at(
+        &self,
+        anchor: &mast_proto::ReviewAnchor,
+        line: u32,
+    ) -> Option<String> {
+        let side = match anchor.side {
+            ReviewSide::Left => CommentSide::Old,
+            ReviewSide::Right => CommentSide::New,
+        };
+        self.positions
+            .get(&(anchor.file.clone(), anchor.hunk_hash.clone()?, side, line))
+            .cloned()
+    }
+
+    pub(super) fn resolve(&self, draft: &ReviewDraft) -> Option<(u32, u32)> {
         let side = match draft.anchor.side {
             ReviewSide::Left => CommentSide::Old,
             ReviewSide::Right => CommentSide::New,
         };
-        let key = (
-            draft.anchor.file.clone(),
-            draft.anchor.hunk_hash.clone()?,
-            side,
-            draft.line_hash.clone()?,
-        );
-        let lines = self.lines.get(&key)?;
-        (lines.len() == 1).then_some(lines[0])
+        let hunk = draft.anchor.hunk_hash.clone()?;
+        let find = |hash: &str| {
+            let lines = self.lines.get(&(
+                draft.anchor.file.clone(),
+                hunk.clone(),
+                side,
+                hash.to_owned(),
+            ))?;
+            (lines.len() == 1).then_some(lines[0])
+        };
+        let start = find(draft.line_hash.as_deref()?)?;
+        let end = if draft.anchor.start_line == draft.anchor.end_line {
+            start
+        } else {
+            find(draft.end_line_hash.as_deref()?)?
+        };
+        (start <= end).then_some((start, end))
     }
 }
 
@@ -769,6 +1067,7 @@ mod tests {
                             hunk_hash: Some("h".into()),
                         },
                         line_hash: Some("l".into()),
+                        end_line_hash: None,
                     },
                     false,
                     cx,
@@ -802,10 +1101,11 @@ mod tests {
                 hunk_hash: Some(identities[0][0].clone()),
             },
             line_hash: Some(line_hash("a", CommentSide::New, "new")),
+            end_line_hash: None,
         };
         assert_eq!(
-            DraftAnchorIndex::new(&moved, &identities, &[draft.clone()]).resolve(&draft),
-            Some(10)
+            DraftAnchorIndex::new(&moved, &identities, &[draft.clone()], &[]).resolve(&draft),
+            Some((10, 10))
         );
         let changed = super::super::parse_patch(
             "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -10 +10 @@\n-old\n+different\n",
@@ -814,7 +1114,8 @@ mod tests {
             DraftAnchorIndex::new(
                 &changed,
                 &super::super::hunk_identities(&changed),
-                &[draft.clone()]
+                &[draft.clone()],
+                &[]
             )
             .resolve(&draft),
             None
