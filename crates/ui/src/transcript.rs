@@ -25,6 +25,8 @@
 //! Wheel/touch releases that anchor immediately, including when background
 //! streaming has advanced beyond the last measured frame.
 
+mod code_refs;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -1455,10 +1457,9 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let (text, mentions) = match crate::composer::sent_mention_display(&body) {
-            Some((display, spans)) => (display, spans),
-            None => (body, Vec::new()),
-        };
+        let (text, mentions) = crate::code_ref::project_sent_refs(&body)
+            .or_else(|| crate::composer::sent_mention_display(&body))
+            .unwrap_or_else(|| (body, Vec::new()));
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
@@ -3040,6 +3041,10 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
+    code_ref_inflight: usize,
+    code_ref_generation: u64,
+    code_ref_context: Option<crate::files::client::FilesRequestContext>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3397,6 +3402,10 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            code_ref_resolutions: HashMap::new(),
+            code_ref_inflight: 0,
+            code_ref_generation: 0,
+            code_ref_context: None,
             list,
             rows: Vec::new(),
             last_source: None,
@@ -4546,12 +4555,20 @@ impl Transcript {
             replay,
             self.state.read(cx).transcript_revision,
         );
-        let identity = {
+        let (identity, code_ref_context) = {
             let state = self.state.read(cx);
             let chat = selected.as_deref().and_then(|id| state.chats.iter().find(|chat| chat.id == id));
             let config = chat.and_then(|chat| chat.config.as_ref());
-            (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())))
+            let identity = (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())));
+            let context = chat.and_then(|chat| crate::files::client::FilesRequestContext::for_chat_row(state, chat));
+            (identity, context)
         };
+        if self.code_ref_context != code_ref_context {
+            self.code_ref_context = code_ref_context;
+            self.code_ref_resolutions.clear();
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
+            cx.notify();
+        }
         if self.last_identity.as_ref() != Some(&identity) {
             self.last_identity = Some(identity);
             self.render_cache.borrow_mut().clear();
@@ -4589,6 +4606,8 @@ impl Transcript {
                 self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
+            self.code_ref_resolutions.clear();
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             self.rows.clear();
             self.rows_generation = self.rows_generation.wrapping_add(1);
             self.row_cache.clear();
@@ -5515,6 +5534,8 @@ impl Transcript {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.resolve_code_refs(&mentions, cx);
+        let (text, mentions) = self.project_code_ref_resolutions(&text, &mentions);
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
         let line_height =
@@ -5588,6 +5609,9 @@ impl Transcript {
                 compact,
                 measured_h.clone(),
                 cx.entity_id(),
+                self.link_ui(),
+                self.state.clone(),
+                self.chat_id.clone(),
             ));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
@@ -7447,6 +7471,9 @@ fn user_bubble_text(
     compact: bool,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
+    link_ui: Option<render::LinkUi>,
+    state: Entity<AppState>,
+    chat_id: Option<String>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -7482,8 +7509,10 @@ fn user_bubble_text(
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
+    let border = theme.border;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
+    let hit_mentions = mentions.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
@@ -7493,9 +7522,9 @@ fn user_bubble_text(
                         rect,
                         px(5.0),
                         wash,
-                        px(0.0),
-                        gpui::transparent_black(),
-                        BorderStyle::default(),
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { px(1.0) } else { px(0.0) },
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { border } else { gpui::transparent_black() },
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { BorderStyle::Dashed } else { BorderStyle::default() },
                     ));
                 }
             }
@@ -7523,8 +7552,20 @@ fn user_bubble_text(
     )
     .absolute()
     .size_full();
+    let hit_layout = styled.layout().clone();
     div()
         .relative()
+        .on_mouse_up(gpui::MouseButton::Left, move |event, window, cx| {
+            if !hit_layout.bounds().contains(&event.position) { return; }
+            let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
+            if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
+                if let (Some(reference), Some(chat_id)) = (span.code_ref.clone(), chat_id.clone()) {
+                    code_refs::activate(reference.as_ref().clone(), state.clone(), chat_id, link_ui.clone(), window, cx);
+                } else {
+                    render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
+                }
+            }
+        })
         .child(underlay)
         .child(styled)
         .into_any_element()

@@ -190,6 +190,7 @@ pub fn render(
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
+                "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
                 "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),

@@ -33,6 +33,7 @@ use mast_rpc::{RpcError, methods};
 
 use crate::appshots::{self, CapturedAppshot};
 
+mod code_ref_chips;
 pub(crate) mod instruction_reset;
 pub(crate) mod skill_completion;
 pub(crate) mod skill_files;
@@ -1357,6 +1358,9 @@ pub struct SentMentionSpan {
     /// Full workspace-relative path (labels can be shortened to basenames).
     pub path: SharedString,
     pub is_dir: bool,
+    pub code_ref: Option<std::sync::Arc<crate::code_ref::StagedCodeRef>>,
+    pub resolution_key: Option<SharedString>,
+    pub resolution: Option<crate::code_ref::Resolution>,
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1383,6 +1387,9 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
                 if link.is_dir { "/" } else { "" }
             )),
             is_dir: link.is_dir,
+            code_ref: None,
+            resolution_key: None,
+            resolution: None,
         })
         .collect();
     Some((projection.display, spans))
@@ -4378,6 +4385,8 @@ struct ComposerSlice {
     devices: Vec<(mast_proto::Device, bool)>,
     queue: Vec<mast_doc::QueuedMessage>,
     comments: Vec<crate::comments::ReviewComment>,
+    code_refs: Vec<String>,
+    code_ref_pending: bool,
     comment_flush_pending: bool,
     delivery_degraded: bool,
     connectivity: mast_proto::Connectivity,
@@ -4403,6 +4412,8 @@ impl ComposerSlice {
                 .collect(),
             queue: state.queue.clone(),
             comments: state.review_comments(key).to_vec(),
+            code_refs: state.code_refs(key).iter().map(|reference| reference.id.clone()).collect(),
+            code_ref_pending: state.code_ref_load_pending(key),
             comment_flush_pending: state.review_comment_flush_pending(key),
             delivery_degraded: selected.is_some_and(|id| state.chat_delivery_degraded(id)),
             connectivity: state.connectivity.clone(),
@@ -4427,6 +4438,7 @@ struct FailedSend {
     appshot_ids: Vec<String>,
     skills: Vec<String>,
     comments: Vec<crate::comments::ReviewComment>,
+    code_refs: Vec<crate::code_ref::StagedCodeRef>,
 }
 
 pub struct Composer {
@@ -5212,6 +5224,7 @@ impl Composer {
                 input.insert_dropped_mention(reference, metadata.is_dir(), cx)
             });
             if inserted {
+                if !metadata.is_dir() && relative.is_some() { self.stage_workspace_file(reference, cx); }
                 self.reset_mention(None, cx);
                 self.reset_slash(None, cx);
                 self.focus_pending = true;
@@ -5241,6 +5254,7 @@ impl Composer {
             input.insert_dropped_mention(path, is_directory, cx)
         });
         if inserted {
+            if !is_directory { self.stage_workspace_file(path, cx); }
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
             let focus = self.input.read(cx).focus_handle.clone();
@@ -5873,6 +5887,7 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.replace_mention(token.range, &path, is_dir, cx)
         });
+        if !is_dir { self.stage_workspace_file(&path, cx); }
         self.reset_mention(None, cx);
         cx.notify();
     }
@@ -6683,7 +6698,7 @@ impl Composer {
             return true;
         }
         let state = self.state.read(cx);
-        if state.review_comment_flush_pending(&self.current_key) {
+        if state.review_comment_flush_pending(&self.current_key) || state.code_ref_load_pending(&self.current_key) {
             return true;
         }
         if state.selected_chat.is_some() {
@@ -6703,7 +6718,8 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count()
+                + usize::from(self.state.read(cx).code_ref_load_pending(&self.current_key)),
         );
         send_button_mode(self.run_live(cx), has_text)
     }
@@ -6725,7 +6741,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -6752,7 +6768,7 @@ impl Composer {
         let has_content = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
@@ -6773,6 +6789,7 @@ impl Composer {
             attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
             appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
             skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
+            code_refs: self.state.read(cx).code_refs(&self.current_key).to_vec(),
         };
         self.failed_send = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -6886,9 +6903,19 @@ impl Composer {
             taken
         });
         let typed = text.clone();
+        let mentioned_files: HashSet<_> = file_mention_links(&typed).into_iter().filter(|link| !link.is_dir).map(|link| link.path).collect();
+        let code_refs = self.state.update(cx, |state, cx| {
+            let mut seen_files = HashSet::new();
+            let references = state.take_code_refs(&key).into_iter().filter(|reference| {
+                reference.reference.kind != mast_proto::CodeRefKind::File || (mentioned_files.contains(&reference.reference.location.path) && seen_files.insert(reference.reference.location.path.clone()))
+            }).collect::<Vec<_>>();
+            cx.notify();
+            references
+        });
         // Visible preamble ahead of the user's words (never hidden prompt
         // injection): the transcript, queue row and Run prompt all carry it.
         let text = with_skill_preamble(&staged_skills, &text);
+        let text = crate::code_ref::with_code_refs(&text, &code_refs);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         self.instruction_reset.remember_send(&message_id, &typed);
@@ -7619,6 +7646,7 @@ impl Composer {
                         for comment in &comments {
                             s.add_review_comment(&restore_key, comment.clone());
                         }
+                        for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
                         cx.notify();
                     });
                     composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
@@ -8288,6 +8316,7 @@ impl Render for Composer {
                 && self.staged_appshots().iter().map(|item| &item.id).eq(failed.appshot_ids.iter())
                 && self.staged_skills() == failed.skills
                 && self.staged_comments(cx) == failed.comments
+                && self.state.read(cx).code_refs(&self.current_key) == failed.code_refs
         });
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
@@ -8424,7 +8453,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-                self.staged_comments(cx).len(),
+                self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
@@ -8488,7 +8517,8 @@ impl Render for Composer {
         // The attached-skills row shares the comment chip's strip geometry;
         // both fold into one height term so every sizing site below agrees.
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len())
-            + comment_strip_height(self.staged_skills().len());
+            + comment_strip_height(self.staged_skills().len())
+            + comment_strip_height(self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count());
         let base_height = if self.dock_frame.is_some() {
             dock_height(dock_amount)
         } else if expanded {
@@ -8634,6 +8664,7 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
+        let code_refs = self.render_code_refs(&theme, cx);
         let skill_chips = self.render_skill_chips(&theme, cx);
 
         // A translucent cool silver/slate edge sits more naturally on frost
@@ -8746,7 +8777,8 @@ impl Render for Composer {
                 _ => 0.0,
             }
         };
-        let strips = comments_chip.into_iter().map(|el| el.into_any_element())
+        let strips = code_refs.into_iter().map(|el| el.into_any_element())
+            .chain(comments_chip.into_iter().map(|el| el.into_any_element()))
             .chain(skill_chips.into_iter().map(|el| el.into_any_element()))
             .chain(appshot_strip)
             .chain(strip.into_iter().map(|el| el.into_any_element()))

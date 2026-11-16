@@ -60,6 +60,7 @@ use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use mast_syntax::LanguageId as Lang;
 
+mod code_ref;
 mod file_list;
 mod explanation;
 mod ref_picker;
@@ -4392,7 +4393,18 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
+                // Latest Turn's deleted-only preimage is a tree snapshot, which CodeRef cannot yet name.
+                // Expanded submodule hunks need their own repository revision, not the parent's SHA.
+                let nested_repository = origins.get(file as usize).is_some_and(|origin| origin.repository_path.is_some());
+                let show_reference = !nested_repository && !(self.scope == DiffScope::LatestTurn && code_ref::deleted_only_hunk(&hunk_diff.header));
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
+                    .when(show_reference, |row| row.child(
+                        div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
+                            .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
+                            .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
+                            }))))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
