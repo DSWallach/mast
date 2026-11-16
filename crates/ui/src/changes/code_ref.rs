@@ -1,6 +1,17 @@
 //! Hunk reference staging.
 use super::*;
 
+/// A zero new-line count identifies deleted-only hunks without scanning their lines.
+pub(super) fn deleted_only_hunk(header: &str) -> bool {
+    header
+        .split_whitespace()
+        .nth(2)
+        .and_then(|part| part.strip_prefix('+'))
+        .and_then(|part| part.split_once(','))
+        .and_then(|(_, count)| count.parse::<u32>().ok())
+        == Some(0)
+}
+
 pub(super) fn hunk_selection(
     file: &FileDiff,
     hunk: &Hunk,
@@ -36,6 +47,26 @@ pub(super) fn hunk_selection(
 }
 
 impl Changes {
+    pub(super) fn add_indexed_hunk_to_chat(
+        &mut self,
+        file: usize,
+        hunk: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let reference = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(file))
+            .and_then(|file| {
+                file.hunks
+                    .get(hunk)
+                    .and_then(|hunk| hunk_selection(file, hunk))
+            });
+        if let Some((path, range, snippet, old_side)) = reference {
+            self.add_hunk_to_chat(path, range, snippet, old_side, cx);
+        }
+    }
+
     fn code_ref_context(
         &self,
         state: &AppState,
@@ -189,6 +220,13 @@ impl Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_only_detection_uses_hunk_header() {
+        assert!(deleted_only_hunk("@@ -1,2 +0,0 @@"));
+        assert!(!deleted_only_hunk("@@ -1,2 +1,2 @@"));
+        assert!(!deleted_only_hunk("@@ -1 +1 @@"));
+    }
 
     #[test]
     fn hunk_anchors_new_lines_and_deleted_file_preimage() {

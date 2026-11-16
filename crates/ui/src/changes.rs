@@ -4393,17 +4393,15 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
-                let hunk_reference = code_ref::hunk_selection(file_diff, hunk_diff).filter(|(_, _, _, old_side)| {
-                    // Latest Turn's deleted-only preimage is a tree snapshot, which CodeRef cannot yet name.
-                    !(self.scope == DiffScope::LatestTurn && *old_side)
-                });
+                // Latest Turn's deleted-only preimage is a tree snapshot, which CodeRef cannot yet name.
+                let show_reference = !(self.scope == DiffScope::LatestTurn && code_ref::deleted_only_hunk(&hunk_diff.header));
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
-                    .when_some(hunk_reference, |row, (path, range, snippet, old_side)| row.child(
+                    .when(show_reference, |row| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
                             .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_hunk_to_chat(path.clone(), range, snippet.clone(), old_side, cx);
+                                this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
