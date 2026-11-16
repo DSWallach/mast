@@ -3748,6 +3748,15 @@ mod tests {
     }
 
     #[test]
+    fn add_code_shortcut_default_and_rebinding_persist() {
+        let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(keymap.get(ShortcutId::AddCodeToChat), "mod-shift-l");
+        keymap.set(ShortcutId::AddCodeToChat, "mod-alt-l".into());
+        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::AddCodeToChat), "mod-alt-l");
+    }
+
+    #[test]
     fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
         let mut keymap = KeymapConfig::default();
         assert_eq!(keymap.get(ShortcutId::QuickOpen), "mod-o");
