@@ -1300,6 +1300,14 @@ mod navigation_tests {
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 0 }));
             changes.diff_key_down(&key("v"), window, cx);
             assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks.len(), 1);
+            let marked = changes.review_state.as_ref().unwrap().viewed_hunks.clone();
+            let file = &changes.parsed.as_ref().unwrap().files[0];
+            let source = "new\n2\n3\n4\n5\n6\n7\n8\n9\nafter\n";
+            let gaps = super::super::expand_context::gaps(file, source).unwrap();
+            let shown = gaps.iter().map(|gap| gap.lines.len()).collect();
+            changes.expanded_context.entries.insert(("test".into(), 0), super::super::expand_context::Entry::ready(gaps, shown));
+            changes.reflatten(cx);
+            assert_eq!(changes.review_state.as_ref().unwrap().viewed_hunks, marked);
             changes.diff_key_down(&key("j"), window, cx);
             assert!(matches!(changes.rows[changes.list.logical_scroll_top().item_ix], DiffRow::HunkHeader { file: 0, hunk: 1 }));
             changes.diff_key_down(&key("shift-j"), window, cx);
