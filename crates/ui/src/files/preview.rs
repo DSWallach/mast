@@ -2588,13 +2588,7 @@ impl FilesSurface {
                         at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
                     }, snippet,
                 };
-                Some(crate::components::code_ref::selection_action_bar(theme, top, left)
-                    .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.stage_reference(reference.clone(), cx);
-                        })))
-                    .child(div().id("copy-selection-ref").cursor_pointer().child("Copy ref")
-                        .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(location.clone())))))
+                Some(self.selection_actions(reference, location, theme, top, left, cx))
             });
             return div()
                 .id("files-editor-body")

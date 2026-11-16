@@ -27,6 +27,36 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
+    pub(super) fn selection_actions(
+        &self,
+        reference: crate::code_ref::StagedCodeRef,
+        location: String,
+        theme: &crate::theme::Theme,
+        top: gpui::Pixels,
+        left: gpui::Pixels,
+        cx: &gpui::Context<Self>,
+    ) -> gpui::Div {
+        crate::components::code_ref::selection_action_bar(theme, top, left)
+            .child(
+                div()
+                    .id("add-selection-to-chat")
+                    .cursor_pointer()
+                    .child("Add to chat")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.stage_reference(reference.clone(), cx)
+                    })),
+            )
+            .child(
+                div()
+                    .id("copy-selection-ref")
+                    .cursor_pointer()
+                    .child("Copy ref")
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(location.clone()))
+                    }),
+            )
+    }
+
     pub(super) fn stage_reference(
         &mut self,
         mut reference: crate::code_ref::StagedCodeRef,
@@ -56,7 +86,8 @@ impl super::FilesSurface {
                 }
                 if let Some(identity) = identity {
                     reference.reference.location.repo_id = identity.repo_id;
-                    reference.reference.location.worktree_id = Some(identity.checkout_id).filter(|id| !id.is_empty());
+                    reference.reference.location.worktree_id =
+                        Some(identity.checkout_id).filter(|id| !id.is_empty());
                     this.state.update(cx, |state, cx| {
                         state.add_code_ref(&key, reference);
                         cx.notify();
