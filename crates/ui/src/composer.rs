@@ -1344,7 +1344,8 @@ pub struct SentMentionSpan {
     /// Full workspace-relative path (labels can be shortened to basenames).
     pub path: SharedString,
     pub is_dir: bool,
-    pub code_ref: Option<crate::code_ref::StagedCodeRef>,
+    pub code_ref: Option<Arc<crate::code_ref::StagedCodeRef>>,
+    pub resolution_key: Option<SharedString>,
     pub resolution: Option<crate::code_ref::Resolution>,
 }
 
@@ -1373,6 +1374,7 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
             )),
             is_dir: link.is_dir,
             code_ref: None,
+            resolution_key: None,
             resolution: None,
         })
         .collect();

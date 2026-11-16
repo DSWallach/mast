@@ -3041,7 +3041,9 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
-    code_ref_resolutions: HashMap<String, (Instant, Option<crate::code_ref::Resolution>)>,
+    code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
+    code_ref_inflight: usize,
+    code_ref_generation: u64,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3400,6 +3402,8 @@ impl Transcript {
         let mut this = Self {
             state,
             code_ref_resolutions: HashMap::new(),
+            code_ref_inflight: 0,
+            code_ref_generation: 0,
             list,
             rows: Vec::new(),
             last_source: None,
@@ -4592,6 +4596,8 @@ impl Transcript {
                 self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
+            self.code_ref_resolutions.clear();
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             self.rows.clear();
             self.rows_generation = self.rows_generation.wrapping_add(1);
             self.row_cache.clear();
@@ -7544,7 +7550,7 @@ fn user_bubble_text(
             let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
             if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
                 if let (Some(reference), Some(chat_id)) = (span.code_ref.clone(), chat_id.clone()) {
-                    code_refs::activate(reference, state.clone(), chat_id, link_ui.clone(), window, cx);
+                    code_refs::activate(reference.as_ref().clone(), state.clone(), chat_id, link_ui.clone(), window, cx);
                 } else {
                     render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
                 }

@@ -33,6 +33,12 @@ impl StagedCodeRef {
     }
 }
 
+/// Stable cache key computed during message projection, outside the render path.
+pub fn resolution_key(reference: &StagedCodeRef) -> String {
+    let value = serde_json::to_string(&reference.reference).unwrap_or_default();
+    content_hash(&format!("{value}\n{}", reference.snippet))
+}
+
 /// Append a readable snapshot and structured reference metadata to a prompt.
 pub fn with_code_refs(text: &str, references: &[StagedCodeRef]) -> String {
     use std::fmt::Write as _;
@@ -107,7 +113,8 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             if let Some(span) = spans.iter_mut().find(|span| {
                 span.path.as_ref() == staged.reference.location.path && span.code_ref.is_none()
             }) {
-                span.code_ref = Some(staged);
+                span.resolution_key = Some(resolution_key(&staged).into());
+                span.code_ref = Some(std::sync::Arc::new(staged));
                 remaining = rest;
                 continue;
             }
@@ -126,7 +133,8 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             range: start..end,
             path: path.into(),
             is_dir: false,
-            code_ref: Some(staged),
+            resolution_key: Some(resolution_key(&staged).into()),
+            code_ref: Some(std::sync::Arc::new(staged)),
             resolution: None,
         });
         remaining = rest;

@@ -1,10 +1,10 @@
 //! Resolution of references in sent user messages.
 use super::*;
 
-fn key(reference: &crate::code_ref::StagedCodeRef) -> String {
-    let value = serde_json::to_string(&reference.reference).unwrap_or_default();
-    crate::code_ref::content_hash(&format!("{value}\n{}", reference.snippet))
-}
+// Limit background reads and memory retained by one transcript. A click always
+// rechecks its own reference, including ones outside this cache.
+const MAX_RESOLUTIONS: usize = 256;
+const MAX_INFLIGHT: usize = 4;
 
 impl Transcript {
     pub(super) fn resolve_code_refs(
@@ -12,6 +12,23 @@ impl Transcript {
         spans: &[crate::composer::SentMentionSpan],
         cx: &mut Context<Self>,
     ) {
+        let capacity = MAX_INFLIGHT.saturating_sub(self.code_ref_inflight);
+        if capacity == 0 || self.code_ref_resolutions.len() >= MAX_RESOLUTIONS {
+            return;
+        }
+        let candidates: Vec<_> = spans
+            .iter()
+            .filter_map(|span| {
+                let id = span.resolution_key.as_ref()?;
+                let reference = span.code_ref.as_ref()?;
+                (!self.code_ref_resolutions.contains_key(id.as_ref()))
+                    .then(|| (id.to_string(), reference.clone()))
+            })
+            .take(capacity.min(MAX_RESOLUTIONS - self.code_ref_resolutions.len()))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
         let Some(chat_id) = self.chat_id.as_deref() else {
             return;
         };
@@ -23,25 +40,14 @@ impl Transcript {
         let Some(engine) = state.engine().cloned() else {
             return;
         };
-        for span in spans {
-            let Some(reference) = span.code_ref.clone() else {
-                continue;
-            };
-            let range = reference.reference.range;
-            let id = key(&reference);
-            if self
-                .code_ref_resolutions
-                .get(&id)
-                .is_some_and(|(checked, _)| checked.elapsed() < Duration::from_secs(5))
-            {
+        let generation = self.code_ref_generation;
+        for (id, reference) in candidates {
+            if self.code_ref_resolutions.contains_key(&id) {
                 continue;
             }
-            let previous = self
-                .code_ref_resolutions
-                .get(&id)
-                .and_then(|(_, resolution)| *resolution);
-            self.code_ref_resolutions
-                .insert(id.clone(), (Instant::now(), previous));
+            self.code_ref_resolutions.insert(id.clone(), None);
+            self.code_ref_inflight += 1;
+            let range = reference.reference.range;
             let request = mast_proto::ReadWorkspaceFileRequest {
                 target: context.target.clone(),
                 path: reference.reference.location.path.clone(),
@@ -77,8 +83,10 @@ impl Transcript {
                     }
                 };
                 let _ = this.update(cx, |this, cx| {
-                    this.code_ref_resolutions
-                        .insert(id, (Instant::now(), resolution));
+                    this.code_ref_inflight = this.code_ref_inflight.saturating_sub(1);
+                    if this.code_ref_generation == generation {
+                        this.code_ref_resolutions.insert(id, resolution);
+                    }
                     cx.notify();
                 });
             })
@@ -98,7 +106,7 @@ impl Transcript {
 fn project_resolutions(
     text: &str,
     spans: &[crate::composer::SentMentionSpan],
-    resolutions: &HashMap<String, (Instant, Option<crate::code_ref::Resolution>)>,
+    resolutions: &HashMap<String, Option<crate::code_ref::Resolution>>,
 ) -> (SharedString, Arc<Vec<crate::composer::SentMentionSpan>>) {
     let mut display = String::new();
     let mut projected = Vec::new();
@@ -107,22 +115,24 @@ fn project_resolutions(
         display.push_str(&text[offset..span.range.start]);
         let start = display.len();
         let mut span = span.clone();
-        span.resolution = span.code_ref.as_ref().and_then(|reference| {
-            resolutions
-                .get(&key(reference))
-                .and_then(|(_, resolution)| *resolution)
-        });
+        span.resolution = span
+            .resolution_key
+            .as_ref()
+            .and_then(|id| resolutions.get(id.as_ref()).copied().flatten());
         match span.resolution {
             Some(crate::code_ref::Resolution::Moved(range)) => {
-                let mut reference = span.code_ref.clone().unwrap();
-                reference.reference.range = Some(range);
-                display.push_str(&format!("{} moved", reference.label()));
-                span.path = if reference.reference.range.is_some() {
-                    format!("{}:{}", reference.reference.location.path, range.start_line)
-                } else {
-                    reference.reference.location.path.clone()
-                }
-                .into();
+                let reference = span.code_ref.as_ref().unwrap();
+                let path = &reference.reference.location.path;
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let label = match reference.reference.kind {
+                    mast_proto::CodeRefKind::Hunk => format!("Hunk · {name}:{}", range.start_line),
+                    _ if range.start_line == range.end_line => {
+                        format!("{name}:{}", range.start_line)
+                    }
+                    _ => format!("{name}:{}-{}", range.start_line, range.end_line),
+                };
+                display.push_str(&format!("{label} moved"));
+                span.path = format!("{}:{}", path, range.start_line).into();
             }
             Some(crate::code_ref::Resolution::Changed) => {
                 display.push_str(&text[span.range.clone()]);
@@ -267,28 +277,26 @@ mod tests {
             range: 8..19,
             path: "src/file.rs:2".into(),
             is_dir: false,
-            code_ref: Some(reference.clone()),
+            code_ref: Some(Arc::new(reference.clone())),
+            resolution_key: Some(crate::code_ref::resolution_key(&reference).into()),
             resolution: None,
         };
         let mut resolutions = HashMap::new();
         resolutions.insert(
-            key(&reference),
-            (
-                Instant::now(),
-                Some(crate::code_ref::Resolution::Moved(
-                    mast_proto::CodeRefRange {
-                        start_line: 4,
-                        end_line: 5,
-                    },
-                )),
-            ),
+            crate::code_ref::resolution_key(&reference),
+            Some(crate::code_ref::Resolution::Moved(
+                mast_proto::CodeRefRange {
+                    start_line: 4,
+                    end_line: 5,
+                },
+            )),
         );
         let (display, spans) = project_resolutions(text, &[span.clone()], &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:4-5 moved");
         assert_eq!(spans[0].path.as_ref(), "src/file.rs:4");
         resolutions.insert(
-            key(&reference),
-            (Instant::now(), Some(crate::code_ref::Resolution::Changed)),
+            crate::code_ref::resolution_key(&reference),
+            Some(crate::code_ref::Resolution::Changed),
         );
         let (display, spans) = project_resolutions(text, &[span], &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:2-3 changed");
@@ -307,8 +315,8 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) {
         self.code_ref_resolutions.insert(
-            key(reference),
-            (Instant::now(), Some(crate::code_ref::Resolution::Changed)),
+            crate::code_ref::resolution_key(reference),
+            Some(crate::code_ref::Resolution::Changed),
         );
         cx.notify();
     }
