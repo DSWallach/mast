@@ -43,13 +43,14 @@ impl super::FilesSurface {
             state.begin_code_ref_load(&key);
             cx.notify();
         });
+        let state_handle = self.state.clone();
         cx.spawn(async move |this, cx| {
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
+            let _ = state_handle.update(cx, |state, cx| {
+                state.end_code_ref_load(&key);
+                cx.notify();
+            });
             let _ = this.update(cx, |this, cx| {
-                this.state.update(cx, |state, cx| {
-                    state.end_code_ref_load(&key);
-                    cx.notify();
-                });
                 if this.request_context.as_ref() != Some(&context) {
                     return;
                 }
