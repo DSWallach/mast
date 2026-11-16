@@ -531,7 +531,13 @@ pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) 
 /// The shortcut reference card: Outline keys (Navigate, Edit, Restructure)
 /// beside the Work Outline commands, every binding read from the live
 /// keymap. Read-only; Esc or Close dismisses it.
-fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) -> AnyElement {
+fn shortcuts_card(
+    theme: &Theme,
+    viewport: gpui::Size<gpui::Pixels>,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let width = (f32::from(viewport.width) - 32.0).clamp(0.0, 600.0);
+    let stacked = width < 560.0;
     let keymap = crate::settings::current(cx).keymap;
     let groups = crate::work_outline::hints::shortcut_reference(&keymap);
     let group_el = |group: &crate::work_outline::hints::ShortcutGroup| {
@@ -540,6 +546,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(1.0))
             .child(
                 div()
@@ -552,6 +559,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
             .children(group.rows.iter().map(|row| {
                 div()
                     .h(px(20.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -560,19 +568,22 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                     .text_color(theme.text)
                     .child(div().min_w_0().truncate().child(row.label))
                     .when_some(row.keys.clone(), |el, keys| {
-                        el.child(popover::kbd_hint(theme, &keys))
+                        el.child(popover::kbd_hint(theme, &keys).flex_none())
                     })
             }))
     };
     let (outline_groups, command_groups) = groups.split_at(3);
     popover::dialog_card(theme)
-        .w(px(600.0))
-        .max_h(px(viewport_height * 0.7))
+        .w(px(width))
+        .h(px(f32::from(viewport.height) * 0.7))
+        .overflow_hidden()
         .debug_selector(|| "work-outline-shortcuts".into())
-        .child(popover::dialog_title(theme, "Outline shortcuts"))
+        .child(popover::dialog_title(theme, "Outline shortcuts").flex_none())
         .child(
             div()
                 .id("work-outline-shortcuts-scroll")
+                .debug_selector(|| "work-outline-shortcuts-scroll".into())
+                .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .flex()
@@ -581,10 +592,13 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                     div()
                         .mt(px(12.0))
                         .flex()
+                        .flex_none()
+                        .when(stacked, |el| el.flex_col())
                         .gap(px(24.0))
                         .child(
                             div()
                                 .flex_1()
+                                .when(stacked, |el| el.flex_none())
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
@@ -594,6 +608,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                         .child(
                             div()
                                 .flex_1()
+                                .when(stacked, |el| el.flex_none())
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
@@ -601,20 +616,24 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                                 .children(command_groups.iter().map(group_el)),
                         ),
                 )
-                .child(icon_legend(theme)),
+                .child(icon_legend(theme, stacked)),
         )
         .child(
             div()
                 .mt(px(14.0))
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .child(crate::components::shell_parts::shortcuts_footer(
-                    theme, &keymap,
-                ))
+                .child(
+                    crate::components::shell_parts::shortcuts_footer(theme, &keymap)
+                        .flex_1()
+                        .min_w_0(),
+                )
                 .child(
                     popover::btn_ghost(theme, "Close", "work-outline-shortcuts-close")
+                        .flex_none()
                         .id("work-outline-shortcuts-close")
                         .debug_selector(|| "work-outline-shortcuts-close".into())
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -626,7 +645,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
 }
 
 /// The icon legend of PR and Linear rows (two columns under the shortcuts).
-fn icon_legend(theme: &Theme) -> AnyElement {
+fn icon_legend(theme: &Theme, stacked: bool) -> AnyElement {
     use crate::github::row_icons::{self, Mark};
     let rows: Vec<_> = row_icons::legend_rows();
     let half = rows.len().div_ceil(2);
@@ -651,6 +670,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
         };
         div()
             .h(px(20.0))
+            .flex_none()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -670,6 +690,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
     let column = |rows: &[row_icons::LegendRow]| {
         div()
             .flex_1()
+            .when(stacked, |el| el.flex_none())
             .min_w_0()
             .flex()
             .flex_col()
@@ -677,6 +698,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
     };
     div()
         .debug_selector(|| "work-outline-shortcuts-icons".into())
+        .flex_none()
         .mt(px(12.0))
         .flex()
         .flex_col()
@@ -692,6 +714,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
         .child(
             div()
                 .flex()
+                .when(stacked, |el| el.flex_col())
                 .gap(px(24.0))
                 .child(column(&rows[..half]))
                 .child(column(&rows[half..])),
@@ -1292,7 +1315,7 @@ impl Shell {
             WorkOutlineModal::HandOff(dialog) => {
                 super::hand_off_ui::hand_off_card(dialog, &theme, cx)
             }
-            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, f32::from(viewport.height), cx),
+            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, viewport, cx),
             WorkOutlineModal::Confirm(dialog) => {
                 let accept = if dialog.destructive {
                     popover::btn_danger(&theme, &dialog.confirm_label)
@@ -2026,6 +2049,28 @@ mod tests {
         shell.read_with(cx, |shell, _| {
             assert!(matches!(shell.route, Route::PrReviewChats))
         });
+    }
+
+    #[gpui::test]
+    fn shortcut_popup_keeps_scroll_content_and_close_inside_small_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        shell.update(cx, |shell, cx| shell.open_outline_shortcuts(cx));
+        for (width, height) in [(360.0, 420.0), (600.0, 600.0), (1200.0, 900.0)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            redraw(cx);
+            let card = cx.debug_bounds("work-outline-shortcuts").unwrap();
+            let scroll = cx.debug_bounds("work-outline-shortcuts-scroll").unwrap();
+            let close = cx.debug_bounds("work-outline-shortcuts-close").unwrap();
+            assert!(card.left() >= px(0.0) && card.right() <= px(width));
+            assert!(card.top() >= px(0.0) && card.bottom() <= px(height));
+            assert!(scroll.top() >= card.top() && scroll.bottom() <= close.top());
+            assert!(close.left() >= card.left() && close.right() <= card.right());
+            assert!(close.top() >= card.top() && close.bottom() <= card.bottom());
+            assert!(scroll.size.height > px(0.0));
+        }
     }
 
     #[gpui::test]

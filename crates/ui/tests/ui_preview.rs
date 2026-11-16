@@ -103,6 +103,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let all_screens = [
         "chat",
         "overview-column",
+        "outline-shortcuts",
         "overview",
         "linear",
         "linear-settings",

@@ -335,6 +335,14 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shortcut_button_matches_other_outline_toolbar_controls(cx: &mut TestAppContext) {
+        let (_dir, _shell, vcx) = setup(cx);
+        let shortcut = vcx.debug_bounds("outline-shortcuts").unwrap();
+        let new_item = vcx.debug_bounds("outline-new-item").unwrap();
+        assert!((f32::from(shortcut.size.height) - f32::from(new_item.size.height)).abs() < 0.5);
+    }
+
+    #[gpui::test]
     fn pinned_collections_have_height_beside_the_outline(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {

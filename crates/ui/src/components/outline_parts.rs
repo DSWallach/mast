@@ -316,28 +316,9 @@ pub fn outline_toolbar_button(
 
 /// Keyboard shortcut action in the outline toolbar.
 pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
-    let scale = super::layout_spacing(theme);
-    let button = div()
-        .id("outline-shortcuts")
+    outline_toolbar_button("outline-shortcuts", "?".into(), false, theme)
         .debug_selector(|| "outline-shortcuts".into())
         .aria_label("Keyboard shortcuts")
-        .flex()
-        .items_center()
-        .px(px(6.0 * scale))
-        .py(px(4.0 * scale))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
-        .cursor_pointer()
-        .bg(theme.element_hover.opacity(0.5))
-        .text_color(theme.text_muted)
-        .hover(|el| el.text_color(theme.text));
-    super::toolbar_control(
-        crate::surface_chrome::segmented_key(button, theme, false),
-        theme,
-        false,
-    )
-    .when(super::is_horizon(theme), |el| el.rounded_full())
-    .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-    .child("?")
 }
 
 /// Container for descendant status totals.

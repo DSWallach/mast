@@ -16450,6 +16450,11 @@ impl Shell {
             .update(cx, |composer, cx| composer.fixture_type(text, cx));
     }
 
+    pub fn fixture_snapshot_outline_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.open_overview(cx);
+        self.open_outline_shortcuts(cx);
+    }
+
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
     }

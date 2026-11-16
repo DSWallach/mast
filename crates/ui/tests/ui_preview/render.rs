@@ -184,6 +184,11 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
+                "outline-shortcuts" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| shell.fixture_snapshot_outline_shortcuts(cx));
+                    shell.into()
+                }
                 "overview-column" => {
                     let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
                     shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
