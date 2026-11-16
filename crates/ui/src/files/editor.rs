@@ -259,4 +259,41 @@ mod lifetime_tests {
             )
         });
     }
+
+    #[gpui::test]
+    fn context_menu_opens_while_editor_is_being_updated(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "test".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let (surface, editor) = window
+            .update(cx, |_, window, cx| {
+                let theme = Theme::of(cx).clone();
+                let editor = new_file_editor("selected text", "test.rs", false, &theme, window, cx);
+                (cx.entity(), editor)
+            })
+            .unwrap();
+
+        // The input runs its context-menu callback while it is still leased.
+        cx.update(|cx| {
+            editor.update(cx, |_, cx| {
+                surface.update(cx, |surface, cx| {
+                    surface.open_editor_context_menu(
+                        editor.clone(),
+                        EditorMenuAvailability::new(
+                            InputContextMenuCapabilities::new().selection(true),
+                            false,
+                        ),
+                        gpui::point(gpui::px(0.), gpui::px(0.)),
+                        cx,
+                    );
+                })
+            })
+        });
+        cx.update(|cx| assert!(surface.read(cx).editor_context_menu.get().is_some()));
+    }
 }
