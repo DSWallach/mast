@@ -28,6 +28,19 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 91: active checkout P0 + review tool schemas** (2026-11-16; full suite from bd0aac02a: nextest 2605/2607,
+  only the known `peer::actual_webrtc_pair_streams…` and `preview::leak remote_preview_churn`; UI 2642/0).
+  - Active checkout P0: when a chat has a selected diff target (bind_chat_worktree or a manual pick), the header
+    branch chip, "Runs in" (execution root shown as secondary), Item tab, sidebar row, Overview details and search,
+    command palette, pickers, and the PR lookup and watch keys all follow that checkout. An explicit checkout skips the
+    `.gitmodules` same-branch fallback; `is_worktree`/`diff_stat` come from the checkout. P1+ (inference, touched
+    sets, PR by remote) shelved by Mikey; re-measure first.
+  - review_publish / review_get: flat input schemas (no anyOf/oneOf/allOf), one target object with a `kind` enum,
+    example in the description, errors that name the field path (`review.summary`, `target.number`), and
+    `review.target` rejected in favour of the top-level target. From failed-tool-call audit pass 2
+    (mast-artifact:ff5aaaac), where 22 of 35 failures were review_publish retries. Fixes 2–5 wait for a re-run on a
+    larger sample (item ca2d95cc waits until 2026-11-23).
+  - Backup: `~/zeron-dev-app-backups/mast-release-90`.
 - **Release 90: review follow-ups** (2026-11-14; touched crates from ded3ec8f9: all passed; UI 2639/0): Claude
   limit-error dedupe resets at turn boundaries; admin reach skips archived chats except `archive_chat` (unarchive);
   decision-sheet tables wrap inside their cards at narrow widths (verify visually after restart).
@@ -1186,6 +1199,27 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-16 afternoon; coordinator 443e035b)
+
+- **Installed: release 91.** Mikey needs to restart onto it.
+- **Code review, navigation and coordination** (item bb3a9716, plan mast-artifact:060317a6, mockups 9229f124 and
+  b860e121): wave 1 builds on branch `code-review-nav`, cut from release 91, so it can be rolled back as one unit. Workers
+  branch from it and merge into it, not into work-outline-implementation. Wave-1 items (briefs in their descriptions):
+  - code reference + Add to chat (187334ff)
+  - word diff + expand context (a33d34b9)
+  - board (d72281c0)
+  - review phase 5 (c5627f01)
+  - inline diagrams (9c17adbe)
+
+  Run order: ref + board, then word diff + diagrams, then phase 5 alone. Open calls for Mikey: how editor-like Mast
+  gets, and whether Mast may post to GitHub on Submit.
+- **Declined:** coordinator context meter and hand-off (Mikey watches the chat's context indicator). Sender provenance
+  held until needed.
+- **Skills:** talk-to-me gained "Yes/no questions" and "Answers he can read in one pass" (backup
+  ~/skills-backups/2026-11-16-answer-shape/).
+- **Aside, not decided:** Mikey asked whether Mast should be project-scoped like VS Code. The coordinator suggested a
+  window per Space with a global Needs-you, to be tested in the pop-out-window spike.
 
 ## In flight (snapshot 2026-11-16; coordinator 9fd580ac handing off)
 
