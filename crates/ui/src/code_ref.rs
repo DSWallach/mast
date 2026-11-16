@@ -1,0 +1,84 @@
+//! Extract and re-anchor code reference snippets.
+
+use mast_proto::CodeRefRange;
+use sha2::{Digest, Sha256};
+
+/// Hash the full file so an unchanged working tree is recognized cheaply.
+pub fn content_hash(contents: &str) -> String {
+    format!("{:x}", Sha256::digest(contents.as_bytes()))
+}
+
+/// Extract inclusive, one-based lines. Invalid or incomplete ranges are rejected.
+pub fn snippet(contents: &str, range: CodeRefRange) -> Option<String> {
+    if range.start_line == 0 || range.end_line < range.start_line {
+        return None;
+    }
+    let lines: Vec<_> = contents.lines().collect();
+    let start = (range.start_line - 1) as usize;
+    let end = range.end_line as usize;
+    Some(lines.get(start..end)?.join("\n"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Unchanged(CodeRefRange),
+    Moved(CodeRefRange),
+    Changed,
+}
+
+/// Search complete lines only. Ambiguous matches are treated as changed rather
+/// than silently navigating to an arbitrary occurrence.
+pub fn reanchor(contents: &str, original: CodeRefRange, pinned_snippet: &str) -> Resolution {
+    if pinned_snippet.is_empty() {
+        return Resolution::Changed;
+    }
+    if snippet(contents, original).as_deref() == Some(pinned_snippet) {
+        return Resolution::Unchanged(original);
+    }
+    let file: Vec<_> = contents.lines().collect();
+    let target: Vec<_> = pinned_snippet.lines().collect();
+    let matches: Vec<_> = file
+        .windows(target.len())
+        .enumerate()
+        .filter_map(|(index, lines)| (lines == target.as_slice()).then_some(index))
+        .take(2)
+        .collect();
+    if let [index] = matches.as_slice() {
+        let start_line = *index as u32 + 1;
+        Resolution::Moved(CodeRefRange {
+            start_line,
+            end_line: start_line + target.len() as u32 - 1,
+        })
+    } else {
+        Resolution::Changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_unchanged_shifted_edited_and_deleted_lines() {
+        let range = CodeRefRange {
+            start_line: 2,
+            end_line: 3,
+        };
+        let text = "one\ntwo\nthree\nfour\n";
+        let pinned = snippet(text, range).unwrap();
+        assert_eq!(reanchor(text, range, &pinned), Resolution::Unchanged(range));
+        assert_eq!(
+            reanchor(&format!("zero\n{text}"), range, &pinned),
+            Resolution::Moved(CodeRefRange {
+                start_line: 3,
+                end_line: 4
+            })
+        );
+        assert_eq!(
+            reanchor("one\ntwo\nchanged\nfour", range, &pinned),
+            Resolution::Changed
+        );
+        assert_eq!(reanchor("one\nfour", range, &pinned), Resolution::Changed);
+        assert_ne!(content_hash(text), content_hash("one\nfour"));
+    }
+}

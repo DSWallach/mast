@@ -30,6 +30,7 @@ pub mod chat_type_view;
 mod chat_work_context;
 mod comment_ui;
 pub mod comments;
+pub mod code_ref;
 pub mod composer;
 pub mod components;
 pub mod stories;

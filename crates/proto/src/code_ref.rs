@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct CodeRef {
     pub version: u32,
-    #[serde rename = "where"]
+    #[serde(rename = "where")]
     pub location: CodeRefLocation,
     pub kind: CodeRefKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,7 +52,9 @@ pub struct CodeRefSymbol {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, rename_all = "camelCase")]
 pub enum CodeRefRevision {
-    Commit { commit: String },
+    Commit {
+        commit: String,
+    },
     WorkingTree {
         #[serde(rename = "workingTree")]
         working_tree: bool,
@@ -69,11 +71,21 @@ mod tests {
     fn reference_round_trips_with_camel_case_fields() {
         let reference = CodeRef {
             version: 1,
-            location: CodeRefLocation { repo_id: "repo".into(), worktree_id: None, path: "src/main.rs".into() },
+            location: CodeRefLocation {
+                repo_id: "repo".into(),
+                worktree_id: None,
+                path: "src/main.rs".into(),
+            },
             kind: CodeRefKind::Lines,
-            range: Some(CodeRefRange { start_line: 2, end_line: 4 }),
+            range: Some(CodeRefRange {
+                start_line: 2,
+                end_line: 4,
+            }),
             symbol: None,
-            at: CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            at: CodeRefRevision::WorkingTree {
+                working_tree: true,
+                content_hash: "hash".into(),
+            },
         };
         let value = serde_json::to_value(&reference).unwrap();
         assert_eq!(value["where"]["repoId"], "repo");
