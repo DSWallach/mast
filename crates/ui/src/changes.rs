@@ -3743,10 +3743,29 @@ impl Changes {
         }
     }
 
-    fn add_hunk_to_chat(&mut self, path: String, range: mast_proto::CodeRefRange, expected: String, cx: &mut Context<Self>) {
+    fn add_hunk_to_chat(&mut self, path: String, range: mast_proto::CodeRefRange, expected: String, old_side: bool, cx: &mut Context<Self>) {
         let key = self.owner_chat_id_owned().unwrap_or_default();
         let state = self.state.read(cx);
         let Some(member) = state.selected_execution_member(&key) else { return; };
+        let commit = match self.scope {
+            DiffScope::Commit => self.commit.as_ref().and_then(|commit| if old_side { commit.parent_shas.first().cloned() } else { Some(commit.sha.clone()) }),
+            DiffScope::Range if !old_side => self.owner.as_ref().and_then(|owner| owner.range.as_ref()).and_then(|range| range.head_sha.clone()),
+            DiffScope::WorkingTree if old_side => member.head_sha.clone(),
+            _ => None,
+        };
+        if let Some(commit) = commit {
+            let reference = crate::code_ref::StagedCodeRef {
+                id: uuid::Uuid::new_v4().to_string(),
+                reference: mast_proto::CodeRef { version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: member.repo_id, worktree_id: member.checkout_id, path },
+                    kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None,
+                    at: mast_proto::CodeRefRevision::Commit { commit },
+                }, snippet: expected,
+            };
+            self.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); });
+            return;
+        }
+        if old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range) { return; }
         let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, &key) else { return; };
         let Some(engine) = state.engine().cloned() else { return; };
         let request = mast_proto::ReadWorkspaceFileRequest { target: context.target.clone(), path: path.clone() };
@@ -4417,9 +4436,11 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
-                let path = file_diff.path.clone();
-                let lines: Vec<_> = hunk_diff.lines.iter().filter(|line| line.new_no.is_some()).collect();
-                let hunk_range = lines.first().and_then(|first| lines.last().map(|last| mast_proto::CodeRefRange { start_line: first.new_no.unwrap(), end_line: last.new_no.unwrap() }));
+                let old_side = hunk_diff.lines.iter().all(|line| line.new_no.is_none());
+                let path = if old_side { file_diff.old_path.clone().unwrap_or_else(|| file_diff.path.clone()) } else { file_diff.path.clone() };
+                let lines: Vec<_> = hunk_diff.lines.iter().filter(|line| if old_side { line.old_no.is_some() } else { line.new_no.is_some() }).collect();
+                let number = |line: &DiffLine| if old_side { line.old_no } else { line.new_no };
+                let hunk_range = lines.first().and_then(|first| lines.last().map(|last| mast_proto::CodeRefRange { start_line: number(first).unwrap(), end_line: number(last).unwrap() }));
                 let snippet = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n");
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
                     .when_some(hunk_range, |row, range| row.child(
@@ -4427,7 +4448,7 @@ impl Changes {
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
                             .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_hunk_to_chat(path.clone(), range, snippet.clone(), cx);
+                                this.add_hunk_to_chat(path.clone(), range, snippet.clone(), old_side, cx);
                             }))))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
