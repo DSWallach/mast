@@ -20,6 +20,7 @@ pub mod agent_accounts;
 pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
+pub mod git_gate;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;

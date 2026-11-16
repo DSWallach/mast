@@ -1442,6 +1442,9 @@ impl EngineRpc {
         let mut chats_rx = self.workspace.watch_chats();
         let mut spaces_rx = self.workspace.watch_spaces();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        // Canonicalized lazily, once; a path that does not resolve cannot be
+        // any Space's checkout, so it never reaches git.
+        let mut canonical: Option<Option<std::path::PathBuf>> = None;
         loop {
             let chats = chats_rx.borrow_and_update().clone();
             if chats.iter().any(|chat| {
@@ -1473,9 +1476,18 @@ impl EngineRpc {
                     }
                     continue;
                 }
+                if canonical.is_none() {
+                    canonical = Some(self.repos.canonical_path(&requested).await);
+                }
+                let Some(Some(candidate)) = canonical.as_ref() else {
+                    return Err(unknown());
+                };
                 if let Some(checkout) = self
                     .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &requested)
+                    .workspace_checkout_canonical(
+                        std::path::Path::new(&space.path),
+                        candidate.clone(),
+                    )
                     .await
                 {
                     return Ok(checkout);

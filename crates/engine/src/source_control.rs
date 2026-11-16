@@ -809,6 +809,11 @@ impl ProcessRunner for SystemProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let _git_permit = if request.program == "git" {
+            Some(crate::git_gate::acquire().await)
+        } else {
+            None
+        };
         let mut child = command
             .spawn()
             .map_err(|error| ProcessRunError::Spawn(error.kind()))?;

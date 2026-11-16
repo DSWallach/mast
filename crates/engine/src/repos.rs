@@ -188,7 +188,25 @@ struct ReposInner {
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
     file_index: FileIndexCache,
+    checkout_sets: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<CheckoutSetSlot>>>,
 }
+
+/// Canonical repo-root + linked-worktree paths of one Space, refreshed under
+/// the slot's async mutex so concurrent callers share a single refresh.
+#[derive(Default)]
+struct CheckoutSetSlot {
+    state: tokio::sync::Mutex<Option<CheckoutSet>>,
+}
+
+struct CheckoutSet {
+    paths: HashSet<PathBuf>,
+    refreshed: std::time::Instant,
+}
+
+/// A cached checkout set is trusted this long when the lookup hits.
+const CHECKOUT_SET_TTL: Duration = Duration::from_secs(60);
+/// A lookup miss re-reads `git worktree list` only if the set is older than this.
+const CHECKOUT_SET_MISS_REFRESH: Duration = Duration::from_secs(3);
 
 struct IndexedPath {
     path: String,
@@ -235,6 +253,7 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
                 file_index: std::sync::Mutex::new(HashMap::new()),
+                checkout_sets: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -287,10 +306,11 @@ impl Repos {
             cmd.current_dir(cwd);
         }
         cmd.stdin(std::process::Stdio::null());
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+        let output = {
+            let _permit = crate::git_gate::acquire().await;
+            cmd.output().await
+        }
+        .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let message = stderr.trim();
@@ -1073,25 +1093,77 @@ impl Repos {
     /// worktrees. Filesystem resolution happens on a disposable thread because
     /// user-selected paths may be dead mounts.
     pub async fn workspace_checkout(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
-        let repo_path = repo_path.to_path_buf();
-        let candidate = candidate.to_path_buf();
-        let worktrees: Vec<_> = self
-            .refs(&repo_path)
+        let candidate = self.canonical_path(candidate).await?;
+        self.workspace_checkout_canonical(repo_path, candidate).await
+    }
+
+    /// Canonicalize on a disposable thread (dead mounts must not wedge callers).
+    pub(crate) async fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+        let path = path.to_path_buf();
+        disposable_worker("checkout-auth", move || std::fs::canonicalize(path).ok())
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| row.worktree_path.map(PathBuf::from))
-            .collect();
+            .flatten()
+    }
+
+    /// Like [`Self::workspace_checkout`] for an already-canonical candidate.
+    /// Membership comes from a per-Space cache of `git worktree list` (one git
+    /// spawn per refresh, never branches or refs). A hit is served from the
+    /// cache; a miss re-reads the list only when the cache is a few seconds
+    /// old, so a stale path asked for repeatedly costs no further spawns.
+    pub(crate) async fn workspace_checkout_canonical(
+        &self,
+        repo_path: &Path,
+        candidate: PathBuf,
+    ) -> Option<PathBuf> {
+        let slot = {
+            let mut sets = self
+                .inner
+                .checkout_sets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sets.entry(repo_path.to_path_buf()).or_default().clone()
+        };
+        let mut state = slot.state.lock().await;
+        if let Some(set) = state.as_ref()
+            && set.refreshed.elapsed() < CHECKOUT_SET_TTL
+        {
+            if set.paths.contains(&candidate) {
+                return Some(candidate);
+            }
+            if set.refreshed.elapsed() < CHECKOUT_SET_MISS_REFRESH {
+                return None;
+            }
+        }
+        let paths = self.read_checkout_set(repo_path).await;
+        let found = paths.contains(&candidate);
+        *state = Some(CheckoutSet {
+            paths,
+            refreshed: std::time::Instant::now(),
+        });
+        found.then_some(candidate)
+    }
+
+    /// Canonical repo root plus every `worktree <path>` from one
+    /// `git worktree list --porcelain`.
+    async fn read_checkout_set(&self, repo_path: &Path) -> HashSet<PathBuf> {
+        let listed = self
+            .git(&["worktree", "list", "--porcelain"], Some(repo_path))
+            .await
+            .unwrap_or_default();
+        let mut raw: Vec<PathBuf> = vec![repo_path.to_path_buf()];
+        raw.extend(
+            listed
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("worktree "))
+                .map(PathBuf::from),
+        );
         disposable_worker("checkout-auth", move || {
-            let candidate = std::fs::canonicalize(candidate).ok()?;
-            std::iter::once(repo_path)
-                .chain(worktrees)
+            raw.into_iter()
                 .filter_map(|path| std::fs::canonicalize(path).ok())
-                .any(|path| path == candidate)
-                .then_some(candidate)
+                .collect::<HashSet<_>>()
         })
         .await
-        .flatten()
+        .unwrap_or_default()
     }
 
     pub(crate) async fn same_folder(&self, folder: &Path, candidate: &Path) -> Option<PathBuf> {
