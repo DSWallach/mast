@@ -2566,12 +2566,16 @@ impl FilesSurface {
                 let state = editor.read(cx);
                 let value = state.value().to_string();
                 let selection = state.selected_range();
-                let top = state.range_to_bounds(&selection).map(|bounds| bounds.origin.y + bounds.size.height - state.input_bounds().origin.y).unwrap_or(px(12.0));
+                let input_bounds = state.input_bounds();
+                let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
+                    let left = f32::from(bounds.origin.x - input_bounds.origin.x).clamp(0.0, (f32::from(input_bounds.size.width) - 160.0).max(0.0));
+                    (bounds.origin.y + bounds.size.height - input_bounds.origin.y, px(left))
+                }).unwrap_or((px(12.0), px(12.0)));
                 crate::code_ref::selection_lines(&value, selection).and_then(|range| {
-                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value), top))
+                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value), top, left))
                 })
             };
-            let action_bar = selected.and_then(|(range, snippet, hash, top)| {
+            let action_bar = selected.and_then(|(range, snippet, hash, top, left)| {
                 let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;
                 let path = path.to_string();
                 let location = format!("{}:{}-{}", path, range.start_line, range.end_line);
@@ -2584,7 +2588,7 @@ impl FilesSurface {
                         at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
                     }, snippet,
                 };
-                Some(crate::components::code_ref::selection_action_bar(theme, top)
+                Some(crate::components::code_ref::selection_action_bar(theme, top, left)
                     .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.stage_reference(reference.clone(), cx);

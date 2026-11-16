@@ -1,5 +1,5 @@
 //! Offscreen fixture for the production editor and code selection action bar.
-use gpui::{App, Context, Entity, Render, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, Focusable as _, Render, Window, div, prelude::*, px};
 use gpui_base::input::{Editor, EditorState};
 
 pub struct CodeReferenceFixture {
@@ -10,17 +10,22 @@ impl Render for CodeReferenceFixture {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::Theme::of(cx);
         let state = self.editor.read(cx);
-        let top = state
+        let (top, left) = state
             .range_to_bounds(&state.selected_range())
-            .map(|bounds| bounds.origin.y + bounds.size.height - state.input_bounds().origin.y)
-            .unwrap_or(px(90.0));
+            .map(|bounds| {
+                (
+                    bounds.origin.y + bounds.size.height - state.input_bounds().origin.y,
+                    bounds.origin.x - state.input_bounds().origin.x,
+                )
+            })
+            .unwrap_or((px(90.0), px(30.0)));
         div()
             .size_full()
             .relative()
             .bg(theme.surface)
             .child(Editor::new(&self.editor))
             .child(
-                crate::components::code_ref::selection_action_bar(theme, top)
+                crate::components::code_ref::selection_action_bar(theme, top, left)
                     .child("Add to chat")
                     .child("Copy ref"),
             )
@@ -30,6 +35,7 @@ impl Render for CodeReferenceFixture {
 pub fn fixture(window: &mut Window, cx: &mut App) -> Entity<CodeReferenceFixture> {
     let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true)
         .default_value("fn review() {\n    let first = 1;\n    let second = 2;\n    inspect(first, second);\n}\n"));
+    window.focus(&editor.focus_handle(cx), cx);
     editor.update(cx, |state, cx| state.set_selected_range(14..57, cx));
     cx.new(|_| CodeReferenceFixture { editor })
 }
