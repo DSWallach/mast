@@ -66,7 +66,7 @@ impl super::FilesSurface {
             return;
         };
         let state = editor.read(cx);
-        let Some(range) = crate::code_ref::selection_lines(state.value(), state.selected_range())
+        let Some(range) = crate::code_ref::selection_lines(&state.value(), state.selected_range())
         else {
             return;
         };
