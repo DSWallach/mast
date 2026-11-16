@@ -122,6 +122,7 @@ actions!(
         ToggleFiles,
         OpenMyPrs,
         QuickOpen,
+        AddCodeToChat,
         SearchWorkspaceContent,
         GoToLine,
         AddSpacePalette,
@@ -416,6 +417,7 @@ pub fn apply_keymap(
     cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
     for (id, action) in [
         (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
         (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
         (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),

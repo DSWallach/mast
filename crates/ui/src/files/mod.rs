@@ -226,6 +226,7 @@ impl Render for FilesSurface {
                 "files-surface-{}",
                 self.chat_id
             )))
+            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| this.add_selected_code_to_chat(cx)))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .size_full()
