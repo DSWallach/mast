@@ -1219,6 +1219,36 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-16 15:20; coordinator 443e035b handing off)
+
+- **Installed: release 94; Mikey restarted on it and it still feels slow.** Top priority: keep searching for the cause.
+  - Already fixed: 93 bounds and caches diff-sync watch-budget walks (they pinned ~8 cores after every restart). 94
+    stops the menu-bar item redrawing every ~900 ms (≈40% of the main thread was in NSStatusItem _updateReplicants;
+    it's gone in the 94 sample).
+  - Latest sample (94, 43 s after launch, ~225% CPU, 2.6 GB): the hottest Mast frames are `mast_engine::repos` (768),
+    `source_control` (159), `rpc::handle_request` (154) and `repos::disposable_worker` (108). That is git fan-out:
+    `git branch -r --contains …` and refs/branches across ~110 Cofactr worktrees (ui 62, flagship 44, root 12). Mikey is
+    removing old Cofactr worktrees with a Claude Code session in a terminal.
+  - Earlier: the main thread spent ~¾ of its time in Overview (sidebar) prepaint, which is perf follow-up 2694931e (spinner
+    ticks invalidating ancestors, unchanged sidebar rows redrawn).
+  - Method: find the Mast pid with `ps -Ao pid,command | grep MacOS/mast` (skip ` mcp`), run `sample <pid> 3 -file …`,
+    and count `mast_*` frames; look at the main thread separately. The log is `~/.zeron/logs/mast-headed.log`.
+  - Next steps: profile the repos/source_control git fan-out (who calls it, how often, per worktree?), then cap its
+    concurrency and cache per worktree with event-driven refresh. Then the sidebar prepaint fix. Add the freeze watchdog
+    (17c9d278) so freezes leave a stack.
+- **Build discipline:** at most 2 builds at once, counting the coordinator's own. No builds are running now.
+- **Paused workers (no builds until Mast is fast):**
+  - Code reference + Add to chat (chat bfbe2328, branch `feature/code-ref-add-to-chat` at d12ff36b7): done except the
+    final engine, UI and RPC test runs on its head. When resumed, it should run them, then raise Ready to merge →
+    code-review-nav.
+  - Board (chat a0c94ee7, branch `feature/coordination-board`): it has the review-fix list (perf, real table, labels,
+    buttons). It was interrupted mid-fix; its target/ was deleted.
+  - Inline diagrams (chat 43132a65, branch `feature/inline-diagrams`): it has the review-fix list (default off, don't
+    replace the pane, LRU and concurrency caps, observer outside render). It was interrupted; its target/ was deleted.
+  - Word diff and review phase 5 are not started.
+- **Needs-you:** the approval rule for offscreen ui-preview renders (78abd9dc); the plan's two calls (how editor-like
+  Mast gets; posting to GitHub on Submit); the older items listed in the previous snapshot.
+
 ## In flight (snapshot 2026-11-16 afternoon; coordinator 443e035b)
 
 - **Installed: release 92** (91 plus the composer crash fix). Mast crashed on 90 and restarted onto 91; it needs another
