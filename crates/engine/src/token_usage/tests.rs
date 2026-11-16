@@ -113,6 +113,16 @@ fn snapshots_dedupe_and_unknown_subtypes_are_not_reported_as_measured_zero() {
         store.observe("a", &measurement("snapshot", "model", "turn", amount, 4));
     }
     assert_eq!(store.snapshot(&Default::default()).unwrap().total, 24);
+    assert_eq!(
+        store
+            .snapshot(&TokenUsageQuery {
+                token_kind: TokenKind::CacheRead,
+                ..Default::default()
+            })
+            .unwrap()
+            .total,
+        10
+    );
     store.observe("a", &done());
     store.activate("a");
     store.observe(
@@ -637,4 +647,34 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
     );
     assert!(!store.has_snapshot("local-deleted").unwrap());
     core.shutdown().await;
+}
+
+#[test]
+fn duplicate_claude_results_cannot_replace_a_billed_delta_with_a_resume_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "first", &request(), "Conversation");
+    store.observe(
+        "a",
+        &measurement(
+            "provider:claude-result:id:model",
+            "model",
+            "turnIncludingChildren",
+            10,
+            2,
+        ),
+    );
+    store.observe("a", &done());
+    store.begin("a", "resumed", &request(), "Conversation");
+    store.observe(
+        "a",
+        &measurement(
+            "provider:claude-result:id:model",
+            "model",
+            "resumeBaseline",
+            10000,
+            2000,
+        ),
+    );
+    assert_eq!(store.snapshot(&Default::default()).unwrap().total, 12);
 }
