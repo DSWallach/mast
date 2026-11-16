@@ -205,6 +205,9 @@ pub struct ReviewDraft {
     pub id: String,
     pub target: String,
     pub anchor: ReviewAnchor,
+    /// Hash of the anchored line, used to locate it within an unchanged hunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_hash: Option<String>,
     pub body: String,
     pub source: ReviewDraftSource,
     pub created_at: i64,

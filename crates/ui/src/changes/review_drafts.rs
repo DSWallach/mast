@@ -4,7 +4,7 @@ use super::{
 };
 use crate::comments::CommentSide;
 use gpui::prelude::*;
-use mast_proto::{ReviewSide, ReviewThread};
+use mast_proto::{ReviewDraft, ReviewSide, ReviewThread};
 
 impl Changes {
     pub(super) fn load_review_threads(&mut self, target: &str, cx: &mut Context<Self>) {
@@ -179,6 +179,73 @@ impl Changes {
 }
 use std::collections::HashMap;
 
+/// Maps unchanged hunk and line content to a unique line on a new revision.
+/// Ambiguous repeated lines are deliberately left outdated.
+#[derive(Default)]
+pub(super) struct DraftAnchorIndex {
+    lines: HashMap<(String, String, CommentSide, String), Vec<u32>>,
+}
+
+fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
+    let tag = match side {
+        CommentSide::Old => b'-',
+        CommentSide::New => b'+',
+    };
+    mast_proto::review_hunk_identity(path, [(tag, text)])
+}
+
+impl DraftAnchorIndex {
+    pub(super) fn new(files: &[super::FileDiff], identities: &[Vec<String>]) -> Self {
+        let mut index = Self::default();
+        for (file_ix, file) in files.iter().enumerate() {
+            for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+                let Some(hash) = identities.get(file_ix).and_then(|hunks| hunks.get(hunk_ix))
+                else {
+                    continue;
+                };
+                for line in &hunk.lines {
+                    for (side, number) in [
+                        (CommentSide::Old, line.old_no),
+                        (CommentSide::New, line.new_no),
+                    ] {
+                        if let Some(number) = number {
+                            index
+                                .lines
+                                .entry((
+                                    file.path.clone(),
+                                    hash.clone(),
+                                    side,
+                                    line_hash(&file.path, side, &line.text),
+                                ))
+                                .or_default()
+                                .push(number);
+                        }
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    pub(super) fn resolve(&self, draft: &ReviewDraft) -> Option<u32> {
+        if draft.anchor.start_line != draft.anchor.end_line {
+            return None;
+        }
+        let side = match draft.anchor.side {
+            ReviewSide::Left => CommentSide::Old,
+            ReviewSide::Right => CommentSide::New,
+        };
+        let key = (
+            draft.anchor.file.clone(),
+            draft.anchor.hunk_hash.clone()?,
+            side,
+            draft.line_hash.clone()?,
+        );
+        let lines = self.lines.get(&key)?;
+        (lines.len() == 1).then_some(lines[0])
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ThreadIndex {
     by_anchor: HashMap<String, HashMap<(CommentSide, u32), Vec<usize>>>,
@@ -218,6 +285,40 @@ impl ThreadIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn draft_reanchors_only_to_a_unique_matching_line() {
+        let moved = super::super::parse_patch(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -10 +10 @@\n-old\n+new\n",
+        );
+        let identities = super::super::hunk_identities(&moved);
+        let draft = ReviewDraft {
+            id: "one".into(),
+            target: "pr:o/r#1".into(),
+            body: "Check".into(),
+            source: mast_proto::ReviewDraftSource::User,
+            created_at: 1,
+            anchor: mast_proto::ReviewAnchor {
+                file: "a".into(),
+                side: ReviewSide::Right,
+                start_line: 1,
+                end_line: 1,
+                hunk_hash: Some(identities[0][0].clone()),
+            },
+            line_hash: Some(line_hash("a", CommentSide::New, "new")),
+        };
+        assert_eq!(
+            DraftAnchorIndex::new(&moved, &identities).resolve(&draft),
+            Some(10)
+        );
+        let changed = super::super::parse_patch(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -10 +10 @@\n-old\n+different\n",
+        );
+        assert_eq!(
+            DraftAnchorIndex::new(&changed, &super::super::hunk_identities(&changed))
+                .resolve(&draft),
+            None
+        );
+    }
     #[test]
     fn many_threads_have_direct_anchor_lookups() {
         let threads: Vec<_> = (0..5000)

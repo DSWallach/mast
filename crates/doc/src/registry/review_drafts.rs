@@ -112,6 +112,7 @@ mod tests {
                 end_line: 2,
                 hunk_hash: Some("hash".into()),
             },
+            line_hash: None,
         };
         assert!(
             registry
@@ -142,6 +143,7 @@ mod tests {
                     end_line: i + 1,
                     hunk_hash: Some("hash".into()),
                 },
+                line_hash: None,
             })
             .collect();
         assert!(registry.put_review_drafts(target, &drafts).unwrap());
