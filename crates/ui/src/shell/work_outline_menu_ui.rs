@@ -1618,7 +1618,16 @@ mod tests {
         assert_eq!(selected(&outline, cx), Some(row_key::chat(CHAT_API)));
     }
 
-    fn click_row(cx: &mut gpui::VisualTestContext, key: &str) {
+    fn click_row(outline: &Entity<OutlineView>, cx: &mut gpui::VisualTestContext, key: &str) {
+        // The fixed header can change the viewport after a chat opens. Reveal
+        // an offscreen target before synthesizing its click.
+        if cx
+            .debug_bounds(selector(format!("outline-row-{key}")))
+            .is_none()
+        {
+            outline.update(cx, |outline, cx| outline.reveal(key, cx));
+            redraw(cx);
+        }
         let row = cx
             .debug_bounds(selector(format!("outline-row-{key}")))
             .unwrap_or_else(|| panic!("row {key} is shown"));
@@ -1654,7 +1663,7 @@ mod tests {
         let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
 
         let chat = row_key::chat(CHAT_UI);
-        click_row(cx, &chat);
+        click_row(&outline, cx, &chat);
         assert!(outline_focused(&outline, cx));
         press(cx, &archive_key());
         assert_eq!(archived_chats(&shell, cx), [CHAT_UI]);
@@ -1673,7 +1682,7 @@ mod tests {
         });
 
         // A work item: its Archive dialog, nothing archived yet.
-        click_row(cx, &row_key::item("s1", API));
+        click_row(&outline, cx, &row_key::item("s1", API));
         press(cx, &archive_key());
         shell.read_with(cx, |shell, _| {
             assert!(
@@ -1689,7 +1698,7 @@ mod tests {
 
         // The Unassociated group: nothing.
         let mutations = shell.read_with(cx, |shell, _| shell.mutations.len());
-        click_row(cx, &row_key::unassociated(Some("s1")));
+        click_row(&outline, cx, &row_key::unassociated(Some("s1")));
         press(cx, &archive_key());
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.mutations.len(), mutations);
@@ -1756,7 +1765,7 @@ mod tests {
         let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
         let start = platform_combo("mod-enter");
 
-        click_row(cx, &row_key::item("s1", HOUSEKEEPING));
+        click_row(&outline, cx, &row_key::item("s1", HOUSEKEEPING));
         press(cx, &start);
         assert_eq!(
             start_chat_item(&shell, cx).as_deref(),
@@ -1766,7 +1775,7 @@ mod tests {
         press(cx, "escape");
         assert_eq!(start_chat_item(&shell, cx), None);
 
-        click_row(cx, &row_key::chat(CHAT_UI));
+        click_row(&outline, cx, &row_key::chat(CHAT_UI));
         press(cx, &start);
         assert_eq!(
             start_chat_item(&shell, cx).as_deref(),
@@ -1775,7 +1784,7 @@ mod tests {
         );
         press(cx, "escape");
 
-        click_row(cx, &row_key::chat(CHAT_LOOSE_A));
+        click_row(&outline, cx, &row_key::chat(CHAT_LOOSE_A));
         press(cx, &start);
         assert_eq!(start_chat_item(&shell, cx), None);
         assert_eq!(
