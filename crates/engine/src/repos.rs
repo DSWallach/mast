@@ -75,6 +75,58 @@ const NOUNS: &[&str] = &[
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
 
+/// Canonical (worktree root, git dir) of the checkout containing `path`, read
+/// from the `.git` entry nearest `path` without spawning git. `None` means
+/// "ask git": nothing found, `GIT_DIR`/`GIT_WORK_TREE` set, `path` inside a git
+/// dir, a `.git` that is not a valid git dir, or an unreadable gitdir file.
+fn checkout_layout_from_fs(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
+        return None;
+    }
+    let start = std::fs::canonicalize(path).ok()?;
+    if start.components().any(|c| c.as_os_str() == ".git") {
+        return None;
+    }
+    let start = if start.is_dir() { start } else { start.parent()?.to_path_buf() };
+    for dir in start.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        let git_dir = if meta.is_dir() {
+            dot_git
+        } else if meta.is_file() {
+            let text = std::fs::read_to_string(&dot_git).ok()?;
+            let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+            if target.is_empty() {
+                return None;
+            }
+            let target = Path::new(target);
+            if target.is_absolute() { target.to_path_buf() } else { dir.join(target) }
+        } else {
+            return None;
+        };
+        let git_dir = std::fs::canonicalize(git_dir).ok()?;
+        // Same test git applies before accepting a directory as a git dir.
+        if !git_dir.join("HEAD").is_file()
+            || (!git_dir.join("objects").is_dir() && !git_dir.join("commondir").is_file()) {
+            return None;
+        }
+        return Some((dir.to_path_buf(), git_dir));
+    }
+    None
+}
+
+/// [`checkout_layout_from_fs`] on the blocking pool, so a wedged mount cannot
+/// stall a runtime worker.
+async fn checkout_layout(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || checkout_layout_from_fs(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Canonical identity shared by every chat operating in this exact worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutIdentity {
@@ -351,6 +403,9 @@ impl Repos {
 
     /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
     pub async fn is_repo(&self, path: &Path) -> bool {
+        if checkout_layout(path).await.is_some() {
+            return true;
+        }
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,
             Ok(out) if out == "true"
@@ -359,6 +414,18 @@ impl Repos {
 
     /// The branch currently checked out at a repo/worktree path (`"HEAD"` when detached).
     pub async fn current_branch(&self, path: &Path) -> Result<String, EngineError> {
+        // Spawn-free when HEAD is a plain branch ref or a detached sha.
+        if let Some((_, git_dir)) = checkout_layout(path).await
+            && let Ok(head) = tokio::fs::read_to_string(git_dir.join("HEAD")).await
+        {
+            let head = head.trim();
+            if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+                return Ok(branch.to_owned());
+            }
+            if !head.starts_with("ref:") && head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok("HEAD".to_string());
+            }
+        }
         let branch = self.git(&["branch", "--show-current"], Some(path)).await?;
         Ok(if branch.is_empty() {
             "HEAD".to_string()
@@ -400,6 +467,11 @@ impl Repos {
     /// Canonical identity shared by every chat operating in this exact worktree:
     /// `sha256(deviceId ‖ NUL ‖ canonical git dir)`.
     pub async fn checkout_identity(&self, path: &Path) -> Result<CheckoutIdentity, EngineError> {
+        // Fast path: read the checkout layout from disk, no `git` spawn. Any
+        // doubt (bare repo, odd layout, env overrides) falls through to git.
+        if let Some((root, git_dir)) = checkout_layout(path).await {
+            return Ok(self.identity_from(root, git_dir));
+        }
         let root = self
             .git(&["rev-parse", "--show-toplevel"], Some(path))
             .await?;
@@ -412,16 +484,19 @@ impl Repos {
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
         let canonical_git_dir =
             std::fs::canonicalize(&git_dir).unwrap_or_else(|_| PathBuf::from(&git_dir));
+        Ok(self.identity_from(canonical_root, canonical_git_dir))
+    }
+
+    fn identity_from(&self, root: PathBuf, git_dir: PathBuf) -> CheckoutIdentity {
         let mut hasher = Sha256::new();
         hasher.update(self.inner.device_id.as_bytes());
         hasher.update([0u8]);
-        hasher.update(canonical_git_dir.to_string_lossy().as_bytes());
-        let id = hex(&hasher.finalize());
-        Ok(CheckoutIdentity {
-            id,
-            root: canonical_root,
-            git_dir: canonical_git_dir,
-        })
+        hasher.update(git_dir.to_string_lossy().as_bytes());
+        CheckoutIdentity {
+            id: hex(&hasher.finalize()),
+            root,
+            git_dir,
+        }
     }
 
     async fn to_repo(&self, path: &Path) -> Result<Repo, EngineError> {
@@ -2360,6 +2435,44 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn checkout_identity_from_disk_matches_git_and_spawns_nothing() {
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(main.join("sub/deep")).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        let linked = dir.path().join("linked");
+        git(&main, &["worktree", "add", "-q", "--detach", linked.to_str().unwrap()]);
+        std::fs::create_dir_all(linked.join("sub")).unwrap();
+        for p in [main.clone(), main.join("sub/deep"), linked.clone(), linked.join("sub")] {
+            let want_root = PathBuf::from(git(&p, &["rev-parse", "--show-toplevel"]));
+            let want_git = PathBuf::from(git(&p, &["rev-parse", "--path-format=absolute", "--git-dir"]));
+            let (root, git_dir) = checkout_layout_from_fs(&p).expect("fast path resolves");
+            assert_eq!(root, std::fs::canonicalize(want_root).unwrap(), "{p:?}");
+            assert_eq!(git_dir, std::fs::canonicalize(want_git).unwrap(), "{p:?}");
+        }
+        // Not a checkout, or inside a git dir: leave it to git.
+        assert!(checkout_layout_from_fs(dir.path()).is_none());
+        assert!(checkout_layout_from_fs(&main.join(".git")).is_none());
+        assert!(checkout_layout_from_fs(&main.join(".git/objects")).is_none());
+        assert!(checkout_layout_from_fs(&dir.path().join("missing")).is_none());
+    }
 
     #[test]
     fn worktree_branches_are_created_as_mast_and_both_prefixes_are_ours() {

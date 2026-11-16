@@ -35,4 +35,6 @@ case "$sub" in
   *) refuse "$@" ;;
 esac
 printf 'A %s\n' "$sub" >> "${MAST_SOAK_GIT_LOG:-/dev/null}"
+# Per-spawn detail (cwd and full args) next to the log, for tallying callers.
+[ -n "${MAST_SOAK_GIT_LOG:-}" ] && printf '%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$*" >> "$MAST_SOAK_GIT_LOG.detail"
 GIT_OPTIONAL_LOCKS=0 exec "${MAST_SOAK_REAL_GIT:?}" "$@"
