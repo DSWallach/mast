@@ -3,6 +3,33 @@
 use mast_proto::CodeRefRange;
 use sha2::{Digest, Sha256};
 
+/// A draft reference and the text captured from its revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedCodeRef {
+    pub id: String,
+    pub reference: mast_proto::CodeRef,
+    pub snippet: String,
+}
+
+impl StagedCodeRef {
+    pub fn label(&self) -> String {
+        let path = self
+            .reference
+            .location
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.reference.location.path);
+        match self.reference.range {
+            Some(range) if range.start_line != range.end_line => {
+                format!("{path}:{}-{}", range.start_line, range.end_line)
+            }
+            Some(range) => format!("{path}:{}", range.start_line),
+            None => path.to_string(),
+        }
+    }
+}
+
 /// Hash the full file so an unchanged working tree is recognized cheaply.
 pub fn content_hash(contents: &str) -> String {
     format!("{:x}", Sha256::digest(contents.as_bytes()))

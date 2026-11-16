@@ -4367,6 +4367,7 @@ struct ComposerSlice {
     devices: Vec<(mast_proto::Device, bool)>,
     queue: Vec<mast_doc::QueuedMessage>,
     comments: Vec<crate::comments::ReviewComment>,
+    code_refs: Vec<crate::code_ref::StagedCodeRef>,
     comment_flush_pending: bool,
     delivery_degraded: bool,
     connectivity: mast_proto::Connectivity,
@@ -4392,6 +4393,7 @@ impl ComposerSlice {
                 .collect(),
             queue: state.queue.clone(),
             comments: state.review_comments(key).to_vec(),
+            code_refs: state.code_refs(key).to_vec(),
             comment_flush_pending: state.review_comment_flush_pending(key),
             delivery_degraded: selected.is_some_and(|id| state.chat_delivery_degraded(id)),
             connectivity: state.connectivity.clone(),
@@ -5301,6 +5303,27 @@ impl Composer {
             .read(cx)
             .review_comments(&self.current_key)
             .to_vec()
+    }
+
+    fn render_code_refs(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let references = self.state.read(cx).code_refs(&self.current_key).to_vec();
+        if references.is_empty() { return None; }
+        let mut row = div().w_full().flex_none().flex().flex_row().items_center()
+            .gap(px(6.0)).overflow_hidden().px(px(STRIP_PAD_X)).pt(px(STRIP_PAD_TOP));
+        for (index, reference) in references.into_iter().enumerate() {
+            let id = reference.id.clone();
+            let label: SharedString = reference.label().into();
+            row = row.child(crate::components::conversation_skill_chip(theme, index)
+                .child(label)
+                .child(crate::components::conversation_skill_remove(theme, index)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let key = this.current_key.clone();
+                        this.state.update(cx, |state, cx| { state.remove_code_ref(&key, &id); cx.notify(); });
+                    })));
+        }
+        Some(row)
     }
 
     fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
@@ -8623,6 +8646,7 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
+        let code_refs = self.render_code_refs(&theme, cx);
         let skill_chips = self.render_skill_chips(&theme, cx);
 
         // A translucent cool silver/slate edge sits more naturally on frost
@@ -8735,7 +8759,8 @@ impl Render for Composer {
                 _ => 0.0,
             }
         };
-        let strips = comments_chip.into_iter().map(|el| el.into_any_element())
+        let strips = code_refs.into_iter().map(|el| el.into_any_element())
+            .chain(comments_chip.into_iter().map(|el| el.into_any_element()))
             .chain(skill_chips.into_iter().map(|el| el.into_any_element()))
             .chain(appshot_strip)
             .chain(strip.into_iter().map(|el| el.into_any_element()))
