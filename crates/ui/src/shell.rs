@@ -5208,6 +5208,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// The Scheduled tasks page at one task's run history on its host device.
+    pub(crate) fn open_scheduled_task_history(
+        &mut self,
+        task_id: String,
+        device: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.route = Route::ScheduledTasks;
+        self.nav.push(NavEntry::ScheduledTasks);
+        let page = self.ensure_scheduled_tasks_page(cx);
+        page.update(cx, |p, cx| p.show_task(task_id, Some(device), cx));
+        cx.notify();
+    }
+
     pub(crate) fn open_overview(&mut self, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.reveal_overview_navigation(cx);

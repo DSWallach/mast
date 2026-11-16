@@ -78,6 +78,8 @@ const STALE_AFTER: chrono::Duration = chrono::Duration::days(7);
 /// it — independent of the server's own cache TTL, just how often the UI
 /// bothers to poll for a fresher answer.
 const LINK_STATUS_REFRESH: Duration = Duration::from_secs(45);
+/// How long a host's scheduled-task list (schedule, next run, outcome) stays fresh.
+const SCHEDULED_TASKS_REFRESH: Duration = Duration::from_secs(60);
 
 /// Subagent scans are settled-ish once a transcript exists, but an imported
 /// chat that keeps running elsewhere (or gets resumed here) grows new
@@ -1479,6 +1481,9 @@ pub struct Overview {
     expanded: HashSet<String>,
     link_status: HashMap<String, LinkStatusEntry>,
     link_status_pending: HashSet<String>,
+    /// Each host device's scheduled tasks, for task rows.
+    scheduled_tasks: HashMap<String, (Instant, std::sync::Arc<mast_proto::ScheduledTasksSnapshot>)>,
+    scheduled_tasks_pending: HashSet<String>,
     /// Subagents per chat id. Fetched once per chat (not refreshed on an
     /// interval like `link_status` — a session's own subagent set is
     /// settled once its transcript exists, unlike a PR's live checks/review
@@ -1867,6 +1872,8 @@ impl Overview {
             expanded: HashSet::new(),
             link_status: HashMap::new(),
             link_status_pending: HashSet::new(),
+            scheduled_tasks: HashMap::new(),
+            scheduled_tasks_pending: HashSet::new(),
             subagents: HashMap::new(),
             subagent_pending: HashSet::new(),
             hovered_row: None,
@@ -2893,6 +2900,63 @@ impl Overview {
         let _ = self.shell.update(cx, |shell, cx| {
             shell.set_chat_archived(chat_id, archived, cx);
         });
+    }
+
+    /// Refresh `device`'s scheduled-task list (its owner answers through the
+    /// existing device routing) for the task rows' schedule and next run.
+    fn ensure_scheduled_tasks(&mut self, device: &str, cx: &mut Context<Self>) {
+        let fresh = self
+            .scheduled_tasks
+            .get(device)
+            .is_some_and(|(at, _)| at.elapsed() < SCHEDULED_TASKS_REFRESH);
+        if fresh || self.scheduled_tasks_pending.contains(device) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let device = device.to_owned();
+        self.scheduled_tasks_pending.insert(device.clone());
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<mast_proto::ScheduledTasksSnapshot>(
+                    methods::SCHEDULED_TASKS,
+                    serde_json::json!({ "action": "list", "targetDeviceId": device }),
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.scheduled_tasks_pending.remove(&device);
+                // A host that cannot answer keeps its rows, without schedule
+                // details, and is retried after the same interval.
+                let snapshot = result.map(std::sync::Arc::new).unwrap_or_else(|_| {
+                    this.scheduled_tasks
+                        .get(&device)
+                        .map(|(_, s)| s.clone())
+                        .unwrap_or_default()
+                });
+                // Task rows read this live, like badges: repaint only.
+                this.scheduled_tasks
+                    .insert(device, (Instant::now(), snapshot));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The task definition behind a scheduled run, when its host reported it.
+    fn task_for(
+        &self,
+        chat: &Chat,
+    ) -> Option<(&mast_proto::ScheduledTask, &[mast_proto::ScheduledRun])> {
+        let info = chat.scheduled_task_info.as_ref()?;
+        let (_, snapshot) = self.scheduled_tasks.get(&chat.device_id)?;
+        let task = snapshot
+            .tasks
+            .iter()
+            .find(|t| t.id == info.task_id && t.device_id == chat.device_id)?;
+        Some((task, snapshot.runs.as_slice()))
     }
 
     fn ensure_link_status(&mut self, chat_id: String, cx: &mut Context<Self>) {
@@ -5364,6 +5428,150 @@ impl Overview {
             .into_any_element()
     }
 
+    /// A scheduled task's row: the task, not its run. Name, schedule, next
+    /// run and last outcome, with the dot of its latest run. Clicking opens
+    /// that run; History opens the task's run history.
+    fn render_task_row(
+        &mut self,
+        ix: usize,
+        row: &OverviewRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let chat = &row.chat;
+        let Some(info) = chat.scheduled_task_info.clone() else {
+            return div().into_any_element();
+        };
+        self.ensure_scheduled_tasks(&chat.device_id, cx);
+        let chat_id = chat.id.clone();
+        let task = self.task_for(chat);
+        let name = task.map_or(info.task_name.clone(), |(t, _)| t.draft.name.clone());
+        let mut meta = Vec::new();
+        if let Some((task, runs)) = task {
+            meta.push(crate::scheduled_tasks::schedule_label(&task.draft.schedule));
+            meta.push(
+                crate::scheduled_tasks::next_run_label(task).unwrap_or_else(|| {
+                    if task.draft.enabled {
+                        "No next run"
+                    } else {
+                        "Paused"
+                    }
+                    .into()
+                }),
+            );
+            meta.push(format!(
+                "Last: {}",
+                crate::scheduled_tasks::last_outcome_label(runs, &task.id)
+            ));
+        } else {
+            let (_, label) = status_style(row.status);
+            meta.push(format!("Last: {label}"));
+        }
+        let last_run = format!(
+            "Latest run {}",
+            format_time_ago(
+                chrono::DateTime::from_timestamp_millis(mast_proto::task_chat_order(chat).0)
+                    .unwrap_or(chat.created_at),
+                Utc::now()
+            )
+        );
+        let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
+        let indicator = crate::components::outline_chat_indicator(
+            row.status.into(),
+            format!("overview-task-status-{chat_id}"),
+            dot,
+            theme,
+            cx.entity_id(),
+            cx,
+        );
+        let open_id = chat_id.clone();
+        let history_task = info.task_id.clone();
+        let history_device = chat.device_id.clone();
+        let row_selector = format!("overview-task-row-{}", info.task_id);
+        let history_selector = format!("overview-task-history-{}", info.task_id);
+        crate::components::scheduled_task_parts::task_row()
+            .id(("overview-task-row", ix))
+            .debug_selector(move || row_selector.clone())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(
+                self.panel_highlight.as_deref() == Some(chat_id.as_str()),
+                |el| el.border_color(theme.accent),
+            )
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_chat_panel(open_id.clone(), cx)))
+            .child(indicator)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                crate::components::scheduled_task_parts::task_kind()
+                                    .flex_none()
+                                    .text_color(theme.text_muted)
+                                    .child("Scheduled task"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(name),
+                            ),
+                    )
+                    .child(
+                        crate::components::scheduled_task_parts::task_details()
+                            .truncate()
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(meta.join(" · ")),
+                    ),
+            )
+            .child(
+                crate::components::scheduled_task_parts::task_time()
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child(last_run),
+            )
+            .child(
+                crate::components::scheduled_task_parts::task_history()
+                    .id(SharedString::from(history_selector.clone()))
+                    .debug_selector(move || history_selector.clone())
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .bg(theme.accent.opacity(0.1))
+                    .hover(|el| el.bg(theme.accent.opacity(0.2)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let (task, device) = (history_task.clone(), history_device.clone());
+                        let _ = this.shell.update(cx, |shell, cx| {
+                            shell.open_scheduled_task_history(task, device, cx)
+                        });
+                    }))
+                    .child("History"),
+            )
+            .into_any_element()
+    }
+
     /// One List-mode row. Same click split as the web's `renderTile`: clicking the row toggles its expanded detail in place
     /// (and acknowledges an unread done); the explicit "View full chat →"
     /// control opens the interactive chat panel. Neither navigates away
@@ -5375,6 +5583,9 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if row.chat.scheduled_task_info.is_some() {
+            return self.render_task_row(ix, row, theme, cx);
+        }
         let now = Utc::now();
         let chat_id = row.chat.id.clone();
         let title: SharedString = row
@@ -8939,6 +9150,136 @@ mod logic_tests {
         };
         assert!(row.same_identity(&moved));
         assert!(!row.same_identity(&other));
+    }
+
+    #[gpui::test]
+    fn scheduled_tasks_render_as_one_task_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let run = |id: &str, task: &str, created: i64, retired: bool| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "host", "archived": false, "cwd": "/work/alpha",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "scheduledTaskInfo": {
+                    "taskId": task, "taskName": "stall-watch", "runId": id,
+                    "sessionCreatedAt": created, "retired": retired
+                }
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                run("older", "watch", 1, false),
+                run("latest", "watch", 2, false),
+                run("gone", "retired-routine", 3, true),
+                row("plain", "/work/alpha", None).chat,
+            ];
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let (overview, vcx) = cx.add_window_view(|_, cx| {
+            let mut overview = Overview::new(
+                state.clone(),
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            );
+            overview.view_mode = OverviewMode::List;
+            let task: mast_proto::ScheduledTask = serde_json::from_value(serde_json::json!({
+                "id": "watch", "revision": 1, "deviceId": "host", "createdAt": 0,
+                "updatedAt": 0, "nextDue": 1_800_000_000_000i64,
+                "draft": {
+                    "name": "Codespace Stall Watch", "prompt": "p", "cwd": "/work",
+                    "spaceId": null, "enabled": true, "graceMinutes": 30,
+                    "schedule": {"type": "cron", "expression": "*/30 9-17 * * 1-5",
+                        "timezone": "America/New_York"},
+                    "config": {"harness": "mock", "sandbox": "workspace-write"}
+                }
+            }))
+            .unwrap();
+            overview.scheduled_tasks.insert(
+                "host".into(),
+                (
+                    Instant::now(),
+                    std::sync::Arc::new(mast_proto::ScheduledTasksSnapshot {
+                        device_id: "host".into(),
+                        tasks: vec![task],
+                        ..Default::default()
+                    }),
+                ),
+            );
+            overview
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        overview.read_with(vcx, |o, _| {
+            let ids: Vec<&str> = o.list_order.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids.len(), 2, "one task row and the plain chat: {ids:?}");
+            assert!(ids.contains(&"latest") && ids.contains(&"plain"));
+            let latest = &o
+                .list_rows
+                .iter()
+                .find(|r| r.chat.id == "latest")
+                .unwrap()
+                .chat;
+            let (task, _) = o.task_for(latest).expect("the host reported the task");
+            assert_eq!(task.draft.name, "Codespace Stall Watch");
+        });
+        assert!(vcx.debug_bounds("overview-task-row-watch").is_some());
+        assert!(vcx.debug_bounds("overview-task-history-watch").is_some());
+        assert!(vcx.debug_bounds("overview-list-chat-latest").is_none());
+        assert!(vcx.debug_bounds("overview-list-chat-plain").is_some());
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
+        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+            for width in [640.0, 1440.0] {
+                crate::snapshot::render_to_png(
+                    &format!("scheduled-task-rows-{name}-{}", width as u32),
+                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    |_, cx| {
+                        let _ = crate::typography::register_fonts(cx);
+                        let state = cx.new(|_| AppState::new());
+                        state.update(cx, |s, _| {
+                            s.chats = vec![serde_json::from_value(serde_json::json!({
+                                "id":"latest", "deviceId":"host", "archived":false,
+                                "cwd":"/work/alpha", "createdAt":"2026-11-16T12:00:00Z",
+                                "scheduledTaskInfo":{"taskId":"watch", "taskName":"Routine", "runId":"latest"}
+                            })).unwrap()];
+                        });
+                        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        cx.new(|cx| {
+                            let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
+                            overview.view_mode = OverviewMode::List;
+                            let task = serde_json::from_value(serde_json::json!({
+                                "id":"watch", "revision":1, "deviceId":"host", "createdAt":0, "updatedAt":0,
+                                "nextDue":1_800_000_000_000i64,
+                                "draft":{"name":"Workspace health check", "prompt":"p", "cwd":"/work",
+                                "enabled":true, "graceMinutes":30,
+                                "schedule":{"type":"cron", "expression":"*/30 9-17 * * 1-5", "timezone":"America/New_York"},
+                                "config":{"harness":"mock", "sandbox":"workspace-write"}}
+                            })).unwrap();
+                            overview.scheduled_tasks.insert("host".into(), (Instant::now(), std::sync::Arc::new(mast_proto::ScheduledTasksSnapshot {
+                                device_id:"host".into(), tasks:vec![task], ..Default::default()
+                            })));
+                            overview
+                        })
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[gpui::test]

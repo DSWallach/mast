@@ -254,6 +254,7 @@ mod tests {
                 enabled: true,
                 grace_minutes: 360,
                 cutover_confirmed: false,
+                work_item_id: None,
             },
             created_at: 0,
             updated_at: 0,

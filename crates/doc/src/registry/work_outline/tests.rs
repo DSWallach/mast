@@ -1710,3 +1710,23 @@ fn undo_inverse_operations_restore_order_parent_fields_and_archive() {
     assert!(s.items.iter().all(|i| i.archived_at.is_none()));
     assert_eq!(titles(&s, Some(&a)), ["A child"]);
 }
+
+#[test]
+fn scheduled_run_lists_and_counts_exclude_superseded_and_retired_chats() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item = create(&mut doc, "item", None, "Routine");
+    for (id, at, retired) in [("older", 1, false), ("latest", 2, false), ("retired", 3, true)] {
+        let mut chat = space_chat(id, Some(SPACE));
+        chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_id: if retired { "retired" } else { "task" }.into(),
+            task_name: "Routine".into(), run_id: id.into(), session_created_at: Some(at), retired,
+            ..Default::default()
+        });
+        doc.upsert_chat(&chat).unwrap();
+        assign(&mut doc, &format!("assign-{id}"), id, &item).unwrap();
+    }
+    let outline = snap(&doc);
+    assert_eq!(outline.item(&item).unwrap().chat_ids, ["latest"]);
+    assert_eq!(outline.item(&item).unwrap().rollup.associated_chat_count, 1);
+    assert!(outline.unassociated_chat_ids.is_empty());
+}
