@@ -4393,7 +4393,10 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
-                let hunk_reference = code_ref::hunk_selection(file_diff, hunk_diff);
+                let hunk_reference = code_ref::hunk_selection(file_diff, hunk_diff).filter(|(_, _, _, old_side)| {
+                    // Latest Turn's deleted-only preimage is a tree snapshot, which CodeRef cannot yet name.
+                    !(self.scope == DiffScope::LatestTurn && *old_side)
+                });
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
                     .when_some(hunk_reference, |row, (path, range, snippet, old_side)| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
