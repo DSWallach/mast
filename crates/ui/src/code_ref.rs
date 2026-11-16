@@ -58,11 +58,58 @@ pub fn with_code_refs(text: &str, references: &[StagedCodeRef]) -> String {
         );
         let _ = write!(
             output,
-            "\n\n{}{} @ {}\n{}\n{}\n{}\n<!-- mast-code-ref:{} -->",
-            reference.location.path, range, revision, fence, staged.snippet, fence, encoded
+            "\n\n<!-- mast-code-ref:{} -->\n{}{} @ {}\n{}\n{}\n{}\n<!-- /mast-code-ref -->",
+            encoded, reference.location.path, range, revision, fence, staged.snippet, fence
         );
     }
     output
+}
+
+/// Project encoded reference blocks into transcript labels, leaving legacy text untouched.
+pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::SentMentionSpan>)> {
+    const OPEN: &str = "\n\n<!-- mast-code-ref:";
+    const END: &str = "\n<!-- /mast-code-ref -->";
+    let first = raw.find(OPEN)?;
+    let mut result = raw[..first].to_string();
+    let mut remaining = &raw[first..];
+    let mut spans = Vec::new();
+    while let Some(tail) = remaining.strip_prefix(OPEN) {
+        let (encoded, tail) = tail.split_once(" -->\n")?;
+        if encoded.len() % 2 != 0 {
+            return None;
+        }
+        let bytes: Option<Vec<_>> = encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let value = std::str::from_utf8(pair).ok()?;
+                u8::from_str_radix(value, 16).ok()
+            })
+            .collect();
+        let reference: mast_proto::CodeRef = serde_json::from_slice(&bytes?).ok()?;
+        let (_, rest) = tail.split_once(END)?;
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        let staged = StagedCodeRef {
+            id: String::new(),
+            reference,
+            snippet: String::new(),
+        };
+        let start = result.len();
+        result.push_str(&staged.label());
+        let end = result.len();
+        spans.push(crate::composer::SentMentionSpan {
+            range: start..end,
+            path: staged.reference.location.path.into(),
+            is_dir: false,
+        });
+        remaining = rest;
+    }
+    if !remaining.is_empty() {
+        return None;
+    }
+    Some((result, spans))
 }
 
 /// Hash the full file so an unchanged working tree is recognized cheaply.
