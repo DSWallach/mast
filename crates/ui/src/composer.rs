@@ -8486,7 +8486,8 @@ impl Render for Composer {
         // The attached-skills row shares the comment chip's strip geometry;
         // both fold into one height term so every sizing site below agrees.
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len())
-            + comment_strip_height(self.staged_skills().len());
+            + comment_strip_height(self.staged_skills().len())
+            + comment_strip_height(self.state.read(cx).code_refs(&self.current_key).len());
         let base_height = if self.dock_frame.is_some() {
             dock_height(dock_amount)
         } else if expanded {
