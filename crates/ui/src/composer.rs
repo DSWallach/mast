@@ -5321,7 +5321,7 @@ impl Composer {
                         cx.stop_propagation();
                         let key = this.current_key.clone();
                         this.state.update(cx, |state, cx| { state.remove_code_ref(&key, &id); cx.notify(); });
-                    })));
+                    }))));
         }
         Some(row)
     }
