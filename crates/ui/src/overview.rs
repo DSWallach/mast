@@ -47,6 +47,7 @@ use crate::shell::Shell;
 use crate::state::{AppState, format_time_ago};
 use crate::theme::Theme;
 use crate::transcript::Transcript;
+use crate::work_outline::chips::TextTooltip;
 use crate::work_outline::details_panel::{DetailsEvent, WorkItemDetails};
 use crate::work_outline::filter::{self as work_item_filter, WorkItemIndex, WorkItemPathLabel};
 use crate::work_outline::hints::{HintKey, WithHint};
