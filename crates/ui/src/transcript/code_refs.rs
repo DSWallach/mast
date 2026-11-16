@@ -27,9 +27,7 @@ impl Transcript {
             let Some(reference) = span.code_ref.clone() else {
                 continue;
             };
-            let Some(range) = reference.reference.range else {
-                continue;
-            };
+            let range = reference.reference.range;
             let id = key(&reference);
             if self
                 .code_ref_resolutions
@@ -73,7 +71,7 @@ impl Transcript {
                             None
                         } else {
                             file.text.as_deref().map(|contents| {
-                                crate::code_ref::reanchor(contents, range, &reference.snippet)
+                                resolve_snapshot(contents, range, &reference.snippet)
                             })
                         }
                     }
@@ -119,8 +117,12 @@ fn project_resolutions(
                 let mut reference = span.code_ref.clone().unwrap();
                 reference.reference.range = Some(range);
                 display.push_str(&format!("{} moved", reference.label()));
-                span.path =
-                    format!("{}:{}", reference.reference.location.path, range.start_line).into();
+                span.path = if reference.reference.range.is_some() {
+                    format!("{}:{}", reference.reference.location.path, range.start_line)
+                } else {
+                    reference.reference.location.path.clone()
+                }
+                .into();
             }
             Some(crate::code_ref::Resolution::Changed) => {
                 display.push_str(&text[span.range.clone()]);
@@ -134,6 +136,23 @@ fn project_resolutions(
     }
     display.push_str(&text[offset..]);
     (display.into(), Arc::new(projected))
+}
+
+fn resolve_snapshot(
+    contents: &str,
+    range: Option<mast_proto::CodeRefRange>,
+    snippet: &str,
+) -> crate::code_ref::Resolution {
+    match range {
+        Some(range) => crate::code_ref::reanchor(contents, range, snippet),
+        None if contents == snippet => {
+            crate::code_ref::Resolution::Unchanged(mast_proto::CodeRefRange {
+                start_line: 1,
+                end_line: contents.lines().count().max(1) as u32,
+            })
+        }
+        None => crate::code_ref::Resolution::Changed,
+    }
 }
 
 pub(super) fn activate(
@@ -151,16 +170,7 @@ pub(super) fn activate(
     let Some(engine) = state.engine().cloned() else {
         return;
     };
-    let Some(range) = reference.reference.range else {
-        render::activate_link(
-            crate::markdown::links::LinkTarget::new("", &reference.reference.location.path),
-            crate::markdown::links::LinkAction::Primary,
-            link_ui.as_ref(),
-            window,
-            cx,
-        );
-        return;
-    };
+    let range = reference.reference.range;
     let request = mast_proto::ReadWorkspaceFileRequest {
         target: context.target.clone(),
         path: reference.reference.location.path.clone(),
@@ -181,7 +191,7 @@ pub(super) fn activate(
             {
                 file.text
                     .as_deref()
-                    .map(|contents| crate::code_ref::reanchor(contents, range, &reference.snippet))
+                    .map(|contents| resolve_snapshot(contents, range, &reference.snippet))
             }
             Ok(file)
                 if reference
