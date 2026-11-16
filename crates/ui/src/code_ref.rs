@@ -150,7 +150,7 @@ pub fn pinned_link(reference: &StagedCodeRef) -> String {
 
 pub fn decode_pinned_link(target: &str) -> Option<StagedCodeRef> {
     let encoded = target.strip_prefix("mast-code-ref:")?;
-    if encoded.len() % 2 != 0 || encoded.len() > 2_000_000 {
+    if encoded.len() % 2 != 0 || encoded.len() > 20_000_000 {
         return None;
     }
     let bytes: Option<Vec<_>> = encoded
