@@ -3755,16 +3755,23 @@ impl Changes {
             DiffScope::WorkingTree if old_side => member.head_sha.clone(),
             _ => None,
         };
-        if commit.is_none() && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range)) { return; }
+        let lookup_head = old_side && self.scope == DiffScope::WorkingTree && commit.is_none();
+        if commit.is_none() && !lookup_head && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range)) { return; }
         let request = mast_proto::ReadWorkspaceFileRequest { target: context.target.clone(), path: path.clone() };
         let client = crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
         let state_handle = self.state.clone();
         state_handle.update(cx, |state, cx| { state.begin_code_ref_load(&key); cx.notify(); });
         cx.spawn(async move |this, cx| {
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
+            let commit = if lookup_head {
+                let params = serde_json::json!({ "cwd": context.cwd, "targetDeviceId": context.target_device_id, "cursor": 0, "limit": 1 });
+                engine.client().call(mast_rpc::methods::LIST_GIT_HISTORY, params).await.ok()
+                    .and_then(|value| serde_json::from_value::<mast_proto::GitHistoryPage>(value).ok())
+                    .and_then(|page| page.head_sha)
+            } else { commit };
             let snapshot = if let Some(commit) = commit {
                 Some((mast_proto::CodeRefRevision::Commit { commit }, expected.clone()))
-            } else {
+            } else if lookup_head { None } else {
                 match client.read_file(request).await {
                     Ok(file) if !file.truncated => file.text.and_then(|contents| {
                         let snippet = crate::code_ref::snippet(&contents, range)?;
