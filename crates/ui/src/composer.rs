@@ -4418,6 +4418,7 @@ struct FailedSend {
     appshot_ids: Vec<String>,
     skills: Vec<String>,
     comments: Vec<crate::comments::ReviewComment>,
+    code_refs: Vec<crate::code_ref::StagedCodeRef>,
 }
 
 pub struct Composer {
@@ -6715,7 +6716,7 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
         );
         send_button_mode(self.run_live(cx), has_text)
     }
@@ -6737,7 +6738,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -6764,7 +6765,7 @@ impl Composer {
         let has_content = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
@@ -6785,6 +6786,7 @@ impl Composer {
             attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
             appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
             skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
+            code_refs: self.state.read(cx).code_refs(&self.current_key).to_vec(),
         };
         self.failed_send = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -6897,11 +6899,13 @@ impl Composer {
             }
             taken
         });
+        let code_refs = self.state.update(cx, |state, cx| { let references = state.take_code_refs(&key); cx.notify(); references });
         let typed = text.clone();
         // Visible preamble ahead of the user's words (never hidden prompt
         // injection): the transcript, queue row and Run prompt all carry it.
         let text = with_skill_preamble(&staged_skills, &text);
         let text = crate::comments::with_comments(&text, &comments);
+        let text = crate::code_ref::with_code_refs(&text, &code_refs);
         self.preview = None;
         self.instruction_reset.remember_send(&message_id, &typed);
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -7631,6 +7635,7 @@ impl Composer {
                         for comment in &comments {
                             s.add_review_comment(&restore_key, comment.clone());
                         }
+                        for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
                         cx.notify();
                     });
                     composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
@@ -8300,6 +8305,7 @@ impl Render for Composer {
                 && self.staged_appshots().iter().map(|item| &item.id).eq(failed.appshot_ids.iter())
                 && self.staged_skills() == failed.skills
                 && self.staged_comments(cx) == failed.comments
+                && self.state.read(cx).code_refs(&self.current_key) == failed.code_refs
         });
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
@@ -8436,7 +8442,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-                self.staged_comments(cx).len(),
+                self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),

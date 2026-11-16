@@ -30,6 +30,41 @@ impl StagedCodeRef {
     }
 }
 
+/// Append a readable snapshot and structured reference metadata to a prompt.
+pub fn with_code_refs(text: &str, references: &[StagedCodeRef]) -> String {
+    use std::fmt::Write as _;
+    let mut output = text.to_owned();
+    for staged in references {
+        let reference = &staged.reference;
+        let revision = match &reference.at {
+            mast_proto::CodeRefRevision::Commit { commit } => commit.as_str(),
+            mast_proto::CodeRefRevision::WorkingTree { .. } => "working tree",
+        };
+        let range = reference
+            .range
+            .map(|range| format!(":{}-{}", range.start_line, range.end_line))
+            .unwrap_or_default();
+        let metadata = serde_json::to_vec(reference).expect("code reference serializes");
+        let encoded: String = metadata.iter().map(|byte| format!("{byte:02x}")).collect();
+        let fence = "`".repeat(
+            staged
+                .snippet
+                .split(|character| character != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0)
+                .max(2)
+                + 1,
+        );
+        let _ = write!(
+            output,
+            "\n\n{}{} @ {}\n{}\n{}\n{}\n<!-- mast-code-ref:{} -->",
+            reference.location.path, range, revision, fence, staged.snippet, fence, encoded
+        );
+    }
+    output
+}
+
 /// Hash the full file so an unchanged working tree is recognized cheaply.
 pub fn content_hash(contents: &str) -> String {
     format!("{:x}", Sha256::digest(contents.as_bytes()))
