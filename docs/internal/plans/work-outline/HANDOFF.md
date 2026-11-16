@@ -1219,6 +1219,17 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-16 evening; coordinator da545eee)
+
+- **Installed: release 96** = 95 + network git ops skip the spawn gate + post-mortem guardrails P1–P4
+  (`chore/perf-guardrails`: `mast_harness::backoff`, clippy `disallowed-methods` for raw `Command::new` with 28
+  non-git/gh sites still allowed under `TODO(post-mortem P3)`, git spawn-rate `warn` above 120/min with top callers,
+  idle-budget tests). Release tests since 94 (e8d628596): UI 2651/0; nextest 1865/1867, the known
+  `preview::leak remote_preview_churn` hang plus `idle_spawn_budget` over by one (87/86); its budget now counts
+  miss refreshes per 3 s window, 5/5 green. 95 at 30 min: 7–9% CPU, 2.7 GB flat.
+- Follow-ups: `diff_sync` / `diff_targets` call `git_command()` directly, bypassing the gate and the spawn-rate
+  counter, and lead 95's startup profile. Pre-install engine soak (gate 3) not built yet.
+
 ## In flight (snapshot 2026-11-16 15:45; coordinator da545eee)
 
 - **Installed: release 95** (integration dee3aa810 + 5d6b99faf): git spawn storm and sidebar PR-row scans fixed.
@@ -1991,6 +2002,13 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   lsregister); push `work-outline-implementation`. Before 2026-11-05 this was a `cp … Contents/MacOS/zeron` plus
   `codesign --identifier sh.zeron.app.dev`. Earlier bundles:
   `Zeron Dev.app` (until 2026-10-23) and `Creel.app` (until 2026-10-26), kept only as rollbacks.
+- **Perf gate before every install** (Mikey, 2026-11-16: perf is part of review, before a restart):
+  1. Branch review includes a perf pass on the diff: per-Space/worktree/chat loops that run git or I/O (cached and
+     bounded?), timers and polls, retry loops (backoff?), `cx.notify()`/redraw on ticks, whole-list scans in render.
+  2. The release suite's budget tests (engine `idle_spawn_budget`, UI PR-link index and retry budgets) must pass at
+     real scale.
+  3. Once it exists: headless engine soak of the candidate on a scratch data copy, compared with the installed
+     release. Worse CPU or git spawn rate = no install.
 - **Perf check after every release** (post-mortem 2026-11-16, P6): about 2 minutes after Mikey restarts, run
   `scripts/perf-sample.py` and record CPU, RSS and the top frames in the snapshot. Steady CPU above ~25%, or RSS
   growing more than 1 GB in 15 minutes, blocks further feature releases until explained.
