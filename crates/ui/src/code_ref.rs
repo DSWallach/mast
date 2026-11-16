@@ -293,6 +293,9 @@ mod tests {
         state.add_code_ref("chat", staged.clone());
         let taken = state.take_code_refs("chat");
         assert_eq!(taken, vec![staged]);
+        let pinned = pinned_link(&taken[0]);
+        assert_eq!(decode_pinned_link(&pinned), Some(taken[0].clone()));
+        assert!(decode_pinned_link("mast-code-ref:xyz").is_none());
         let prompt = with_code_refs("Review", &taken);
         assert!(
             prompt.contains("src/main.rs:2-3 @ working tree\n```\nlet x = 1;\nlet y = 2;\n```")
