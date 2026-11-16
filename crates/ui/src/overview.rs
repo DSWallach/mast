@@ -1955,7 +1955,6 @@ impl Overview {
     }
 
     /// Whether the toolbar search field holds focus.
-    #[cfg(test)]
     pub(crate) fn search_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         gpui::Focusable::focus_handle(self.search.read(cx), cx).is_focused(window)
     }
