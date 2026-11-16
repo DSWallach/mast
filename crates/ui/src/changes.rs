@@ -3764,7 +3764,7 @@ impl Changes {
         cx.spawn(async move |this, cx| {
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
             let commit = if lookup_head {
-                let params = serde_json::json!({ "cwd": context.cwd, "targetDeviceId": context.target_device_id, "cursor": 0, "limit": 1 });
+                let params = serde_json::json!({ "cwd": context.cwd.clone(), "targetDeviceId": context.target_device_id.clone(), "cursor": 0, "limit": 1 });
                 engine.client().call(mast_rpc::methods::LIST_GIT_HISTORY, params).await.ok()
                     .and_then(|value| serde_json::from_value::<mast_proto::GitHistoryPage>(value).ok())
                     .and_then(|page| page.head_sha)
