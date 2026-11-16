@@ -213,12 +213,26 @@ fn input_overflow_edges(
 
 /// During the reveal, stop at a complete row boundary instead of slicing
 /// glyphs with a moving clip. Scrolling offsets the row grid inside the box.
+/// Keeps a drag-selection pointer inside the text box. A collapsed box (under
+/// 0.5px) would put the upper limit below the lower one, and `clamp` panics on
+/// that, so the upper limit never drops below the lower.
+fn input_drag_position(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Point<Pixels> {
+    point(
+        position
+            .x
+            .clamp(bounds.left(), (bounds.right() - px(0.5)).max(bounds.left())),
+        position
+            .y
+            .clamp(bounds.top(), (bounds.bottom() - px(0.5)).max(bounds.top())),
+    )
+}
+
 fn input_reveal_height(visible: f32, scroll: f32, line_height: f32, resizing: bool) -> f32 {
     if !resizing {
         return visible;
     }
     let row_end = ((scroll + visible + 0.001) / line_height).floor() * line_height;
-    (row_end - scroll).clamp(0.0, visible)
+    (row_end - scroll).clamp(0.0, visible.max(0.0))
 }
 
 /// Apply GPUI's wheel delta to a top-origin input offset. Positive deltas mean
@@ -300,7 +314,7 @@ fn input_drag_scroll_delta(
     } else {
         return 0.0;
     };
-    distance.signum() * (distance.abs() * 0.2).clamp(1.0, line_height)
+    distance.signum() * (distance.abs() * 0.2).clamp(1.0, line_height.max(1.0))
 }
 
 /// Staged-attachment strip metrics (zeron attachment-ui.tsx AttachmentStrip:
@@ -2969,13 +2983,10 @@ impl ComposerInput {
     }
 
     fn drag_selection_position(&self, position: Point<Pixels>) -> Point<Pixels> {
-        let Some(bounds) = self.last_bounds else {
-            return position;
-        };
-        point(
-            position.x.clamp(bounds.left(), bounds.right() - px(0.5)),
-            position.y.clamp(bounds.top(), bounds.bottom() - px(0.5)),
-        )
+        match self.last_bounds {
+            Some(bounds) => input_drag_position(position, bounds),
+            None => position,
+        }
     }
 
     fn drag_scroll_delta(&self, position: Point<Pixels>) -> f32 {
@@ -10401,6 +10412,22 @@ mod tests {
         assert_eq!(input_drag_scroll_delta(315.0, top, bottom, line), 3.0);
         assert_eq!(input_drag_scroll_delta(-100.0, top, bottom, line), -line);
         assert_eq!(input_drag_scroll_delta(500.0, top, bottom, line), line);
+    }
+
+    #[test]
+    fn collapsed_input_bounds_do_not_panic_during_drag() {
+        let collapsed = Bounds::new(point(px(10.0), px(20.0)), size(px(0.0), px(0.2)));
+        assert_eq!(
+            input_drag_position(point(px(50.0), px(-5.0)), collapsed),
+            point(px(10.0), px(20.0))
+        );
+        let normal = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(40.0)));
+        assert_eq!(
+            input_drag_position(point(px(500.0), px(500.0)), normal),
+            point(px(99.5), px(39.5))
+        );
+        assert_eq!(input_reveal_height(-4.0, 0.0, INPUT_LINE_HEIGHT, true), 0.0);
+        assert_eq!(input_drag_scroll_delta(500.0, 0.0, 10.0, 0.0), 1.0);
     }
 
     /// One frame short of the full morph timeline (never rounds up to done).
