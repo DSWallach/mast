@@ -7359,7 +7359,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
-            SettingsSection::TokenUsage => icons::DOCUMENT_ADD,
+            SettingsSection::TokenUsage => icons::TOKEN_USAGE,
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,

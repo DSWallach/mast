@@ -12,6 +12,7 @@ async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_
         None,
     )
     .unwrap();
+    core.workspace.create_chat("fixture",None,Some(&core.device_id),None,Some(dir.path().display().to_string())).unwrap();
     let usage = core
         .sessions
         .token_usage()

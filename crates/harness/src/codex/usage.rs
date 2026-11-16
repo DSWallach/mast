@@ -73,7 +73,8 @@ fn counts(v: &Value) -> Option<TokenCounts> {
         input: count("inputTokens", "input_tokens")?,
         output: count("outputTokens", "output_tokens")?,
         cache_read: count("cachedInputTokens", "cached_input_tokens"),
-        cache_write: count("cacheWriteInputTokens", "cache_write_input_tokens"),
+        cache_write: count("cacheWriteInputTokens", "cache_write_input_tokens")
+            .or_else(|| count("cachedInputTokens", "cached_input_tokens").map(|_| 0)),
         reasoning: count("reasoningOutputTokens", "reasoning_output_tokens"),
     })
 }
@@ -146,5 +147,26 @@ mod tests {
         assert_eq!(input(t.observe(&event("a", 130, 20))), 30);
         assert_eq!(input(t.observe(&event("a", 130, 20))), 30);
         assert_eq!(input(t.observe(&event("b", 135, 5))), 5);
+    }
+    #[test]
+    fn child_usage_routes_to_its_tracker_and_implicit_cache_write_is_zero() {
+        assert!(matches!(
+            super::super::normalize::route_child_notification("thread/tokenUsage/updated"),
+            super::super::normalize::ChildRoute::Subagent
+        ));
+        let mut child = super::super::normalize::ChildStream::default();
+        let params = json!({"turnId":"child-turn","tokenUsage":{"total":{"inputTokens":50,"outputTokens":5,"cachedInputTokens":30},"last":{"inputTokens":20,"outputTokens":2,"cachedInputTokens":10}}});
+        let events = child.map("child", "thread/tokenUsage/updated", &params);
+        let AgentEvent::UsageMeasurement { measurement } = &events[0] else {
+            panic!()
+        };
+        assert_eq!(measurement.counts.input, 20);
+        assert_eq!(measurement.counts.cache_write, Some(0));
+        assert_eq!(
+            measurement
+                .counts
+                .selected(mast_proto::token_usage::TokenKind::UncachedInput),
+            10
+        );
     }
 }

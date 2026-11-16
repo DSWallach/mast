@@ -3,9 +3,9 @@ use super::*;
 // Aggregates replace request observations, including child-role observations.
 // Legacy counts are only used when a turn has no richer measurements.
 const FILTER:&str="FROM measurements m JOIN turns t ON t.id=m.turn_id
-    WHERE (?1 IS NULL OR m.model=?1) AND (?2 IS NULL OR t.at>=?2)
+    WHERE m.scope!='resumeBaseline' AND (?1 IS NULL OR m.model=?1) AND (?2 IS NULL OR t.at>=?2)
     AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4)
-    AND (m.scope!='legacy' OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.scope!='legacy'))
+    AND (m.scope!='legacy' OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.scope NOT IN ('legacy','resumeBaseline')))
     AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.model=m.model AND x.scope IN ('turn','turnIncludingChildren')))";
 
 fn selection(kind: TokenKind) -> (&'static str, &'static str) {
@@ -44,8 +44,8 @@ impl TokenUsage {
             "Recorded on this device since rollout. Earlier history is not included.".into(),
             "Provider counts and observed payload bytes are separate. Bytes are not billed tokens.".into(),
             "Tool schemas, hidden prompts, repeated request inclusion, exact rule token costs and causal savings are unavailable unless the harness exposes them.".into(),
-            "Claude per-model cumulative results are differenced within a harness process and include children. Request observations may be partial until a result arrives. Other harnesses may report input/output only.".into(),
-            "Showing at most 200 diagnostic groups and the latest 50 context snapshots. Narrow the filters to inspect other observations.".into(),
+            "Claude role totals combine main and subagent usage; a precise Claude subagent split is unavailable. First results after Claude resume establish a baseline and use only observed current-process requests, so those turns may be incomplete. Claude per-model cumulative results are differenced within a harness process and include children. Request observations may be partial until a result arrives. Other harnesses may report input/output only.".into(),
+            "Showing at most 200 groups per diagnostic category and the latest 50 context snapshots. Narrow the filters to inspect other observations.".into(),
         ],..Default::default()};
         let failures = self
             .0
@@ -59,7 +59,7 @@ impl TokenUsage {
             .query_row("SELECT MIN(at) FROM turns", [], |r| r.get(0))
             .map_err(fail)?;
         result.models = db
-            .prepare("SELECT DISTINCT model FROM measurements ORDER BY model")
+            .prepare("SELECT DISTINCT model FROM measurements WHERE scope!='resumeBaseline' ORDER BY model")
             .map_err(fail)?
             .query_map([], |r| r.get(0))
             .map_err(fail)?
@@ -133,7 +133,10 @@ impl TokenUsage {
             .collect::<Result<_, _>>()
             .map_err(fail)?;
         // A mixed-model turn contributes each diagnostic once, not once/model.
-        let mut diagnostics=db.prepare("SELECT d.category,d.label,d.revision,d.channel,d.stage,d.method,SUM(d.bytes),COUNT(*),SUM(COALESCE(d.is_error,0)),MIN(t.chat),COUNT(d.signature)-COUNT(DISTINCT d.signature),SUM(COALESCE(d.elapsed_ms,0)) FROM diagnostics d JOIN turns t ON t.id=d.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1)) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) GROUP BY d.category,d.label,d.revision,d.channel,d.stage,d.method ORDER BY SUM(d.bytes) DESC LIMIT 200").map_err(fail)?;
+        let mut diagnostics=db.prepare("WITH grouped AS (
+            SELECT d.category,d.label,d.revision,d.channel,d.stage,d.method,CASE WHEN d.stage='availableOnDisk' THEN MAX(d.bytes) ELSE SUM(d.bytes) END AS bytes,COUNT(*) AS observations,SUM(COALESCE(d.is_error,0)) AS errors,MIN(t.chat) AS example_chat_id,COUNT(d.signature)-COUNT(DISTINCT d.signature) AS repeated,SUM(COALESCE(d.elapsed_ms,0)) AS elapsed_ms
+            FROM diagnostics d JOIN turns t ON t.id=d.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) GROUP BY d.category,d.label,d.revision,d.channel,d.stage,d.method
+            ) SELECT category,label,revision,channel,stage,method,bytes,observations,errors,example_chat_id,repeated,elapsed_ms FROM (SELECT grouped.*,ROW_NUMBER() OVER(PARTITION BY category ORDER BY bytes DESC,label) AS rank FROM grouped) WHERE rank<=200 ORDER BY bytes DESC,category,label").map_err(fail)?;
         result.diagnostics = diagnostics
             .query_map(params![q.model, q.since, q.until, q.activity], |r| {
                 Ok(DiagnosticGroup {
@@ -154,7 +157,7 @@ impl TokenUsage {
             .map_err(fail)?
             .collect::<Result<_, _>>()
             .map_err(fail)?;
-        let mut samples=db.prepare("SELECT s.at,s.tokens,s.window,s.role FROM context_samples s JOIN turns t ON t.id=s.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1)) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) ORDER BY s.at DESC LIMIT 50").map_err(fail)?;
+        let mut samples=db.prepare("SELECT s.at,s.tokens,s.window,s.role FROM context_samples s JOIN turns t ON t.id=s.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) ORDER BY s.at DESC LIMIT 50").map_err(fail)?;
         result.context_samples = samples
             .query_map(params![q.model, q.since, q.until, q.activity], |r| {
                 Ok(UsageContextSample {

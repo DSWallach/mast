@@ -238,6 +238,7 @@ pub struct EngineCore {
     /// The PR/ticket sweep — owned so shutdown can end it. It reaches the
     /// doc host through the merged-PR wakes.
     pr_ticket_sweep: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token_usage_retention: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -340,6 +341,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         )?;
+        let token_usage_retention=sessions.token_usage().map(|usage|usage.follow_deletions(workspace.clone()));
         doc_host.set_workspace(workspace.clone());
         doc_host.set_instruction_registry(Arc::new(workspace.clone()));
         // Everything the dispatch gate needs (workspace + repos, so
@@ -695,6 +697,7 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             pr_ticket_sweep: std::sync::Mutex::new(Some(pr_ticket_sweep)),
+            token_usage_retention:std::sync::Mutex::new(token_usage_retention),
             _instance_lock: lock,
         })
     }
@@ -863,6 +866,8 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally

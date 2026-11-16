@@ -114,6 +114,7 @@ fn snapshots_dedupe_and_unknown_subtypes_are_not_reported_as_measured_zero() {
     }
     assert_eq!(store.snapshot(&Default::default()).unwrap().total, 24);
     store.observe("a", &done());
+    store.activate("a");
     store.observe(
         "a",
         &AgentEvent::Usage {
@@ -262,6 +263,7 @@ fn repeated_rule_observations_are_deduped_per_turn_but_not_across_turns() {
     store.observe("a", &diagnostic);
     store.observe("a", &diagnostic);
     store.observe("a", &done());
+    store.activate("a");
     store.observe("a", &diagnostic);
     let result = store.snapshot(&Default::default()).unwrap();
     let row = result
@@ -353,4 +355,286 @@ fn large_history_aggregates_in_sql_and_bounds_detail_payload() {
     assert_eq!(result.details.len(), 50);
     assert!(result.has_more);
     assert_eq!(result.configurations.len(), 1);
+}
+
+#[test]
+fn activity_uses_explicit_origins_and_scheduling_has_precedence() {
+    let mut request = request();
+    let manual = mast_proto::ChatPrLink {
+        url: "https://example.invalid/pr/1".into(),
+        source: mast_proto::ChatLinkSource::Manual,
+    };
+    assert_eq!(
+        classify_activity(&request, &[manual], false),
+        "Conversation"
+    );
+    let review = mast_proto::ChatPrLink {
+        url: "https://example.invalid/pr/1".into(),
+        source: mast_proto::ChatLinkSource::ReviewLauncher,
+    };
+    assert_eq!(
+        classify_activity(&request, std::slice::from_ref(&review), true),
+        "PR review"
+    );
+    request.scheduled_task = Some("task".into());
+    assert_eq!(
+        classify_activity(&request, &[review], true),
+        "Scheduled task"
+    );
+    request.scheduled_task = None;
+    assert_eq!(
+        classify_activity(&request, &[], true),
+        "Work-item automation"
+    );
+    request.prompt = "[Mast system message: auto-continue] Continue".into();
+    assert_eq!(
+        classify_activity(&request, &[], false),
+        "Work-item automation"
+    );
+}
+
+#[test]
+fn settled_late_events_do_not_create_phantom_turns_and_guards_release_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "r", &request(), "Conversation");
+    let guard = store.guard("a", "r");
+    store.observe("a", &measurement("one", "model", "turn", 10, 1));
+    store.observe("a", &done());
+    store.observe(
+        "a",
+        &AgentEvent::ContextUsage {
+            tokens: Some(100),
+            window: Some(1000),
+        },
+    );
+    assert_eq!(
+        store
+            .0
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+    drop(guard);
+    store.observe("a", &measurement("two", "model", "turn", 20, 1));
+    assert_eq!(store.snapshot(&Default::default()).unwrap().total, 11);
+    store.begin("a", "new", &request(), "Conversation");
+    let stale = store.guard("a", "old");
+    drop(stale);
+    assert!(store.0.lock().unwrap().active.contains_key("a"));
+}
+
+#[test]
+fn inventory_keeps_one_size_per_revision_and_skips_title_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), "rule contents").unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    let mut request = request();
+    request.cwd = dir.path().display().to_string();
+    for run in ["one", "two", "three"] {
+        store.begin("a", run, &request, "Conversation");
+    }
+    let snapshot = store.snapshot(&Default::default()).unwrap();
+    let inventory = snapshot
+        .diagnostics
+        .iter()
+        .find(|d| d.stage == "availableOnDisk")
+        .unwrap();
+    assert_eq!(inventory.bytes, 13);
+    assert_eq!(inventory.observations, 3);
+    let title = store.begin_title("a", &request);
+    let snapshot = store
+        .snapshot(&TokenUsageQuery {
+            activity: Some("Title generation".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        !snapshot
+            .diagnostics
+            .iter()
+            .any(|d| d.stage == "availableOnDisk")
+    );
+    store.finish_title(&title);
+}
+
+#[test]
+fn diagnostics_limits_do_not_hide_call_counts_or_rules_behind_large_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "r", &request(), "Conversation");
+    for index in 0..210 {
+        store.observe(
+            "a",
+            &AgentEvent::UsageDiagnostic {
+                diagnostic: UsageDiagnostic {
+                    id: index.to_string(),
+                    label: format!("tool-{index}"),
+                    category: "toolResult".into(),
+                    stage: "harnessResponse".into(),
+                    method: "bytesOnly".into(),
+                    bytes: 1000,
+                    ..Default::default()
+                },
+            },
+        );
+    }
+    store.observe(
+        "a",
+        &AgentEvent::UsageDiagnostic {
+            diagnostic: UsageDiagnostic {
+                id: "rule".into(),
+                label: "small rule".into(),
+                category: "instruction".into(),
+                stage: "submittedToHarness".into(),
+                bytes: 1,
+                ..Default::default()
+            },
+        },
+    );
+    store.observe(
+        "a",
+        &AgentEvent::ToolCall {
+            id: "call".into(),
+            call: ToolCall::Exec {
+                command: "rg thing".into(),
+            },
+        },
+    );
+    let result = store.snapshot(&Default::default()).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.category == "instruction")
+    );
+    assert!(result.diagnostics.iter().any(|d| d.category == "toolCall"));
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|d| d.category == "toolResult")
+            .count(),
+        200
+    );
+}
+
+#[test]
+fn resume_baselines_are_retained_for_audit_and_excluded_from_billed_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "run", &request(), "Conversation");
+    store.observe(
+        "a",
+        &measurement(
+            "provider:baseline",
+            "historical-model",
+            "resumeBaseline",
+            10000,
+            2000,
+        ),
+    );
+    let result = store.snapshot(&Default::default()).unwrap();
+    assert_eq!(result.total, 0);
+    assert_eq!(result.runs, 0);
+    assert!(result.models.is_empty());
+    store.observe(
+        "a",
+        &AgentEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+        },
+    );
+    assert_eq!(store.snapshot(&Default::default()).unwrap().total, 12);
+    let rows: u64 = store
+        .0
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM measurements WHERE scope='resumeBaseline'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purge() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = crate::EngineProfile::development(dir.path(), "org", "user");
+    let root = profile.store_root().to_path_buf();
+    let core = crate::EngineCore::assemble_with_profile(
+        profile,
+        Arc::new(crate::default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat(
+            "remote-deleted",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(dir.path().display().to_string()),
+        )
+        .unwrap();
+    let usage = core.sessions.token_usage().unwrap();
+    usage.begin("remote-deleted", "r", &request(), "Conversation");
+    usage.observe(
+        "remote-deleted",
+        &measurement("req", "model", "turn", 10, 1),
+    );
+    // This is the same registry tombstone the host receives through sync,
+    // without executing the host's DeleteChat RPC.
+    core.workspace.delete_chat("remote-deleted").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if usage.snapshot(&Default::default()).unwrap().total == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    core.workspace
+        .create_chat(
+            "local-deleted",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(dir.path().display().to_string()),
+        )
+        .unwrap();
+    let store = mast_sync::DocsStore::open(&root).unwrap();
+    let doc = mast_doc::SessionDoc::init("local-deleted").unwrap();
+    store
+        .save_snapshot("local-deleted", &doc.export_snapshot().unwrap())
+        .unwrap();
+    assert!(store.has_snapshot("local-deleted").unwrap());
+    usage
+        .0
+        .lock()
+        .unwrap()
+        .db
+        .execute_batch("DROP TABLE diagnostics")
+        .unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    assert!(
+        client
+            .call(
+                mast_rpc::methods::MUTATE,
+                serde_json::json!({"op":"deleteChat","chatId":"local-deleted"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(!store.has_snapshot("local-deleted").unwrap());
+    core.shutdown().await;
 }

@@ -2065,6 +2065,7 @@ impl Inner {
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
+        if status==SessionStatus::Working && let Some(usage)=self.token_usage.get(){usage.activate(chat_id);}
         self.set_status_with_completion(chat_id, status, fresh_start, None);
     }
 
@@ -3076,9 +3077,9 @@ async fn drive_run(
         Ok(())
     };
     if let Some(usage) = inner.token_usage.get() {
-        let activity = if request.scheduled_task.is_some() { "Scheduled task" }
-            else if inner.workspace().is_some_and(|ws| ws.chat_pr_links(&chat_id).is_ok_and(|links| links.iter().any(|link| link.source==mast_proto::ChatLinkSource::ReviewLauncher))) { "PR review" }
-            else if inner.workspace().and_then(|ws| ws.chat(&chat_id).ok().flatten()).is_some_and(|chat| chat.parent_chat_id.is_some()) || !matches!(mast_proto::message_source::classify(&request.prompt).0, mast_proto::message_source::MessageSource::Human) { "Work-item automation" } else { "Conversation" };
+        let links=inner.workspace().and_then(|ws|ws.chat_pr_links(&chat_id).ok()).unwrap_or_default();
+        let worker=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).is_some_and(|chat|chat.parent_chat_id.is_some());
+        let activity=crate::token_usage::classify_activity(&request,&links,worker);
         usage.begin(&chat_id, &run_id, &request, activity);
         let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
@@ -4759,5 +4760,24 @@ mod tests {
             subagent_doc_id("chat", "a:b"),
             subagent_doc_id("chat", "a:c")
         );
+    }
+}
+
+#[cfg(test)]
+mod token_usage_routing_tests {
+    use super::*;
+    #[test]
+    fn private_usage_is_persisted_only_in_its_ledger() {
+        let dir=tempfile::tempdir().unwrap();
+        let journal=Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let sessions=SessionsEngine::new("device".into(),journal.clone(),Arc::new(HarnessRegistry::new()));
+        let usage=crate::token_usage::TokenUsage::open(dir.path()).unwrap();
+        let request:RunRequest=serde_json::from_value(serde_json::json!({"prompt":"test","cwd":dir.path(),"sandbox":"read-only","attachments":[]})).unwrap();
+        usage.begin("chat","run",&request,"Conversation");sessions.set_token_usage(usage.clone());
+        let event=AgentEvent::UsageMeasurement{measurement:mast_proto::token_usage::UsageMeasurement{id:"private".into(),model:Some("model".into()),scope:"turn".into(),counts:mast_proto::token_usage::TokenCounts{input:10,output:2,..Default::default()}}};
+        assert_eq!(sessions.inner.publish("chat",&event),0);
+        assert!(journal.replay("chat",0).unwrap().is_empty());
+        assert!(lock(&sessions.inner.hubs).is_empty());
+        assert_eq!(usage.snapshot(&Default::default()).unwrap().total,12);
     }
 }

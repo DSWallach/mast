@@ -4,10 +4,15 @@ use super::wire::Frame;
 
 #[derive(Default)]
 pub(super) struct UsageTracker {
+    needs_resume_baseline: bool,
     previous: std::collections::BTreeMap<String, TokenCounts>,
     results: std::collections::VecDeque<String>,
 }
 impl UsageTracker {
+    pub(super) fn establish_resume_baseline(&mut self, resumed: bool) {
+        self.needs_resume_baseline = resumed;
+    }
+
     pub(super) fn observe(&mut self, frame: &Frame) -> Vec<AgentEvent> {
         if let Frame::Result(f) = frame {
             if let Some(id) = &f.uuid {
@@ -19,6 +24,11 @@ impl UsageTracker {
                 }
                 self.results.push_back(id.clone());
             }
+        }
+        let baseline_only = matches!(frame,Frame::Result(f) if !f.model_usage.is_empty())
+            && self.needs_resume_baseline;
+        if baseline_only {
+            self.needs_resume_baseline = false;
         }
         let mut events = observe(frame);
         if matches!(frame, Frame::Result(_)) {
@@ -44,8 +54,21 @@ impl UsageTracker {
                         }
                     }
                     self.previous.insert(model, current);
+                    if baseline_only {
+                        measurement.scope = "resumeBaseline".into();
+                    }
                 }
             }
+        }
+        if matches!(frame, Frame::Result(_)) {
+            events.retain(|event| match event {
+                AgentEvent::UsageMeasurement { measurement } => {
+                    measurement.scope == "resumeBaseline"
+                        || measurement.counts.input > 0
+                        || measurement.counts.output > 0
+                }
+                _ => true,
+            });
         }
         events
     }
@@ -232,5 +255,43 @@ mod tests {
         }
         assert_eq!(input, 641 + 87489 + 15844);
         assert_eq!(output, 768);
+    }
+
+    #[test]
+    fn resumed_history_seeds_a_baseline_and_inactive_models_do_not_emit_rows() {
+        let mut tracker = UsageTracker::default();
+        tracker.establish_resume_baseline(true);
+        let first=super::super::wire::parse_frame(r#"{"type":"result","uuid":"first","modelUsage":{"active":{"inputTokens":1000,"outputTokens":500},"inactive":{"inputTokens":100,"outputTokens":20}}}"#).unwrap();
+        let baselines = tracker.observe(&first);
+        assert_eq!(baselines.len(), 2);
+        assert!(baselines.iter().all(|event|matches!(event,AgentEvent::UsageMeasurement{measurement} if measurement.scope=="resumeBaseline")));
+        let next=super::super::wire::parse_frame(r#"{"type":"result","uuid":"next","modelUsage":{"active":{"inputTokens":1010,"outputTokens":505},"inactive":{"inputTokens":100,"outputTokens":20}}}"#).unwrap();
+        let events = tracker.observe(&next);
+        assert_eq!(events.len(), 1);
+        let AgentEvent::UsageMeasurement { measurement } = &events[0] else {
+            panic!()
+        };
+        assert_eq!(measurement.model.as_deref(), Some("active"));
+        assert_eq!(measurement.counts.input, 10);
+        assert_eq!(measurement.counts.output, 5);
+    }
+
+    #[test]
+    fn production_normalizer_preserves_legacy_usage_and_done_after_private_telemetry() {
+        let mut normalizer = super::super::normalize::Normalizer::new();
+        let frame=super::super::wire::parse_frame(r#"{"type":"result","uuid":"done","subtype":"success","usage":{"input_tokens":10,"output_tokens":20},"modelUsage":{"actual":{"inputTokens":10,"outputTokens":20}}}"#).unwrap();
+        let events = normalizer.normalize(frame, false);
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::UsageMeasurement { .. })
+        ));
+        assert!(matches!(
+            events[events.len() - 2],
+            AgentEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 20
+            }
+        ));
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
     }
 }

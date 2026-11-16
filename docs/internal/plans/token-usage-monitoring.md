@@ -1,6 +1,6 @@
 # Token usage monitoring — proposed implementation plan
 
-Status: implementation in progress, authorized by David. This plan is attached to the **Token Usage Monitoring** work item.
+Status: first implementation complete; review and validation in progress, authorized by David. This plan is attached to the **Token Usage Monitoring** work item.
 
 Branch: `david/token-usage-monitoring`  
 Worktree: `.worktrees/token-usage-monitoring`  
@@ -135,3 +135,9 @@ Begin reliable collection at rollout. Add a resumable background import of exist
 ## Proposed scope decisions
 
 These are recommendations for review, not implementation already performed: device-scoped first release; explicit operational activities rather than guessed task topics; prospective collection with clearly labeled partial journal history; token counts before dollar estimates. Optimization provenance, MCP/CLI comparisons, and expensive-rule diagnostics are required first-release scope. Detailed capture is limited by what each harness exposes, with coverage visible rather than fabricated. No blocking product question is needed to present this plan. David can revise these choices before implementation.
+
+## First implementation coverage
+
+Implemented: durable device-local collection; model/token-type/date filtering; activity and role groups; private telemetry; paginated chat drill-down; MCP/CLI/native payload sizes, repeated inputs, errors and elapsed time; Work Outline instruction revisions and working-directory rule-file inventory; context occupancy history; advertised-tool-name fingerprints; daily usage and configuration cohorts; title attempts; registry-driven deletion cleanup; capability-aware routing.
+
+Unavailable or deferred: exact hidden prompt/tool-schema tokens, actual repeated instruction inclusion, precise Claude subagent separation, complete first resumed-Claude-turn aggregates, cross-device combined totals, historical journal/native-transcript imports, custom calendar ranges, outcome-confirmed experiments and automatic savings claims. The page explicitly distinguishes provider counts, observed bytes, on-disk availability, and missing measurements. Configuration cohorts compare observations and do not establish causal savings.

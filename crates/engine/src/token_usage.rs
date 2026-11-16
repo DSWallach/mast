@@ -10,6 +10,7 @@ use std::{
 };
 
 mod query;
+mod retention;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,8 @@ struct Active {
     model: String,
     activity: String,
     configuration: String,
+    base_configuration: String,
+    has_turn: bool,
     context: UsageContext,
     calls: HashMap<String, (String, String, std::time::Instant)>,
 }
@@ -74,31 +77,24 @@ impl TokenUsage {
         let version: u32 = db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(fail)?;
-        if version > 4 {
-            return Err(fail("ledger belongs to a newer Mast"));
+        if version > 1 {
+            return Err(fail(
+                "ledger belongs to a newer or unreleased development version",
+            ));
         }
-        db.execute_batch("PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, chat TEXT NOT NULL, activity TEXT NOT NULL, configuration TEXT NOT NULL, at INTEGER NOT NULL, status TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS measurements(turn_id TEXT NOT NULL, source TEXT NOT NULL, model TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER, cache_write INTEGER, reasoning INTEGER, PRIMARY KEY(turn_id,source));
-            CREATE TABLE IF NOT EXISTS diagnostics(turn_id TEXT NOT NULL, source TEXT NOT NULL, category TEXT NOT NULL, label TEXT NOT NULL, revision TEXT, channel TEXT, bytes INTEGER NOT NULL, stage TEXT NOT NULL, method TEXT NOT NULL, is_error INTEGER, PRIMARY KEY(turn_id,source,category,stage));
+        db.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY,chat TEXT NOT NULL,activity TEXT NOT NULL,configuration TEXT NOT NULL,at INTEGER NOT NULL,status TEXT NOT NULL,context TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE IF NOT EXISTS measurements(turn_id TEXT NOT NULL,source TEXT NOT NULL,model TEXT NOT NULL,role TEXT NOT NULL,scope TEXT NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,cache_read INTEGER,cache_write INTEGER,reasoning INTEGER,PRIMARY KEY(turn_id,source));
+            CREATE TABLE IF NOT EXISTS diagnostics(turn_id TEXT NOT NULL,source TEXT NOT NULL,category TEXT NOT NULL,label TEXT NOT NULL,revision TEXT,channel TEXT,bytes INTEGER NOT NULL,stage TEXT NOT NULL,method TEXT NOT NULL,is_error INTEGER,signature TEXT,elapsed_ms INTEGER,PRIMARY KEY(turn_id,source,category,stage));
+            CREATE TABLE IF NOT EXISTS context_samples(turn_id TEXT NOT NULL,role TEXT NOT NULL,parent TEXT NOT NULL,at INTEGER NOT NULL,tokens INTEGER,window INTEGER,PRIMARY KEY(turn_id,parent,at));
+            CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS turns_time ON turns(at);
+            CREATE INDEX IF NOT EXISTS turns_chat ON turns(chat);
             CREATE INDEX IF NOT EXISTS measurements_model ON measurements(model,turn_id);
             CREATE INDEX IF NOT EXISTS diagnostics_turn ON diagnostics(turn_id);
-            CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);").map_err(fail)?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS context_samples(turn_id TEXT NOT NULL,role TEXT NOT NULL,parent TEXT NOT NULL,at INTEGER NOT NULL,tokens INTEGER,window INTEGER,PRIMARY KEY(turn_id,parent,at)); CREATE INDEX IF NOT EXISTS context_samples_turn ON context_samples(turn_id);").map_err(fail)?;
-        if version < 2 {
-            let tx = db.unchecked_transaction().map_err(fail)?;
-            tx.execute_batch("ALTER TABLE diagnostics ADD COLUMN signature TEXT; ALTER TABLE diagnostics ADD COLUMN elapsed_ms INTEGER; PRAGMA user_version=2;").map_err(fail)?;
-            tx.commit().map_err(fail)?;
-        }
-        if version < 3 {
-            let tx = db.unchecked_transaction().map_err(fail)?;
-            tx.execute_batch("ALTER TABLE turns ADD COLUMN context TEXT NOT NULL DEFAULT '{}'; PRAGMA user_version=3;").map_err(fail)?;
-            tx.commit().map_err(fail)?;
-        }
-        if version < 4 {
-            db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS provider_source ON measurements(source) WHERE substr(source,1,9)='provider:'; PRAGMA user_version=4;").map_err(fail)?;
-        }
+            CREATE INDEX IF NOT EXISTS context_samples_turn ON context_samples(turn_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS provider_source ON measurements(source) WHERE substr(source,1,9)='provider:';
+            PRAGMA user_version=1; COMMIT;").map_err(fail)?;
         db.execute(
             "INSERT OR IGNORE INTO metadata VALUES('signatureKey',?1)",
             [crate::new_id()],
@@ -123,15 +119,27 @@ impl TokenUsage {
     }
 
     pub fn begin(&self, chat: &str, run: &str, request: &RunRequest, activity: &str) {
+        self.begin_with_owner(chat, chat, run, request, activity);
+    }
+    fn begin_with_owner(
+        &self,
+        chat: &str,
+        owner: &str,
+        run: &str,
+        request: &RunRequest,
+        activity: &str,
+    ) {
         let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.insert(
             chat.into(),
             Active {
-                owner: chat.into(),
+                owner: owner.into(),
                 run: run.into(),
                 activity: activity.into(),
+                base_configuration: configuration.clone(),
                 configuration,
+                has_turn: true,
                 context: UsageContext {
                     harness: request.harness.map(|h| format!("{h:?}")),
                     reasoning: request.reasoning.map(|r| format!("{r:?}")),
@@ -160,7 +168,10 @@ impl TokenUsage {
         );
         // Inventory is explicitly not proof of prompt inclusion. It lets the
         // user find large repo rules even when a harness loads them privately.
-        for directory in Path::new(&request.cwd).ancestors().take(8) {
+        if let Some(directory) = (activity != "Title generation"
+            && Path::new(&request.cwd).is_absolute())
+        .then_some(Path::new(&request.cwd))
+        {
             for name in ["AGENTS.md", "CLAUDE.md"] {
                 if let Some(diagnostic) = instruction_file(
                     &directory.join(name),
@@ -216,22 +227,7 @@ impl TokenUsage {
 
     pub fn begin_title(&self, chat: &str, request: &RunRequest) -> String {
         let key = format!("title:{}", crate::new_id());
-        self.begin(&key, &key, request, "Title generation");
-        if let Some(active) = self
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .active
-            .get_mut(&key)
-        {
-            active.owner = chat.into();
-        }
-        // begin already recorded the prompt; correct its owner before exposure.
-        let inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = inner.db.execute(
-            "UPDATE turns SET chat=?2 WHERE id=?1",
-            params![format!("{key}:0"), chat],
-        );
+        self.begin_with_owner(&key, chat, &key, request, "Title generation");
         key
     }
     pub fn finish_title(&self, key: &str) {
@@ -242,16 +238,77 @@ impl TokenUsage {
             .remove(key);
     }
 
+    pub fn activate(&self, chat: &str) {
+        if let Some(active) = self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .active
+            .get_mut(chat)
+        {
+            active.has_turn = true;
+        }
+    }
     pub fn observe(&self, chat: &str, event: &AgentEvent) {
+        let mut leaf = event;
+        let mut parent = String::new();
+        while let AgentEvent::Subagent {
+            parent_tool_use_id,
+            event,
+        } = leaf
+        {
+            parent.push_str(parent_tool_use_id);
+            parent.push('/');
+            leaf = event;
+        }
+        // Text deltas never take the shared lock or touch SQLite.
+        if !matches!(
+            leaf,
+            AgentEvent::Usage { .. }
+                | AgentEvent::UsageMeasurement { .. }
+                | AgentEvent::UsageDiagnostic { .. }
+                | AgentEvent::SessionStarted { .. }
+                | AgentEvent::ToolCall { .. }
+                | AgentEvent::ToolResult { .. }
+                | AgentEvent::Done { .. }
+                | AgentEvent::ContextUsage { .. }
+                | AgentEvent::Steered { .. }
+        ) {
+            return;
+        }
+        // File metadata is read before entering the collector critical section.
+        let file = if let AgentEvent::ToolCall {
+            id,
+            call: ToolCall::ReadFile { path },
+        } = leaf
+        {
+            instruction_file(
+                Path::new(path),
+                format!("instructionRead:{parent}{id}"),
+                "requestedRead",
+            )
+        } else {
+            None
+        };
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        if let Err(error) = inner.observe(chat, event) {
+        let result = (|| {
+            inner.db.execute_batch("BEGIN IMMEDIATE").map_err(fail)?;
+            inner.observe(chat, event)?;
+            if let Some(diagnostic) = file {
+                inner.observe(chat, &AgentEvent::UsageDiagnostic { diagnostic })?;
+            }
+            inner.db.execute_batch("COMMIT").map_err(fail)
+        })();
+        if let Err(error) = result {
+            let _ = inner.db.execute_batch("ROLLBACK");
             inner.capture_failures += 1;
-            tracing::warn!(%error, "token usage capture failed");
+            tracing::warn!(%error,"token usage capture failed");
         }
     }
 
     pub fn delete_chat(&self, chat: &str) -> Result<(), EngineError> {
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        inner.active.retain(|_, active| active.owner != chat);
         let tx = inner.db.transaction().map_err(fail)?;
         for table in ["measurements", "diagnostics", "context_samples"] {
             tx.execute(
@@ -265,7 +322,7 @@ impl TokenUsage {
         tx.execute("DELETE FROM turns WHERE chat=?1", [chat])
             .map_err(fail)?;
         tx.commit().map_err(fail)?;
-        inner.active.remove(chat);
+        inner.active.retain(|_, active| active.owner != chat);
         Ok(())
     }
 }
@@ -288,7 +345,22 @@ impl Inner {
             parent.push('/');
             leaf = event;
         }
-        let turn = format!("{}:{}", active.run, active.turn);
+        if role == "main" && matches!(leaf, AgentEvent::Steered { .. }) {
+            active.has_turn = true;
+            return Ok(());
+        }
+        if role == "main" && !active.has_turn && matches!(leaf, AgentEvent::Done { .. }) {
+            return Ok(());
+        }
+        let turn = format!(
+            "{}:{}",
+            active.run,
+            if active.has_turn {
+                active.turn
+            } else {
+                active.turn.saturating_sub(1)
+            }
+        );
         // Avoid writes for the high-frequency text/reasoning stream.
         if !matches!(
             leaf,
@@ -324,7 +396,8 @@ impl Inner {
                 let mut names = tools.clone();
                 names.sort();
                 let revision = fingerprint(&names.join("\n"));
-                active.configuration = fingerprint(&format!("{}:{revision}", active.configuration));
+                active.configuration =
+                    fingerprint(&format!("{}:{revision}", active.base_configuration));
                 self.db
                     .execute(
                         "UPDATE turns SET configuration=?2 WHERE id=?1",
@@ -408,7 +481,8 @@ impl Inner {
                 let (channel, label) = tool_label(call);
                 let key = format!("{parent}{id}");
                 // Fingerprint only normalized input. The per-ledger secret
-                // prevents dictionary lookup of common commands/arguments.
+                // prevents correlation of identical inputs across different ledgers.
+                // The key is in this ledger and does not protect an exfiltrated DB.
                 let signature = match call {
                     ToolCall::Exec { command } => {
                         Some(fingerprint(&format!("{}:{command}", self.signature_key)))
@@ -436,15 +510,6 @@ impl Inner {
                     ..Default::default()
                 };
                 write_diagnostic(&self.db, &turn, &diagnostic)?;
-                if let ToolCall::ReadFile { path } = call
-                    && let Some(diagnostic) = instruction_file(
-                        Path::new(path),
-                        format!("instructionRead:{parent}{id}"),
-                        "requestedRead",
-                    )
-                {
-                    write_diagnostic(&self.db, &turn, &diagnostic)?;
-                }
             }
             AgentEvent::ToolResult {
                 id,
@@ -507,6 +572,7 @@ impl Inner {
                         params![turn, status],
                     )
                     .map_err(fail)?;
+                active.has_turn = false;
                 active.turn += 1;
                 active.calls.clear();
             }
@@ -561,6 +627,9 @@ fn tool_label(call: &ToolCall) -> (String, String) {
 }
 
 fn instruction_file(path: &Path, id: String, stage: &str) -> Option<UsageDiagnostic> {
+    if !path.is_absolute() {
+        return None;
+    }
     let name = path.file_name()?.to_str()?;
     if !matches!(name, "AGENTS.md" | "CLAUDE.md" | "SKILL.md") {
         return None;
@@ -578,11 +647,42 @@ fn instruction_file(path: &Path, id: String, stage: &str) -> Option<UsageDiagnos
     Some(UsageDiagnostic {
         id,
         category: "instructionFile".into(),
-        label: path.display().to_string(),
-        revision: Some(format!("mtime-{modified}-{}", metadata.len())),
+        label: if name == "SKILL.md" {
+            format!("{}/SKILL.md", path.parent()?.file_name()?.to_str()?)
+        } else {
+            name.to_owned()
+        },
+        revision: Some(fingerprint(&format!(
+            "file-metadata:{modified}:{}",
+            metadata.len()
+        ))),
         bytes: metadata.len(),
         stage: stage.into(),
         method: "bytesOnly".into(),
         ..Default::default()
     })
+}
+
+pub(crate) fn classify_activity(
+    request: &RunRequest,
+    links: &[mast_proto::ChatPrLink],
+    worker: bool,
+) -> &'static str {
+    if request.scheduled_task.is_some() {
+        "Scheduled task"
+    } else if links
+        .iter()
+        .any(|link| link.source == mast_proto::ChatLinkSource::ReviewLauncher)
+    {
+        "PR review"
+    } else if worker
+        || !matches!(
+            mast_proto::message_source::classify(&request.prompt).0,
+            mast_proto::message_source::MessageSource::Human
+        )
+    {
+        "Work-item automation"
+    } else {
+        "Conversation"
+    }
 }

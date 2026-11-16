@@ -2149,8 +2149,8 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                if let Some(usage) = self.sessions.token_usage() { usage.delete_chat(&chat_id).map_err(failed)?; }
                 self.doc_host.purge_chat(&chat_id);
+                if let Some(usage) = self.sessions.token_usage() { usage.delete_chat(&chat_id).map_err(failed)?; }
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
@@ -2664,6 +2664,9 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
+            if method==methods::TOKEN_USAGE && self.workspace.read_devices().ok().and_then(|devices|devices.into_iter().find(|device|device.id==target)).is_some_and(|device|!device.supports(mast_proto::capabilities::TOKEN_USAGE_V1)) {
+                return Err(RpcError::Failed("Update Mast on the selected device to view token usage.".into()));
+            }
             let target = target.to_string();
             return self.forward(&target, method, params).await;
         }

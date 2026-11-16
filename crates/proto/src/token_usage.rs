@@ -89,7 +89,7 @@ pub struct UsageMeasurement {
     pub id: String,
     pub model: Option<String>,
     pub counts: TokenCounts,
-    /// `request`, `turn`, or `turnIncludingChildren`. Aggregates supersede
+    /// `request`, `turn`, `turnIncludingChildren`, or excluded `resumeBaseline`. Aggregates supersede
     /// request measurements for the same turn/model in billing totals.
     pub scope: String,
 }

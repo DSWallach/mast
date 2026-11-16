@@ -288,6 +288,8 @@ impl Normalizer {
         }
     }
 
+    pub fn set_resumed(&mut self,resumed:bool){self.usage_tracker.establish_resume_baseline(resumed);}
+
     /// Preserve a buffered assistant error when the process exits without a result.
     pub(crate) fn take_pending_limit_error(&mut self) -> Option<AgentEvent> {
         self.emitted_limit_error = false;

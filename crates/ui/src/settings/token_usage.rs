@@ -145,6 +145,21 @@ impl TokenUsagePage {
         self.query.since = self
             .days
             .map(|days| chrono::Utc::now().timestamp_millis() - days * 86_400_000);
+        if let Some(target) = &self.target {
+            let state = self.state.read(cx);
+            if !state.is_local_device(target)
+                && state
+                    .devices
+                    .iter()
+                    .find(|d| &d.id == target)
+                    .is_some_and(|d| !d.supports(mast_proto::capabilities::TOKEN_USAGE_V1))
+            {
+                self.error = Some("Update Mast on this device to view token usage.".into());
+                self.loading = false;
+                cx.notify();
+                return;
+            }
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.error = Some("Connect to an engine to view token usage.".into());
             self.loading = false;
@@ -166,21 +181,29 @@ impl TokenUsagePage {
                     serde_json::from_value::<TokenUsageSnapshot>(v).map_err(|e| e.to_string())
                 });
             this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
-                this.loading = false;
-                match result {
-                    Ok(snapshot) => this.snapshot = Some(snapshot),
-                    Err(error) => {
-                        this.snapshot = None;
-                        this.error = Some(error);
-                    }
-                }
-                cx.notify();
+                this.apply_result(generation, result, cx);
             })
             .ok();
         }));
+        cx.notify();
+    }
+    fn apply_result(
+        &mut self,
+        generation: u64,
+        result: Result<TokenUsageSnapshot, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.generation != generation {
+            return;
+        }
+        self.loading = false;
+        match result {
+            Ok(snapshot) => {
+                self.snapshot = Some(snapshot);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
         cx.notify();
     }
     fn reset(&mut self, cx: &mut Context<Self>) {
@@ -239,7 +262,9 @@ impl Render for TokenUsagePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.polling && self.refresh_task.is_none() {
             self.refresh_task = Some(cx.spawn(async move |this, cx| {
-                gpui::Timer::after(std::time::Duration::from_secs(15)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(15))
+                    .await;
                 this.update(cx, |this, cx| {
                     this.refresh_task = None;
                     if !this.loading {
@@ -643,4 +668,56 @@ fn format_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| "Unknown time".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::AppContext as _;
+    #[gpui::test]
+    fn filter_resets_and_stale_responses_preserve_the_current_view(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| TokenUsagePage::new(state, cx));
+        page.update(cx, |page, cx| {
+            let old = page.generation;
+            page.query.offset = 50;
+            page.query.model = Some("new-model".into());
+            page.reset(cx);
+            assert_eq!(page.query.offset, 0);
+            assert!(page.snapshot.is_none());
+            let current = page.generation;
+            page.apply_result(
+                current,
+                Ok(TokenUsageSnapshot {
+                    total: 20,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            page.apply_result(
+                old,
+                Ok(TokenUsageSnapshot {
+                    total: 999,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert_eq!(page.snapshot.as_ref().unwrap().total, 20);
+            page.apply_result(current, Err("offline".into()), cx);
+            assert_eq!(page.snapshot.as_ref().unwrap().total, 20);
+            assert_eq!(page.error.as_deref(), Some("offline"));
+            page.target = Some("another-device".into());
+            page.reset(cx);
+            assert!(page.snapshot.is_none());
+            page.apply_result(
+                current,
+                Ok(TokenUsageSnapshot {
+                    total: 999,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(page.snapshot.is_none());
+        });
+    }
 }
