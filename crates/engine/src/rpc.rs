@@ -1436,6 +1436,10 @@ impl EngineRpc {
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
+        crate::git_gate::scope("change_request_root", self.change_request_root_inner(cwd)).await
+    }
+
+    async fn change_request_root_inner(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
         let requested = std::path::PathBuf::from(cwd);
         let unknown = || RpcError::BadParams("cwd is not a known checkout on this device".into());
         let local_device = self.doc_host.device_id();
@@ -5684,6 +5688,7 @@ impl RpcService for EngineRpc {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     #[tokio::test]

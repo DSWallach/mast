@@ -710,6 +710,7 @@ pub(crate) struct ProbeReport {
     pub(crate) content_height: Option<u32>,
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod probe_tests {
     use super::PROBE_TEMPLATE;

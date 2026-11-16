@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 #[test]
 fn doctor_reports_missing_prerequisites_with_fixes() {
     let profile = tempfile::Builder::new()

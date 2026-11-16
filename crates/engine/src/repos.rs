@@ -318,7 +318,7 @@ impl Repos {
             let _permit = if network {
                 None
             } else {
-                Some(crate::git_gate::acquire().await)
+                Some(crate::git_gate::acquire(crate::git_gate::default_tag("repos", args)).await)
             };
             cmd.output().await
         }
@@ -2356,6 +2356,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

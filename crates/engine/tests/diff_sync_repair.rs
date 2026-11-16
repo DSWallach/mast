@@ -2,6 +2,7 @@
 //! state has not moved, and a full capture must stay at five git processes.
 //! Own binary: the spawn counter is process-wide.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

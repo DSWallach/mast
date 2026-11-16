@@ -1,0 +1,9 @@
+# Post-mortem 2026-11-16 (P3): one way to spawn. Raw `Command::new` resolves a bare
+# program name through PATH, which made std fall back from posix_spawn to
+# fork+exec, and bypasses the engine's git gate. Spawn through mast_harness
+# helpers (`git_command`, `resolve_program`, ...). Allow only inside those
+# helpers and in tests.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "spawn via mast_harness helpers (absolute program path, git gate); see docs/internal/postmortems/2026-11-16-slow-mast.md P3" },
+  { path = "tokio::process::Command::new", reason = "spawn via mast_harness helpers (absolute program path, git gate); see docs/internal/postmortems/2026-11-16-slow-mast.md P3" },
+]

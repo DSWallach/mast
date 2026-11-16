@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use mast_harness::{AcpHarness, CodexHarness, Harness};
 use std::{path::Path, sync::Arc};
 

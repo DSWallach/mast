@@ -3512,7 +3512,10 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
         // restart or RPC drop ends the stream, and a bare return here froze
         // the sidebar until app restart — new chats, renames and archives
         // from every device silently stopped arriving.
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(30),
+        );
         loop {
             #[cfg(feature = "startup-bench")]
             startup_trace("chats_subscribe_start");
@@ -3527,11 +3530,12 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue;
                 }
             };
             while let Some(value) = rx.recv().await {
+                backoff.reset();
                 #[cfg(feature = "startup-bench")]
                 startup_trace("chats_frame_received");
                 #[cfg(feature = "startup-bench")]
@@ -3568,7 +3572,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }
@@ -3599,23 +3603,25 @@ pub(crate) enum InstructionHostSupport {
 /// Backoff before resubscribing a failed `WatchWorkOutline`: 2 s doubling to
 /// a 30 s ceiling.
 fn work_outline_retry_delay(attempt: u32) -> std::time::Duration {
-    let seconds = 2u64.saturating_mul(1u64 << attempt.min(4));
-    std::time::Duration::from_secs(seconds.min(30))
+    mast_harness::backoff::delay_for_attempt(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(30),
+        attempt,
+    )
 }
 
-/// Retry delay for a failed change-request watch. Transport errors retry every
-/// 2 s; a rejected request (`BadParams`: the cwd is not a known checkout, e.g. a
-/// deleted worktree) will fail the same way, so it backs off 2 s doubling to a
-/// 5 minute ceiling.
+/// Retry delay for a failed change-request watch (before jitter). Transport
+/// errors back off 2 s doubling to 30 s; a rejected request (`BadParams`: the
+/// cwd is not a known checkout, e.g. a deleted worktree) will fail the same way,
+/// so it backs off 2 s doubling to a 5 minute ceiling.
 fn change_request_retry_delay(err: &RpcError, attempt: u32) -> std::time::Duration {
-    const BASE: u64 = 2;
-    const CEILING: u64 = 300;
-    if matches!(err, RpcError::BadParams(_)) {
-        let seconds = BASE.saturating_mul(1u64 << attempt.min(8));
-        std::time::Duration::from_secs(seconds.min(CEILING))
+    let base = std::time::Duration::from_secs(2);
+    let ceiling = if matches!(err, RpcError::BadParams(_)) {
+        std::time::Duration::from_secs(300)
     } else {
-        std::time::Duration::from_secs(BASE)
-    }
+        std::time::Duration::from_secs(30)
+    };
+    mast_harness::backoff::delay_for_attempt(base, ceiling, attempt)
 }
 
 /// Sleep `delay`, waking early once `epoch` moves off `seen`.
@@ -3678,7 +3684,7 @@ fn spawn_work_outline_watch(
                         return;
                     }
                     cx.background_executor()
-                        .timer(work_outline_retry_delay(attempt))
+                        .timer(mast_harness::backoff::jittered(work_outline_retry_delay(attempt)))
                         .await;
                     attempt = attempt.saturating_add(1);
                     continue;
@@ -3730,7 +3736,7 @@ fn spawn_work_outline_watch(
                 return;
             }
             cx.background_executor()
-                .timer(work_outline_retry_delay(0))
+                .timer(mast_harness::backoff::jittered(work_outline_retry_delay(0)))
                 .await;
         }
     })
@@ -3778,7 +3784,7 @@ fn spawn_artifacts_watch(
                         return;
                     }
                     cx.background_executor()
-                        .timer(work_outline_retry_delay(attempt))
+                        .timer(mast_harness::backoff::jittered(work_outline_retry_delay(attempt)))
                         .await;
                     attempt = attempt.saturating_add(1);
                     continue;
@@ -3812,7 +3818,7 @@ fn spawn_artifacts_watch(
                 return;
             }
             cx.background_executor()
-                .timer(work_outline_retry_delay(0))
+                .timer(mast_harness::backoff::jittered(work_outline_retry_delay(0)))
                 .await;
         }
     })
@@ -3826,7 +3832,6 @@ fn spawn_change_request_watch(
     epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         let mut failures: u32 = 0;
         loop {
             let params = watch_params(&target, local_device_id.as_deref());
@@ -3868,18 +3873,14 @@ fn spawn_change_request_watch(
                         return;
                     }
                     let delay = change_request_retry_delay(&err, failures);
-                    failures = if matches!(err, RpcError::BadParams(_)) {
-                        failures.saturating_add(1)
-                    } else {
-                        0
-                    };
+                    failures = failures.saturating_add(1);
                     sleep_until_epoch_changes(cx, delay, &epoch, seen_epoch).await;
                     continue;
                 }
             };
-            failures = 0;
 
             while let Some(value) = subscription.recv().await {
+                failures = 0;
                 let snapshot: CheckoutChangeRequestStatus = match serde_json::from_value(value) {
                     Ok(snapshot) => snapshot,
                     Err(err) => {
@@ -3912,7 +3913,12 @@ fn spawn_change_request_watch(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            let delay = mast_harness::backoff::jittered(change_request_retry_delay(
+                &RpcError::Transport(String::new()),
+                failures,
+            ));
+            failures = failures.saturating_add(1);
+            cx.background_executor().timer(delay).await;
         }
     })
 }
@@ -3929,7 +3935,10 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
         // them for the rest of the app's life (remote Working dots staled out
         // to nothing after 45s, and Idle/Completed transitions from other
         // devices never arrived again — "the session never completes").
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(30),
+        );
         loop {
             let mut rx = match handle
                 .client()
@@ -3942,11 +3951,12 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue;
                 }
             };
             while let Some(value) = rx.recv().await {
+                backoff.reset();
                 #[cfg(feature = "startup-bench")]
                 if method == methods::WATCH_SPACES { startup_trace("spaces_frame_received"); }
                 let parsed: T = match serde_json::from_value(value) {
@@ -3986,7 +3996,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }
@@ -4037,7 +4047,10 @@ fn spawn_transcript_watch(
         // its engine-side room are the ONLY transcript delivery path). The
         // task itself is dropped by select_chat/apply_chats when the chat is
         // deselected or deleted, so retrying can't outlive relevance.
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(30),
+        );
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
@@ -4051,7 +4064,7 @@ fn spawn_transcript_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
@@ -4092,11 +4105,12 @@ fn spawn_transcript_watch(
                         // copy, so resubscribe for a fresh reset — delayed,
                         // in case the reset itself is what can't parse.
                         tracing::warn!(error = %err, "malformed transcript frame; resubscribing");
-                        cx.background_executor().timer(RETRY_DELAY).await;
+                        cx.background_executor().timer(backoff.next_delay()).await;
                         continue 'resubscribe;
                     }
                 };
                 preparation = next_preparation;
+                backoff.reset();
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
@@ -4126,7 +4140,7 @@ fn spawn_transcript_watch(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }
@@ -4149,7 +4163,10 @@ fn spawn_queue_watch(
         rejected_sends: Vec<mast_proto::InstructionRejectedSend>,
     }
     cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(30),
+        );
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": chat_id });
             let mut rx = match handle
@@ -4163,11 +4180,12 @@ fn spawn_queue_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
             while let Some(value) = rx.recv().await {
+                backoff.reset();
                 let frame: QueueFrame = match serde_json::from_value(value) {
                     Ok(frame) => frame,
                     Err(err) => {
@@ -4189,7 +4207,7 @@ fn spawn_queue_watch(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }
@@ -4203,7 +4221,10 @@ fn spawn_subagent_watch(
     doc_id: String,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut backoff = mast_harness::backoff::Backoff::new(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(30),
+        );
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
@@ -4217,7 +4238,7 @@ fn spawn_subagent_watch(
                     if this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(backoff.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
@@ -4236,11 +4257,12 @@ fn spawn_subagent_watch(
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
-                        cx.background_executor().timer(RETRY_DELAY).await;
+                        cx.background_executor().timer(backoff.next_delay()).await;
                         continue 'resubscribe;
                     }
                 };
                 preparation = next_preparation;
+                backoff.reset();
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
@@ -4280,7 +4302,7 @@ fn spawn_subagent_watch(
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(backoff.next_delay()).await;
         }
     })
 }
@@ -5781,7 +5803,39 @@ mod tests {
             .collect();
         assert_eq!(delays, [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
         let transport = RpcError::Transport("socket closed".into());
-        assert_eq!(change_request_retry_delay(&transport, 7).as_secs(), 2);
+        let delays: Vec<u64> = (0..7)
+            .map(|attempt| change_request_retry_delay(&transport, attempt).as_secs())
+            .collect();
+        assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    /// Post-mortem 2026-11-16 (P1): a rejected watch (deleted worktree) must
+    /// not retry faster than its backoff. Over simulated minutes its attempts
+    /// stay few; a transport failure stays bounded too.
+    #[test]
+    fn change_request_retries_stay_within_a_budget_over_simulated_minutes() {
+        let attempts_within = |err: &RpcError, minutes: u64| {
+            let limit = std::time::Duration::from_secs(minutes * 60);
+            let mut elapsed = std::time::Duration::ZERO;
+            let mut attempts = 0u32;
+            while elapsed <= limit {
+                attempts += 1;
+                elapsed += change_request_retry_delay(err, attempts - 1);
+            }
+            attempts
+        };
+        let rejected = RpcError::BadParams("cwd is not a known checkout".into());
+        // 2 s fixed would be 150 attempts in 5 minutes; the ladder makes it 8.
+        assert_eq!(attempts_within(&rejected, 5), 8);
+        // 10 minutes: one more at the 300 s ceiling, never a fixed-rate loop.
+        assert_eq!(attempts_within(&rejected, 10), 9);
+        // Every delay is non-decreasing (never speeds back up).
+        let delays: Vec<_> = (0..20)
+            .map(|attempt| change_request_retry_delay(&rejected, attempt))
+            .collect();
+        assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
+        let transport = RpcError::Transport("socket closed".into());
+        assert!(attempts_within(&transport, 5) <= 14, "transport retries unbounded");
     }
 
     #[test]

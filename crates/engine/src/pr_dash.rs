@@ -110,9 +110,7 @@ pub trait GhRunner: Send + Sync + 'static {
 pub struct RealGh;
 
 fn gh_command() -> Option<std::process::Command> {
-    let executable = mast_harness::resolve_login_shell_executable("gh")?;
-    let mut command = std::process::Command::new(executable);
-    mast_harness::compose_login_shell_path_std(&mut command);
+    let mut command = mast_harness::gh_command()?;
     command.env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
     Some(command)
 }

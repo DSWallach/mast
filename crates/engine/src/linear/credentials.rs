@@ -6,6 +6,7 @@
 //! The key is never logged: errors carry `security`'s stderr only, and the
 //! value is passed to `security` as an argument (as `agent_accounts` does).
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

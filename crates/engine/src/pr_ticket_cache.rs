@@ -1248,9 +1248,7 @@ fn fetch_github_pr_by_number(repo: &str, number: u64) -> Option<PrStatus> {
 /// setup. In particular, app launches do not inherit the login shell PATH
 /// that commonly contains Homebrew's `gh`.
 fn gh_command() -> Option<Command> {
-    let executable = mast_harness::resolve_login_shell_executable("gh")?;
-    let mut command = Command::new(executable);
-    mast_harness::compose_login_shell_path_std(&mut command);
+    let mut command = mast_harness::gh_command()?;
     command.env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
     Some(command)
 }
@@ -1260,7 +1258,7 @@ fn gh_command() -> Option<Command> {
 /// not an error; every failure mode here (missing binary, non-zero exit,
 /// unparseable output) collapses to the same "no ticket data available".
 fn fetch_linear_ticket(ticket_id: &str) -> Option<TicketStatus> {
-    let output = Command::new("linear")
+    let output = mast_harness::command("linear")
         .args(["issue", "view", ticket_id, "--json"])
         .output()
         .ok()?;

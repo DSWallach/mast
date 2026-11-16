@@ -1,6 +1,7 @@
 //! Opt-in live test. Uses real Cursor quota in a disposable workspace.
 //! MAST_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p mast-harness --example cursor_stability_probe -- sessions 20
 //! cargo run -p mast-harness --example cursor_stability_probe -- models 1000
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use futures::StreamExt;
 use mast_harness::{CancellationToken, CursorHarness, Harness, RunControls};
 use mast_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};

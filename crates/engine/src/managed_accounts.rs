@@ -16,6 +16,7 @@
 //! a chat that already has a harness session keeps the Default login (its
 //! history lives there), a brand-new chat takes its project's default.
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (3 non-test sites) through mast_harness::command / git_command
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

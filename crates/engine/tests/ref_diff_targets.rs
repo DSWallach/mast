@@ -6,6 +6,7 @@
 //! `https://github.com/cofactr/...` URLs are redirected to the bare repos with
 //! `url.<bare>.insteadOf`.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
