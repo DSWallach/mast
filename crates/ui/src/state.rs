@@ -1899,6 +1899,16 @@ impl AppState {
     /// Full display status for a chat (tab dots, Active list). A send in
     /// flight ([`Self::begin_pending_send`]) reads as Working — the queued
     /// command is as good as running.
+    /// Board status lookup in one pass over sessions and chats.
+    pub(crate) fn board_indicators(&self, now: DateTime<Utc>) -> HashMap<String, ChatIndicator> {
+        let mut sessions = HashMap::new();
+        for session in &self.sessions { sessions.entry(session.chat_id.as_str()).or_insert(session); }
+        self.chats.iter().map(|chat| {
+            let indicator = if self.send_pending(&chat.id, now) { ChatIndicator::Working } else { display_status(chat, sessions.get(chat.id.as_str()).copied(), now) };
+            (chat.id.clone(), indicator)
+        }).collect()
+    }
+
     pub fn display_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
@@ -4171,6 +4181,11 @@ fn spawn_queue_watch(
     })
 }
 
+fn subagent_watch_terminal(error: &RpcError) -> bool {
+    matches!(error, RpcError::BadParams(_) | RpcError::UnknownMethod(_))
+        || matches!(error, RpcError::Failed(message) if message.to_ascii_lowercase().contains("not found"))
+}
+
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
@@ -4180,21 +4195,22 @@ fn spawn_subagent_watch(
     doc_id: String,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
                 Err(err) => {
-                    tracing::warn!(%doc_id, error = %err, "subagent watch failed; retrying");
-                    if this.update(cx, |_, _| {}).is_err() {
+                    let terminal = subagent_watch_terminal(&err);
+                    tracing::warn!(%doc_id, error = %err, terminal, "subagent watch failed");
+                    if terminal || this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
@@ -4213,7 +4229,7 @@ fn spawn_subagent_watch(
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
-                        cx.background_executor().timer(RETRY_DELAY).await;
+                        cx.background_executor().timer(retry.next_delay()).await;
                         continue 'resubscribe;
                     }
                 };
@@ -4250,14 +4266,16 @@ fn spawn_subagent_watch(
                     return;
                 }
                 if desync {
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
+                retry.reset();
             }
             tracing::debug!(%doc_id, "subagent stream ended; resubscribing");
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(retry.next_delay()).await;
         }
     })
 }
@@ -5756,6 +5774,22 @@ mod tests {
             .map(|attempt| work_outline_retry_delay(attempt).as_secs())
             .collect();
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
+    #[test]
+    fn subagent_watch_retry_budget_and_terminal_errors() {
+        assert!(subagent_watch_terminal(&RpcError::BadParams("bad".into())));
+        assert!(subagent_watch_terminal(&RpcError::UnknownMethod("watch".into())));
+        assert!(subagent_watch_terminal(&RpcError::Failed("chat not found".into())));
+        assert!(!subagent_watch_terminal(&RpcError::Closed));
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut attempts = 0;
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
+        while elapsed < std::time::Duration::from_secs(180) {
+            elapsed += mast_harness::backoff::jittered_with(retry.next_delay_exact(), 1000);
+            attempts += 1;
+        }
+        assert!(attempts <= 11, "too many retries in three minutes: {attempts}");
     }
 
     #[test]

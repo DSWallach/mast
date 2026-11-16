@@ -282,16 +282,28 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
 }
 
 pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFacts {
-    let snapshot = input.snapshot;
-    let item = item_id.and_then(|id| snapshot.and_then(|s| s.item(id)));
+    let item = item_id.and_then(|id| input.snapshot.and_then(|snapshot| snapshot.item(id)));
+    let requests = input.snapshot.map(|snapshot| requests_of(snapshot, &chat.id)).unwrap_or_default();
+    let ticket = if input.links.get(&chat.id).and_then(|status| status.ticket.as_ref()).is_some() {
+        None
+    } else {
+        input.snapshot.and_then(|snapshot| crate::chat_work_context::ticket(snapshot, item_id?)).map(|found| HeaderTicket { identifier:found.identifier, title:None, url:Some(found.url), state:None })
+    };
+    worker_with_index(chat, item, input, &requests, ticket)
+}
+
+/// Build a worker from already indexed item, requests and inherited ticket.
+pub(crate) fn worker_with_index(
+    chat: &Chat,
+    item: Option<&mast_proto::WorkItemView>,
+    input: &TeamInput<'_>,
+    requests: &[&mast_proto::UserActionRequestView],
+    inherited_ticket: Option<HeaderTicket>,
+) -> WorkerFacts {
     let mut ready = None;
     let mut asks = false;
-    if let Some(snapshot) = snapshot {
-        for request in snapshot
-            .user_action_requests
-            .iter()
-            .filter(|r| r.is_open() && !r.deduped && r.chat_id == chat.id)
-        {
+    if let Some(snapshot) = input.snapshot {
+        for request in requests.iter().copied().filter(|request| request.is_open()) {
             if request.effective_kind() == UserActionKind::Notice
                 || request.priority == Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)
             {
@@ -359,16 +371,7 @@ pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) 
             url: t.url.clone(),
             state: t.status.clone(),
         })
-        .or_else(|| {
-            let snapshot = snapshot?;
-            let found = crate::chat_work_context::ticket(snapshot, item_id?)?;
-            Some(HeaderTicket {
-                identifier: found.identifier,
-                title: None,
-                url: Some(found.url),
-                state: None,
-            })
-        });
+        .or(inherited_ticket);
     let title = item
         .map(|i| i.title.trim())
         .filter(|t| !t.is_empty())
@@ -382,7 +385,7 @@ pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) 
             indicator,
             queued: false,
             item,
-            requests: snapshot.map(|s| requests_of(s, &chat.id)).unwrap_or_default(),
+            requests: requests.to_vec(),
             pr_states: prs
                 .iter()
                 .filter(|pr| !pr.state.is_empty())

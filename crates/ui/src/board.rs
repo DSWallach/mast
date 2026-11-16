@@ -1,6 +1,8 @@
 //! Derived coordination board facts. This module does not fetch or persist data.
+use crate::chat_metadata::HeaderTicket;
 use crate::team::{self, TeamInput, WorkerFacts};
 use mast_proto::{ToolCall, WorkItemEffectiveStatus, WorkOutlineSnapshot};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum BoardStatus {
@@ -46,38 +48,102 @@ pub(crate) fn board(
         ids.insert(id.to_owned());
         ids
     });
+    let chats: HashMap<_, _> = input
+        .chats
+        .iter()
+        .map(|chat| (chat.id.as_str(), chat))
+        .collect();
+    let mut requests: HashMap<&str, Vec<&mast_proto::UserActionRequestView>> = HashMap::new();
+    let mut handoffs = HashSet::new();
+    for request in &snapshot.user_action_requests {
+        if request.deduped {
+            continue;
+        }
+        requests
+            .entry(request.chat_id.as_str())
+            .or_default()
+            .push(request);
+        if request.is_open()
+            && request.effective_kind()
+                == mast_proto::work_outline_user_actions::UserActionKind::Handoff
+        {
+            handoffs.insert(request.work_item_id.as_str());
+        }
+    }
+    let mut direct_tickets: HashMap<&str, &mast_proto::WorkItemExternalReferenceView> =
+        HashMap::new();
+    for reference in &snapshot.external_references {
+        if reference.provider != mast_proto::linear::LINEAR_PROVIDER
+            || reference.reference_type != mast_proto::linear::LINEAR_ISSUE_REFERENCE
+        {
+            continue;
+        }
+        direct_tickets
+            .entry(reference.work_item_id.as_str())
+            .and_modify(|prior| {
+                if (reference.created_at, &reference.id) < (prior.created_at, &prior.id) {
+                    *prior = reference;
+                }
+            })
+            .or_insert(reference);
+    }
+    // The materialized snapshot is depth-first, so the parent's inherited ticket is known first.
+    let mut tickets: HashMap<&str, Option<HeaderTicket>> = HashMap::new();
+    for item in &snapshot.items {
+        let inherited = item
+            .parent_work_item_id
+            .as_deref()
+            .and_then(|parent| tickets.get(parent))
+            .cloned()
+            .flatten();
+        let ticket = direct_tickets
+            .get(item.id.as_str())
+            .map(|reference| HeaderTicket {
+                identifier: reference.external_id.clone(),
+                title: None,
+                url: Some(reference.url.clone()),
+                state: None,
+            })
+            .or(inherited);
+        tickets.insert(item.id.as_str(), ticket);
+    }
     snapshot
         .items
         .iter()
         .filter(|item| item.archived_at.is_none())
         .filter(|item| scope.as_ref().is_none_or(|ids| ids.contains(&item.id)))
         .map(|item| {
-            let worker = item
+            let worker_chat = item
                 .chat_ids
                 .iter()
-                .filter_map(|id| {
-                    input
-                        .chats
-                        .iter()
-                        .find(|chat| &chat.id == id && !chat.archived)
-                })
-                .map(|chat| team::worker(chat, Some(&item.id), input))
-                .max_by_key(|worker| worker.last_active);
+                .filter_map(|id| chats.get(id.as_str()).copied())
+                .filter(|chat| !chat.archived)
+                .max_by_key(|chat| chat.last_message_at.or(Some(chat.created_at)));
+            let worker_requests = worker_chat
+                .and_then(|chat| requests.get(chat.id.as_str()))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let inherited_ticket = tickets.get(item.id.as_str()).cloned().flatten();
+            let worker = worker_chat.map(|chat| {
+                team::worker_with_index(
+                    chat,
+                    Some(item),
+                    input,
+                    worker_requests,
+                    inherited_ticket.clone(),
+                )
+            });
             let status = if item.effective_status == WorkItemEffectiveStatus::Completed {
                 BoardStatus::Done
-            } else if snapshot.user_action_requests.iter().any(|request| {
-                request.work_item_id == item.id
-                    && request.is_open()
-                    && !request.deduped
-                    && request.effective_kind()
-                        == mast_proto::work_outline_user_actions::UserActionKind::Handoff
-            }) || worker.as_ref().is_some_and(|worker| {
-                worker.ready.is_some()
-                    || worker
-                        .prs
-                        .iter()
-                        .any(|pr| pr.state.eq_ignore_ascii_case("open"))
-            }) {
+            } else if handoffs.contains(item.id.as_str())
+                || worker.as_ref().is_some_and(|worker| {
+                    worker.ready.is_some()
+                        || worker
+                            .prs
+                            .iter()
+                            .any(|pr| pr.state.eq_ignore_ascii_case("open"))
+                })
+            {
                 BoardStatus::InReview
             } else if worker.is_some()
                 && matches!(
@@ -89,25 +155,34 @@ pub(crate) fn board(
             } else {
                 BoardStatus::Todo
             };
-            let worker_chat = worker
-                .as_ref()
-                .and_then(|worker| input.chats.iter().find(|chat| chat.id == worker.chat_id));
             let worker_title = worker_chat.and_then(|chat| chat.title.clone());
             let report = worker_chat
                 .and_then(|chat| chat.last_message_preview.as_deref())
                 .and_then(team::activity_line);
+            let request_id = worker_requests
+                .iter()
+                .find(|request| {
+                    request.is_open()
+                        && !matches!(
+                            request.effective_kind(),
+                            mast_proto::work_outline_user_actions::UserActionKind::Handoff
+                                | mast_proto::work_outline_user_actions::UserActionKind::Notice
+                        )
+                        && request.priority
+                            != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)
+                })
+                .map(|request| request.id.clone());
             BoardItem {
-                request_id: worker.as_ref().and_then(|worker| snapshot.user_action_requests.iter().find(|request| request.chat_id == worker.chat_id && request.is_open() && !request.deduped && !matches!(request.effective_kind(), mast_proto::work_outline_user_actions::UserActionKind::Handoff | mast_proto::work_outline_user_actions::UserActionKind::Notice) && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)).map(|request| request.id.clone())),
-                worker_title,
-                report,
-                ticket: crate::chat_work_context::ticket(snapshot, &item.id)
-                    .map(|ticket| ticket.identifier),
                 id: item.id.clone(),
                 title: item.title.clone(),
                 status,
                 updated_at: item.updated_at,
                 created_at: item.created_at,
                 worker,
+                worker_title,
+                report,
+                ticket: inherited_ticket.map(|ticket| ticket.identifier),
+                request_id,
             }
         })
         .collect()
@@ -214,6 +289,35 @@ mod tests {
             team::WorkerState::Waiting
         );
     }
+    #[test]
+    fn indexed_tickets_keep_nearest_earliest_reference() {
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"s", "items":[{"id":"root","spaceId":"s","title":"Root"},{"id":"child","spaceId":"s","title":"Child","parentWorkItemId":"root"},{"id":"nested","spaceId":"s","title":"Nested","parentWorkItemId":"child"}],
+            "externalReferences":[
+                {"id":"r1","spaceId":"s","workItemId":"root","provider":"linear","referenceType":"issue","externalId":"ROOT-1","url":"https://example.invalid/root","createdAt":1},
+                {"id":"r2","spaceId":"s","workItemId":"child","provider":"linear","referenceType":"issue","externalId":"CHILD-2","url":"https://example.invalid/child","createdAt":2},
+                {"id":"r3","spaceId":"s","workItemId":"child","provider":"linear","referenceType":"issue","externalId":"LATER-3","url":"https://example.invalid/later","createdAt":3}
+            ]
+        })).unwrap();
+        let indicators = Default::default();
+        let links = Default::default();
+        let input = TeamInput {
+            chat_id: "",
+            chats: &[],
+            indicators: &indicators,
+            snapshot: Some(&snapshot),
+            links: &links,
+            now: chrono::Utc::now(),
+        };
+        let rows = board(&snapshot, None, &input);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.ticket.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("ROOT-1"), Some("CHILD-2"), Some("CHILD-2")]
+        );
+    }
+
     #[test]
     fn most_recent_worker_supplies_pr_and_diff_facts() {
         use mast_engine::pr_ticket_cache::{ChatLinkStatus, DiffStat, PrStatus};

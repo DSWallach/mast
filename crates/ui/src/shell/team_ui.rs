@@ -29,13 +29,14 @@ impl Shell {
         ids.iter().filter(|id| {
             let checkout = self.state.read(cx).selected_checkout_key(id);
             !self.chat_header_links_pending.contains(*id) && !self.chat_header_links.get(*id).is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
-        }).cloned().collect()
+        }).take(8usize.saturating_sub(self.chat_header_links_pending.len())).cloned().collect()
     }
 
     pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
         let ids = self.board_links_due(ids, cx);
         self.board_links_generation = self.board_links_generation.wrapping_add(1);
         let generation = self.board_links_generation;
+        if ids.is_empty() { return; }
         cx.spawn(async move |shell, cx| {
             for id in ids {
                 if !shell.update(cx, |shell, cx| { if shell.board_links_generation != generation { return false; } shell.ensure_chat_header_links(id, cx); true }).unwrap_or(false) { break; }
@@ -774,6 +775,8 @@ mod board_link_tests {
             shell.chat_header_links.insert("fresh".into(), ChatHeaderLinkCache { checkout:None, status:None, fetched_at:Instant::now() });
             shell.chat_header_links_pending.insert("pending".into());
             assert_eq!(shell.board_links_due(&["fresh".into(), "pending".into(), "missing".into()], cx), vec!["missing"]);
+            let many: Vec<_> = (0..100).map(|i| format!("worker-{i}")).collect();
+            assert_eq!(shell.board_links_due(&many, cx).len(), 7);
         });
     }
 }

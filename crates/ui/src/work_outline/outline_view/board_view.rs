@@ -59,10 +59,6 @@ impl OutlineView {
         );
     }
 
-    fn board_chat_ids(&self) -> Vec<String> {
-        self.board_cached_ids.clone()
-    }
-
     pub(crate) fn suspend_board(&mut self, cx: &mut Context<Self>) {
         if self.board_visible {
             self.board_visible = false;
@@ -82,12 +78,20 @@ impl OutlineView {
         }
     }
 
+    fn refresh_board_data(&mut self, cx: &mut Context<Self>) {
+        if self.board_mode != BoardMode::Tree && self.board_visible {
+            self.watch_board_links(cx);
+            self.watch_board_activity(cx);
+        }
+    }
+
     fn watch_board_links(&mut self, cx: &mut Context<Self>) {
         let Some(shell) = self.shell.as_ref().and_then(|shell| shell.upgrade()) else {
             return;
         };
         let ids = board_link_candidates(
             &self.board_rows,
+            &self.board_groups,
             self.board_mode,
             self.board_limit,
             &self.board_scroll,
@@ -128,36 +132,40 @@ impl OutlineView {
     }
 
     fn watch_board_activity(&mut self, cx: &mut Context<Self>) {
-        let now = chrono::Utc::now();
-        let state = self.state.read(cx);
-        let ids: std::collections::HashSet<_> = self
-            .board_chat_ids()
+        let visible = board_link_candidates(
+            &self.board_rows,
+            &self.board_groups,
+            self.board_mode,
+            self.board_limit,
+            &self.board_scroll,
+            &self.board_column_scroll,
+        );
+        let ids: std::collections::HashSet<_> = visible
             .into_iter()
-            .filter(|id| {
-                state
-                    .chats
-                    .iter()
-                    .find(|chat| &chat.id == id)
-                    .is_some_and(|chat| {
-                        state.display_status_for(chat, now) == mast_proto::ChatIndicator::Working
-                    })
-            })
+            .filter(|id| self.board_worker_states.get(id) == Some(&WorkerState::Working))
             .collect();
+        let mut activity_ids: Vec<_> = ids.iter().cloned().collect();
+        activity_ids.sort();
+        if self.board_activity_ids != activity_ids {
+            self.board_activity_ids = activity_ids;
+            self.board_activity.retain(|id, _| ids.contains(id));
+        }
         self.state
             .update(cx, |state, cx| state.set_board_watch_docs(ids, cx));
         if self.board_state_observe.is_none() {
+            self.board_status_revision = self.state.read(cx).board_status_revision;
             self.board_state_observe = Some(cx.observe(&self.state, |this, state, cx| {
                 if this.board_mode == BoardMode::Tree || !this.board_visible {
                     return;
                 }
-                let (status_revision, transcript_revision, activity) = {
+                let (status_revision, transcript_revision, artifact_changed, activity) = {
                     let state = state.read(cx);
                     let mut activity = None;
                     if state.transcript_revision != this.board_transcript_revision {
                         let mut lines = std::collections::HashMap::new();
-                        for id in this.board_chat_ids() {
+                        for id in &this.board_activity_ids {
                             let call = state
-                                .sub_transcript(&id)
+                                .sub_transcript(id)
                                 .iter()
                                 .rev()
                                 .flat_map(|message| message.parts.iter().rev())
@@ -170,7 +178,7 @@ impl OutlineView {
                                     _ => None,
                                 });
                             if let Some(line) = board::activity(call, None) {
-                                lines.insert(id, line);
+                                lines.insert(id.clone(), line);
                             }
                         }
                         activity = Some(lines);
@@ -178,6 +186,7 @@ impl OutlineView {
                     (
                         state.board_status_revision,
                         state.transcript_revision,
+                        this.board_artifact_key(state) != this.board_artifact_revision,
                         activity,
                     )
                 };
@@ -191,6 +200,9 @@ impl OutlineView {
                     cx.notify();
                 }
                 this.board_transcript_revision = transcript_revision;
+                if artifact_changed {
+                    cx.notify();
+                }
                 if let Some(activity) = activity
                     && activity != this.board_activity
                 {
@@ -334,24 +346,62 @@ impl OutlineView {
         bar.into_any_element()
     }
 
+    fn board_artifact_key(&self, state: &AppState) -> Option<(String, u64)> {
+        let space = self
+            .board_space
+            .as_deref()
+            .or_else(|| self.inputs.spaces.first().map(|space| space.id.as_str()))?;
+        state
+            .artifacts()
+            .snapshot(space)
+            .map(|snapshot| (space.to_owned(), snapshot.revision))
+    }
+
+    fn refresh_board_artifacts(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let key = self.board_artifact_key(state);
+        if key == self.board_artifact_revision {
+            return;
+        }
+        let mut artifacts: std::collections::HashMap<String, Vec<(String, String)>> =
+            Default::default();
+        if let Some((space, _)) = &key
+            && let Some(snapshot) = state.artifacts().snapshot(space)
+        {
+            for artifact in &snapshot.artifacts {
+                if artifact.archived_at.is_none()
+                    && let Some(chat) = &artifact.chat_id
+                {
+                    let entries = artifacts.entry(chat.clone()).or_default();
+                    if entries.len() < 5 {
+                        entries.push((artifact.id.clone(), artifact.title.clone()));
+                    }
+                }
+            }
+        }
+        self.board_artifact_revision = key;
+        self.board_artifacts = artifacts;
+    }
+
     pub(super) fn render_board(
         &mut self,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.refresh_board_artifacts(cx);
         if !self.board_visible {
             self.board_visible = true;
             self.board_rows_dirty = true;
         }
         if self.board_rows_dirty {
+            #[cfg(test)]
+            {
+                self.board_rebuild_count += 1;
+            }
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
-            let indicators = state
-                .chats
-                .iter()
-                .map(|chat| (chat.id.clone(), state.display_status_for(chat, now)))
-                .collect();
+            let indicators = state.board_indicators(now);
             let links = &self.board_links;
             let mut entries = Vec::new();
             for space in &self.inputs.spaces {
@@ -395,11 +445,20 @@ impl OutlineView {
                 self.board_link_versions.clear();
                 self.board_link_revision = u64::MAX;
             }
+            self.board_groups = std::array::from_fn(|_| Vec::new());
+            self.board_worker_states.clear();
+            for (index, (_, item)) in entries.iter().enumerate() {
+                self.board_groups[item.status as usize].push(index);
+                if let Some(worker) = &item.worker {
+                    self.board_worker_states
+                        .insert(worker.chat_id.clone(), worker.state);
+                }
+            }
             self.board_rows = entries;
             self.board_rows_dirty = false;
             let view = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
-                let _ = view.update(cx, |this, cx| this.refresh_board_watches(cx));
+                let _ = view.update(cx, |this, cx| this.refresh_board_data(cx));
             });
         }
         let entries = &self.board_rows;
@@ -493,12 +552,10 @@ impl OutlineView {
                 (BoardStatus::InReview, "IN REVIEW"),
                 (BoardStatus::Done, "DONE"),
             ] {
-                let count = entries
-                    .iter()
-                    .filter(|(_, item)| item.status == status)
-                    .count();
+                let indices = &self.board_groups[status as usize];
+                let count = indices.len();
                 let items = limit_board_items(
-                    entries.iter().filter(|(_, item)| item.status == status),
+                    indices.iter().map(|index| &entries[*index]),
                     self.board_limit,
                 );
                 let mut column = div()
@@ -769,18 +826,9 @@ impl OutlineView {
                     card = card.child(format!("Last report: {report}"));
                 }
                 let artifacts = self
-                    .state
-                    .read(cx)
-                    .artifacts()
-                    .snapshot(&space)
-                    .map(|snapshot| {
-                        snapshot
-                            .for_chat(&worker.chat_id)
-                            .into_iter()
-                            .take(5)
-                            .map(|artifact| (artifact.id.clone(), artifact.title.clone()))
-                            .collect::<Vec<_>>()
-                    })
+                    .board_artifacts
+                    .get(&worker.chat_id)
+                    .cloned()
                     .unwrap_or_default();
                 for (id, title) in artifacts {
                     card = card.child(
@@ -877,24 +925,25 @@ fn limit_board_items<'a>(
 
 fn board_link_candidates(
     rows: &[(String, BoardItem)],
+    groups: &[Vec<usize>; 4],
     mode: BoardMode,
     limit: usize,
     table_scroll: &gpui::ScrollHandle,
     columns: &[gpui::ScrollHandle; 4],
 ) -> Vec<String> {
-    fn visible(handle: &gpui::ScrollHandle, index: usize) -> bool {
-        if handle.bounds().size.height <= px(0.0) {
-            return false;
+    fn visible_range(handle: &gpui::ScrollHandle, count: usize) -> std::ops::Range<usize> {
+        if handle.bounds().size.height <= px(0.0) || count == 0 {
+            return 0..0;
         }
-        index >= handle.top_item() && index <= handle.bottom_item()
+        let bottom = handle.bottom_item().min(count);
+        let start = handle.top_item().max(1).saturating_sub(1).min(bottom);
+        start..bottom
     }
     if mode == BoardMode::Table {
-        return rows
+        let count = rows.len().min(limit.saturating_mul(4));
+        return rows[visible_range(table_scroll, count)]
             .iter()
-            .take(limit * 4)
-            .enumerate()
-            .filter(|(index, _)| visible(table_scroll, index + 1))
-            .filter_map(|(_, (_, item))| {
+            .filter_map(|(_, item)| {
                 (item.status != BoardStatus::Done)
                     .then(|| item.worker.as_ref().map(|worker| worker.chat_id.clone()))
                     .flatten()
@@ -906,14 +955,12 @@ fn board_link_candidates(
         BoardStatus::Todo,
         BoardStatus::InProgress,
         BoardStatus::InReview,
-        BoardStatus::Done,
     ] {
-        let items = rows.iter().filter(|(_, item)| item.status == status);
-        for (index, (_, item)) in items.take(limit).enumerate() {
-            if status != BoardStatus::Done && visible(&columns[status as usize], index + 1) {
-                if let Some(worker) = &item.worker {
-                    result.push(worker.chat_id.clone());
-                }
+        let indices = &groups[status as usize];
+        let count = indices.len().min(limit);
+        for index in &indices[visible_range(&columns[status as usize], count)] {
+            if let Some(worker) = &rows[*index].1.worker {
+                result.push(worker.chat_id.clone());
             }
         }
     }
@@ -963,6 +1010,123 @@ fn sort_board_rows(entries: &mut Vec<(String, BoardItem)>, sort: BoardSort, desc
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+
+    #[gpui::test]
+    fn board_idle_rebuild_budget_at_space_scale(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let state = cx.new(|_| { let mut state = AppState::new(); state.chats = (0..50).map(|i| serde_json::from_value(serde_json::json!({"id":format!("chat-{i}"),"deviceId":"local","spaceId":"s","archived":false,"createdAt":"2026-09-08T00:00:00Z"})).unwrap()).collect(); state });
+        state.update(cx, |state, _| {
+            for i in 0..5 {
+                state.begin_pending_send(&format!("chat-{i}"), "message", chrono::Utc::now());
+            }
+        });
+        let artifacts: Vec<_> = (0..500).map(|i| serde_json::json!({"id":format!("artifact-{i}"),"spaceId":"s","chatId":format!("chat-{}", i % 50),"title":format!("Artifact {i}")})).collect();
+        state.update(cx, |state, _| {
+            state.set_test_artifacts(
+                serde_json::from_value(
+                    serde_json::json!({"spaceId":"s","revision":1,"artifacts":artifacts}),
+                )
+                .unwrap(),
+            )
+        });
+        let items: Vec<_> = (0..500).map(|i| serde_json::json!({"id":format!("item-{i}"),"spaceId":"s","title":format!("Item {i}"),"chatIds":if i < 50 { vec![format!("chat-{i}")] } else { vec![] }})).collect();
+        let requests: Vec<_> = (0..500).map(|i| serde_json::json!({"id":format!("request-{i}"),"spaceId":"s","workItemId":format!("item-{}", i % 50),"chatId":format!("chat-{}", i % 50),"kind":"notice","state":"open"})).collect();
+        let references: Vec<_> = (0..500).map(|i| serde_json::json!({"id":format!("reference-{i}"),"spaceId":"s","workItemId":format!("item-{i}"),"provider":"linear","referenceType":"issue","externalId":format!("TEST-{i}"),"url":"https://example.invalid"})).collect();
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(
+            serde_json::json!({"spaceId":"s","available":true,"revision":1,"items":items,"userActionRequests":requests,"externalReferences":references}),
+        )
+        .unwrap();
+        let (outline, vcx) = cx.add_window_view(|_, cx| OutlineView::new(state.clone(), cx));
+        outline.update(vcx, |outline, cx| {
+            outline.set_inputs(
+                OutlineInputs {
+                    spaces: vec![OutlineSpace {
+                        id: "s".into(),
+                        label: "Space".into(),
+                        load: WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+                        hidden: false,
+                    }],
+                    ..Default::default()
+                },
+                cx,
+            );
+            outline.board_mode = BoardMode::Board;
+            for i in 0..50 {
+                let pr = mast_engine::pr_ticket_cache::PrStatus {
+                    number: i + 1,
+                    url: None,
+                    state: "OPEN".into(),
+                    is_draft: false,
+                    review_decision: None,
+                    reviewers: Vec::new(),
+                    checks: None,
+                    title: None,
+                    branch: None,
+                    head_sha: None,
+                    mergeable: String::new(),
+                    has_reviewer_requested: false,
+                    merged_at: None,
+                };
+                outline.board_links.insert(
+                    format!("chat-{i}"),
+                    mast_engine::pr_ticket_cache::ChatLinkStatus {
+                        pr: Some(pr),
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        outline.update(vcx, |outline, cx| outline.refresh_board_data(cx));
+        assert!(!outline.read_with(vcx, |outline, _| outline.board_activity_ids.is_empty()));
+        let before = outline.read_with(vcx, |outline, _| outline.board_rebuild_count);
+        let started = std::time::Instant::now();
+        for _ in 0..50 {
+            state.update(vcx, |state, cx| {
+                state.transcript_revision += 1;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            outline.update(vcx, |_, cx| cx.notify());
+            vcx.update(|window, cx| window.draw(cx).clear());
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(
+            outline.read_with(vcx, |outline, _| outline.board_rebuild_count),
+            before
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "50 idle redraws took {elapsed:?}"
+        );
+        outline.update(vcx, |outline, cx| {
+            outline.board_mode = BoardMode::Table;
+            outline.board_rows_dirty = true;
+            cx.notify();
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        let before = outline.read_with(vcx, |outline, _| outline.board_rebuild_count);
+        let table_started = std::time::Instant::now();
+        for _ in 0..50 {
+            outline.update(vcx, |_, cx| cx.notify());
+            vcx.update(|window, cx| window.draw(cx).clear());
+        }
+        assert_eq!(
+            outline.read_with(vcx, |outline, _| outline.board_rebuild_count),
+            before,
+            "table sort must be cached across redraws"
+        );
+        assert!(
+            table_started.elapsed() < std::time::Duration::from_secs(5),
+            "50 table redraws exceeded the budget"
+        );
+    }
 
     #[test]
     fn done_column_is_capped_until_more_is_requested() {
@@ -1030,6 +1194,7 @@ mod tests {
         outline.read_with(vcx, |outline, _| {
             let ids = board_link_candidates(
                 &outline.board_rows,
+                &outline.board_groups,
                 outline.board_mode,
                 outline.board_limit,
                 &outline.board_scroll,
@@ -1100,15 +1265,32 @@ mod tests {
         let (outline, vcx) = cx.add_window_view(|_, cx| {
             OutlineView::new(state.clone(), cx).with_shell(shell.downgrade())
         });
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({"spaceId":"s","available":true,"revision":1,"items":[{"id":"item","spaceId":"s","title":"Item","effectiveStatus":"active","chatIds":["worker"]}]})).unwrap();
         outline.update(vcx, |outline, cx| {
+            outline.set_inputs(
+                OutlineInputs {
+                    spaces: vec![OutlineSpace {
+                        id: "s".into(),
+                        label: "Space".into(),
+                        load: WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+                        hidden: false,
+                    }],
+                    ..Default::default()
+                },
+                cx,
+            );
             outline.board_mode = BoardMode::Board;
-            outline.board_visible = true;
-            outline.board_cached_ids = vec!["worker".into()];
             outline.board_status_revision = state.read(cx).board_status_revision;
-            outline.watch_board_activity(cx);
-            outline.watch_board_links(cx);
         });
+        vcx.update(|window, cx| window.draw(cx).clear());
         vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        outline.update(vcx, |outline, cx| outline.refresh_board_data(cx));
+        vcx.run_until_parked();
+        outline.read_with(vcx, |outline, _| {
+            assert_eq!(outline.board_activity_ids, vec!["worker"]);
+            assert!(outline.board_shell_observe.is_some());
+        });
         let notifications = Rc::new(Cell::new(0));
         let seen = notifications.clone();
         vcx.update(|_, cx| {
