@@ -315,6 +315,15 @@ mod tests {
         assert_eq!(&display[spans[0].range.clone()], "main.rs:2-3");
         assert_eq!(spans[0].path.as_ref(), "src/main.rs:2");
         assert!(project_sent_refs("legacy message").is_none());
+        let mut file = taken[0].clone();
+        file.reference.kind = mast_proto::CodeRefKind::File;
+        file.reference.range = None;
+        file.snippet = "text\n<!-- /mast-code-ref -->\n```".into();
+        let prompt = with_code_refs("Review [main.rs](mast-file:src/main.rs)", &[file.clone()]);
+        let (display, spans) = project_sent_refs(&prompt).unwrap();
+        assert_eq!(display, "Review main.rs");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].code_ref.as_ref().unwrap().snippet, file.snippet);
     }
 
     #[test]
