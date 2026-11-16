@@ -580,6 +580,8 @@ impl mast_harness::Harness for HeldOpenFixture {
             cwd: request.cwd,
             session_id: "held-open".into(),
             assistant_message_id: "reply".into(),
+            chat_id: None,
+            space_id: None,
         })])
         .chain(futures::stream::once(async move {
             let _answer = asks.then(|| {
