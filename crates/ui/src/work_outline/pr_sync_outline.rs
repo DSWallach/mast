@@ -416,3 +416,27 @@ pub(crate) fn destination_marker(id: String, theme: &Theme) -> AnyElement {
         })
         .into_any_element()
 }
+
+#[cfg(test)]
+mod pr_link_cache_tests {
+    use super::PrLinkCache;
+    use std::sync::Arc;
+
+    #[test]
+    fn the_index_is_built_once_per_snapshot() {
+        let cache = PrLinkCache::default();
+        let a = Arc::new(mast_proto::WorkOutlineSnapshot::default());
+        for _ in 0..50 {
+            cache.get("s1", &a);
+        }
+        assert_eq!(cache.builds(), 1);
+        let mut changed = (*a).clone();
+        changed.revision += 1;
+        let b = Arc::new(changed);
+        cache.get("s1", &b);
+        cache.get("s1", &b);
+        assert_eq!(cache.builds(), 2);
+        cache.get("s2", &b);
+        assert_eq!(cache.builds(), 3);
+    }
+}
