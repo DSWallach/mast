@@ -736,6 +736,7 @@ pub struct AppState {
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
+    pub(crate) board_status_revision: u64,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -830,6 +831,8 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    board_watch_docs: std::collections::HashSet<String>,
+    tab_watch_docs: std::collections::HashSet<String>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -881,6 +884,7 @@ impl AppState {
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
+            board_status_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
@@ -923,6 +927,8 @@ impl AppState {
             github: Default::default(),
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            board_watch_docs: Default::default(),
+            tab_watch_docs: Default::default(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1070,6 +1076,7 @@ impl AppState {
 
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
+        if self.chats != chats { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
         self.chats = chats;
         self.chats_synced = true;
         self.transcript_cache
@@ -1106,7 +1113,9 @@ impl AppState {
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
-        self.apply_sessions_at(sessions, Utc::now())
+        let changed = self.apply_sessions_at(sessions, Utc::now());
+        if changed { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
+        changed
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
@@ -1528,6 +1537,11 @@ impl AppState {
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
     pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+        self.tab_watch_docs.insert(doc_id.clone());
+        self.ensure_subagent_doc_watch(doc_id, cx);
+    }
+
+    fn ensure_subagent_doc_watch(&mut self, doc_id: String, cx: &mut Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1542,6 +1556,21 @@ impl AppState {
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
+        self.tab_watch_docs.remove(doc_id);
+        if self.board_watch_docs.contains(doc_id) { return; }
+        self.remove_subagent_doc_watch(doc_id);
+    }
+
+    pub(crate) fn set_board_watch_docs(&mut self, ids: std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        let removed: Vec<_> = self.board_watch_docs.difference(&ids).cloned().collect();
+        self.board_watch_docs = ids;
+        for id in removed {
+            if !self.tab_watch_docs.contains(&id) { self.remove_subagent_doc_watch(&id); }
+        }
+        for id in self.board_watch_docs.clone() { self.ensure_subagent_doc_watch(id, cx); }
+    }
+
+    fn remove_subagent_doc_watch(&mut self, doc_id: &str) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
@@ -1620,6 +1649,7 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        self.board_status_revision = self.board_status_revision.wrapping_add(1);
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
@@ -1639,6 +1669,7 @@ impl AppState {
             .is_some_and(|p| p.message_id == message_id)
         {
             self.pending_sends.remove(chat_id);
+            self.board_status_revision = self.board_status_revision.wrapping_add(1);
         }
     }
 
@@ -1901,6 +1932,16 @@ impl AppState {
     /// Full display status for a chat (tab dots, Active list). A send in
     /// flight ([`Self::begin_pending_send`]) reads as Working — the queued
     /// command is as good as running.
+    /// Board status lookup in one pass over sessions and chats.
+    pub(crate) fn board_indicators(&self, now: DateTime<Utc>) -> HashMap<String, ChatIndicator> {
+        let mut sessions = HashMap::new();
+        for session in &self.sessions { sessions.entry(session.chat_id.as_str()).or_insert(session); }
+        self.chats.iter().map(|chat| {
+            let indicator = if self.send_pending(&chat.id, now) { ChatIndicator::Working } else { display_status(chat, sessions.get(chat.id.as_str()).copied(), now) };
+            (chat.id.clone(), indicator)
+        }).collect()
+    }
+
     pub fn display_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
@@ -4173,6 +4214,11 @@ fn spawn_queue_watch(
     })
 }
 
+fn subagent_watch_terminal(error: &RpcError) -> bool {
+    matches!(error, RpcError::BadParams(_) | RpcError::UnknownMethod(_))
+        || matches!(error, RpcError::Failed(message) if message.to_ascii_lowercase().contains("not found"))
+}
+
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
@@ -4182,21 +4228,22 @@ fn spawn_subagent_watch(
     doc_id: String,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
                 Err(err) => {
-                    tracing::warn!(%doc_id, error = %err, "subagent watch failed; retrying");
-                    if this.update(cx, |_, _| {}).is_err() {
+                    let terminal = subagent_watch_terminal(&err);
+                    tracing::warn!(%doc_id, error = %err, terminal, "subagent watch failed");
+                    if terminal || this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(RETRY_DELAY).await;
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
@@ -4215,7 +4262,7 @@ fn spawn_subagent_watch(
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
-                        cx.background_executor().timer(RETRY_DELAY).await;
+                        cx.background_executor().timer(retry.next_delay()).await;
                         continue 'resubscribe;
                     }
                 };
@@ -4252,14 +4299,16 @@ fn spawn_subagent_watch(
                     return;
                 }
                 if desync {
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
+                retry.reset();
             }
             tracing::debug!(%doc_id, "subagent stream ended; resubscribing");
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(RETRY_DELAY).await;
+            cx.background_executor().timer(retry.next_delay()).await;
         }
     })
 }
@@ -5758,6 +5807,22 @@ mod tests {
             .map(|attempt| work_outline_retry_delay(attempt).as_secs())
             .collect();
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
+    #[test]
+    fn subagent_watch_retry_budget_and_terminal_errors() {
+        assert!(subagent_watch_terminal(&RpcError::BadParams("bad".into())));
+        assert!(subagent_watch_terminal(&RpcError::UnknownMethod("watch".into())));
+        assert!(subagent_watch_terminal(&RpcError::Failed("chat not found".into())));
+        assert!(!subagent_watch_terminal(&RpcError::Closed));
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut attempts = 0;
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
+        while elapsed < std::time::Duration::from_secs(180) {
+            elapsed += mast_harness::backoff::jittered_with(retry.next_delay_exact(), 1000);
+            attempts += 1;
+        }
+        assert!(attempts <= 11, "too many retries in three minutes: {attempts}");
     }
 
     #[test]

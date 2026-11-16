@@ -103,6 +103,9 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let all_screens = [
         "chat",
         "overview",
+        "board",
+        "board-table",
+        "board-empty",
         "linear",
         "linear-settings",
         "workflow-pack",

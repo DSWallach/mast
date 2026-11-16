@@ -242,6 +242,7 @@ pub trait Harness: Send + Sync {
     }
 }
 
+pub mod backoff;
 pub mod acp;
 pub mod agent_tools;
 pub use agent_tools::AgentToolsInjection;

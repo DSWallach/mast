@@ -1837,6 +1837,9 @@ pub struct Shell {
     /// values remain owned by the workspace doc and are read through the
     /// existing multi-PR `CHAT_LINK_STATUS` endpoint.
     chat_header_links: std::collections::HashMap<String, ChatHeaderLinkCache>,
+    board_links_revision: u64,
+    board_links_generation: u64,
+    board_link_versions: std::collections::HashMap<String, u64>,
     chat_header_links_pending: std::collections::HashSet<String>,
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
@@ -2305,6 +2308,9 @@ impl Shell {
             copied_chat_identity: None,
             copied_chat_identity_clear: None,
             chat_header_links: Default::default(),
+            board_links_revision: 0,
+            board_links_generation: 0,
+            board_link_versions: Default::default(),
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
             running: running_ui::RunningUi::new(
@@ -4751,6 +4757,8 @@ impl Shell {
                         &chat_id,
                         &crate::review_chats::links_of_status(&status),
                     );
+                    this.board_links_revision = this.board_links_revision.wrapping_add(1);
+                    this.board_link_versions.insert(chat_id.clone(), this.board_links_revision);
                     this.chat_header_links.insert(
                         chat_id,
                         ChatHeaderLinkCache {
@@ -4775,6 +4783,8 @@ impl Shell {
 
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {
         self.chat_header_links.remove(chat_id);
+        self.board_links_revision = self.board_links_revision.wrapping_add(1);
+        self.board_link_versions.insert(chat_id.to_owned(), self.board_links_revision);
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
@@ -9687,6 +9697,9 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if !matches!(self.route, Route::Overview) && let Some(overview) = &self.overview_page {
+            overview.update(cx, |overview, cx| overview.suspend_board(cx));
+        }
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar). Settings never
         // underlaps: pad below the overlaid titlebar.

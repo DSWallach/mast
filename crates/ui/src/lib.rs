@@ -86,6 +86,7 @@ mod review_chats;
 pub mod running_chats;
 pub mod settings;
 pub mod shell;
+mod board;
 mod team;
 #[cfg(test)]
 #[global_allocator]
