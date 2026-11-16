@@ -24,8 +24,12 @@ pub struct FilesRequestContext {
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+        Self::for_chat_row(state, chat)
+    }
+
+    pub(crate) fn for_chat_row(state: &AppState, chat: &mast_proto::Chat) -> Option<Self> {
         let selected = state
-            .chat_diff_targets(chat_id)
+            .chat_diff_targets(&chat.id)
             .iter()
             .find(|target| target.selected);
         let cwd = selected

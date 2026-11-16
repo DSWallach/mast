@@ -29,15 +29,10 @@ impl Transcript {
         if candidates.is_empty() {
             return;
         }
-        let Some(chat_id) = self.chat_id.as_deref() else {
+        let Some(context) = self.code_ref_context.clone() else {
             return;
         };
-        let state = self.state.read(cx);
-        let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, chat_id)
-        else {
-            return;
-        };
-        let Some(engine) = state.engine().cloned() else {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         let generation = self.code_ref_generation;

@@ -3044,6 +3044,7 @@ pub struct Transcript {
     code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     code_ref_inflight: usize,
     code_ref_generation: u64,
+    code_ref_context: Option<crate::files::client::FilesRequestContext>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3404,6 +3405,7 @@ impl Transcript {
             code_ref_resolutions: HashMap::new(),
             code_ref_inflight: 0,
             code_ref_generation: 0,
+            code_ref_context: None,
             list,
             rows: Vec::new(),
             last_source: None,
@@ -4553,12 +4555,19 @@ impl Transcript {
             replay,
             self.state.read(cx).transcript_revision,
         );
-        let identity = {
+        let (identity, code_ref_context) = {
             let state = self.state.read(cx);
             let chat = selected.as_deref().and_then(|id| state.chats.iter().find(|chat| chat.id == id));
             let config = chat.and_then(|chat| chat.config.as_ref());
-            (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())))
+            let identity = (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())));
+            let context = chat.and_then(|chat| crate::files::client::FilesRequestContext::for_chat_row(state, chat));
+            (identity, context)
         };
+        if self.code_ref_context != code_ref_context {
+            self.code_ref_context = code_ref_context;
+            self.code_ref_resolutions.clear();
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
+        }
         if self.last_identity.as_ref() != Some(&identity) {
             self.last_identity = Some(identity);
             self.render_cache.borrow_mut().clear();
