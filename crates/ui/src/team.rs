@@ -281,7 +281,7 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
     TeamFacts { workers }
 }
 
-fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFacts {
+pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFacts {
     let snapshot = input.snapshot;
     let item = item_id.and_then(|id| snapshot.and_then(|s| s.item(id)));
     let mut ready = None;
