@@ -28,6 +28,16 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 93: startup watch-storm fix** (2026-11-16, urgent; diff_sync tests 20/20, worker's full mast-engine 711/1
+  with the 1 the known instance_lock flake; installed build only, no full release run because of the load emergency).
+  After each restart Mast pinned about 8 cores for many minutes: every diff-sync entry walked up to 8000 dirs in
+  parallel. With ~116 Cofactr worktrees (node_modules) plus Mast worktrees (target/), that froze or lagged the app. Now
+  at most 2 watch setups run at once, trees with node_modules/target/.venv/dist/build/.next/vendor are over budget
+  immediately (git-dir watch only), and verdicts are cached per root. Still open:
+  - The menu-bar item redraws about every 900 ms (≈40% of the main thread in -[NSStatusItem _updateReplicants]); being
+    fixed on the same branch.
+  - repos/source_control git fan-out (`git branch -r --contains` across Cofactr worktrees).
+  Backup: `~/zeron-dev-app-backups/mast-release-92`.
 - **Release 92: composer crash fix** (2026-11-16; touched crates from 6b24713d4: all passed; UI 2643/0). Release 90
   aborted in `ComposerInput::drag_selection_position` during a drag-select. `f32::clamp` panics when min > max, and a
   text box under 0.5px made the upper limit fall below the lower one. That clamp and two others in the composer that
