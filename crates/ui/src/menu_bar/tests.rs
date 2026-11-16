@@ -680,3 +680,52 @@ fn menu_bar_usage_only_and_needs_you_opt_in(_cx: &mut gpui::TestAppContext) {
     assert!(opted_in.iter().any(|s| s.contains("chat waiting")));
     assert!(!opted_in.iter().any(|s| s.contains("chat running")));
 }
+
+fn glyph() -> Glyph {
+    Glyph { light: AppLight::Idle, ring: false, bars: GlyphBars::default() }
+}
+
+fn sync_view(glyph: Glyph, tooltip: &str, line: &str) -> MenuView {
+    MenuView {
+        glyph,
+        tooltip: tooltip.into(),
+        items: vec![Item::Title("Mast".into()), Item::Line { text: Styled::plain(line), indent: 0 }],
+    }
+}
+
+#[test]
+fn time_only_changes_do_not_rebuild_a_closed_menu() {
+    let mut sync = MenuSync::default();
+    let first = sync.apply(&sync_view(glyph(), "tip", "2m ago"));
+    assert_eq!(first, SyncPlan { set_icon: true, set_tooltip: true, rebuild_menu: false });
+    for minutes in 3..30 {
+        let plan = sync.apply(&sync_view(glyph(), "tip", &format!("{minutes}m ago")));
+        assert_eq!(plan, SyncPlan::default());
+    }
+}
+
+#[test]
+fn glyph_change_updates_the_icon_only() {
+    let mut sync = MenuSync::default();
+    let a = glyph();
+    sync.apply(&sync_view(a, "tip", "x"));
+    let b = Glyph { light: AppLight::Error, ..a };
+    assert_ne!(a, b);
+    let plan = sync.apply(&sync_view(b, "tip", "x"));
+    assert_eq!(plan, SyncPlan { set_icon: true, set_tooltip: false, rebuild_menu: false });
+}
+
+#[test]
+fn opening_builds_from_the_latest_view_and_open_menu_tracks_changes() {
+    let mut sync = MenuSync::default();
+    sync.apply(&sync_view(glyph(), "tip", "old"));
+    sync.apply(&sync_view(glyph(), "tip", "latest"));
+    let opened = sync.will_open(false).cloned().expect("stale menu fills on open");
+    assert_eq!(opened, sync_view(glyph(), "tip", "latest"));
+    assert!(sync.will_open(false).is_none(), "already current");
+    // While open, a change rebuilds immediately.
+    assert!(sync.apply(&sync_view(glyph(), "tip", "newer")).rebuild_menu);
+    sync.did_close();
+    assert!(!sync.apply(&sync_view(glyph(), "tip", "newest")).rebuild_menu);
+    assert!(sync.will_open(false).is_some());
+}
