@@ -28,6 +28,11 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 92: composer crash fix** (2026-11-16; touched crates from 6b24713d4: all passed; UI 2643/0). Release 90
+  aborted in `ComposerInput::drag_selection_position` during a drag-select. `f32::clamp` panics when min > max, and a
+  text box under 0.5px made the upper limit fall below the lower one. That clamp and two others in the composer that
+  have variable bounds are now guarded; test `collapsed_input_bounds_do_not_panic_during_drag`. Rule for workers:
+  every variable-bound `clamp` must guarantee min <= max. Backup: `~/zeron-dev-app-backups/mast-release-91`.
 - **Release 91: active checkout P0 + review tool schemas** (2026-11-16; full suite from bd0aac02a: nextest 2605/2607,
   only the known `peer::actual_webrtc_pair_streams…` and `preview::leak remote_preview_churn`; UI 2642/0).
   - Active checkout P0: when a chat has a selected diff target (bind_chat_worktree or a manual pick), the header
@@ -1202,7 +1207,9 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-16 afternoon; coordinator 443e035b)
 
-- **Installed: release 91.** Mikey needs to restart onto it.
+- **Installed: release 92** (91 plus the composer crash fix). Mast crashed on 90 and restarted onto 91; it needs another
+  restart for 92. Mast was laggy with 4 Rust builds running (load 44 on 18 cores). The main thread is mostly Overview
+  (sidebar) prepaint, which is the perf follow-up 2694931e; the coordinator proposed starting it after wave 1.
 - **Code review, navigation and coordination** (item bb3a9716, plan mast-artifact:060317a6, mockups 9229f124 and
   b860e121): wave 1 builds on branch `code-review-nav`, cut from release 91, so it can be rolled back as one unit. Workers
   branch from it and merge into it, not into work-outline-implementation. Wave-1 items (briefs in their descriptions):
