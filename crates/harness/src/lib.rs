@@ -273,6 +273,7 @@ pub mod process;
 pub mod redact;
 mod scratch;
 pub mod shell_env;
+pub mod soak;
 #[cfg(windows)]
 pub mod windows_process;
 
