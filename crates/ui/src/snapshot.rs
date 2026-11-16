@@ -350,7 +350,7 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
 }
 
 /// Offline coordination board fixture for the preview renderer.
-pub fn board_fixture(table: bool, cx: &mut App) -> Entity<impl Render + use<>> {
+pub fn board_fixture(table: bool, empty: bool, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{model::OutlineSpace, outline_view::{OutlineInputs, OutlineView}, store::WorkOutlineLoad};
     let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
         "spaceId":"fixture-space", "available":true,
@@ -366,6 +366,8 @@ pub fn board_fixture(table: bool, cx: &mut App) -> Entity<impl Render + use<>> {
             {"id":"waiting-action","spaceId":"fixture-space","workItemId":"waiting","chatId":"waiting-worker","kind":"ask","text":"Choose a layout"}
         ]
     })).unwrap();
+    let mut snapshot = snapshot;
+    if empty { snapshot.items.clear(); snapshot.user_action_requests.clear(); }
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
         state.chats = [("worker", "Implementation worker"), ("reviewer", "Review worker"), ("waiting-worker", "Design worker")].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"branch":"feature/example","lastMessagePreview":"Running checks","createdAt":"2026-09-08T00:00:00Z"})).unwrap()).collect();

@@ -10,6 +10,17 @@ pub(crate) enum BoardStatus {
     Done,
 }
 
+impl BoardStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Todo => "To do",
+            Self::InProgress => "In progress",
+            Self::InReview => "In review",
+            Self::Done => "Done",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoardItem {
     pub id: String,
@@ -86,7 +97,7 @@ pub(crate) fn board(
                 .and_then(|chat| chat.last_message_preview.as_deref())
                 .and_then(team::activity_line);
             BoardItem {
-                request_id: worker.as_ref().and_then(|worker| snapshot.user_action_requests.iter().find(|request| request.chat_id == worker.chat_id && request.is_open() && !request.deduped && request.effective_kind() != mast_proto::work_outline_user_actions::UserActionKind::Handoff).map(|request| request.id.clone())),
+                request_id: worker.as_ref().and_then(|worker| snapshot.user_action_requests.iter().find(|request| request.chat_id == worker.chat_id && request.is_open() && !request.deduped && !matches!(request.effective_kind(), mast_proto::work_outline_user_actions::UserActionKind::Handoff | mast_proto::work_outline_user_actions::UserActionKind::Notice) && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)).map(|request| request.id.clone())),
                 worker_title,
                 report,
                 ticket: crate::chat_work_context::ticket(snapshot, &item.id)
@@ -202,5 +213,55 @@ mod tests {
             rows[1].worker.as_ref().unwrap().state,
             team::WorkerState::Waiting
         );
+    }
+    #[test]
+    fn most_recent_worker_supplies_pr_and_diff_facts() {
+        use mast_engine::pr_ticket_cache::{ChatLinkStatus, DiffStat, PrStatus};
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({"spaceId":"s","items":[{"id":"i","spaceId":"s","title":"Item","effectiveStatus":"active","chatIds":["older","newer"]}]})).unwrap();
+        let chats: Vec<mast_proto::Chat> = [("older", "2026-01-01T00:00:00Z"), ("newer", "2026-02-01T00:00:00Z")].into_iter().map(|(id, date)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"s","archived":false,"createdAt":date})).unwrap()).collect();
+        let pr = PrStatus {
+            number: 41,
+            url: None,
+            state: "OPEN".into(),
+            is_draft: false,
+            review_decision: None,
+            reviewers: vec![],
+            checks: None,
+            title: None,
+            branch: None,
+            head_sha: None,
+            mergeable: String::new(),
+            has_reviewer_requested: false,
+            merged_at: None,
+        };
+        let links = [(
+            "newer".into(),
+            ChatLinkStatus {
+                pr: Some(pr),
+                diff_stat: Some(DiffStat {
+                    files_changed: 1,
+                    lines_added: 12,
+                    lines_removed: 3,
+                }),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+        let indicators = Default::default();
+        let input = TeamInput {
+            chat_id: "",
+            chats: &chats,
+            indicators: &indicators,
+            snapshot: Some(&snapshot),
+            links: &links,
+            now: chrono::Utc::now(),
+        };
+        let rows = board(&snapshot, None, &input);
+        let worker = rows[0].worker.as_ref().unwrap();
+        assert_eq!(worker.chat_id, "newer");
+        assert_eq!(worker.prs[0].number, 41);
+        assert_eq!(worker.diff, Some((12, 3)));
+        assert_eq!(rows[0].status, BoardStatus::InReview);
     }
 }

@@ -26,7 +26,6 @@ use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
-#[path = "../components/coordination_board.rs"]
 mod board_view;
 pub(crate) mod templates;
 mod tree_guides_view;
@@ -455,10 +454,23 @@ pub(crate) struct OutlineView {
     board_space: Option<String>,
     board_space_scope: bool,
     board_show_all: bool,
+    board_limit: usize,
     board_sort: board_view::BoardSort,
+    board_sort_desc: bool,
     board_expanded: HashSet<String>,
     board_links: std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus>,
-    board_link_fingerprint: String,
+    board_link_revision: u64,
+    board_link_versions: Vec<u64>,
+    board_transcript_revision: u64,
+    board_status_revision: u64,
+    board_cached_ids: Vec<String>,
+    board_rows: Vec<(String, crate::board::BoardItem)>,
+    board_rows_dirty: bool,
+    board_snapshot_revisions: Vec<(String, u64)>,
+    board_input_chats: Vec<OutlineChat>,
+    board_visible: bool,
+    board_scroll: gpui::ScrollHandle,
+    board_column_scroll: [gpui::ScrollHandle; 4],
     board_shell_observe: Option<Subscription>,
     board_activity: std::collections::HashMap<String, String>,
     board_state_observe: Option<Subscription>,
@@ -567,10 +579,23 @@ impl OutlineView {
             board_space: None,
             board_space_scope: false,
             board_show_all: false,
+            board_limit: 12,
             board_sort: board_view::BoardSort::Status,
+            board_sort_desc: false,
             board_expanded: HashSet::new(),
             board_links: Default::default(),
-            board_link_fingerprint: String::new(),
+            board_link_revision: 0,
+            board_link_versions: Vec::new(),
+            board_transcript_revision: 0,
+            board_status_revision: 0,
+            board_cached_ids: Vec::new(),
+            board_rows: Vec::new(),
+            board_rows_dirty: true,
+            board_snapshot_revisions: Vec::new(),
+            board_input_chats: Vec::new(),
+            board_visible: false,
+            board_scroll: gpui::ScrollHandle::new(),
+            board_column_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
             board_shell_observe: None,
             board_activity: Default::default(),
             board_state_observe: None,
@@ -636,16 +661,25 @@ impl OutlineView {
     pub(crate) fn set_inputs(&mut self, inputs: OutlineInputs, cx: &mut Context<Self>) {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
+        let revisions: Vec<_> = inputs.spaces.iter().filter_map(|space| space.load.snapshot().map(|snapshot| (space.id.clone(), snapshot.revision))).collect();
+        if revisions != self.board_snapshot_revisions || inputs.chats != self.board_input_chats {
+            self.board_snapshot_revisions = revisions;
+            self.board_input_chats = inputs.chats.clone();
+            self.board_rows_dirty = true;
+        }
         self.inputs = inputs;
+        if self.board_space.as_ref().is_some_and(|id| !self.inputs.spaces.iter().any(|space| &space.id == id)) {
+            self.board_space = self.state.read(cx).selected_space.clone().filter(|id| self.inputs.spaces.iter().any(|space| &space.id == id)).or_else(|| self.inputs.spaces.first().map(|space| space.id.clone()));
+            self.board_root = None;
+            self.board_space_scope = true;
+            self.board_show_all = false;
+            self.board_limit = 12;
+            self.board_rows_dirty = true;
+            self.notice = Some("Space unavailable; showing the current Space".into());
+        }
         self.retire_shown_optimistic();
         self.overlay_optimistic();
         self.reflatten();
-        if self.board_mode != board_view::BoardMode::Tree {
-            let view = cx.weak_entity();
-            cx.defer(move |cx| { let _ = view.update(cx, |this, cx| {
-                this.refresh_board_watches(cx);
-            }); });
-        }
         cx.notify();
     }
 
@@ -3770,7 +3804,7 @@ impl Render for OutlineView {
             .shows_first_use(cx)
             .then(|| self.render_first_use(&theme, cx));
         let list: AnyElement = if self.board_mode != board_view::BoardMode::Tree {
-            self.render_board(&theme, cx)
+            self.render_board(&theme, window, cx)
         } else if count == 0 && first_use.is_some() {
             // First use: the compact line takes the empty tree's place.
             div()

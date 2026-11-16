@@ -736,6 +736,7 @@ pub struct AppState {
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
+    pub(crate) board_status_revision: u64,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -881,6 +882,7 @@ impl AppState {
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
+            board_status_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
@@ -1041,6 +1043,7 @@ impl AppState {
 
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
+        if self.chats != chats { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
         self.chats = chats;
         self.chats_synced = true;
         self.transcript_cache
@@ -1077,7 +1080,9 @@ impl AppState {
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
-        self.apply_sessions_at(sessions, Utc::now())
+        let changed = self.apply_sessions_at(sessions, Utc::now());
+        if changed { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
+        changed
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
@@ -1611,6 +1616,7 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        self.board_status_revision = self.board_status_revision.wrapping_add(1);
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
@@ -1630,6 +1636,7 @@ impl AppState {
             .is_some_and(|p| p.message_id == message_id)
         {
             self.pending_sends.remove(chat_id);
+            self.board_status_revision = self.board_status_revision.wrapping_add(1);
         }
     }
 
