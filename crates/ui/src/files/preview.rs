@@ -2586,7 +2586,7 @@ impl FilesSurface {
                         at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
                     }, snippet,
                 };
-                Some(super::code_ref_bar::action_bar(theme)
+                Some(crate::components::code_ref::selection_action_bar(theme)
                     .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference.clone()); cx.notify(); });
