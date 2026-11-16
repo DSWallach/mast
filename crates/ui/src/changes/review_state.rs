@@ -558,6 +558,7 @@ impl Changes {
             return;
         }
         self.review_target = Some(target.clone());
+        self.load_review_threads(&target, cx);
         self.review_status_task = None;
         self.review_status_checked = None;
         self.review_status_base = None;
