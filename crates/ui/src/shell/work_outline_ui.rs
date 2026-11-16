@@ -94,6 +94,7 @@ pub(super) struct DriftDialog {
 }
 
 pub(super) enum WorkOutlineModal {
+    CreateItem(super::create_item_ui::CreateItemDialog),
     Confirm(ConfirmDialog),
     Archive(ArchiveDialog),
     Drift(DriftDialog),
@@ -741,7 +742,8 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
                 callback(accept, window, cx);
             }
         }
-        WorkOutlineModal::Compare(_)
+        WorkOutlineModal::CreateItem(_)
+        | WorkOutlineModal::Compare(_)
         | WorkOutlineModal::FromChat(_)
         | WorkOutlineModal::StartChat(_)
         | WorkOutlineModal::HandOff(_)
@@ -765,7 +767,7 @@ impl Shell {
     /// cancel the whole modal before the input sees the key). `true` when a
     /// popup was closed.
     pub(super) fn dismiss_work_outline_modal_skills(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.close_start_chat_picker(cx) {
+        if self.dismiss_create_item_picker(cx) || self.close_start_chat_picker(cx) {
             return true;
         }
         let skills = match self.work_outline_modal.as_ref() {
@@ -964,6 +966,10 @@ impl Shell {
         modal: WorkOutlineModal,
         cx: &mut Context<Self>,
     ) {
+        if matches!(&self.work_outline_modal, Some(WorkOutlineModal::CreateItem(dialog)) if dialog.saving())
+        {
+            return;
+        }
         // A newer request supersedes an open one, which reports a cancel. No
         // window is at hand here, so the report is delivered on the next
         // render (`render_work_outline_modal`).
@@ -982,7 +988,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting())
+        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::CreateItem(dialog)) if dialog.saving())
+            || matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting())
         {
             return true;
         }
@@ -1230,6 +1237,7 @@ impl Shell {
                     .filter(|focused| *focused != self.work_outline_modal_focus);
             }
             match modal {
+                WorkOutlineModal::CreateItem(dialog) => window.focus(&dialog.focus(cx), cx),
                 WorkOutlineModal::FromChat(dialog) => {
                     let handle = dialog.input_focus(cx);
                     window.focus(&handle, cx);
@@ -1243,6 +1251,9 @@ impl Shell {
             }
         }
         let card = match modal {
+            WorkOutlineModal::CreateItem(dialog) => {
+                super::create_item_ui::create_item_card(dialog, self, viewport, &theme, cx)
+            }
             WorkOutlineModal::Drift(dialog) => {
                 let impact_line = format!(
                     "{} \u{b7} {}",

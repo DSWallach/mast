@@ -5774,7 +5774,17 @@ impl Overview {
                     HintKey::Command(WorkOutlineCommand::CreateWorkItem),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.run_work_outline_command(WorkOutlineCommand::CreateWorkItem, window, cx);
+                    let selected = this.outline.read(cx).selected_item();
+                    let space = selected
+                        .as_ref()
+                        .map(|(space, _)| space.clone())
+                        .or_else(|| this.sidebar_scope.clone());
+                    let parent = selected.map(|(_, item)| item);
+                    if let Some(shell) = this.shell.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.open_create_work_item(space, parent, window, cx)
+                        });
+                    }
                 }))
                 .into_any_element(),
         ];

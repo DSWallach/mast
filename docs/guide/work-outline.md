@@ -39,7 +39,7 @@ set Mast's native session archive flag or disable schedules.
 
 ## Items
 
-- **New item:** `⇧⌘I` or `N` (a sibling), `⇧N` (a child). Type the title and press Enter.
+- **New item:** click the toolbar button for the full dialog: title, Space, parent work item, description, status and placement. For quick inline creation, use `⇧⌘I` or `N` (a sibling), or `⇧N` (a child), type the title and press Enter.
 - **Rename:** `F2` or `R`.
 - **Move:** `⇧↑` / `⇧↓` reorder, `⇥` / `⇧⇥` indent and outdent, or drag and drop. Dropping a chat on an item puts the chat in it.
 - **Status:** Pending, Active or Completed, from the row menu. An item with open Required Actions shows **User Action Required**, and the count rolls up to its parents.

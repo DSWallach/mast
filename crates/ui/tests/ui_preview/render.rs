@@ -189,6 +189,13 @@ pub fn render(
                     shell.update(cx, |shell, cx| shell.fixture_snapshot_outline_shortcuts(cx));
                     shell.into()
                 }
+                "create-item" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| {
+                        shell.fixture_snapshot_create_item(window, cx)
+                    });
+                    shell.into()
+                }
                 "overview-column" => {
                     let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
                     shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));

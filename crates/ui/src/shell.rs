@@ -75,6 +75,7 @@ mod chat_item_tests;
 mod chat_item_ui;
 mod closeout_ui;
 mod command_palette;
+mod create_item_ui;
 mod files_panel;
 mod github_ui;
 mod hand_off_ui;
@@ -16453,6 +16454,11 @@ impl Shell {
     pub fn fixture_snapshot_outline_shortcuts(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
         self.open_outline_shortcuts(cx);
+    }
+
+    pub fn fixture_snapshot_create_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_overview(cx);
+        self.open_create_work_item(None, None, window, cx);
     }
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {

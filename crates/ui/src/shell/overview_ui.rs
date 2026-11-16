@@ -215,7 +215,7 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
 
@@ -238,11 +238,12 @@ mod tests {
                     .capture_key_down(cx.listener(Shell::on_key_down_capture))
                     .child(div().size_full().flex().child(sidebar).child(main))
                     .children(floating)
+                    .children(shell.render_work_outline_modal(window.viewport_size(), window, cx))
             })
         }
     }
 
-    fn setup(
+    pub(in crate::shell) fn setup(
         cx: &mut TestAppContext,
     ) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();

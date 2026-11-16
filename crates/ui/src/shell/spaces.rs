@@ -2653,30 +2653,6 @@ impl Render for SidebarViewOptionsTooltip {
     }
 }
 
-struct SidebarOverviewTooltip;
-
-impl Render for SidebarOverviewTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let shortcut = if cfg!(target_os = "macos") {
-            "⌘⇧O"
-        } else {
-            "Ctrl+Shift+O"
-        };
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text)
-            .child(format!("Overview  {shortcut}"))
-    }
-}
-
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
     ByProject,
@@ -4659,49 +4635,6 @@ impl Shell {
             view_trigger
         };
 
-        // Multi-chat overview entry point — sits beside the view-options
-        // trigger since it's the other "how do I look at my chats" control.
-        // Same 29px glass-hover button idiom; lit while the overview is the
-        // current route.
-        let overview_active = self.is_overview_route();
-        let overview_trigger = crate::components::shell_parts::sidebar_action_frame(
-            "sidebar-open-overview",
-            theme,
-            sidebar_width,
-        )
-        .role(gpui::Role::Button)
-        .aria_label("Open overview")
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .cursor_pointer()
-        .bg(if overview_active {
-            theme.glass_hover()
-        } else {
-            theme.glass_hover().opacity(0.0)
-        })
-        .hover(|el| el.bg(theme.glass_hover()))
-        .on_click(cx.listener(|this, _, _, cx| this.open_overview(cx)))
-        .tooltip(|_, cx| cx.new(|_| SidebarOverviewTooltip).into())
-        .tooltip_show_delay(std::time::Duration::from_millis(350))
-        .child(
-            icon(icons::WIDGET)
-                .size(px(15.0))
-                .text_color(if overview_active {
-                    theme.text
-                } else {
-                    theme.text_muted.opacity(0.6)
-                }),
-        )
-        .children(crate::components::shell_parts::sidebar_action_label(
-            theme,
-            sidebar_width,
-            "Overview",
-            Some(theme.text_muted),
-        ));
-
         div()
             .flex_none()
             .flex()
@@ -4712,7 +4645,6 @@ impl Shell {
             .pt(px(8.0))
             .pb(px(4.0))
             .child(trigger)
-            .child(overview_trigger)
             .child(
                 crate::components::shell_parts::scheduled_tasks_navigation(theme)
                     .on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))),

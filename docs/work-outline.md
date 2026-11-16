@@ -41,8 +41,10 @@ that harness. Claude Code's existing permission handling is unchanged.
 1. Choose **Overview** in the left column, or press `⇧⌘L` (`Ctrl+Shift+L`) to
    reveal and focus the Outline. **Sessions** retains the session list's
    grouping, sorting and metadata controls.
-2. Create a work item with **New item**, `⇧⌘I` (`Ctrl+Shift+I`), or `N`. Type a
-   title and press Enter. In a Space with no work items, the Outline offers
+2. Click **New item** for the full creation dialog. Choose a Space and parent
+   work item, enter the title and optional description, then set status and
+   placement and click **Create item**. For quick inline creation, use `⇧⌘I`
+   (`Ctrl+Shift+I`) or `N`, type a title and press Enter. In a Space with no work items, the Outline offers
    **Create work item** in place of the empty tree.
 3. Select the item and press Enter to open **Work Item Details**. Under
    **Instructions**, add an instruction and click **Save**.
