@@ -14,16 +14,18 @@
 //! engine `git` command):
 //!
 //! - Resolving the cwd is O(1) in git per Space: one `git worktree list` fills a
-//!   cache with a 60 s TTL (single-flight), so those spawns are
-//!   `SPACES × (ceil(elapsed/60 s) + 1)`, independent of watches × retries.
+//!   cache with a 60 s TTL (single-flight). A lookup miss may refresh it at most
+//!   once per 3 s (`CHECKOUT_SET_MISS_REFRESH`), so those spawns are bounded by
+//!   `SPACES × (ceil(elapsed/3 s) + 1)`, independent of watches × retries.
 //! - Each *accepted* watch pays `checkout_identity` once: 2 × `git rev-parse`
 //!   (`ACCEPT_COST`). A live watch that reconnects pays it again.
-//! - `SLACK = 4` covers a miss-triggered refresh or two.
+//! - `SLACK = 4` covers scheduling noise.
 //!
-//!   budget = SPACES × (ceil(elapsed/60) + 1) + accepted × 2 + SLACK
-//!          = 1 × 2 + 40 × 2 + 4 = 86 for a test run under a minute.
+//!   budget = SPACES × (ceil(elapsed/3) + 1) + accepted × 2 + SLACK
+//!          = 1 × 4 + 40 × 2 + 4 = 88 for a ~9 s run.
 //!
-//!   Observed on the fixed engine: 84. Release 94 spent ~5 git spawns per Space
+//!   Observed on the fixed engine: 84–87 (87 when a miss refresh lands in a new
+//!   3 s window; the old 60 s term budgeted 86 and flaked). Release 94 spent ~5 git spawns per Space
 //!   per call on every watch and every retry (≈ 5 × 50 × (1 + 8 retries) ≈ 2,250
 //!   here), which blows this budget by more than 25×.
 //! - A rejected watch (path no longer resolves) never reaches git: zero spawns
@@ -254,7 +256,7 @@ async fn idle_engine_stays_within_its_git_spawn_budget() {
 
     let total = git_spawn_count() - baseline;
     let elapsed = started.elapsed();
-    let budget = SPACES * (elapsed.as_secs().div_ceil(60) + 1)
+    let budget = SPACES * (elapsed.as_secs().div_ceil(3) + 1)
         + live.len() as u64 * ACCEPT_COST
         + SLACK;
     eprintln!(
