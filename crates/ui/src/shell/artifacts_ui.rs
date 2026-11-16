@@ -14,8 +14,9 @@ pub(crate) struct ArtifactTabs {
     subs: std::collections::HashMap<u64, Subscription>,
     seq: u64,
     observed_diagrams: std::collections::HashMap<String, std::collections::HashSet<String>>,
-    observed_source: Option<(String, usize, bool)>,
+    observed_source: Option<(String, std::sync::Arc<mast_proto::ArtifactsSnapshot>)>,
     observation: Option<Subscription>,
+    observed_chat_index: Option<usize>,
     /// Tests: the web renderer new tabs use.
     #[cfg(test)]
     pub(crate) web_factory: Option<WebHostFactory>,
@@ -24,49 +25,115 @@ pub(crate) struct ArtifactTabs {
 impl Shell {
     /// Subscribe once; subsequent work is gated by chat and snapshot identity.
     pub(super) fn ensure_diagram_observer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.artifact_tabs.observation.is_some() { return; }
+        if self.artifact_tabs.observation.is_some() {
+            return;
+        }
         let state = self.state.clone();
-        self.artifact_tabs.observation = Some(cx.observe_in(&state, window, |this, _, window, cx| {
+        self.artifact_tabs.observation =
+            Some(cx.observe_in(&state, window, |this, _, window, cx| {
+                this.observe_diagram_snapshot(window, cx);
+            }));
+        cx.defer_in(window, |this, window, cx| {
             this.observe_diagram_snapshot(window, cx);
-        }));
-        self.observe_diagram_snapshot(window, cx);
+        });
     }
 
     fn observe_diagram_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (chat, snapshot, live) = {
             let state = self.state.read(cx);
-            let Some(chat) = state.selected_chat.clone() else { self.artifact_tabs.observed_source = None; return; };
-            let row = state.chats.iter().find(|row| row.id == chat);
+            let Some(chat) = state.selected_chat.clone() else {
+                self.artifact_tabs.observed_source = None;
+                return;
+            };
+            let index = self
+                .artifact_tabs
+                .observed_chat_index
+                .filter(|index| state.chats.get(*index).is_some_and(|row| row.id == chat))
+                .or_else(|| state.chats.iter().position(|row| row.id == chat));
+            self.artifact_tabs.observed_chat_index = index;
+            let row = index.and_then(|index| state.chats.get(index));
             let live = matches!(state.connection, crate::state::ConnectionStatus::Ready)
                 && row.is_some_and(|row| !row.archived);
-            let snapshot = row.and_then(|row| row.space_id.as_deref()).and_then(|space| state.artifacts().snapshot(space)).cloned();
+            let snapshot = row
+                .and_then(|row| row.space_id.as_deref())
+                .and_then(|space| state.artifacts().snapshot(space))
+                .cloned();
             (chat, snapshot, live)
         };
-        let Some(snapshot) = snapshot.filter(|_| live) else { self.artifact_tabs.observed_source = None; return; };
-        let source = (chat.clone(), std::sync::Arc::as_ptr(&snapshot) as usize, live);
-        if self.artifact_tabs.observed_source.as_ref() == Some(&source) { return; }
-        let baseline = self.artifact_tabs.observed_source.as_ref().is_none_or(|old| old.0 != chat);
-        self.artifact_tabs.observed_source = Some(source);
-        let seen = self.artifact_tabs.observed_diagrams.entry(chat.clone()).or_default();
+        let Some(snapshot) = snapshot.filter(|_| live) else {
+            self.artifact_tabs.observed_source = None;
+            return;
+        };
+        if self
+            .artifact_tabs
+            .observed_source
+            .as_ref()
+            .is_some_and(|(old_chat, old)| {
+                old_chat == &chat && std::sync::Arc::ptr_eq(old, &snapshot)
+            })
+        {
+            return;
+        }
+        let baseline = self
+            .artifact_tabs
+            .observed_source
+            .as_ref()
+            .is_none_or(|old| old.0 != chat);
+        self.artifact_tabs.observed_source = Some((chat.clone(), snapshot.clone()));
+        let seen = self
+            .artifact_tabs
+            .observed_diagrams
+            .entry(chat.clone())
+            .or_default();
         let mut added = Vec::new();
-        for artifact in snapshot.artifacts.iter().filter(|artifact| artifact.chat_id.as_deref() == Some(&chat)) {
+        for artifact in snapshot
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.chat_id.as_deref() == Some(&chat))
+        {
             let is_new = seen.insert(artifact.id.clone());
-            if !baseline && is_new && artifact.archived_at.is_none() && crate::artifacts::preview_thumb::eligible(artifact) {
+            if !baseline
+                && is_new
+                && artifact.archived_at.is_none()
+                && crate::artifacts::preview_thumb::eligible(artifact)
+            {
                 added.push(artifact.id.clone());
             }
         }
-        if added.is_empty() || !crate::settings::current(cx).open_diagrams_automatically { return; }
+        if added.is_empty() || !crate::settings::current(cx).open_diagrams_automatically {
+            return;
+        }
         cx.defer_in(window, move |this, window, cx| {
-            if this.active_chat != chat || !matches!(this.route, Route::Chat) { return; }
-            let may_activate = !this.right_pane_open(cx) || matches!(this.resolved_right_active(cx), RightSurface::Picker | RightSurface::Artifact(_));
+            if this.active_chat != chat || !matches!(this.route, Route::Chat) {
+                return;
+            }
+            let may_activate = !this.right_pane_open(cx)
+                || matches!(
+                    this.resolved_right_active(cx),
+                    RightSurface::Picker | RightSurface::Artifact(_)
+                );
             let key = this.panel_key(cx);
-            added.retain(|artifact_id| !this.right_tabs.get(&key).is_some_and(|tabs| tabs.iter().any(|surface| match surface {
-                RightSurface::Artifact(id) => this.artifact_tabs.tabs.get(id).is_some_and(|tab| tab.read(cx).artifact_id == *artifact_id),
-                _ => false,
-            })));
+            added.retain(|artifact_id| {
+                !this.right_tabs.get(&key).is_some_and(|tabs| {
+                    tabs.iter().any(|surface| match surface {
+                        RightSurface::Artifact(id) => this
+                            .artifact_tabs
+                            .tabs
+                            .get(id)
+                            .is_some_and(|tab| tab.read(cx).artifact_id == *artifact_id),
+                        _ => false,
+                    })
+                })
+            });
             let last = added.len().saturating_sub(1);
             for (index, artifact_id) in added.into_iter().enumerate() {
-                this.open_artifact_here(artifact_id, false, may_activate && index == last, window, cx);
+                this.open_artifact_here(
+                    artifact_id,
+                    false,
+                    may_activate && index == last,
+                    window,
+                    cx,
+                );
             }
         });
     }
@@ -225,7 +292,9 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
-        if activate { self.set_surfaces_open(true, cx); }
+        if activate {
+            self.set_surfaces_open(true, cx);
+        }
         let key = self.panel_key(cx);
         let existing = self.right_tabs.get(&key).and_then(|tabs| {
             tabs.iter().find_map(|tab| match tab {
@@ -239,8 +308,12 @@ impl Shell {
             })
         });
         if let Some(id) = existing {
-            if activate { self.set_right_active(RightSurface::Artifact(id), cx); }
-            if focus { self.focus_artifact_tab(id, window, cx); }
+            if activate {
+                self.set_right_active(RightSurface::Artifact(id), cx);
+            }
+            if focus {
+                self.focus_artifact_tab(id, window, cx);
+            }
             return;
         }
         self.artifact_tabs.seq += 1;
@@ -272,8 +345,14 @@ impl Shell {
             .entry(key)
             .or_default()
             .push(RightSurface::Artifact(id));
-        if activate { self.set_right_active(RightSurface::Artifact(id), cx); } else { cx.notify(); }
-        if focus { self.focus_artifact_tab(id, window, cx); }
+        if activate {
+            self.set_right_active(RightSurface::Artifact(id), cx);
+        } else {
+            cx.notify();
+        }
+        if focus {
+            self.focus_artifact_tab(id, window, cx);
+        }
     }
 
     /// Put keyboard focus in an Artifact tab, so ⌘F finds in it.
@@ -511,16 +590,33 @@ mod tests {
         review.space_id = "s1".into();
         review.chat_id = Some("c1".into());
         let content = r#"{"schema":"mast.review/v1","pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},"summary":"Summary","steps":[],"highlights":[],"questions":[],"suggestedComments":[]}"#;
-        let reply: Reply = Arc::new(move |_, _| Ok(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8)));
+        let reply: Reply = Arc::new(move |_, _| {
+            Ok(content_reply(
+                ArtifactKind::Review,
+                1,
+                content,
+                ArtifactContentEncoding::Utf8,
+            ))
+        });
         let (shell, _, _, vcx) = artifact_shell(cx, dir.path(), vec![review], reply);
         shell.update(vcx, |shell, cx| {
-            assert!(shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            assert!(
+                shell
+                    .right_surface_rows(cx)
+                    .iter()
+                    .any(|row| row.0 == RightSurface::Review)
+            );
             let pane = shell.review_host(cx).unwrap();
             shell.route = Route::Review;
             let full = shell.review_host(cx).unwrap();
             assert_eq!(pane.entity_id(), full.entity_id());
             shell.active_chat = "other".into();
-            assert!(!shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            assert!(
+                !shell
+                    .right_surface_rows(cx)
+                    .iter()
+                    .any(|row| row.0 == RightSurface::Review)
+            );
             shell.active_chat = "c1".into();
         });
         vcx.run_until_parked();
@@ -544,37 +640,68 @@ mod tests {
     #[gpui::test]
     fn diagram_baselines_ignore_old_items_and_bursts_preserve_diff(cx: &mut gpui::TestAppContext) {
         let dir = init_ui(cx);
-        let reply: Reply = Arc::new(|_, _| Ok(content_reply(ArtifactKind::Mermaid, 1, "graph TD; A-->B", ArtifactContentEncoding::Utf8)));
+        let reply: Reply = Arc::new(|_, _| {
+            Ok(content_reply(
+                ArtifactKind::Mermaid,
+                1,
+                "graph TD; A-->B",
+                ArtifactContentEncoding::Utf8,
+            ))
+        });
         let mut first = artifact(&id(1), "first", ArtifactKind::Mermaid);
         first.chat_id = Some("c1".into());
         let mut archived = artifact(&id(2), "archived", ArtifactKind::Image);
         archived.chat_id = Some("c1".into());
         archived.archived_at = Some(1);
-        let (shell, _, _, vcx) = artifact_shell(cx, dir.path(), vec![first.clone(), archived.clone()], reply);
-        vcx.update(|_, cx| { crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |s| s.open_diagrams_automatically = true); });
-        shell.update_in(vcx, |shell, window, cx| shell.observe_diagram_snapshot(window, cx));
+        let (shell, _, _, vcx) =
+            artifact_shell(cx, dir.path(), vec![first.clone(), archived.clone()], reply);
+        vcx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |s| {
+                s.open_diagrams_automatically = true
+            });
+        });
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.observe_diagram_snapshot(window, cx)
+        });
         vcx.run_until_parked();
-        assert!(open_artifact_ids(&shell, vcx).is_empty(), "first observation is a baseline");
+        assert!(
+            open_artifact_ids(&shell, vcx).is_empty(),
+            "first observation is a baseline"
+        );
         archived.archived_at = None;
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![first.clone(), archived.clone()])));
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![first.clone(), archived.clone()]))
+            });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();
-        assert!(open_artifact_ids(&shell, vcx).is_empty(), "unarchive is not a publish");
+        assert!(
+            open_artifact_ids(&shell, vcx).is_empty(),
+            "unarchive is not a publish"
+        );
         let mut during_disconnect = artifact(&id(3), "disconnected", ArtifactKind::Mermaid);
         during_disconnect.chat_id = Some("c1".into());
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.connection = crate::state::ConnectionStatus::Connecting);
+            shell.state.update(cx, |state, _| {
+                state.connection = crate::state::ConnectionStatus::Connecting
+            });
             shell.observe_diagram_snapshot(window, cx);
             shell.state.update(cx, |state, _| {
-                state.set_test_artifacts(snapshot(vec![first.clone(), archived.clone(), during_disconnect.clone()]));
+                state.set_test_artifacts(snapshot(vec![
+                    first.clone(),
+                    archived.clone(),
+                    during_disconnect.clone(),
+                ]));
                 state.connection = crate::state::ConnectionStatus::Ready;
             });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();
-        assert!(open_artifact_ids(&shell, vcx).is_empty(), "reconnect is a baseline");
+        assert!(
+            open_artifact_ids(&shell, vcx).is_empty(),
+            "reconnect is a baseline"
+        );
         shell.update_in(vcx, |shell, window, cx| {
             shell.state.update(cx, |state, _| {
                 state.chats.push(serde_json::from_value(serde_json::json!({"id":"c2", "deviceId":"dev", "spaceId":"s1", "archived":false, "createdAt":"2026-01-01T00:00:00Z"})).unwrap());
@@ -587,7 +714,10 @@ mod tests {
             shell.add_diff_surface(cx);
         });
         vcx.run_until_parked();
-        assert!(open_artifact_ids(&shell, vcx).is_empty(), "switching chats is a baseline");
+        assert!(
+            open_artifact_ids(&shell, vcx).is_empty(),
+            "switching chats is a baseline"
+        );
         let before = shell.read_with(vcx, |shell, cx| shell.resolved_right_active(cx));
         assert!(matches!(before, RightSurface::Diff(_)));
         let mut fourth = artifact(&id(4), "fourth", ArtifactKind::Mermaid);
@@ -595,28 +725,96 @@ mod tests {
         let mut fifth = artifact(&id(5), "fifth", ArtifactKind::Image);
         fifth.chat_id = Some("c1".into());
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![first, archived, during_disconnect, fourth, fifth])));
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![
+                    first,
+                    archived,
+                    during_disconnect,
+                    fourth,
+                    fifth,
+                ]))
+            });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();
         assert_eq!(open_artifact_ids(&shell, vcx), [id(4), id(5)]);
-        shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), before));
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.resolved_right_active(cx), before)
+        });
+    }
+
+    #[gpui::test]
+    fn diagram_burst_activates_the_last_tab_in_an_empty_pane(cx: &mut gpui::TestAppContext) {
+        let dir = init_ui(cx);
+        let reply: Reply = Arc::new(|_, _| {
+            Ok(content_reply(
+                ArtifactKind::Mermaid,
+                1,
+                "graph TD; A-->B",
+                ArtifactContentEncoding::Utf8,
+            ))
+        });
+        let (shell, _, _, vcx) = artifact_shell(cx, dir.path(), vec![], reply);
+        vcx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |s| {
+                s.open_diagrams_automatically = true
+            });
+        });
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.observe_diagram_snapshot(window, cx)
+        });
+        let mut first = artifact(&id(4), "first", ArtifactKind::Mermaid);
+        first.chat_id = Some("c1".into());
+        let mut second = artifact(&id(5), "second", ArtifactKind::Image);
+        second.chat_id = Some("c1".into());
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![first, second]))
+            });
+            shell.observe_diagram_snapshot(window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(open_artifact_ids(&shell, vcx), [id(4), id(5)]);
+        shell.read_with(vcx, |shell, cx| {
+            let RightSurface::Artifact(active) = shell.resolved_right_active(cx) else {
+                panic!("artifact tab");
+            };
+            assert_eq!(
+                shell.artifact_tab(active).unwrap().read(cx).artifact_id,
+                id(5)
+            );
+        });
     }
 
     #[gpui::test]
     fn published_diagrams_open_once_and_respect_setting(cx: &mut gpui::TestAppContext) {
         let dir = init_ui(cx);
-        let reply: Reply = Arc::new(|_, _| Ok(content_reply(ArtifactKind::Mermaid, 1, "graph TD; A-->B", ArtifactContentEncoding::Utf8)));
+        let reply: Reply = Arc::new(|_, _| {
+            Ok(content_reply(
+                ArtifactKind::Mermaid,
+                1,
+                "graph TD; A-->B",
+                ArtifactContentEncoding::Utf8,
+            ))
+        });
         let (shell, calls, _, vcx) = artifact_shell(cx, dir.path(), vec![], reply);
-        vcx.update(|_, cx| { crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.open_diagrams_automatically = true); });
-        shell.update_in(vcx, |shell, window, cx| shell.observe_diagram_snapshot(window, cx));
+        vcx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                settings.open_diagrams_automatically = true
+            });
+        });
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.observe_diagram_snapshot(window, cx)
+        });
         let focus = shell.read_with(vcx, |shell, cx| shell.composer.read(cx).focus_handle(cx));
         vcx.update(|window, cx| window.focus(&focus, cx));
         let mut diagram = artifact(&id(1), "Diagram", ArtifactKind::Mermaid);
         diagram.space_id = "s1".into();
         diagram.chat_id = Some("c1".into());
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram.clone()])));
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![diagram.clone()]))
+            });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();
@@ -624,29 +822,45 @@ mod tests {
         assert!(vcx.update(|window, _| focus.is_focused(window)));
         let initial_calls = calls.lock().unwrap().len();
         diagram.current_revision += 1;
-        shell.update(vcx, |shell, cx| shell.state.update(cx, |state, cx| {
-            state.set_test_artifacts(snapshot(vec![diagram.clone()]));
-            cx.notify();
-        }));
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.set_test_artifacts(snapshot(vec![diagram.clone()]));
+                cx.notify();
+            })
+        });
         vcx.run_until_parked();
-        assert!(calls.lock().unwrap().len() > initial_calls, "the open tab reloads a new revision");
+        assert!(
+            calls.lock().unwrap().len() > initial_calls,
+            "the open tab reloads a new revision"
+        );
         shell.update(vcx, |shell, cx| {
             let key = shell.panel_key(cx);
-            let tab = match shell.right_tabs.get_mut(&key).unwrap().pop().unwrap() { RightSurface::Artifact(id) => id, _ => panic!("artifact") };
+            let tab = match shell.right_tabs.get_mut(&key).unwrap().pop().unwrap() {
+                RightSurface::Artifact(id) => id,
+                _ => panic!("artifact"),
+            };
             shell.close_artifact_tab(tab, cx);
         });
         diagram.current_revision += 1;
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram.clone()])));
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![diagram.clone()]))
+            });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();
         assert!(open_artifact_ids(&shell, vcx).is_empty());
-        vcx.update(|_, cx| { crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.open_diagrams_automatically = false); });
+        vcx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                settings.open_diagrams_automatically = false
+            });
+        });
         let mut second = diagram.clone();
         second.id = id(2);
         shell.update_in(vcx, |shell, window, cx| {
-            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram, second])));
+            shell.state.update(cx, |state, _| {
+                state.set_test_artifacts(snapshot(vec![diagram, second]))
+            });
             shell.observe_diagram_snapshot(window, cx);
         });
         vcx.run_until_parked();

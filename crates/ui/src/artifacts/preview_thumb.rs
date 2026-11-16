@@ -30,6 +30,7 @@ struct Cache {
     entries: HashMap<Key, Entry>,
     order: std::collections::VecDeque<Key>,
     renders: Arc<tokio::sync::Semaphore>,
+    pending: Arc<tokio::sync::Semaphore>,
 }
 impl Default for Cache {
     fn default() -> Self {
@@ -37,6 +38,7 @@ impl Default for Cache {
             entries: HashMap::new(),
             order: Default::default(),
             renders: Arc::new(tokio::sync::Semaphore::new(2)),
+            pending: Arc::new(tokio::sync::Semaphore::new(64)),
         }
     }
 }
@@ -54,8 +56,14 @@ impl Cache {
         self.entries.insert(key.clone(), entry);
         self.touch(&key);
         while self.order.len() > 64 {
-            if let Some(old) = self.order.pop_front() {
+            let index = self
+                .order
+                .iter()
+                .position(|key| !matches!(self.entries.get(key), Some(Entry::Pending(_))));
+            if let Some(old) = index.and_then(|index| self.order.remove(index)) {
                 self.entries.remove(&old);
+            } else {
+                break;
             }
         }
     }
@@ -85,6 +93,7 @@ fn size_limit(kind: ArtifactKind) -> u64 {
 }
 
 /// A compact copy of the metadata needed after releasing the state borrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreviewSpec {
     id: String,
     revision: u32,
@@ -127,7 +136,8 @@ pub(crate) fn thumbnail<V: 'static>(
         id: artifact.id.clone(),
         revision: artifact.revision,
         theme: format!(
-            "{}:{:?}:{:?}:{:?}:{:?}",
+            "{}:{}:{:?}:{:?}:{:?}:{:?}",
+            crate::theme::style_generation(),
             theme.variant_id,
             color(theme.bg),
             color(theme.text),
@@ -137,12 +147,17 @@ pub(crate) fn thumbnail<V: 'static>(
     };
     let cache = cx.default_global::<Cache>();
     let previous = cache.entries.get(&key).cloned();
-    cache.touch(&key);
+    if previous.is_some() {
+        cache.touch(&key);
+    }
     let attempt = match previous {
         Some(Entry::Ready(image)) => return Some(image),
         Some(Entry::Pending(_)) | Some(Entry::Failed(1..)) => return None,
         Some(Entry::Failed(_)) => 1,
         None => 0,
+    };
+    let Ok(pending) = cache.pending.clone().try_acquire_owned() else {
+        return None;
     };
     cache.insert(key.clone(), Entry::Pending(attempt));
     let renders = cache.renders.clone();
@@ -156,11 +171,23 @@ pub(crate) fn thumbnail<V: 'static>(
         companion: None,
         target_device_id,
     };
-    let call = state.read(cx).artifact_actions().content(params);
     let kind = artifact.kind;
     let title = artifact.title.clone();
     cx.spawn_in(window, async move |view, cx| {
-        let image = if let Ok(reply) = call.await {
+        let _pending = pending;
+        let permit = renders.acquire_owned().await.ok();
+        let call = if permit.is_some() {
+            cx.update(|_, cx| state.read(cx).artifact_actions().content(params))
+                .ok()
+        } else {
+            None
+        };
+        let reply = if let Some(call) = call {
+            call.await.ok()
+        } else {
+            None
+        };
+        let image = if let Some(reply) = reply {
             if reply.size_bytes > size_limit(kind) || reply.revision != key.revision {
                 None
             } else {
@@ -177,10 +204,7 @@ pub(crate) fn thumbnail<V: 'static>(
                             std::rc::Rc<dyn render_check::ArtifactRenderer>,
                         > = None;
                         if let Some(renderer) = renderer {
-                            let permit = renders.acquire_owned().await.ok();
-                            if permit.is_none() {
-                                None
-                            } else {
+                            {
                                 let html = document::web_document(
                                     kind,
                                     &source,
@@ -297,7 +321,7 @@ mod tests {
     #[test]
     fn cache_evicts_least_recently_used_and_superseded_revisions() {
         let mut cache = Cache::default();
-        let key = |n| Key {
+        let key = |n: usize| Key {
             id: n.to_string(),
             revision: 1,
             theme: "light".into(),
@@ -317,6 +341,24 @@ mod tests {
             Entry::Pending(0),
         );
         assert!(!cache.entries.contains_key(&key(0)));
+    }
+
+    #[test]
+    fn render_budget_limits_concurrent_work_to_two() {
+        let cache = Cache::default();
+        assert_eq!(cache.pending.available_permits(), 64);
+        let first = cache.renders.clone().try_acquire_owned().unwrap();
+        let second = cache.renders.clone().try_acquire_owned().unwrap();
+        assert!(cache.renders.clone().try_acquire_owned().is_err());
+        drop(first);
+        assert!(cache.renders.clone().try_acquire_owned().is_ok());
+        drop(second);
+    }
+
+    #[test]
+    fn diagram_preference_defaults_off_for_existing_settings() {
+        let loaded: crate::settings::UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(!loaded.open_diagrams_automatically);
     }
 
     #[test]
@@ -347,6 +389,7 @@ mod tests {
         struct Host {
             state: Entity<AppState>,
             renders: std::rc::Rc<std::cell::Cell<usize>>,
+            _observation: gpui::Subscription,
         }
         impl gpui::Render for Host {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -371,9 +414,11 @@ mod tests {
                 state.local_device_id = Some("dev".into());
                 state.work_outline_actions_override = Some(actions);
             });
+            let observation = cx.observe(&state, |_: &mut Host, _, _| {});
             Host {
                 state,
                 renders: view_renders,
+                _observation: observation,
             }
         });
         let item = artifact(&id(1), "image", ArtifactKind::Image);
@@ -393,6 +438,8 @@ mod tests {
         assert!(!request(&host, vcx));
         vcx.run_until_parked();
         let before = renders.get();
+        host.update(vcx, |host, cx| host.state.update(cx, |_, cx| cx.notify()));
+        vcx.run_until_parked();
         assert!(request(&host, vcx));
         assert!(request(&host, vcx));
         vcx.run_until_parked();
@@ -449,6 +496,7 @@ pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render +
                 detail: "Mermaid · diagram · r1".into(),
                 url: "mast-artifact:fixture".into(),
                 registered: true,
+                preview: None,
             };
             div()
                 .size_full()
