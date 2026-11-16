@@ -63,6 +63,7 @@ mod layout;
 mod sidebar;
 pub(crate) use sidebar::OverviewNavigation;
 mod linear_host;
+mod top_sessions;
 
 /// A chat with no activity for longer than this, and not currently
 /// working/awaiting input, reads as stale. Adapted from
@@ -1530,6 +1531,7 @@ pub struct Overview {
     /// close-then-reopening).
     repo_filter: popover::Popup<()>,
     filter_menu: popover::Popup<()>,
+    assistant_chooser: popover::Popup<()>,
     /// Rows before any filter (archived-inclusion aside) — lets the empty
     /// state tell "no chats at all" from "everything filtered out".
     unfiltered_count: usize,
@@ -1875,6 +1877,7 @@ impl Overview {
             repo_filter_needs_validation: false,
             repo_filter: popover::Popup::default(),
             filter_menu: popover::Popup::default(),
+            assistant_chooser: popover::Popup::default(),
             unfiltered_count: 0,
             refresh_ticks: 0,
             _refresh_task: refresh_task,
@@ -5084,6 +5087,8 @@ impl Overview {
         let new_chat_button = truly_empty.then(|| self.render_new_chat_button(theme, cx));
         div()
             .flex_1()
+            .min_w_0()
+            .w_full()
             .flex()
             .flex_col()
             .items_center()
@@ -5092,6 +5097,10 @@ impl Overview {
             .p(px(24.0))
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_center()
                     .text_size(crate::typography::ui_rems(13.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(headline)),
@@ -5099,6 +5108,10 @@ impl Overview {
             .when_some(detail, |el, detail| {
                 el.child(
                     div()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_center()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(detail)),
@@ -5501,11 +5514,17 @@ impl Overview {
             has_subagent_overflow && self.hovered_row.as_deref() == Some(chat_id.as_str());
         let subagent_tiles = self.subagent_tiles_for(&chat_id, theme, show_all_subagents, cx);
         let detail = is_expanded.then(|| self.expanded_detail_for(row, theme, chat_id.clone(), cx));
+        let session_badge = crate::personal_assistant::session_badge(self.state.read(cx), &chat_id, theme);
+        let menu_id = chat_id.clone();
         let toggle_id = chat_id.clone();
         let row_selector = format!("overview-list-chat-{chat_id}");
         let hover_id = chat_id.clone();
         div()
             .id(("overview-row", ix))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                this.open_session_menu(menu_id.clone(), event.position, cx);
+                cx.stop_propagation();
+            }))
             .debug_selector(|| "overview-list-row".into())
             .relative()
             // Never shrink inside the scrolling list column. The row is
@@ -5587,6 +5606,7 @@ impl Overview {
                                             .text_color(theme.text)
                                             .child(title),
                                     )
+                                    .children(session_badge)
                                     .children(drift_mark)
                                     .children(exception_mark)
                                     .when_some(needs_input_pill, |el, pill| el.child(pill))
@@ -6929,6 +6949,26 @@ impl Overview {
         self.set_mode(OverviewMode::Outline, cx);
         let handle = gpui::Focusable::focus_handle(self.outline.read(cx), cx);
         window.focus(&handle, cx);
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_attention_empty(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.apply_work_outline_frame(
+                "fixture-space",
+                mast_proto::WorkOutlineSnapshot {
+                    space_id: "fixture-space".into(),
+                    available: true,
+                    synced: true,
+                    ..Default::default()
+                },
+            );
+            cx.notify();
+        });
+        self.attention_filter = AttentionFilter::NeedsInteraction;
+        self.rows_dirty = true;
+        self.outline_dirty = true;
+        cx.notify();
     }
 
     #[cfg(feature = "snapshot")]

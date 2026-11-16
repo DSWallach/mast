@@ -141,7 +141,7 @@ impl Shell {
         self.open_work_outline_menu(menu, position, outline.downgrade(), focus, true, cx);
     }
 
-    /// Grant/Renew/Revoke admin for a Chat in a Space (none otherwise).
+    /// Assistant designation and Grant/Renew/Revoke admin for a Chat in a Space.
     fn admin_menu_entries(
         &self,
         chat: &mast_proto::Chat,
@@ -152,6 +152,20 @@ impl Shell {
         if chat.space_id.is_none() {
             return entries;
         }
+        let is_assistant = self.state.read(cx).is_personal_assistant(chat_id);
+        entries.push(
+            MenuEntry::new(
+                "personal-assistant",
+                if is_assistant {
+                    crate::personal_assistant::CLEAR_LABEL
+                } else {
+                    crate::personal_assistant::SET_LABEL
+                },
+                icons::BOT,
+                MenuAction::TogglePersonalAssistant(chat_id.to_owned()),
+            )
+            .separated(),
+        );
         let is_admin = self.chat_is_admin(chat_id, cx);
         entries.push(
             MenuEntry::new(
@@ -528,6 +542,13 @@ impl Shell {
             MenuAction::CloseOutChat(chat_id) => self.open_chat_closeout(chat_id, cx),
             MenuAction::GrantAdmin(chat_id) => self.open_admin_dialog(&chat_id, cx),
             MenuAction::RevokeAdmin(chat_id) => self.revoke_chat_admin(&chat_id, cx),
+            MenuAction::TogglePersonalAssistant(chat_id) => self.state.update(cx, |state, cx| {
+                if state.is_personal_assistant(&chat_id) {
+                    state.clear_personal_assistant(cx);
+                } else {
+                    state.set_personal_assistant(&chat_id, cx);
+                }
+            }),
             MenuAction::ArchiveChat(chat_id) => self.archive_chat(chat_id, cx),
             MenuAction::HandOffChat(chat_id) => self.open_hand_off(chat_id, cx),
             MenuAction::AskOnSide(chat_id) => self.ask_on_side(chat_id, None, cx),
@@ -948,6 +969,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn outline_and_compact_chat_menus_set_and_remove_the_assistant(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::work_outline::store::fixture_snapshot("s1");
+        let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        for compact in [false, true] {
+            outline.update(cx, |outline, cx| {
+                outline.set_compact_single_chat(compact, cx)
+            });
+            redraw(cx);
+            let key = if compact {
+                row_key::item("s1", UI)
+            } else {
+                row_key::chat(CHAT_UI)
+            };
+            right_click(cx, &key);
+            assert_eq!(
+                row(&shell, cx, "personal-assistant").label,
+                crate::personal_assistant::SET_LABEL
+            );
+            click(cx, "personal-assistant");
+            settle(&shell, cx);
+            shell.read_with(cx, |shell, cx| {
+                assert!(shell.state.read(cx).is_personal_assistant(CHAT_UI))
+            });
+            right_click(cx, &key);
+            assert_eq!(
+                row(&shell, cx, "personal-assistant").label,
+                crate::personal_assistant::CLEAR_LABEL
+            );
+            click(cx, "personal-assistant");
+            settle(&shell, cx);
+            shell.read_with(cx, |shell, cx| {
+                assert!(!shell.state.read(cx).is_personal_assistant(CHAT_UI))
+            });
+        }
+    }
+
+    #[gpui::test]
     fn hand_off_entry_requires_a_live_child(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let fixture = crate::work_outline::store::fixture_snapshot("s1");
@@ -1133,6 +1192,7 @@ mod tests {
                 "remove-from-item",
                 "compare-instructions",
                 "apply-instructions",
+                "personal-assistant",
                 "grant-admin",
                 "pin",
                 "copy-identity",
@@ -1545,7 +1605,10 @@ mod tests {
         assert_eq!(call(2)["workItemId"], HOUSEKEEPING);
         assert_eq!(selected(&outline, cx), Some(chat.clone()));
 
-        // The menu entry runs the same move as its key.
+        // The menu entry runs the same move as its key. Reveal the earlier
+        // row after keyboard navigation has scrolled to the moved chat.
+        outline.update(cx, |outline, cx| outline.reveal(&row_key::chat(CHAT_API), cx));
+        redraw(cx);
         right_click(cx, &row_key::chat(CHAT_API));
         assert!(menu_open(&shell, cx));
         click(cx, "move-to-next-item");

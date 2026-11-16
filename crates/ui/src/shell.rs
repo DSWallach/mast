@@ -4889,6 +4889,31 @@ impl Shell {
     }
 
     /// Close the session-row context menu through the exit animation.
+    /// Reuse the sidebar menu on overview rows and its fixed session cards.
+    pub(crate) fn open_overview_chat_menu(
+        &mut self,
+        chat_id: String,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let closeable = crate::chat_closeout::is_closeout_candidate(
+            self.state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .and_then(|chat| chat.cwd.as_deref()),
+        );
+        self.chat_menu.open(ChatMenuState {
+            chat_id: chat_id.clone(),
+            position,
+            page: ChatMenuPage::Root,
+            closeable,
+        });
+        self.load_branch_review_target(chat_id, cx);
+        cx.notify();
+    }
+
     fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
         if self.chat_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.chat_menu);
@@ -6124,6 +6149,7 @@ impl Shell {
             || self.add_space.is_some()
             || self.work_outline_modal_open()
             || self.work_outline_menu.is_open()
+            || self.overview_page.as_ref().is_some_and(|page| page.read(cx).assistant_chooser_open())
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
 
@@ -8648,7 +8674,11 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
-        let assistant_section = self.render_personal_assistant_section(theme, cx);
+        let assistant_section = if self.settings.sidebar_overview {
+            None
+        } else {
+            self.render_personal_assistant_section(theme, cx)
+        };
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -9608,6 +9638,11 @@ impl Shell {
         if self.add_space.is_some() {
             self.add_space = None;
             cx.notify();
+            return true;
+        }
+        if let Some(page) = self.overview_page.clone()
+            && page.update(cx, |page, cx| page.dismiss_assistant_chooser(cx))
+        {
             return true;
         }
         if self.spaces_menu.is_open() {
@@ -16463,6 +16498,9 @@ impl Shell {
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
+        if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
+            self.ensure_overview_page(cx).update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
+        }
     }
 
     pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {

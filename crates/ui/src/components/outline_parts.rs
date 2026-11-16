@@ -3339,7 +3339,9 @@ pub fn outline_first_use(theme: &Theme) -> Div {
     div()
         .debug_selector(|| "outline-first-use".into())
         .flex_none()
-        .mx(px(14.0))
+        .w_full()
+        .min_w_0()
+        .px(px(14.0))
         .my(px(6.0))
         .flex()
         .flex_wrap()
@@ -3349,7 +3351,14 @@ pub fn outline_first_use(theme: &Theme) -> Div {
             11.5 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child("No work items yet — group Chats and share instructions under one.")
+        .child(
+            div()
+                .debug_selector(|| "outline-first-use-copy".into())
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .child("No work items yet — group Chats and share instructions under one."),
+        )
 }
 pub fn outline_editor_frame(submitting: bool, theme: &Theme) -> Div {
     div()

@@ -157,6 +157,8 @@ impl Shell {
         Some(
             div()
                 .id("overview-clear-filters")
+                .min_w_0()
+                .whitespace_normal()
                 .debug_selector(|| "overview-clear-filters".into())
                 .mx(px(8.0))
                 .py(px(4.0))
@@ -605,4 +607,251 @@ pub(super) mod tests {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
         });
     }
+
+    fn seed_assistant(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        shell.update(vcx, |shell, cx| shell.state.update(cx, |state, cx| {
+            state.spaces = vec![serde_json::from_value(serde_json::json!({
+                "id":"assistant-space", "deviceId":"local", "path":"/fixture/assistant", "createdAt":"2026-11-01T00:00:00Z"
+            })).unwrap()];
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id":"assistant", "deviceId":"local", "spaceId":"assistant-space", "title":"Daily assistant",
+                "createdAt":"2026-11-01T00:00:00Z", "archived":false
+            })).unwrap());
+            state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+                assistant: Some(mast_proto::PersonalAssistant::for_chat(state.chats.last().unwrap(), 0)),
+            });
+            cx.notify();
+        }));
+        redraw_assistant(vcx);
+    }
+
+    fn redraw_assistant(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    #[gpui::test]
+    fn needs_interaction_empty_hint_wraps_inside_narrow_overview(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        seed_assistant(&shell, vcx);
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_work_outline_frame(
+                    "assistant-space",
+                    mast_proto::WorkOutlineSnapshot {
+                        space_id: "assistant-space".into(),
+                        available: true,
+                        synced: true,
+                        ..Default::default()
+                    },
+                );
+                cx.notify();
+            })
+        });
+        redraw_assistant(vcx);
+        let trigger = vcx.debug_bounds("overview-filter-menu").unwrap().center();
+        vcx.simulate_click(trigger, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        let filter = vcx
+            .debug_bounds("overview-filter-needs-interaction-menu")
+            .unwrap()
+            .center();
+        vcx.simulate_click(filter, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        // Dismiss the filter menu so its floating layer cannot mask overflow.
+        vcx.simulate_click(
+            gpui::point(px(700.0), px(300.0)),
+            gpui::Modifiers::default(),
+        );
+        for width in [240.0, 300.0, 360.0] {
+            shell.update(vcx, |shell, cx| {
+                shell.settings.sidebar_width = width;
+                cx.notify();
+            });
+            redraw_assistant(vcx);
+            let nav = vcx.debug_bounds("overview-navigation").unwrap();
+            let copy = vcx
+                .debug_bounds("outline-first-use-copy")
+                .expect("first-use hint with no matching chats");
+            assert!(
+                copy.left() >= nav.left() && copy.right() <= nav.right(),
+                "hint stays inside {width}px navigation: {copy:?} vs {nav:?}"
+            );
+            assert!(
+                f32::from(copy.size.height) > 20.0,
+                "long hint wraps: {copy:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn assistant_and_current_session_live_inside_overview_and_ignore_filters(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        seed_assistant(&shell, vcx);
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        shell.update(vcx, |shell, cx| {
+            shell.settings.space_filter = Some("missing-space".into());
+            cx.notify();
+        });
+        page.update(vcx, |page, cx| {
+            page.set_search_text_for_test("no matching chats", cx)
+        });
+        redraw_assistant(vcx);
+        let nav = vcx.debug_bounds("overview-navigation").unwrap();
+        for selector in ["overview-assistant", "overview-current-session"] {
+            let card = vcx.debug_bounds(selector).unwrap();
+            assert!(card.left() >= nav.left() && card.right() <= nav.right());
+            assert!(card.top() >= nav.top() && card.bottom() <= nav.bottom());
+        }
+        assert!(vcx.debug_bounds("sidebar-personal-assistant").is_none());
+        assert!(vcx.debug_bounds("sidebar-current-session").is_none());
+        page.update(vcx, |page, cx| page.open_required_actions(cx));
+        redraw_assistant(vcx);
+        let card = vcx.debug_bounds("overview-assistant").unwrap().center();
+        vcx.simulate_click(card, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.route, Route::Chat);
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("assistant")
+            );
+        });
+        assert!(
+            vcx.debug_bounds("overview-current-session").is_none(),
+            "same chat gets one card"
+        );
+        assert!(
+            vcx.debug_bounds("overview-chat-panel").is_none(),
+            "one live transcript host"
+        );
+        page.read_with(vcx, |page, _| {
+            assert!(page.required_actions_panel().is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn assistant_chooser_filters_candidates_assigns_and_escape_closes(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        seed_assistant(&shell, vcx);
+        shell.update(vcx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, cx| state.clear_personal_assistant(cx))
+        });
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("overview-assistant").is_none());
+        let choose = vcx
+            .debug_bounds("overview-choose-assistant")
+            .unwrap()
+            .center();
+        vcx.simulate_click(choose, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        assert!(
+            vcx.debug_bounds("overview-assistant-choice-assistant")
+                .is_some()
+        );
+        assert!(
+            vcx.debug_bounds("overview-assistant-choice-chat").is_none(),
+            "projectless chat is ineligible"
+        );
+        let choice = vcx
+            .debug_bounds("overview-assistant-choice-assistant")
+            .unwrap()
+            .center();
+        vcx.simulate_click(choice, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            assert!(shell.state.read(cx).is_personal_assistant("assistant"));
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("chat"),
+                "assignment does not open the chat"
+            );
+        });
+        assert!(vcx.debug_bounds("overview-assistant").is_some());
+        shell.update(vcx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, cx| state.clear_personal_assistant(cx))
+        });
+        redraw_assistant(vcx);
+        let choose = vcx
+            .debug_bounds("overview-choose-assistant")
+            .unwrap()
+            .center();
+        vcx.simulate_click(choose, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        vcx.simulate_keystrokes("escape");
+        redraw_assistant(vcx);
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        page.read_with(vcx, |page, _| assert!(!page.assistant_chooser_open()));
+    }
+
+    #[gpui::test]
+    fn scheduled_assistant_tracks_latest_run_and_current_card_survives_without_assistant(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        seed_assistant(&shell, vcx);
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let old = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "assistant")
+                    .unwrap();
+                old.scheduled_task_info = Some(serde_json::from_value(serde_json::json!({
+                "taskId":"briefing", "taskName":"Briefing", "runId":"old", "sessionCreatedAt":1
+            })).unwrap());
+                let designation = mast_proto::PersonalAssistant::for_chat(old, 0);
+                let mut latest = old.clone();
+                latest.id = "latest-assistant".into();
+                latest
+                    .scheduled_task_info
+                    .as_mut()
+                    .unwrap()
+                    .session_created_at = Some(2);
+                state.chats.push(latest);
+                state
+                    .personal_assistant
+                    .apply(mast_proto::PersonalAssistantReply {
+                        assistant: Some(designation),
+                    });
+                cx.notify();
+            })
+        });
+        redraw_assistant(vcx);
+        let card = vcx.debug_bounds("overview-assistant").unwrap().center();
+        vcx.simulate_click(card, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("latest-assistant")
+            )
+        });
+        assert!(vcx.debug_bounds("overview-current-session").is_none());
+        shell.update(vcx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, cx| state.clear_personal_assistant(cx))
+        });
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("overview-current-session").is_some());
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.selected_chat = None;
+                cx.notify();
+            })
+        });
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("overview-current-session").is_none());
+    }
+
 }

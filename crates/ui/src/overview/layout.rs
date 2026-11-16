@@ -251,6 +251,7 @@ impl Overview {
             );
         }
 
+        let top_sessions = self.render_top_sessions(&theme, cx);
         let header = crate::components::outline_overview_header(&theme)
             .flex_none()
             .flex()
@@ -259,6 +260,7 @@ impl Overview {
             .px(px(if self.in_sidebar { 8.0 } else { 16.0 }))
             .py(px(if self.in_sidebar { 8.0 } else { 12.0 }))
             .child(title_row)
+            .child(top_sessions)
             .child(toolbar);
 
         let body = match self.view_mode {
@@ -360,7 +362,9 @@ impl Overview {
                 if event.keystroke.key != "escape" {
                     return;
                 }
-                if let Some(details) = this.work_item_details.clone() {
+                if this.dismiss_assistant_chooser(cx) {
+                    cx.stop_propagation();
+                } else if let Some(details) = this.work_item_details.clone() {
                     details.update(cx, |details, cx| details.request_close(cx));
                     cx.stop_propagation();
                 } else if this.required_actions_panel.is_some() {

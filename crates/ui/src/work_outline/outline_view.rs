@@ -3021,7 +3021,7 @@ impl OutlineView {
                         self.external_chips(&key, item, row.depth, other_width, theme, cx);
                     let compact_chat = item.compact_chat.as_ref().map(|chat| {
                         let drift = self.drift_chip(&key, chat, theme, cx);
-                        compact_chat_segment(&key, chat, drift, theme, cx)
+                        compact_chat_segment(&key, chat, drift, &self.state, theme, cx)
                     });
                     // A compact row's status glyph opens the item's details
                     // (the rest of the row opens the Chat).
@@ -3061,7 +3061,7 @@ impl OutlineView {
             }
             OutlineRowKind::Chat(chat) => {
                 let chip = self.drift_chip(&key, chat, theme, cx);
-                chat_body(&key, chat, chip, selected, theme, cx)
+                chat_body(&key, chat, chip, selected, &self.state, theme, cx)
             }
         };
         // Row action: Start Chat on the selected, live work item.
@@ -3682,10 +3682,12 @@ fn compact_chat_segment(
     key: &str,
     row: &ChatRow,
     drift: Option<AnyElement>,
+    state: &Entity<AppState>,
     theme: &Theme,
     cx: &mut Context<OutlineView>,
 ) -> AnyElement {
     let chat = &row.chat;
+    let session_badge = crate::personal_assistant::session_badge(state.read(cx), &chat.id, theme);
     let status = crate::status_style::Status::from(chat.status);
     let indicator = crate::components::outline_chat_indicator(
         status,
@@ -3712,6 +3714,7 @@ fn compact_chat_segment(
                 .child(indicator)
                 .tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into()),
         )
+        .children(session_badge)
         .when_some(drift, |el, drift| el.child(drift))
         .when_some(chat.harness.clone(), |el, harness| {
             el.child(crate::components::outline_harness_badge(harness, theme))
@@ -3724,10 +3727,12 @@ fn chat_body(
     row: &ChatRow,
     drift: Option<AnyElement>,
     selected: bool,
+    state: &Entity<AppState>,
     theme: &Theme,
     cx: &mut Context<OutlineView>,
 ) -> AnyElement {
     let chat = &row.chat;
+    let session_badge = crate::personal_assistant::session_badge(state.read(cx), &chat.id, theme);
     if row.dangling {
         if let Some(missing) = crate::components::outline_missing_chat(theme, &chat.id) {
             return missing;
@@ -3833,6 +3838,7 @@ fn chat_body(
                 .text_color(theme.text_muted)
                 .child(SharedString::from(chat.title.clone())),
         )
+        .children(session_badge)
         .when_some(tool_failures_pill, |el, pill| el.child(pill))
         .when_some(
             drift.filter(|_| crate::components::outline_row_extras(theme)),
@@ -3982,6 +3988,8 @@ impl Render for OutlineView {
             // First use: the compact line takes the empty tree's place.
             div()
                 .flex_1()
+                .min_w_0()
+                .w_full()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3990,16 +3998,19 @@ impl Render for OutlineView {
         } else if count == 0 {
             div()
                 .flex_1()
+                .min_w_0()
+                .w_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
-                .child(if self.inputs.options.query.is_empty() {
-                    "No chats or work items"
-                } else {
-                    "Nothing matches the search"
-                })
+                .child(div().w_full().min_w_0().px(px(12.0)).whitespace_normal().text_center()
+                    .child(if self.inputs.options.query.is_empty() {
+                        "No chats or work items"
+                    } else {
+                        "Nothing matches the search"
+                    }))
                 .into_any_element()
         } else {
             gpui::uniform_list("work-outline-rows", count, cx.processor(Self::render_rows))
