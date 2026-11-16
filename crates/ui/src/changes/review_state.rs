@@ -6,7 +6,7 @@ pub(super) fn comment_state_key(
 ) -> u64 {
     let mut parts: Vec<String> = comments
         .iter()
-        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
+        .flat_map(|comment| [comment.id.clone(), comment.body.clone(), comment.path.clone(), format!("{:?}:{}", comment.side(), comment.line)])
         .collect();
     if let Some((path, side, line)) = draft {
         parts.push(format!("draft:{path}:{}:{line}", side.tag()));
@@ -559,6 +559,7 @@ impl Changes {
         }
         self.review_target = Some(target.clone());
         self.load_review_threads(&target, cx);
+        self.load_local_drafts(&target, cx);
         self.review_status_task = None;
         self.review_status_checked = None;
         self.review_status_base = None;

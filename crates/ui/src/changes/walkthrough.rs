@@ -691,6 +691,7 @@ impl Render for Walkthrough {
             .changes
             .as_ref()
             .map(|changes| changes.update(cx, |changes, cx| changes.render_header_controls(cx)));
+        let mut draft_count = 0;
         if let Some(changes) = &self.changes {
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
             let changes = changes.read(cx);
@@ -705,6 +706,7 @@ impl Render for Walkthrough {
             }
             self.target_selected =
                 changes.review_target.as_deref() == Some(self.review.target_key.as_str());
+            if self.target_selected { draft_count = changes.local_review_drafts.get(&self.review.target_key).map_or(0, Vec::len); }
             self.viewed = changes
                 .review_state
                 .as_ref()
@@ -721,9 +723,9 @@ impl Render for Walkthrough {
         let selected_reviewed = coverage.complete.get(self.selected).copied().unwrap_or(false)
             && coverage.steps.get(self.selected).is_some_and(|hunks| !hunks.is_empty() && hunks.iter().all(|hunk| self.viewed.contains(&hunk.identity)));
         let progress = format!(
-            "{} / {} reviewed",
+            "{} / {} reviewed · {} {}",
             coverage.reviewed_count(&self.viewed),
-            self.review.steps.len()
+            self.review.steps.len(), draft_count, if draft_count == 1 { "draft" } else { "drafts" }
         );
         let mut steps = div().id("review-steps").flex().flex_col().gap_1();
         for (index, step) in self.review.steps.iter().enumerate() {
