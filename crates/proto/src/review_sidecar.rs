@@ -222,6 +222,17 @@ mod tests {
     use super::ReviewTarget;
 
     #[test]
+    fn legacy_suggestion_without_id_still_decodes() {
+        let comment: super::ReviewSuggestedComment = serde_json::from_value(serde_json::json!({
+            "anchor": {"file":"a.rs", "side":"right", "startLine":1, "endLine":1},
+            "body":"Check this", "severity":"low"
+        }))
+        .unwrap();
+        assert_eq!(comment.id, None);
+        assert!(serde_json::to_value(comment).unwrap().get("id").is_none());
+    }
+
+    #[test]
     fn review_target_state_keys_survive_head_changes() {
         let mut target = ReviewTarget::Branch {
             repo: Some("Owner/Repo".into()),
