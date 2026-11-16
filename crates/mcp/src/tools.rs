@@ -627,7 +627,7 @@ fn review_schema() -> Value {
         }, "required": ["id", "title", "file", "hunks", "what", "why", "risk", "riskNote", "tags"]}},
         "highlights": {"type": "array", "items": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["risk", "missing-tests", "behaviour-change", "security", "migration", "perf", "style"]}, "severity": {"type": "string"}, "text": {"type": "string"}, "anchor": anchor}, "required": ["kind", "severity", "text", "anchor"]}},
         "questions": {"type": "array", "description": "Questions as strings or objects with question or text fields.", "items": {}},
-        "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
+        "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string", "description": "Stable identifier across review revisions."}, "anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
     }, "required": ["schema", "summary", "steps", "highlights", "questions", "suggestedComments"],
        "description": "With prUrl, pr is required. With target, Mast supplies pr when omitted."})
 }

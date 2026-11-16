@@ -187,11 +187,34 @@ pub enum ReviewSide {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSuggestedComment {
+    /// Stable across republishes so a dismissed suggestion stays dismissed.
+    /// Older sidecars did not include an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub anchor: ReviewAnchor,
     pub body: String,
     pub severity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+}
+
+/// A local review comment, keyed by the review target rather than its head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDraft {
+    pub id: String,
+    pub target: String,
+    pub anchor: ReviewAnchor,
+    pub body: String,
+    pub source: ReviewDraftSource,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewDraftSource {
+    User,
+    Agent,
 }
 
 #[cfg(test)]
