@@ -92,40 +92,47 @@ impl Transcript {
         text: &str,
         spans: &[crate::composer::SentMentionSpan],
     ) -> (SharedString, Arc<Vec<crate::composer::SentMentionSpan>>) {
-        let mut display = String::new();
-        let mut projected = Vec::new();
-        let mut offset = 0;
-        for span in spans {
-            display.push_str(&text[offset..span.range.start]);
-            let start = display.len();
-            let mut span = span.clone();
-            span.resolution = span.code_ref.as_ref().and_then(|reference| {
-                self.code_ref_resolutions
-                    .get(&key(reference))
-                    .and_then(|(_, resolution)| *resolution)
-            });
-            match span.resolution {
-                Some(crate::code_ref::Resolution::Moved(range)) => {
-                    let mut reference = span.code_ref.clone().unwrap();
-                    reference.reference.range = Some(range);
-                    display.push_str(&format!("{} moved", reference.label()));
-                    span.path =
-                        format!("{}:{}", reference.reference.location.path, range.start_line)
-                            .into();
-                }
-                Some(crate::code_ref::Resolution::Changed) => {
-                    display.push_str(&text[span.range.clone()]);
-                    display.push_str(" changed");
-                }
-                _ => display.push_str(&text[span.range.clone()]),
-            }
-            offset = span.range.end;
-            span.range = start..display.len();
-            projected.push(span);
-        }
-        display.push_str(&text[offset..]);
-        (display.into(), Arc::new(projected))
+        project_resolutions(text, spans, &self.code_ref_resolutions)
     }
+}
+
+fn project_resolutions(
+    text: &str,
+    spans: &[crate::composer::SentMentionSpan],
+    resolutions: &HashMap<String, (Instant, Option<crate::code_ref::Resolution>)>,
+) -> (SharedString, Arc<Vec<crate::composer::SentMentionSpan>>) {
+    let mut display = String::new();
+    let mut projected = Vec::new();
+    let mut offset = 0;
+    for span in spans {
+        display.push_str(&text[offset..span.range.start]);
+        let start = display.len();
+        let mut span = span.clone();
+        span.resolution = span.code_ref.as_ref().and_then(|reference| {
+            resolutions
+                .get(&key(reference))
+                .and_then(|(_, resolution)| *resolution)
+        });
+        match span.resolution {
+            Some(crate::code_ref::Resolution::Moved(range)) => {
+                let mut reference = span.code_ref.clone().unwrap();
+                reference.reference.range = Some(range);
+                display.push_str(&format!("{} moved", reference.label()));
+                span.path =
+                    format!("{}:{}", reference.reference.location.path, range.start_line).into();
+            }
+            Some(crate::code_ref::Resolution::Changed) => {
+                display.push_str(&text[span.range.clone()]);
+                display.push_str(" changed");
+            }
+            _ => display.push_str(&text[span.range.clone()]),
+        }
+        offset = span.range.end;
+        span.range = start..display.len();
+        projected.push(span);
+    }
+    display.push_str(&text[offset..]);
+    (display.into(), Arc::new(projected))
 }
 
 pub(super) fn activate(
@@ -197,4 +204,69 @@ pub(super) fn activate(
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_moved_and_changed_reference_labels() {
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "ref".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation {
+                    repo_id: "repo".into(),
+                    worktree_id: None,
+                    path: "src/file.rs".into(),
+                },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange {
+                    start_line: 2,
+                    end_line: 3,
+                }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree {
+                    working_tree: true,
+                    content_hash: "hash".into(),
+                },
+            },
+            snippet: "two\nthree".into(),
+        };
+        let text = "Inspect file.rs:2-3";
+        let span = crate::composer::SentMentionSpan {
+            range: 8..19,
+            path: "src/file.rs:2".into(),
+            is_dir: false,
+            code_ref: Some(reference.clone()),
+            resolution: None,
+        };
+        let mut resolutions = HashMap::new();
+        resolutions.insert(
+            key(&reference),
+            (
+                Instant::now(),
+                Some(crate::code_ref::Resolution::Moved(
+                    mast_proto::CodeRefRange {
+                        start_line: 4,
+                        end_line: 5,
+                    },
+                )),
+            ),
+        );
+        let (display, spans) = project_resolutions(text, &[span.clone()], &resolutions);
+        assert_eq!(display.as_ref(), "Inspect file.rs:4-5 moved");
+        assert_eq!(spans[0].path.as_ref(), "src/file.rs:4");
+        resolutions.insert(
+            key(&reference),
+            (Instant::now(), Some(crate::code_ref::Resolution::Changed)),
+        );
+        let (display, spans) = project_resolutions(text, &[span], &resolutions);
+        assert_eq!(display.as_ref(), "Inspect file.rs:2-3 changed");
+        assert_eq!(
+            spans[0].resolution,
+            Some(crate::code_ref::Resolution::Changed)
+        );
+    }
 }
