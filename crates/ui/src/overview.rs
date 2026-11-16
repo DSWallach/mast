@@ -60,6 +60,8 @@ use crate::work_outline::{WorkOutlineCommand, WorkOutlineLoad};
 mod details_width;
 mod github_host;
 mod layout;
+mod sidebar;
+pub(crate) use sidebar::OverviewNavigation;
 mod linear_host;
 
 /// A chat with no activity for longer than this, and not currently
@@ -1468,6 +1470,8 @@ pub struct Overview {
     /// scroll container)`, headers counted. Rebuilt every List render.
     list_order: Vec<(String, usize)>,
     view_mode: OverviewMode,
+    pub(crate) in_sidebar: bool,
+    sidebar_scope: Option<String>,
     /// Rows currently showing their expanded detail (toggled by a click,
     /// matching the reference's `expandedIds`/`toggleExpanded`). Never causes
     /// navigation; only the explicit "Open chat" affordance does that.
@@ -1846,6 +1850,8 @@ impl Overview {
             list_selected: None,
             list_order: Vec::new(),
             view_mode: OverviewMode::Outline,
+            in_sidebar: false,
+            sidebar_scope: None,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
             link_status_pending: HashSet::new(),
@@ -2217,10 +2223,10 @@ impl Overview {
     /// staleness re-derive) — a fetch that lands with changed data does that
     /// itself.
     fn refresh_tick(&mut self, cx: &mut Context<Self>) {
-        let visible = self
-            .shell
-            .upgrade()
-            .is_some_and(|shell| shell.read(cx).is_overview_route());
+        let visible = self.shell.upgrade().is_some_and(|shell| {
+            let shell = shell.read(cx);
+            shell.is_overview_route() || shell.overview_navigation_visible()
+        });
         if !visible {
             return;
         }
@@ -2373,6 +2379,11 @@ impl Overview {
                 state
                     .overview_chats_with_archived(now, self.show_archived)
                     .into_iter()
+                    .filter(|(_, chat)| {
+                        self.sidebar_scope
+                            .as_deref()
+                            .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
+                    })
                     .map(|(status, chat)| {
                         let failures = state
                             .session_for(&chat.id)
@@ -2573,15 +2584,17 @@ impl Overview {
                 let stale = row.map_or_else(|| is_stale(chat, status, now), |r| r.stale);
                 let shown_by_toggles =
                     (self.show_archived || !chat.archived) && !(self.hide_stale && stale);
-                let tool_failures = row
-                    .and_then(|r| r.tool_failures.clone())
-                    .or_else(|| {
-                        state
-                            .session_for(&chat.id)
-                            .and_then(|s| s.last_turn_tool_failures.clone())
-                    });
+                let tool_failures = row.and_then(|r| r.tool_failures.clone()).or_else(|| {
+                    state
+                        .session_for(&chat.id)
+                        .and_then(|s| s.last_turn_tool_failures.clone())
+                });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 let visible = shown_by_toggles
+                    && self
+                        .sidebar_scope
+                        .as_deref()
+                        .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
                     && {
                         let repo = match row {
                             Some(row) => row.repo.clone(),
@@ -2639,7 +2652,15 @@ impl Overview {
     /// All-spaces view), in display order, with its current load.
     fn outline_spaces(&self, cx: &gpui::App) -> Vec<OutlineSpace> {
         let state = self.state.read(cx);
-        let mut spaces: Vec<&Space> = state.spaces.iter().collect();
+        let mut spaces: Vec<&Space> = state
+            .spaces
+            .iter()
+            .filter(|space| {
+                self.sidebar_scope
+                    .as_deref()
+                    .is_none_or(|scope| space.id == scope)
+            })
+            .collect();
         spaces.sort_by_cached_key(|space| (space.display_name().to_lowercase(), space.id.clone()));
         spaces
             .into_iter()
@@ -2691,6 +2712,16 @@ impl Overview {
     }
 
     pub(crate) fn open_chat_panel(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.in_sidebar {
+            self.subagent_peek = None;
+            self.chat_panel_open = false;
+            self.outline_chat_return = Some(OutlineChatReturn {
+                chat_id: chat_id.clone(),
+                full_route: true,
+            });
+            self.open(chat_id, cx);
+            return;
+        }
         // Web `openTranscriptPanel` → `acknowledgeDone`.
         self.acknowledge_done(&chat_id, cx);
         let _ = self.shell.update(cx, |shell, cx| {
@@ -2716,6 +2747,7 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         self.peek_request_seq += 1;
         let request_id = self.peek_request_seq;
         self.chat_panel_open = false;
@@ -2780,6 +2812,7 @@ impl Overview {
     /// ✕ / Escape on a peek: back to the bare list.
     fn close_subagent_peek(&mut self, cx: &mut Context<Self>) {
         if self.subagent_peek.take().is_some() {
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -2938,6 +2971,8 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
+        self.outline_focus_pending = false;
         if self.expanded.insert(chat_id.clone()) {
             self.acknowledge_done(&chat_id, cx);
         }
@@ -2966,6 +3001,7 @@ impl Overview {
                 self.link_error = None;
             }
             self.link_submitting = false;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -3665,7 +3701,8 @@ impl Overview {
                 .id("overview-chat-panel")
                 .debug_selector(|| "overview-chat-panel".into())
                 .flex_none()
-                .w(px(CHAT_PANEL_W))
+                .when(self.in_sidebar, |el| el.flex_1().min_w_0())
+                .when(!self.in_sidebar, |el| el.w(px(CHAT_PANEL_W)))
                 .h_full()
                 .flex()
                 .flex_col()
@@ -3896,7 +3933,8 @@ impl Overview {
                     }
                 }))
                 .flex_none()
-                .w(px(CHAT_PANEL_W))
+                .when(self.in_sidebar, |el| el.flex_1().min_w_0())
+                .when(!self.in_sidebar, |el| el.w(px(CHAT_PANEL_W)))
                 .h_full()
                 .flex()
                 .flex_col()
@@ -4653,8 +4691,12 @@ impl Overview {
 
 impl Render for Overview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let navigation = self.render_navigation(window, cx);
-        self.render_workspace(navigation, window, cx)
+        if self.in_sidebar {
+            self.render_sidebar_workspace(window, cx)
+        } else {
+            let navigation = self.render_navigation(window, cx);
+            self.render_workspace(navigation, window, cx)
+        }
     }
 }
 
@@ -6040,6 +6082,7 @@ impl Overview {
         item_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         if self.work_item_details.as_ref().is_some_and(|details| {
             let details = details.read(cx);
             details.space_id == space_id && details.item_id == item_id
@@ -6149,6 +6192,7 @@ impl Overview {
         item_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         let key = row_key::item(&space_id, &item_id);
         let chat_ids = self
             .state
@@ -6274,6 +6318,7 @@ impl Overview {
     pub(crate) fn close_work_item_details(&mut self, cx: &mut Context<Self>) {
         if self.work_item_details.take().is_some() {
             self._details_events = None;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -6469,6 +6514,10 @@ impl Overview {
     /// any other row, cancel a pending switch: the panel keeps the last
     /// previewed Chat.
     fn schedule_outline_preview(&mut self, cx: &mut Context<Self>) {
+        // Browsing the persistent column must not replace the open workspace.
+        if self.in_sidebar {
+            return;
+        }
         if self.outline.read(cx).selected_open_chat().is_none() {
             self.outline_preview = None;
             return;
@@ -6749,6 +6798,7 @@ impl Overview {
     /// Outline toolbar). Work Item Details close first (through the discard
     /// policy) so the surface is visible.
     pub(crate) fn open_required_actions(&mut self, cx: &mut Context<Self>) {
+        self.show_sidebar_workspace(cx);
         if self.required_actions_panel.is_none() {
             use crate::work_outline::required_actions_view::{
                 RequiredActionsEvent, RequiredActionsList,
@@ -6811,6 +6861,7 @@ impl Overview {
     pub(crate) fn close_required_actions(&mut self, cx: &mut Context<Self>) {
         if self.required_actions_panel.take().is_some() {
             self._required_actions_events = None;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -7817,6 +7868,41 @@ mod logic_tests {
         });
         vcx.run_until_parked();
         (overview, vcx)
+    }
+
+    #[gpui::test]
+    fn sidebar_scope_filters_navigation_without_changing_the_open_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_repos(cx, dir.path(), &["alpha", "beta"]);
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("c1".into());
+            state.spaces = ["alpha", "beta"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "local", "path": format!("/work/{id}"), "createdAt": "2026-11-01T00:00:00Z"
+            })).unwrap()).collect();
+            state.chats[0].space_id = Some("alpha".into());
+            state.chats[1].space_id = Some("beta".into());
+        });
+        let (overview, vcx) = overview_over(cx, &state);
+        overview.update(vcx, |overview, cx| {
+            overview.set_sidebar_scope(Some("alpha".into()), cx);
+            let rows = overview.rows(cx);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.chat.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["c0"]
+            );
+            assert!(
+                overview
+                    .outline_chats
+                    .iter()
+                    .filter(|chat| chat.visible)
+                    .all(|chat| chat.space_id.as_deref() == Some("alpha"))
+            );
+            assert_eq!(overview.state.read(cx).selected_chat.as_deref(), Some("c1"));
+        });
     }
 
     /// A shell can mount navigation without also mounting the live chat.

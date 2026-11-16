@@ -94,6 +94,7 @@ mod running_ui;
 mod side_chat_ui;
 #[cfg(feature = "snapshot")]
 pub(crate) use side_chat_ui::fixture_side_chat_state;
+mod overview_ui;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
@@ -1572,6 +1573,7 @@ struct SidebarPane {
     renders: usize,
     shell: gpui::WeakEntity<Shell>,
     _observation: Subscription,
+    _overview_observation: Option<Subscription>,
 }
 
 impl Render for SidebarPane {
@@ -1702,6 +1704,7 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
+    overview_navigation: Option<Entity<crate::overview::OverviewNavigation>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
     scheduled_tasks_events: Option<Subscription>,
     pr_review_chats_page: Option<Entity<crate::chat_type_view::ChatTypeView>>,
@@ -2182,6 +2185,7 @@ impl Shell {
             renders: 0,
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
+            _overview_observation: None,
         });
         let install = mast_update::detect_install();
         Self {
@@ -2236,6 +2240,7 @@ impl Shell {
             nav,
             devices_page: None,
             overview_page: None,
+            overview_navigation: None,
             scheduled_tasks_page: None,
             scheduled_tasks_events: None,
             pr_review_chats_page: None,
@@ -4998,8 +5003,7 @@ impl Shell {
 
     pub(crate) fn open_overview(&mut self, cx: &mut Context<Self>) {
         self.command_palette = None;
-        self.route = Route::Overview;
-        self.nav.push(NavEntry::Overview);
+        self.reveal_overview_navigation(cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
@@ -5020,14 +5024,29 @@ impl Shell {
         }
         let state = self.state.clone();
         let weak = cx.entity().downgrade();
-        // The overview's chat panel renders these SAME entities (never a
-        // second transcript/composer) — safe because routes are exclusive:
-        // `render_main` returns before the chat stack on this route.
+        // The controller retains the shared chat entities for legacy views.
+        // Its persistent navigation never mounts them; live chats use Shell's
+        // Chat route while non-chat Overview panels use the workspace outlet.
         let transcript = self.transcript.clone();
         let composer = self.composer.clone();
-        let page =
-            cx.new(|cx| crate::overview::Overview::new(state, weak, transcript, composer, cx));
+        let page = cx.new(|cx| {
+            let mut page = crate::overview::Overview::new(state, weak, transcript, composer, cx);
+            page.in_sidebar = true;
+            page
+        });
         self.overview_page = Some(page.clone());
+        // Overview can change from search, selection, or its refresh tick
+        // without a Shell notification. Invalidate the cached sidebar scene
+        // as well as its navigation child. Defer because the page can first
+        // be created while SidebarPane itself is rendering.
+        let sidebar = self.sidebar_pane.clone();
+        let observed = page.clone();
+        cx.defer(move |cx| {
+            sidebar.update(cx, |pane, cx| {
+                pane._overview_observation = Some(cx.observe(&observed, |_, _, cx| cx.notify()));
+                cx.notify();
+            });
+        });
         page
     }
 
@@ -5131,9 +5150,12 @@ impl Shell {
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
             }
-            NavEntry::ScheduledTasks => { self.route = Route::ScheduledTasks; }
+            NavEntry::ScheduledTasks => {
+                self.route = Route::ScheduledTasks;
+            }
             NavEntry::Overview => {
                 self.route = Route::Overview;
+                self.reveal_overview_navigation(cx);
             }
             NavEntry::PrReviewChats => {
                 self.route = Route::PrReviewChats;
@@ -5896,7 +5918,11 @@ impl Shell {
         let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
             return;
         };
-        // Same path a click on that row takes.
+        // Show the presentation whose numbered rows this shortcut uses.
+        if self.settings.sidebar_overview {
+            self.settings.sidebar_overview = false;
+            self.schedule_save(cx);
+        }
         self.open_chat(chat_id, cx);
     }
 
@@ -8043,7 +8069,8 @@ impl Shell {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
-        let session_rows = self.render_active_rows(theme, cx);
+        let session_rows =
+            self.render_sidebar_collection_rows(theme, self.settings.sidebar_overview, cx);
         let moving_row = session_rows
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
@@ -8052,7 +8079,8 @@ impl Shell {
         let regular_start = pinned_count + custom_count;
         let keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
-        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        let ungrouped = !self.settings.sidebar_overview
+            && self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
@@ -8086,6 +8114,17 @@ impl Shell {
         // don't reorder) never animate.
         let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
         let show_pinned_section = pinned_count > 0 || self.sidebar_session_transfer.is_some();
+        let shortcut_rows_height = keyed
+            .iter()
+            .enumerate()
+            .filter(|(ix, _)| *ix >= pinned_count || self.pinned_open)
+            .map(|(_, (_, height, _))| *height + SIDEBAR_LIST_GAP)
+            .sum::<f32>()
+            + if show_pinned_section {
+                spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+            } else {
+                0.0
+            };
         if show_pinned_section {
             order.push((
                 "sidebar-pinned-header".to_string(),
@@ -8231,6 +8270,21 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
+        // Percentage-height scroll children need a definite parent height.
+        // Empty collections yield the space to the Outline; populated ones
+        // scroll independently instead of collapsing to zero height.
+        let shortcut_height = (shortcut_rows_height
+            + if archived_section.is_some() {
+                if self.archived_open { 180.0 } else { 32.0 }
+            } else {
+                0.0
+            }
+            + if shortcut_rows_height > 0.0 {
+                12.0
+            } else {
+                0.0
+            })
+        .min(180.0);
 
         let (user_line, menu_identity): (SharedString, SharedString) = match workspace_scope {
             Some(WorkspaceScope::Local) => {
@@ -8360,7 +8414,11 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
+                .child(SharedString::from(if self.settings.sidebar_overview {
+                    "No pinned sessions"
+                } else {
+                    "No sessions yet"
+                }))
                 .into_any_element()
         };
 
@@ -8377,13 +8435,21 @@ impl Shell {
             SIDEBAR_GLASS_FADE_BAND,
             true,
             true,
-            div().relative().flex_1().min_h_0().child(
-                div()
-                    .id("sidebar-lists")
-                    .relative()
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll)
+            div()
+                .relative()
+                .debug_selector(|| "overview-shortcut-collections".into())
+                .min_h_0()
+                .when(self.settings.sidebar_overview, |el| {
+                    el.flex_none().h(px(shortcut_height))
+                })
+                .when(!self.settings.sidebar_overview, |el| el.flex_1())
+                .child(
+                    div()
+                        .id("sidebar-lists")
+                        .relative()
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.sidebar_scroll)
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if let Some(transfer) = this.sidebar_session_transfer.as_mut() {
@@ -8433,8 +8499,23 @@ impl Shell {
             // window above this column.)
             .children(assistant_section)
             .child(filter_row)
-            .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
+            .child(self.render_overview_switch(theme, cx))
+            .children(crate::ui_style::help_card(
+                "sidebar",
+                "Chats show current activity and items needing your attention.",
+                theme,
+                cx,
+            ))
             .child(sidebar_lists)
+            .when(self.settings.sidebar_overview, |el| {
+                el.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(self.ensure_overview_navigation(cx)),
+                )
+            })
             .children(crate::components::shell_parts::sidebar_grille(theme))
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -12212,7 +12293,14 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &FocusOverviewSearch, window, cx| {
                 if !this.overlay_owns_keyboard(cx) {
                     match this.route {
-                        Route::Overview => {
+                        Route::Overview | Route::Chat
+                            if this.is_overview_route()
+                                || (this.overview_navigation_visible()
+                                    && !this
+                                        .composer
+                                        .focus_handle(cx)
+                                        .contains_focused(window, cx)) =>
+                        {
                             let page = this.ensure_overview_page(cx);
                             page.update(cx, |overview, cx| {
                                 overview.focus_search(window, cx);
@@ -14407,6 +14495,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 shell.open_overview(cx);
+                shell.show_overview_workspace(cx);
                 shell.preview_chat_in_overview("existing-session".into(), cx);
             })
             .unwrap();

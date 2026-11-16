@@ -25,7 +25,13 @@ impl Overview {
             .subagent_peek
             .as_ref()
             .map(|p| p.chat_id.clone())
-            .or_else(|| self.panel_chat_id(cx));
+            .or_else(|| {
+                if self.in_sidebar {
+                    self.state.read(cx).selected_chat.clone()
+                } else {
+                    self.panel_chat_id(cx)
+                }
+            });
         let rows = self.rows(cx);
         self.declare_outline_spaces(cx);
         if self.view_mode == OverviewMode::Outline {
@@ -36,12 +42,14 @@ impl Overview {
 
         let title_row = div()
             .flex()
-            .items_center()
+            .when(self.in_sidebar, |el| el.flex_col().items_start())
+            .when(!self.in_sidebar, |el| el.items_center())
             .justify_between()
             .gap(px(10.0))
             .child(
                 div()
                     .flex()
+                    .when(self.in_sidebar, |el| el.flex_wrap().w_full().min_w_0())
                     .items_center()
                     .gap(px(10.0))
                     .child(
@@ -139,7 +147,8 @@ impl Overview {
                     .child(
                         div()
                             .id("overview-search")
-                            .w(px(260.0))
+                            .when(self.in_sidebar, |el| el.w_full().min_w_0())
+                            .when(!self.in_sidebar, |el| el.w(px(260.0)))
                             .on_key_down(cx.listener(
                                 |this, event: &gpui::KeyDownEvent, window, cx| {
                                     this.search_key_down(event, window, cx)
@@ -247,8 +256,8 @@ impl Overview {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(16.0))
-            .py(px(12.0))
+            .px(px(if self.in_sidebar { 8.0 } else { 16.0 }))
+            .py(px(if self.in_sidebar { 8.0 } else { 12.0 }))
             .child(title_row)
             .child(toolbar);
 
@@ -267,6 +276,8 @@ impl Overview {
             .flex_1()
             .min_w_0()
             .h_full()
+            .min_h_0()
+            .debug_selector(|| "overview-navigation".into())
             .flex()
             .flex_col()
             .child(header)
@@ -314,7 +325,8 @@ impl Overview {
             let width = if panel.is_some() { CHAT_PANEL_W } else { 0.0 };
             (panel, width)
         };
-        let linear = self.render_linear_column(right_w, window, cx);
+        let linear =
+            self.render_linear_column(if self.in_sidebar { 0.0 } else { right_w }, window, cx);
         let (linear_inline, linear_overlay) = match linear {
             Some(linear_host::LinearSlot::Inline(el)) => (Some(el), None),
             Some(linear_host::LinearSlot::Overlay(el)) => (None, Some(el)),

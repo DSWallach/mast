@@ -1,0 +1,155 @@
+//! The persistent navigation host shares a controller with the workspace,
+//! but never renders its transcript or composer.
+use super::*;
+
+pub(crate) struct OverviewNavigation {
+    overview: Entity<Overview>,
+    _observation: Subscription,
+}
+
+impl OverviewNavigation {
+    pub(crate) fn new(overview: Entity<Overview>, cx: &mut Context<Self>) -> Self {
+        let observation = cx.observe(&overview, |_, _, cx| cx.notify());
+        Self {
+            overview,
+            _observation: observation,
+        }
+    }
+}
+
+impl Render for OverviewNavigation {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.overview
+            .update(cx, |overview, cx| overview.render_navigation(window, cx))
+    }
+}
+
+impl Overview {
+    pub(crate) fn set_sidebar_scope(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
+        if self.sidebar_scope != scope {
+            self.sidebar_scope = scope;
+            self.rows_dirty = true;
+            self.outline_dirty = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn navigation_list_focused(&self, window: &Window) -> bool {
+        self.view_mode == OverviewMode::List && self.body_focus.is_focused(window)
+    }
+
+    pub(crate) fn request_navigation_focus(&mut self, cx: &mut Context<Self>) {
+        self.outline_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Callers may already be updating Shell through a command handler.
+    /// Defer opening the destination to avoid re-entering that entity.
+    pub(super) fn show_sidebar_workspace(&self, cx: &mut Context<Self>) {
+        if self.in_sidebar {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell
+                    .update(cx, |shell, cx| shell.show_overview_workspace(cx))
+                    .ok();
+            });
+        }
+    }
+
+    pub(super) fn return_from_sidebar_workspace(&self, cx: &mut Context<Self>) {
+        if self.in_sidebar
+            && self.work_item_details.is_none()
+            && self.required_actions_panel.is_none()
+            && self.subagent_peek.is_none()
+            && !self.column_shown()
+            && self.link_editor_chat.is_none()
+        {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell
+                    .update(cx, |shell, cx| shell.return_from_overview_workspace(cx))
+                    .ok();
+            });
+        }
+    }
+
+    pub(super) fn render_sidebar_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.ensure_prefs_loaded(cx);
+        let _ = self.rows(cx);
+        self.declare_outline_spaces(cx);
+        self.sync_outline(cx);
+        let theme = Theme::of(cx).clone();
+        if self.link_editor_chat.is_some() {
+            let chat_id = self.link_editor_chat.clone().unwrap();
+            let error = self
+                .link_error
+                .as_ref()
+                .filter(|(id, _)| id == &chat_id)
+                .map(|(_, text)| text.clone());
+            return div()
+                .size_full()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .debug_selector(|| "overview-workspace-link-editor".into())
+                .child("Add PR / ticket")
+                .child(self.link_input.clone())
+                .children(error.map(|message| div().text_color(theme.danger).child(message)))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            popover::btn_primary(
+                                &theme,
+                                if self.link_submitting {
+                                    "Linking…"
+                                } else {
+                                    "Add link"
+                                },
+                            )
+                            .id("overview-link-editor-submit")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_link_editor(cx))),
+                        )
+                        .child(
+                            popover::btn_ghost(&theme, "Close", "overview-link-editor-close")
+                                .id("overview-link-editor-close")
+                                .on_click(cx.listener(|this, _, _, cx| this.close_link_editor(cx))),
+                        ),
+                )
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    match event.keystroke.key.as_str() {
+                        "enter" => this.submit_link_editor(cx),
+                        "escape" => this.close_link_editor(cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }))
+                .into_any_element();
+        }
+        let empty = if self.work_item_details.is_none()
+            && self.required_actions_panel.is_none()
+            && self.subagent_peek.is_none()
+            && !self.chat_panel_open
+        {
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.text_muted)
+                .child("Choose a work item or chat in Overview")
+                .into_any_element()
+        } else {
+            div().flex_none().w(px(0.0)).into_any_element()
+        };
+        self.render_workspace(empty, window, cx)
+    }
+}

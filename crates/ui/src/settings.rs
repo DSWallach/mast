@@ -32,7 +32,7 @@ pub mod workflow_pack;
 /// Sidebar drag-resize bounds (px).
 pub const SIDEBAR_MIN: f32 = 200.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
-pub const SIDEBAR_DEFAULT: f32 = 256.0;
+pub const SIDEBAR_DEFAULT: f32 = 360.0;
 
 /// Independent file explorer width preference and drag bounds (px).
 pub const FILES_PANEL_DEFAULT: f32 = 286.0;
@@ -697,6 +697,8 @@ pub struct UiSettings {
     pub sidebar_width: f32,
     pub changes_file_list_width: f32,
     pub sidebar_collapsed: bool,
+    /// Use the Work Outline presentation in the unified Overview column.
+    pub sidebar_overview: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -926,6 +928,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             changes_file_list_width: 240.0,
             sidebar_collapsed: false,
+            sidebar_overview: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -3082,6 +3085,7 @@ mod tests {
             changes_file_list_width: 240.0,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
+            sidebar_overview: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
@@ -3767,7 +3771,8 @@ mod tests {
     #[test]
     fn defaults_match_zeron() {
         let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, 256.0);
+        assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
+        assert!(d.sidebar_overview);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);

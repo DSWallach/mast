@@ -5003,6 +5003,15 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
+        self.render_sidebar_collection_rows(theme, false, cx)
+    }
+
+    pub(super) fn render_sidebar_collection_rows(
+        &mut self,
+        theme: &Theme,
+        shortcuts_only: bool,
+        cx: &mut Context<Self>,
+    ) -> SidebarSessionRows {
         #[cfg(test)]
         let measurement_started = std::time::Instant::now();
         let now = Utc::now();
@@ -5105,6 +5114,13 @@ impl Shell {
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
+        }
+        if shortcuts_only {
+            regular_groups.retain(|(group, _)| {
+                group
+                    .as_ref()
+                    .is_some_and(|(key, _)| key == SCHEDULED_GROUP_KEY)
+            });
         }
         move_scheduled_group_last(&mut regular_groups);
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
@@ -6118,7 +6134,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.settings.sidebar_organization != SidebarOrganization::InOneList {
+        if self.settings.sidebar_overview
+            || self.settings.sidebar_organization != SidebarOrganization::InOneList
+        {
             return content;
         }
         let open = self.sessions_open;

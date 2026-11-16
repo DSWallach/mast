@@ -325,6 +325,7 @@ impl Overview {
         if spaces.is_empty() && !github {
             return Err(crate::linear::LINEAR_OFF_NOTICE);
         }
+        self.show_sidebar_workspace(cx);
         let was_shown = self.column_shown();
         if github {
             self.sync_github_panel(space_id.clone(), true, cx);
@@ -386,6 +387,10 @@ impl Overview {
         }
         self.linear_column.return_focus |= return_focus;
         self.linear_column.focus_search = false;
+        if self.in_sidebar {
+            self.outline_focus_pending |= return_focus;
+            self.return_from_sidebar_workspace(cx);
+        }
         cx.notify();
     }
 
@@ -398,6 +403,9 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
+        if self.in_sidebar {
+            self.outline_focus_pending = false;
+        }
         if self.column_shown() {
             let focused = self
                 .linear_panel

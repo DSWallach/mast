@@ -1,6 +1,6 @@
 # Combine Overview and Sidebar
 
-Status: implementation started; the rendering split is the first checkpoint.
+Status: implementation in progress; the persistent left-column host and workspace routing are implemented.
 Work item: Sidebar and Overview combination (`22ac3419111b39808a8565dbc57c6498`).
 Branch: `david/sidebar-overview-combination`, based on local `david-rolling` at `4cc809e2` (three commits ahead of fetched `origin/david-rolling` on 2026-11-16).
 
@@ -98,3 +98,23 @@ No blocking product questions are needed to begin implementation. The 360 px sta
 Validation: `cargo test -p mast-ui --lib overview::logic_tests:: -- --test-threads=1` compiled successfully and ran 318 tests: 317 passed, including the new navigation/workspace regression. The existing `overview_indicates_sessions_needing_interaction_or_stalled` test failed because `overview-row-stalled-c-errored` was not mounted. Running that exact test with the unchanged base `overview.rs` reproduced the identical assertion failure. No change to that unrelated test was made. New layout module formatting and `git diff --check` passed. The repository-wide isolation audit reports existing findings outside these changes.
 
 This checkpoint is not a merge-ready implementation of the feature. The item remains active; next is the compact left-column host and Shell workspace routing.
+
+
+### Second checkpoint: persistent left-column Overview
+
+- Mounted the Overview navigation in the sidebar position. Chats use Shell's normal main workspace; work-item details, Required Actions, Inbox/Linear and PR/ticket editing use the Overview workspace outlet without a second navigation tree or live composer.
+- Added a persisted Overview/Sessions presentation switch. Sessions retains the existing project/device/list grouping, sort, metadata and context-menu controls. Overview retains the shell's assistant/current-session access, Space selector and account/connection/update/error footer.
+- Kept pins, custom sections, scheduled-task groups and archived sessions above the outline in an independently scrolling collection region. Added an explicit height and geometry regression so populated collections cannot collapse to zero height.
+- Space scope filters navigation while leaving the open chat unchanged. Opening Overview reveals/focuses the column; arrow navigation leaves the workspace alone until Enter/click. Chat drafts survive focus toggles and opening/closing Required Actions or Inbox.
+- Fresh settings use a 360 px column. Saved widths remain intact. Added cached-sidebar invalidation for Overview changes and fixed Full Chat's shell re-entry path.
+- Updated routing tests to the persistent Outline behavior. The instruction fixture now notifies already-mounted views when seeded, and its drift comparison test exercises the production Outline column.
+
+Validation:
+
+- 37 keyboard/routing tests passed.
+- 87 settings tests passed.
+- 340 Overview-related tests passed, with two existing ignored tests. The previously baseline-reproduced `overview_indicates_sessions_needing_interaction_or_stalled` failure remains explicitly skipped.
+- Native light/dark preview rendered and was inspected. The published [native preview](mast-artifact:f8e561b1409df4a8161ee445670c7d5e) also passed the artifact render check at both artifact viewport widths in both themes. This checks presentation of the preview image, not narrow native-window behavior.
+- New module formatting and whitespace checks passed. All Mast builds used the shared Cargo target directory.
+
+Remaining before the full consolidation is merge-ready: finish the capability-by-capability parity audit, check filter behavior across the shortcut collections and Sessions, validate narrow native windows and the proposed overlay, exercise the full context-menu and remote-preference workflows, and run the required `pr-review` gate on the final commit. The branch has not been merged; the work item remains active.
