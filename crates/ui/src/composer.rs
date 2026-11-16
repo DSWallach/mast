@@ -6705,7 +6705,8 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count()
+                + usize::from(self.state.read(cx).code_ref_load_pending(&self.current_key) || self.code_ref_loads.get(&self.current_key).copied().unwrap_or(0) > 0),
         );
         send_button_mode(self.run_live(cx), has_text)
     }
