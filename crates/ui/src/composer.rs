@@ -1344,7 +1344,7 @@ pub struct SentMentionSpan {
     /// Full workspace-relative path (labels can be shortened to basenames).
     pub path: SharedString,
     pub is_dir: bool,
-    pub code_ref: Option<Arc<crate::code_ref::StagedCodeRef>>,
+    pub code_ref: Option<std::sync::Arc<crate::code_ref::StagedCodeRef>>,
     pub resolution_key: Option<SharedString>,
     pub resolution: Option<crate::code_ref::Resolution>,
 }
