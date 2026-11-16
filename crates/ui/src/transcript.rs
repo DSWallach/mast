@@ -5594,6 +5594,8 @@ impl Transcript {
                 measured_h.clone(),
                 cx.entity_id(),
                 self.link_ui(),
+                self.state.clone(),
+                self.chat_id.clone(),
             ));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
@@ -7454,6 +7456,8 @@ fn user_bubble_text(
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
     link_ui: Option<render::LinkUi>,
+    state: Entity<AppState>,
+    chat_id: Option<String>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -7539,10 +7543,11 @@ fn user_bubble_text(
             if !hit_layout.bounds().contains(&event.position) { return; }
             let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
             if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
-                let target = if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) {
-                    span.code_ref.as_ref().map(crate::code_ref::pinned_link).unwrap_or_else(|| span.path.to_string())
-                } else { span.path.to_string() };
-                render::activate_link(crate::markdown::links::LinkTarget::new("", &target), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
+                if let (Some(reference), Some(chat_id)) = (span.code_ref.clone(), chat_id.clone()) {
+                    code_refs::activate(reference, state.clone(), chat_id, link_ui.clone(), window, cx);
+                } else {
+                    render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
+                }
             }
         })
         .child(underlay)

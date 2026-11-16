@@ -110,3 +110,74 @@ impl Transcript {
         (display.into(), Arc::new(projected))
     }
 }
+
+pub(super) fn activate(
+    reference: crate::code_ref::StagedCodeRef,
+    state: Entity<AppState>,
+    chat_id: String,
+    link_ui: Option<render::LinkUi>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let state = state.read(cx);
+    let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, &chat_id) else {
+        return;
+    };
+    let Some(engine) = state.engine().cloned() else {
+        return;
+    };
+    let Some(range) = reference.reference.range else {
+        return;
+    };
+    let request = mast_proto::ReadWorkspaceFileRequest {
+        target: context.target.clone(),
+        path: reference.reference.location.path.clone(),
+    };
+    let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        let result = client.read_file(request).await;
+        let resolution = match result {
+            Ok(file)
+                if !file.truncated
+                    && !reference
+                        .reference
+                        .location
+                        .worktree_id
+                        .as_ref()
+                        .is_some_and(|id| id != &file.checkout_id) =>
+            {
+                file.text
+                    .as_deref()
+                    .map(|contents| crate::code_ref::reanchor(contents, range, &reference.snippet))
+            }
+            Err(crate::files::client::FilesClientError::Request(message))
+                if message.to_lowercase().contains("no such file")
+                    || message.to_lowercase().contains("not found") =>
+            {
+                Some(crate::code_ref::Resolution::Changed)
+            }
+            _ => None,
+        };
+        let Some(resolution) = resolution else {
+            return;
+        };
+        let target = match resolution {
+            crate::code_ref::Resolution::Unchanged(range)
+            | crate::code_ref::Resolution::Moved(range) => {
+                format!("{}:{}", reference.reference.location.path, range.start_line)
+            }
+            crate::code_ref::Resolution::Changed => crate::code_ref::pinned_link(&reference),
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            render::activate_link(
+                crate::markdown::links::LinkTarget::new("", &target),
+                crate::markdown::links::LinkAction::Primary,
+                link_ui.as_ref(),
+                window,
+                cx,
+            )
+        });
+    })
+    .detach();
+}
