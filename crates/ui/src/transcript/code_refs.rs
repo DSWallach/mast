@@ -31,10 +31,19 @@ impl Transcript {
                 continue;
             };
             let id = key(&reference);
-            if self.code_ref_resolutions.contains_key(&id) {
+            if self
+                .code_ref_resolutions
+                .get(&id)
+                .is_some_and(|(checked, _)| checked.elapsed() < Duration::from_secs(5))
+            {
                 continue;
             }
-            self.code_ref_resolutions.insert(id.clone(), None);
+            let previous = self
+                .code_ref_resolutions
+                .get(&id)
+                .and_then(|(_, resolution)| *resolution);
+            self.code_ref_resolutions
+                .insert(id.clone(), (Instant::now(), previous));
             let request = mast_proto::ReadWorkspaceFileRequest {
                 target: context.target.clone(),
                 path: reference.reference.location.path.clone(),
@@ -43,25 +52,34 @@ impl Transcript {
                 crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
             cx.spawn(async move |this, cx| {
                 let result = client.read_file(request).await;
-                let resolution = result.ok().and_then(|file| {
-                    if file.truncated
-                        || reference
-                            .reference
-                            .location
-                            .worktree_id
-                            .as_ref()
-                            .is_some_and(|id| id != &file.checkout_id)
+                let resolution = match result {
+                    Err(crate::files::client::FilesClientError::Request(message))
+                        if message.to_lowercase().contains("no such file")
+                            || message.to_lowercase().contains("not found") =>
                     {
-                        return None;
+                        Some(crate::code_ref::Resolution::Changed)
                     }
-                    Some(crate::code_ref::reanchor(
-                        file.text.as_deref()?,
-                        range,
-                        &reference.snippet,
-                    ))
-                });
+                    Err(_) => None,
+                    Ok(file) => {
+                        if file.truncated
+                            || reference
+                                .reference
+                                .location
+                                .worktree_id
+                                .as_ref()
+                                .is_some_and(|id| id != &file.checkout_id)
+                        {
+                            None
+                        } else {
+                            file.text.as_deref().map(|contents| {
+                                crate::code_ref::reanchor(contents, range, &reference.snippet)
+                            })
+                        }
+                    }
+                };
                 let _ = this.update(cx, |this, cx| {
-                    this.code_ref_resolutions.insert(id, resolution);
+                    this.code_ref_resolutions
+                        .insert(id, (Instant::now(), resolution));
                     cx.notify();
                 });
             })
@@ -84,8 +102,7 @@ impl Transcript {
             span.resolution = span.code_ref.as_ref().and_then(|reference| {
                 self.code_ref_resolutions
                     .get(&key(reference))
-                    .copied()
-                    .flatten()
+                    .and_then(|(_, resolution)| *resolution)
             });
             match span.resolution {
                 Some(crate::code_ref::Resolution::Moved(range)) => {

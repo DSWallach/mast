@@ -3041,7 +3041,7 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
-    code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
+    code_ref_resolutions: HashMap<String, (Instant, Option<crate::code_ref::Resolution>)>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
