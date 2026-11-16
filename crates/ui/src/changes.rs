@@ -1494,6 +1494,11 @@ pub enum DiffRow {
     CommentDraft {
         file: u32,
     },
+    ReviewThread {
+        file: u32,
+        thread: u32,
+        height: u32,
+    },
     /// Trailing pad closing an expanded body ([`BODY_BOTTOM_PAD`]).
     BodyPad {
         file: u32,
@@ -1517,6 +1522,7 @@ impl DiffRow {
             | Self::SplitLine { file, .. }
             | Self::CommentCard { file, .. }
             | Self::CommentDraft { file }
+            | Self::ReviewThread { file, .. }
             | Self::BodyPad { file }
             | Self::FoldingBody { file } => Some(file as usize),
         }
@@ -1536,6 +1542,7 @@ impl DiffRow {
                 .map(|comment| comments::card_height(&comment.body))
                 .unwrap_or(0.0),
             DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
+            DiffRow::ReviewThread { height, .. } => height as f32,
             DiffRow::BodyPad { .. } => BODY_BOTTOM_PAD,
             DiffRow::FoldingBody { .. } => 0.0,
         }
@@ -3160,6 +3167,7 @@ impl Changes {
                     layout: Arc::new(layout),
                 });
                 changes.ensure_review_state(cx);
+                changes.refresh_thread_rows(cx);
                 cx.notify();
             })
             .ok();
@@ -3171,6 +3179,7 @@ impl Changes {
     /// `splice` shifts the logical scroll anchor by the count delta, so
     /// content below the fold stays put.
     fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        let new_body = self.add_thread_rows(file_ix, new_body);
         if self.explanation_selection.take().is_some() {
             self.explanation_unified_rows = None;
             self.explanation_hunk = None;
@@ -3578,6 +3587,7 @@ impl Changes {
         self.rows = rows;
         self.row_ranges = ranges;
         self.section_headers = section_headers;
+        self.refresh_thread_rows(cx);
         let anchor = anchor_file
             .and_then(|ix| self.row_ranges.get(ix))
             .and_then(|range| range.as_ref())
@@ -4656,6 +4666,9 @@ impl Changes {
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
+            }
+            DiffRow::ReviewThread { thread, height, .. } => {
+                self.render_review_thread(thread as usize, height, &theme)
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -7010,6 +7023,11 @@ impl Render for Changes {
             .children(self.render_context_chrome(&theme, cx))
             .children(self.render_execution_selector(&theme, cx))
             .children(self.render_diff_target_error(&theme, cx))
+            .when_some(self.review_threads_error.clone(), |el, message| {
+                el.child(crate::error_notice::ErrorNotice::from_text(
+                    "changes-review-threads-error", &theme, &format!("Review threads: {message}"),
+                ))
+            })
             .when_some(self.review_error.clone(), |el, message| {
                 el.child(div().flex().items_center().gap(px(8.0))
                     .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))
