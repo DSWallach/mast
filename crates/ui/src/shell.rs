@@ -582,10 +582,12 @@ pub enum SettingsSection {
     Shortcuts,
     Appshots,
     Archived,
+    /// Export and import a Space's instructions and templates.
+    WorkflowPack,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 11] = [
+    pub const ALL: [SettingsSection; 12] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
@@ -597,6 +599,7 @@ impl SettingsSection {
         SettingsSection::Shortcuts,
         SettingsSection::Appshots,
         SettingsSection::Archived,
+        SettingsSection::WorkflowPack,
     ];
 
     /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
@@ -614,6 +617,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::WorkflowPack => "Workflow pack",
         }
     }
 }
@@ -1716,6 +1720,7 @@ pub struct Shell {
     #[cfg(test)]
     pub(crate) pr_dash_script: Option<crate::pr_page::PrDashScript>,
     archived_page: Option<Entity<ArchivedPage>>,
+    workflow_pack_page: Option<Entity<crate::settings::workflow_pack::WorkflowPackPage>>,
     linear_settings_page: Option<Entity<crate::linear::settings_page::LinearSettingsPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     design_page: Option<Entity<crate::settings::design_panel::DesignPanel>>,
@@ -2129,6 +2134,7 @@ impl Shell {
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/appshots") => Route::Settings(SettingsSection::Appshots),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
+            Some("settings/workflow-pack") => Route::Settings(SettingsSection::WorkflowPack),
             Some("pr-reviews") | Some("pr-review-chats") => Route::PrReviewChats,
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
@@ -2245,6 +2251,7 @@ impl Shell {
             #[cfg(test)]
             pr_dash_script: None,
             archived_page: None,
+            workflow_pack_page: None,
             linear_settings_page: None,
             appearance_page: None,
             design_page: None,
@@ -5370,6 +5377,17 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::WorkflowPack => {
+                if self.workflow_pack_page.is_none() {
+                    let state = self.state.clone();
+                    self.workflow_pack_page =
+                        Some(cx.new(|cx| crate::settings::workflow_pack::WorkflowPackPage::new(state, cx)));
+                }
+                match &self.workflow_pack_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
         }
     }
 
@@ -7295,6 +7313,7 @@ impl Shell {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::WorkflowPack => icons::DOCUMENT_ADD,
         };
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of

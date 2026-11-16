@@ -2321,7 +2321,8 @@ async fn assert_request_link_targets(rig: &Rig, good: Value, bad: Value) {
         "request": "Review", "idempotencyKey": "links-bad", "links": [{"label": "Bad reference", "target": bad}]
     })).await.unwrap_err();
     assert!(
-        error.contains("Bad reference") && error.contains("artifact, file, diff, pr, chat, url"),
+        error.contains("Bad reference") && error.contains("artifact, file, diff, pr, chat, url")
+            && error.contains(r#"{"label":"Changes","target":{"type":"diff","branch":"feature"}}"#),
         "{error}"
     );
 }
@@ -2549,6 +2550,22 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sheet_option_decision_round_trips() {
+    let rig = rig().await;
+    let path = rig.worktree.join("options.json");
+    std::fs::write(&path, r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}],"steps":[]}]}"#).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path":path,"title":"Sheet","kind":"decision-sheet","idempotencyKey":"option-sheet"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let decision = |label| json!({"artifactId":id,"revision":1,"decisions":[{"rowId":"D-2","outcome":"option","optionId":"night","label":label}]});
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, decision("Wrong")).await.is_err());
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, decision("Night")).await.unwrap();
+    let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId":id})).await.unwrap();
+    assert_eq!(result["decisions"][0]["optionId"], "night");
+    assert_eq!(result["decisions"][0]["label"], "Night");
+    assert_eq!(result["decisions"][0]["outcome"], "option");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sheet_has_one_required_action_that_tracks_open_rows() {
     let rig = rig().await;
     let path = rig.worktree.join("sheet.json");
@@ -2594,12 +2611,21 @@ async fn sheet_republication_updates_the_same_open_card() {
     let cards = || outline.snapshot(SPACE).user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).collect::<Vec<_>>();
     let card_id = cards()[0].id.clone();
     std::fs::write(&path, source.replace("Proceed?", "Proceed now?")).unwrap();
-    publish(&rig, &rig.token, args("sheet-republish-2")).await;
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"assignChatToWorkItem", "chatId":OTHER_CHAT, "workItemId":rig.item, "operationId":"assign-sheet-publisher"})).await.unwrap();
+    publish(&rig, &rig.other_token, args("sheet-republish-2")).await;
     sync.reconcile(id);
     let cards = cards();
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].id, card_id);
+    assert_eq!(cards[0].chat_id, OTHER_CHAT);
+    assert_eq!(artifact(&rig, id).current_owner_chat_id(), Some(OTHER_CHAT));
     assert!(cards[0].info.as_deref().unwrap().contains("Revision 2"));
+    rig.client.call(methods::MUTATE, json!({"op":"setChatArchived", "chatId":OTHER_CHAT, "archived":true})).await.unwrap();
+    sync.reconcile(id);
+    let fallback = outline.snapshot(SPACE).user_action_requests.into_iter().find(|r| r.id == card_id).unwrap();
+    assert_eq!(fallback.chat_id, CHAT);
+    rig.client.call(methods::MUTATE, json!({"op":"setChatArchived", "chatId":OTHER_CHAT, "archived":false})).await.unwrap();
+    sync.reconcile(id);
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":card_id,
         "note":"I'll return to this", "operationId":"resolve-sheet-card"})).await.unwrap();
     sync.reconcile(id);

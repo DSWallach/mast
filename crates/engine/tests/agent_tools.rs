@@ -69,6 +69,8 @@ impl GatedHarness {
             cwd,
             session_id: "sess-agent".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         })]);
         let done = futures::stream::once(async move {
             release.notified().await;
@@ -3200,7 +3202,7 @@ async fn project_scope_reaches_other_chats_requests_and_nothing_wider() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
+async fn chat_scope_without_a_project_includes_descendants_and_excludes_siblings() {
     let rig = rig().await;
     let root = create_item(&rig, "np-root", "Plain", None).await;
     let leaf = create_item(&rig, "np-leaf", "Leaf", Some(&root)).await;
@@ -3222,7 +3224,7 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     let reach = tool(&rig, lease.token(), "chat_project_scope_chats", json!({}))
         .await
         .unwrap();
-    assert_eq!(reach["chatIds"], json!([]));
+    assert_eq!(reach["chatIds"], json!([CHAT]));
     let err = tool(
         &rig,
         lease.token(),
@@ -3232,6 +3234,11 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     .await
     .unwrap_err();
     assert!(err.contains("work-outline/unauthorized"), "{err}");
+    assign_chat(&rig, "np-root-assign", CHAT, &root).await;
+    assign_chat(&rig, "np-leaf-assign", OTHER_CHAT, &leaf).await;
+    let reach = tool(&rig, lease.token(), "chat_project_scope_chats", json!({})).await.unwrap();
+    let ids = reach["chatIds"].as_array().unwrap();
+    assert!(ids.contains(&json!(CHAT)) && ids.contains(&json!(OTHER_CHAT)));
 }
 
 /// A coordinator on a root item resolves requests raised by chats another
@@ -4295,7 +4302,7 @@ async fn friction_captures_rejected_server_requests() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_errored_turn() {
     let rig = rig().await;
-    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { code: None, resets_at: None, message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     wait_for(|| !rig.core.workspace.friction_reports(SPACE).is_empty(), "friction report").await;
     let rows = rig.core.workspace.friction_reports(SPACE);

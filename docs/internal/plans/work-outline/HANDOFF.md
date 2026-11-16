@@ -28,6 +28,41 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 90: review follow-ups** (2026-11-14; touched crates from ded3ec8f9: all passed; UI 2639/0): Claude
+  limit-error dedupe resets at turn boundaries; admin reach skips archived chats except `archive_chat` (unarchive);
+  decision-sheet tables wrap inside their cards at narrow widths (verify visually after restart).
+  Backup: `~/zeron-dev-app-backups/mast-release-89`.
+
+- **Release 89: coordinator reach + approach options** (2026-11-14; tests for touched crates from fc0b007b6: nextest
+  2545/2547, only the known `peer::actual_webrtc_pair_streams…` and `preview::leak remote_preview_churn`; UI 2639/0).
+  - Coordinator reach: send_message, read_chat and wait_for_turn reach non-archived chats in the caller's item subtree
+    or project, besides its own children; a worker always reaches its parent. respond_to_input and interrupt stay
+    children-only (no worker answers another chat's approvals). There's no self-messaging. Sends to non-child,
+    non-parent chats are refused if the target has a wider sandbox or auto-approve. Last-sender reach is disabled:
+    the relayed header is spoofable, and structured sender provenance is a follow-up. Sheet and plan answers route to
+    the latest-revision publisher, else the first publisher. The invalid-link error shows an example.
+  - Approach options: decision-sheet rows take `options` (2–3, `recommendedOption`); options render as neutral
+    selectable cards with a Recommended marker and stage like Accept; decisions carry `optionId`/`label`; a missing
+    decision date is hidden. The coordinator fixed a missed `SheetDecision` initializer in a mast-doc test.
+  - Follow-ups: admin reach still includes archived chats; the project-planner skill should start emitting `options`
+    on approach rows.
+  - Backup: `~/zeron-dev-app-backups/mast-release-88`.
+
+- **Release 88: workflow pack + agent logging/error fixes** (2026-11-13, 3af296e43; full suite from 4a08b739d:
+  nextest 2589/2590, only the known `preview::leak remote_preview_churn` hang; UI 2637/0).
+  - Workflow pack: Settings → Workflow pack exports a Space's instructions and templates and imports them elsewhere,
+    with a per-conflict Keep mine / Add missing / Replace preview, single-lock apply and undo from receipts stored
+    host-locally in `workflow-pack-receipts/`. Admin-only MCP tools `work_outline_workflow_pack_*`; format in
+    `docs/workflow-pack-format.md`.
+  - Logging, from the agent error audit (mast-artifact:7e446c29): a `ts` on every journal record; `exitCode` on
+    ToolResult; Codex MCP failures keep their error text (failures only); `chatId`/`spaceId` on sessionStarted;
+    usage-limit errors carry `code` and `resetsAt` (ms/s sanity, 8-day cap), and auto-wakes and auto-continue defer
+    until reset (a deferred auto-continue is lost on restart; Errored workers auto-continue after reset); 7 daily app
+    log files, legacy `zeron-*.log` removed; friction reports keep per-occurrence history (last 50).
+  - Follow-up: after a rejected `rate_limit_event` with no `result` frame, `emitted_limit_error` stays set, so the next
+    turn's limit is missed.
+  - Backup: `~/zeron-dev-app-backups/mast-release-87`.
+
 - **Release 87: worker Changes in one click + GitHub-style file tree** (2026-11-13, 4c4dc0d61; UI 2634/0, mast-gallery
   8/8): Team, Item and running-chat worker rows get a "Changes" link (worktree first, pushed-branch fallback; was 3
   clicks); Ready to merge diff links use the same path. Changes file tree: collapsible folders with per-diff state,
@@ -1154,7 +1189,11 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
-- **Installed: release 87.**
+- **Installed: release 90** (89 and 90 built overnight 11-14 while Mikey was away; he still needs to restart).
+- **Next:** approval rule proposal for Codex cargo test in worktrees (ec30a2df); three proposed Space-root
+  instructions (talk rules, no polling finished sessions, shell/CI habits) await Mikey.
+- **Terra pattern:** ends turns early when a design choice or the finish line is vague; workflow pack moved to Sonnet
+  after 6 stops. Give checklists that end in the Required Action, and answer "what exactly blocks you" with decisions.
 - **Orchestrator friction** (report mast-artifact:1e838a8e, item 62aa8fe0): Mikey picked all four fixes.
   - Skill edits are live in `~/.agents/skills` (implement-ticket, project-planner, talk-to-me); backup in
     `~/skills-backups/2026-11-12-friction/`; awaiting his keep/undo (request 289320e7). He still has to paste the
@@ -1803,8 +1842,9 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
   merging**; keep at least 100 GB free. **At most 2 building workers at once.**
   Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
-  If disk still nears 100 GB, clear `target/debug/incremental` and `target/installed` in the main
-  checkout; both rebuild.
+  If disk still nears 100 GB, first run `cargo sweep --time 3` in the main checkout (cargo-sweep is
+  installed; it removes build outputs not touched in 3 days and freed 69 GB on 2026-11-14), then clear
+  `target/debug/incremental` and `target/installed`; both rebuild.
 - **Subagents:** one narrow task per agent with clear file ownership; read files in ≤200-line
   slices (they stall on huge files like `overview.rs` / `shell.rs`); commit early and often.
 - **Tests:** release runs use `caffeinate -i scripts/run_release_tests.sh [BASE_REF]` (nextest

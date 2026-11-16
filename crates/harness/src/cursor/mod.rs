@@ -588,6 +588,8 @@ async fn run_session(session: Session) {
                                 cwd: request_cwd.clone(),
                                 session_id: agent_id,
                                 assistant_message_id: assistant_message_id.clone(),
+                                chat_id: None,
+                                space_id: None,
                             })
                             .await
                             {
@@ -905,6 +907,7 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                             id: id.clone(),
                             is_error,
                             output: None,
+                            exit_code: None,
                             diff: None,
                         }),
                     ];

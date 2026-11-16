@@ -56,6 +56,8 @@ impl Harness for FableInitHarness {
                 cwd: request.cwd.clone(),
                 session_id: "hs-fable".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta { text: "ok".into() }),
             Ok(AgentEvent::Done {
@@ -175,6 +177,8 @@ async fn journaled_init_events_backfill_chats_that_predate_the_field() {
                 cwd: "/tmp".into(),
                 session_id: "hs-old".into(),
                 assistant_message_id: "a-old".into(),
+                chat_id: None,
+                space_id: None,
             },
         )
         .unwrap();
@@ -216,6 +220,8 @@ async fn echoed_request_models_are_not_recorded_as_actual() {
                 cwd: "/tmp".into(),
                 session_id: "hs-codex".into(),
                 assistant_message_id: "a-codex".into(),
+                chat_id: None,
+                space_id: None,
             },
         )
         .unwrap();
@@ -243,6 +249,8 @@ async fn backfill_marks_checked_journals_and_rechecks_only_after_growth() {
         cwd: "/tmp".into(),
         session_id: "hs".into(),
         assistant_message_id: "a".into(),
+        chat_id: None,
+        space_id: None,
     };
     let journal = RunJournal::open(&journals).unwrap();
     journal
