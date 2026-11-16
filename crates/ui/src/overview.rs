@@ -1733,6 +1733,12 @@ impl Overview {
     ) -> Self {
         let observe = cx.observe(&state, |this, state, cx| {
             this.perf.observer_calls += 1;
+            if this.assistant_chooser.is_open() {
+                let state = state.read(cx);
+                if state.personal_assistant.current(&state.chats).is_some() {
+                    this.close_assistant_chooser(cx);
+                }
+            }
             // Only a change to something the rows or render read marks them
             // dirty and repaints; streaming transcript frames and the like
             // leave the fingerprint alone.
@@ -5710,6 +5716,11 @@ impl Overview {
 
     pub(crate) fn outline_entity(&self) -> Entity<OutlineView> {
         self.outline.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_item_details_for_test(&self) -> Option<Entity<WorkItemDetails>> {
+        self.work_item_details.clone()
     }
 
     #[cfg(test)]

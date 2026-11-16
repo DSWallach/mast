@@ -13,9 +13,6 @@ impl Overview {
             let current = state.selected_chat_row().cloned();
             (assistant, current)
         };
-        if assistant.is_some() {
-            self.dismiss_assistant_chooser(cx);
-        }
         let same = assistant
             .as_ref()
             .zip(current.as_ref())

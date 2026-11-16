@@ -22,6 +22,7 @@ fn fixed_session_cards_confirm_before_discarding_details(cx: &mut gpui::TestAppC
         "overview-assistant-full",
     ] {
         overview.update(vcx, |overview, cx| {
+            overview.chat_panel_open = false;
             overview.open_work_item_details("s1".into(), API.into(), cx);
         });
         draw(vcx);
@@ -45,11 +46,16 @@ fn fixed_session_cards_confirm_before_discarding_details(cx: &mut gpui::TestAppC
             if discard {
                 overview.read_with(vcx, |overview, _| {
                     assert!(overview.work_item_details.is_none());
+                    assert_eq!(
+                        overview.is_chat_panel_open(),
+                        selector != "overview-assistant-full"
+                    );
                 });
             } else {
                 assert!(details.read_with(vcx, |details, cx| details.has_unsaved_draft(cx)));
                 overview.read_with(vcx, |overview, _| {
                     assert!(overview.work_item_details.is_some());
+                    assert!(!overview.is_chat_panel_open());
                 });
             }
         }

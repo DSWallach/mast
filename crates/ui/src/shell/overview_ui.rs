@@ -794,6 +794,90 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
+    fn an_arriving_assistant_closes_an_open_chooser(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        let choose = vcx
+            .debug_bounds("overview-choose-assistant")
+            .unwrap()
+            .center();
+        vcx.simulate_click(choose, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        page.read_with(vcx, |page, _| assert!(page.assistant_chooser_open()));
+        // This applies a reply directly, bypassing the chooser's assign handler.
+        seed_assistant(&shell, vcx);
+        page.read_with(vcx, |page, _| assert!(!page.assistant_chooser_open()));
+        assert!(vcx.debug_bounds("overview-assistant").is_some());
+    }
+
+    #[gpui::test]
+    fn fixed_full_chat_link_preserves_drafts_until_discard_then_opens_the_chat(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, shell, vcx) = setup(cx);
+        seed_assistant(&shell, vcx);
+        shell.update(vcx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_work_outline_frame(
+                    "assistant-space",
+                    crate::work_outline::store::fixture_snapshot("assistant-space"),
+                );
+                cx.notify();
+            })
+        });
+        let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
+        page.update(vcx, |page, cx| {
+            page.open_work_item_details(
+                "assistant-space".into(),
+                crate::work_outline::store::fixture_ids::API.into(),
+                cx,
+            )
+        });
+        redraw_assistant(vcx);
+        let details = page.read_with(vcx, |page, _| page.work_item_details_for_test().unwrap());
+        vcx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.begin_title_draft("Unsaved title", window, cx)
+            })
+        });
+        for (button, discard) in [
+            ("work-outline-confirm-cancel", false),
+            ("work-outline-confirm-accept", true),
+        ] {
+            redraw_assistant(vcx);
+            let full = vcx
+                .debug_bounds("overview-assistant-full")
+                .unwrap()
+                .center();
+            vcx.simulate_click(full, gpui::Modifiers::default());
+            redraw_assistant(vcx);
+            shell.read_with(vcx, |shell, cx| {
+                assert_eq!(shell.route, Route::Overview);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+            });
+            let decision = vcx.debug_bounds(button).unwrap().center();
+            vcx.simulate_click(decision, gpui::Modifiers::default());
+            redraw_assistant(vcx);
+            if discard {
+                shell.read_with(vcx, |shell, cx| {
+                    assert_eq!(shell.route, Route::Chat);
+                    assert_eq!(
+                        shell.state.read(cx).selected_chat.as_deref(),
+                        Some("assistant")
+                    );
+                });
+                page.read_with(vcx, |page, _| assert!(!page.has_work_item_details()));
+            } else {
+                assert!(details.read_with(vcx, |details, cx| details.has_unsaved_draft(cx)));
+                shell.read_with(vcx, |shell, cx| {
+                    assert_eq!(shell.route, Route::Overview);
+                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     fn scheduled_assistant_tracks_latest_run_and_current_card_survives_without_assistant(
         cx: &mut TestAppContext,
     ) {

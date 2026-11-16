@@ -151,7 +151,6 @@ The requested deliverable is a signed **Mast Dev.app** built from this feature b
 
 The first Sonnet review identified four findings. All are addressed: full-chat filters preserve archived and older scheduled matches, collection filtering has a hidden count and Clear filters action, numbered jumps preserve the saved presentation, narrow overlays support Escape and all primary destinations, with the focused search field retaining first priority to clear its query, and touched Rust files are formatted. Custom collection membership remains separate from outline-derived groups to avoid showing the same groups twice. Regression tests cover these behaviors; final review and build receipts are added to the linked plan after completion.
 
-
 ### Follow-up: assistant/current-session integration and empty-state wrapping
 
 Moved personal assistant and current-session access into the fixed Overview header, independent of its filters. A single card carries both labels when they refer to the same chat; scheduled assistants resolve to the latest run. The chooser and context menus reuse the existing designation calls. Normal and compact outline rows retain their hierarchy and show role badges. Card and full-chat actions pass through the existing unsaved-details confirmation.
