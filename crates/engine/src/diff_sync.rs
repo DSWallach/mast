@@ -3162,6 +3162,30 @@ mod watch_budget_tests {
         assert_eq!(super::resolve_branch_review_base(directory.path(), "main", "device").await.unwrap().ahead_count, 0);
     }
 
+    #[tokio::test]
+    async fn code_reference_base_reads_the_merge_base_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = mast_harness::git_command().current_dir(directory.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(directory.path().join("file.rs"), "before\n").unwrap();
+        git(&["add", "file.rs"]);
+        git(&["commit", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "feature"]);
+        git(&["rm", "file.rs"]);
+        git(&["commit", "-m", "delete"]);
+        let (sha, text) = super::resolve_code_ref_base(directory.path(), "main", "HEAD", "file.rs").await.unwrap();
+        assert_eq!(sha, base);
+        assert_eq!(text, "before\n");
+        assert!(super::resolve_code_ref_base(directory.path(), "main", "HEAD", "../file.rs").await.is_err());
+    }
+
     #[test]
     fn fixed_range_head_resolves_without_a_ref_file() {
         let sha = "a".repeat(40);
