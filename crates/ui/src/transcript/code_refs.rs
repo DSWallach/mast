@@ -61,14 +61,15 @@ impl Transcript {
                     }
                     Err(_) => None,
                     Ok(file) => {
-                        if file.truncated
-                            || reference
-                                .reference
-                                .location
-                                .worktree_id
-                                .as_ref()
-                                .is_some_and(|id| id != &file.checkout_id)
+                        if reference
+                            .reference
+                            .location
+                            .worktree_id
+                            .as_ref()
+                            .is_some_and(|id| id != &file.checkout_id)
                         {
+                            Some(crate::code_ref::Resolution::Changed)
+                        } else if file.truncated {
                             None
                         } else {
                             file.text.as_deref().map(|contents| {
@@ -181,6 +182,16 @@ pub(super) fn activate(
                 file.text
                     .as_deref()
                     .map(|contents| crate::code_ref::reanchor(contents, range, &reference.snippet))
+            }
+            Ok(file)
+                if reference
+                    .reference
+                    .location
+                    .worktree_id
+                    .as_ref()
+                    .is_some_and(|id| id != &file.checkout_id) =>
+            {
+                Some(crate::code_ref::Resolution::Changed)
             }
             Err(crate::files::client::FilesClientError::Request(message))
                 if message.to_lowercase().contains("no such file")
