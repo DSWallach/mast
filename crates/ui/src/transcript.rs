@@ -7489,6 +7489,7 @@ fn user_bubble_text(
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
+    let border = theme.border;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let hit_mentions = mentions.clone();
@@ -7502,7 +7503,7 @@ fn user_bubble_text(
                         px(5.0),
                         wash,
                         if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { px(1.0) } else { px(0.0) },
-                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { theme.border } else { gpui::transparent_black() },
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { border } else { gpui::transparent_black() },
                         if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { BorderStyle::Dashed } else { BorderStyle::default() },
                     ));
                 }
@@ -7538,7 +7539,10 @@ fn user_bubble_text(
             if !hit_layout.bounds().contains(&event.position) { return; }
             let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
             if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
-                render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
+                let target = if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) {
+                    span.code_ref.as_ref().map(crate::code_ref::pinned_link).unwrap_or_else(|| span.path.to_string())
+                } else { span.path.to_string() };
+                render::activate_link(crate::markdown::links::LinkTarget::new("", &target), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
             }
         })
         .child(underlay)

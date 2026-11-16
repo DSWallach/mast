@@ -2509,6 +2509,9 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(reference) = self.pinned_reference.as_ref() {
+            return super::code_ref_bar::pinned_view(reference, theme);
+        }
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
                 "Workspace changed. Image preview suspended.",

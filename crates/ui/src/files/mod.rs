@@ -171,6 +171,7 @@ pub struct FilesSurface {
     /// One-shot location requested by a transcript workspace link. Applied
     /// after the async file load creates its editor.
     pending_editor_location: Option<(u32, Option<u32>)>,
+    pinned_reference: Option<crate::code_ref::StagedCodeRef>,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
     selected_editor_path: Option<String>,
@@ -495,6 +496,7 @@ impl FilesSurface {
             presentation,
             editor_path: editor_path.clone(),
             pending_editor_location: None,
+            pinned_reference: None,
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -698,6 +700,15 @@ impl FilesSurface {
         if !self.presentation.is_editor() {
             self.ensure_tree_loaded(cx);
         }
+    }
+
+    pub(crate) fn show_pinned_reference(&mut self, reference: crate::code_ref::StagedCodeRef, cx: &mut Context<Self>) {
+        self.pinned_reference = Some(reference);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_pinned_reference(&mut self, cx: &mut Context<Self>) {
+        if self.pinned_reference.take().is_some() { cx.notify(); }
     }
 
     /// Reveal a 1-based source location once this editor is ready. Markdown

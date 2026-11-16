@@ -65,6 +65,7 @@ use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
+mod code_ref;
 mod actions_ui;
 pub(crate) mod artifacts_ui;
 #[cfg(test)]
@@ -3277,6 +3278,7 @@ impl Shell {
         {
             return LinkOutcome::Rejected;
         }
+        if let Some(outcome) = self.activate_pinned_code_ref(activation, window, cx) { return outcome; }
         if activation.target.navigation.is_err() {
             if crate::artifacts::model::link_target(&activation.target.original).is_some() {
                 if activation.action == LinkAction::Copy {
@@ -3736,6 +3738,7 @@ impl Shell {
         let lookup = (panel_key.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
             let surface = RightSurface::File(id);
+            if let Some(file) = self.file_surfaces.get(&id) { file.update(cx, |file, cx| file.clear_pinned_reference(cx)); }
             self.set_right_active(surface, cx);
             if let Some(line) = line
                 && let Some(file) = self.file_surfaces.get(&id).cloned()

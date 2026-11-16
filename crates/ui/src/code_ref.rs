@@ -4,7 +4,7 @@ use mast_proto::CodeRefRange;
 use sha2::{Digest, Sha256};
 
 /// A draft reference and the text captured from its revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StagedCodeRef {
     pub id: String,
     pub reference: mast_proto::CodeRef,
@@ -126,6 +126,30 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         return None;
     }
     Some((result, spans))
+}
+
+pub fn pinned_link(reference: &StagedCodeRef) -> String {
+    let bytes = serde_json::to_vec(reference).expect("reference serializes");
+    format!(
+        "mast-code-ref:{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+pub fn decode_pinned_link(target: &str) -> Option<StagedCodeRef> {
+    let encoded = target.strip_prefix("mast-code-ref:")?;
+    if encoded.len() % 2 != 0 || encoded.len() > 2_000_000 {
+        return None;
+    }
+    let bytes: Option<Vec<_>> = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect();
+    serde_json::from_slice(&bytes?).ok()
 }
 
 /// Hash the full file so an unchanged working tree is recognized cheaply.

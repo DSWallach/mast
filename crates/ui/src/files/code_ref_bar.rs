@@ -1,4 +1,29 @@
-//! Actions for a selected range in the file editor.
+use gpui::{AnyElement, div, prelude::*, px};
+
+pub(super) fn pinned_view(
+    reference: &crate::code_ref::StagedCodeRef,
+    theme: &crate::theme::Theme,
+) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .p(px(12.0))
+        .text_color(theme.text)
+        .child(
+            div()
+                .text_color(theme.text_muted)
+                .child("Pinned lines · read only"),
+        )
+        .child(
+            div()
+                .font_family(theme.font_mono.clone())
+                .child(reference.snippet.clone()),
+        )
+        .into_any_element()
+}
+
+// Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
     pub(super) fn add_selected_code_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
