@@ -19,7 +19,8 @@
 # MAST_SOAK=1 additionally makes the candidate refuse to start unless a probe
 # connect fails, git is the guard, and the workspace scope is Local.
 #
-# Fails (exit 1) when candidate avg CPU or git spawns/min > RATIO x baseline
+# Fails (exit 1) when candidate avg CPU or git spawns/min (whole run, and steady state after
+# the first 60 s) > RATIO x baseline
 # (baseline floors: CPU 3%, 10 spawns/min, so near-idle noise cannot trip it) or
 # candidate RSS grows more than RSS_MAX_MB between warm-up and the end.
 # Exit 2: could not run (sandbox unavailable, engine refused/died). Never falls back.
@@ -103,21 +104,23 @@ run_one() {
       sandbox-exec -f "$dir/sandbox.sb" "$bin" headless > "$dir/engine.log" 2>&1 &
   local pid=$!
   # sandbox-exec execs the target, so $pid is the engine.
-  local peak=0 warm_rss="" cpu0=0 t=0 sampled60=0
-  local cpu_start_ok=0
+  local peak=0 warm_rss="" t=0 sampled60=0 cpu60=0 git60=0 t60=0
   while [ "$t" -lt "$SECONDS_TOTAL" ]; do
     sleep 5; t=$(( $(date +%s) - start ))
     kill -0 "$pid" 2>/dev/null || { echo "engine exited early (see $dir/engine.log)" >&2; tail -5 "$dir/engine.log" >&2; echo "failed=exited" > "$ROOT/$label.result"; return 2; }
     local r; r=$(rss_mb "$pid"); [ -n "$r" ] && [ "$r" -gt "$peak" ] && peak=$r
     if [ -z "$warm_rss" ] && [ "$t" -ge 30 ]; then warm_rss=$r; fi
     if [ "$sampled60" = 0 ] && [ "$t" -ge 60 ]; then
-      sampled60=1
-      echo "--- $label @ ${t}s ---"; python3 "$SCRIPTS/perf-sample.py" --pid "$pid" --seconds 3 --top 8 2>&1 | head -14
+      sampled60=1; t60=$t; cpu60=$(cpu_seconds "$pid"); git60=$(wc -l < "$dir/git.log" | tr -d ' ')
+      # In the background: `sample` of a busy multi-GB process can take minutes and must not stretch the window.
+      ( python3 "$SCRIPTS/perf-sample.py" --pid "$pid" --seconds 3 --top 8 > "$dir/sample60.txt" 2>&1 ) &
     fi
   done
-  local cpu_end end_rss; cpu_end=$(cpu_seconds "$pid"); end_rss=$(rss_mb "$pid")
+  # Metrics are frozen here, before the end sample, so both binaries get the same window.
+  local cpu_end end_rss git_end wall; cpu_end=$(cpu_seconds "$pid"); end_rss=$(rss_mb "$pid")
+  git_end=$(wc -l < "$dir/git.log" | tr -d ' '); wall=$(( $(date +%s) - start ))
+  echo "--- $label @ ${t60}s ---"; head -14 "$dir/sample60.txt" 2>/dev/null
   echo "--- $label @ end ---"; python3 "$SCRIPTS/perf-sample.py" --pid "$pid" --seconds 3 --top 8 2>&1 | head -14
-  local wall=$(( $(date +%s) - start ))
   kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   local a r2; a=$(grep -c '^A ' "$dir/git.log"); r2=$(grep -c '^R ' "$dir/git.log")
   grep -q "outbound connect failed as required" "$dir/engine.log" && pre=yes || pre=no
@@ -129,6 +132,8 @@ run_one() {
     echo "end_rss_mb=${end_rss:-0}"
     echo "git_spawns=$((a + r2))"
     echo "git_refused=$r2"
+    echo "steady_cpu_pct=$(awk -v c="$cpu_end" -v c0="$cpu60" -v w="$wall" -v w0="$t60" 'BEGIN{printf "%.1f", 100*(c-c0)/(w-w0)}')"
+    echo "steady_git_per_min=$(awk -v n="$git_end" -v n0="$git60" -v w="$wall" -v w0="$t60" 'BEGIN{printf "%.1f", (n-n0)*60/(w-w0)}')"
     echo "git_per_min=$(awk -v n="$((a + r2))" -v w="$wall" 'BEGIN{printf "%.1f", n*60/w}')"
     echo "stub_calls=$(wc -l < "$dir/stub.log" | tr -d ' ')"
     echo "preflight_logged=$pre"
@@ -148,7 +153,7 @@ fi
 # ---- compare -----------------------------------------------------------------
 echo; echo "=== perf-soak: ${SECONDS_TOTAL}s, data=$MODE ==="
 printf '%-18s %12s %12s\n' metric candidate baseline
-for k in cpu_pct peak_rss_mb end_rss_mb git_per_min git_spawns git_refused stub_calls; do
+for k in cpu_pct steady_cpu_pct peak_rss_mb end_rss_mb git_per_min steady_git_per_min git_spawns git_refused stub_calls; do
   printf '%-18s %12s %12s\n' "$k" "$(get candidate $k)" "$( [ -n "$BASE" ] && get baseline $k || echo -)"
 done
 FAIL=0
@@ -158,6 +163,10 @@ echo "candidate RSS growth after warm-up: ${grow} MB (limit ${RSS_MAX_MB})"
 [ "$grow" -gt "$RSS_MAX_MB" ] && { echo "FAIL: RSS grew ${grow} MB"; FAIL=1; }
 if [ -n "$BASE" ]; then
   bc_=$(get baseline cpu_pct); bg=$(get baseline git_per_min)
+  sc=$(get candidate steady_cpu_pct); sb=$(get baseline steady_cpu_pct)
+  sgc=$(get candidate steady_git_per_min); sgb=$(get baseline steady_git_per_min)
+  awk -v c="$sc" -v b="$sb" -v r="$RATIO" -v f="$CPU_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: steady-state CPU ${sc}% > ${RATIO}x baseline ${sb}% (floor ${CPU_FLOOR}%)"; FAIL=1; }
+  awk -v c="$sgc" -v b="$sgb" -v r="$RATIO" -v f="$SPAWN_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: steady-state git ${sgc}/min > ${RATIO}x baseline ${sgb}/min (floor ${SPAWN_FLOOR}/min)"; FAIL=1; }
   awk -v c="$cc" -v b="$bc_" -v r="$RATIO" -v f="$CPU_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: candidate CPU ${cc}% > ${RATIO}x baseline ${bc_}% (floor ${CPU_FLOOR}%)"; FAIL=1; }
   awk -v c="$cg" -v b="$bg" -v r="$RATIO" -v f="$SPAWN_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: candidate git ${cg}/min > ${RATIO}x baseline ${bg}/min (floor ${SPAWN_FLOOR}/min)"; FAIL=1; }
 else
