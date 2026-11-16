@@ -5780,7 +5780,7 @@ mod tests {
             .map(|attempt| change_request_retry_delay(&rejected, attempt).as_secs())
             .collect();
         assert_eq!(delays, [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
-        let transport = RpcError::Internal("socket closed".into());
+        let transport = RpcError::Transport("socket closed".into());
         assert_eq!(change_request_retry_delay(&transport, 7).as_secs(), 2);
     }
 

@@ -189,6 +189,7 @@ struct ReposInner {
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
     file_index: FileIndexCache,
     checkout_sets: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<CheckoutSetSlot>>>,
+    checkout_set_refreshes: std::sync::atomic::AtomicU64,
 }
 
 /// Canonical repo-root + linked-worktree paths of one Space, refreshed under
@@ -254,6 +255,7 @@ impl Repos {
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
                 file_index: std::sync::Mutex::new(HashMap::new()),
                 checkout_sets: std::sync::Mutex::new(HashMap::new()),
+                checkout_set_refreshes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -1146,6 +1148,9 @@ impl Repos {
     /// Canonical repo root plus every `worktree <path>` from one
     /// `git worktree list --porcelain`.
     async fn read_checkout_set(&self, repo_path: &Path) -> HashSet<PathBuf> {
+        self.inner
+            .checkout_set_refreshes
+            .fetch_add(1, Ordering::Relaxed);
         let listed = self
             .git(&["worktree", "list", "--porcelain"], Some(repo_path))
             .await
@@ -2748,6 +2753,68 @@ tmpfs /run tmpfs rw 0 0
                 .await
                 .is_none()
         );
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[tokio::test]
+    async fn unknown_checkout_lookups_share_one_worktree_list() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let wt_parent = tempfile::tempdir().unwrap();
+        let missing = wt_parent.path().join("gone");
+        git_in(root.path(), &["init", "-q"]);
+        git_in(root.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let linked = wt_parent.path().join("linked");
+        git_in(
+            root.path(),
+            &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()],
+        );
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let refreshes = |r: &Repos| r.inner.checkout_set_refreshes.load(Ordering::Relaxed);
+
+        // 40 concurrent lookups of a path that does not exist never reach git;
+        // a canonical-but-unknown path costs exactly one shared refresh.
+        let stray = tempfile::tempdir().unwrap();
+        let stray_path = std::fs::canonicalize(stray.path()).unwrap();
+        let lookups = (0..40).map(|_| {
+            let repos = repos.clone();
+            let root = root.path().to_path_buf();
+            let stray_path = stray_path.clone();
+            let missing = missing.clone();
+            async move {
+                assert!(repos.workspace_checkout(&root, &missing).await.is_none());
+                repos.workspace_checkout_canonical(&root, stray_path).await
+            }
+        });
+        for found in futures::future::join_all(lookups).await {
+            assert!(found.is_none());
+        }
+        assert_eq!(refreshes(&repos), 1);
+
+        // Hits are served from the cache, including the linked worktree.
+        let before = refreshes(&repos);
+        assert_eq!(
+            repos.workspace_checkout(root.path(), &linked).await,
+            std::fs::canonicalize(&linked).ok()
+        );
+        assert_eq!(
+            repos.workspace_checkout(root.path(), root.path()).await,
+            std::fs::canonicalize(root.path()).ok()
+        );
+        assert_eq!(refreshes(&repos), before);
     }
 
     #[tokio::test]
