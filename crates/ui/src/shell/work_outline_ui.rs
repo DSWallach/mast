@@ -575,7 +575,7 @@ fn shortcuts_card(
     let (outline_groups, command_groups) = groups.split_at(3);
     popover::dialog_card(theme)
         .w(px(width))
-        .h(px(f32::from(viewport.height) * 0.7))
+        .max_h(px(f32::from(viewport.height) * 0.7))
         .overflow_hidden()
         .debug_selector(|| "work-outline-shortcuts".into())
         .child(popover::dialog_title(theme, "Outline shortcuts").flex_none())
@@ -2058,7 +2058,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         shell.update(cx, |shell, cx| shell.open_outline_shortcuts(cx));
-        for (width, height) in [(360.0, 420.0), (600.0, 600.0), (1200.0, 900.0)] {
+        for (width, height) in [
+            (360.0, 420.0),
+            (600.0, 600.0),
+            (1200.0, 900.0),
+            (1200.0, 2400.0),
+        ] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             redraw(cx);
             let card = cx.debug_bounds("work-outline-shortcuts").unwrap();
@@ -2070,6 +2075,12 @@ mod tests {
             assert!(close.left() >= card.left() && close.right() <= card.right());
             assert!(close.top() >= card.top() && close.bottom() <= card.bottom());
             assert!(scroll.size.height > px(0.0));
+            if height == 2400.0 {
+                assert!(
+                    card.size.height < px(height * 0.7),
+                    "tall windows size to content"
+                );
+            }
         }
     }
 
