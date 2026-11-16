@@ -576,46 +576,38 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::REVIEW_PUBLISH,
-            description: "Publish a review for a PR or committed branch range. summary is a single string; use newlines for multiple lines. Hunks and anchors must match the merge-base diff. Verdict hints and suggested comments are never posted. Example: {\"prUrl\":\"https://github.com/a/b/pull/1\",\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"review\":{\"schema\":\"mast.review/v1\",\"pr\":{\"repo\":\"a/b\",\"number\":1,\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"baseSha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"summary\":\"Reviewed changes\",\"steps\":[],\"highlights\":[],\"questions\":[],\"suggestedComments\":[]}}",
+            description: "Publish a review for a PR or committed branch range. summary is one string of 3–8 lines separated by newlines. Risk: none means no risk, low means limited risk, med means material risk, high means severe risk. Hunks and anchors must match valid merge-base diff hunks; errors list the valid hunks. Verdict hints and suggested comments are never posted. Example: {\"prUrl\":\"https://github.com/a/b/pull/1\",\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"review\":{\"schema\":\"mast.review/v1\",\"pr\":{\"repo\":\"a/b\",\"number\":1,\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"baseSha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"summary\":\"Reviewed changes\\nChecked tests\\nNo findings\",\"steps\":[],\"highlights\":[],\"questions\":[],\"suggestedComments\":[]}}",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prUrl": { "type": "string", "description": "GitHub pull request URL; requires headSha and review.pr." },
-                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA, required with prUrl." },
-                    "target": review_target_schema(true),
+                    "prUrl": { "type": "string", "description": "Use prUrl with headSha and review.pr, or supply target." },
+                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA; required with prUrl. Alternatively supply target." },
+                    "target": review_target_schema(),
                     "review": review_schema()
                 },
-                "required": ["review"],
-                "anyOf": [{"required": ["prUrl", "headSha"], "properties": {"review": {"required": ["pr"]}}}, {"required": ["target"]}]
+                "required": ["review"]
             }),
         },
         ToolDef {
             name: agent_tool_names::REVIEW_GET,
             description: "Read this chat's published review, or null. Select with prUrl or target; omit both for the latest review.",
-            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" }, "target": review_target_schema(false) } }),
+            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" }, "target": review_target_schema() } }),
         },
     ]
 }
 
-fn review_target_schema(publish: bool) -> Value {
-    let mut schema = json!({"oneOf": [
-        {"type": "object", "properties": {
-            "kind": {"type": "string", "enum": ["pr"]}, "repo": {"type": "string"},
-            "number": {"type": "integer", "minimum": 0}, "headSha": {"type": "string"}, "baseSha": {"type": "string"}
-        }, "required": ["kind", "repo", "number", "headSha", "baseSha"]},
-        {"type": "object", "properties": {
-            "kind": {"type": "string", "enum": ["branch"]}, "repo": {"type": "string"},
-            "checkoutPath": {"type": "string"}, "checkout": {"type": "string", "description": "Alias for checkoutPath."},
-            "branch": {"type": "string"}, "baseRef": {"type": "string"}, "baseSha": {"type": "string"}, "headSha": {"type": "string"}
-        }, "required": ["kind", "headSha"], "allOf": [
-            {"anyOf": [{"required": ["repo"]}, {"required": ["checkoutPath"]}, {"required": ["checkout"]}]},
-            {"anyOf": [{"required": ["baseRef"]}, {"required": ["baseSha"]}]}
-        ]}
-    ]});
-    if !publish {
-        schema["oneOf"][1].as_object_mut().unwrap().remove("allOf");
-    }
-    schema
+fn review_target_schema() -> Value {
+    json!({"type": "object", "description": "Alternative to prUrl and headSha. Fields depend on kind.", "properties": {
+        "kind": {"type": "string", "enum": ["pr", "branch"], "description": "Required for both target kinds."},
+        "repo": {"type": "string", "description": "Required for pr; for branch, supply repo or checkoutPath when publishing."},
+        "number": {"type": "integer", "minimum": 0, "description": "Required for pr."},
+        "headSha": {"type": "string", "description": "Full head commit SHA; required for both kinds."},
+        "baseSha": {"type": "string", "description": "Required for pr; for branch publishing supply baseSha or baseRef."},
+        "baseRef": {"type": "string", "description": "For branch publishing, an alternative to baseSha."},
+        "checkoutPath": {"type": "string", "description": "For branch publishing, an alternative to repo."},
+        "checkout": {"type": "string", "description": "For branch, alias for checkoutPath."},
+        "branch": {"type": "string", "description": "Optional branch name for branch targets."}
+    }})
 }
 
 fn review_schema() -> Value {
@@ -627,14 +619,14 @@ fn review_schema() -> Value {
     json!({"type": "object", "properties": {
         "schema": {"type": "string", "enum": ["mast.review/v1"]},
         "pr": {"type": "object", "properties": {"repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "headSha": {"type": "string"}, "baseSha": {"type": "string"}}, "required": ["repo", "number", "headSha", "baseSha"]},
-        "target": review_target_schema(false), "summary": {"type": "string"}, "verdictHint": {"type": "string"},
+        "summary": {"type": "string"}, "verdictHint": {"type": "string"},
         "steps": {"type": "array", "items": {"type": "object", "properties": {
             "id": {"type": "string"}, "title": {"type": "string"}, "file": {"type": "string"},
             "hunks": {"type": "array", "items": {"type": "object", "properties": {"newStart": {"type": "integer", "minimum": 0}, "newEnd": {"type": "integer", "minimum": 0}, "hunkHash": {"type": "string"}}, "required": ["newStart", "newEnd"]}},
             "what": {"type": "string"}, "why": {"type": "string"}, "risk": {"type": "string", "enum": ["none", "low", "med", "high"]}, "riskNote": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "group": {"type": "string"}
         }, "required": ["id", "title", "file", "hunks", "what", "why", "risk", "riskNote", "tags"]}},
         "highlights": {"type": "array", "items": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["risk", "missing-tests", "behaviour-change", "security", "migration", "perf", "style"]}, "severity": {"type": "string"}, "text": {"type": "string"}, "anchor": anchor}, "required": ["kind", "severity", "text", "anchor"]}},
-        "questions": {"type": "array", "description": "Questions as JSON strings.", "items": {"type": "string"}},
+        "questions": {"type": "array", "description": "Questions as strings or objects with question or text fields.", "items": {}},
         "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
     }, "required": ["schema", "summary", "steps", "highlights", "questions", "suggestedComments"],
        "description": "With prUrl, pr is required. With target, Mast supplies pr when omitted."})
@@ -2835,12 +2827,53 @@ mod tests {
         assert!(plan.description.contains("addressedComments"));
     }
 
+    #[test]
+    fn review_schema_matches_serde_types() {
+        fn no_composition(value: &Value) {
+            match value {
+                Value::Object(object) => {
+                    for (key, child) in object {
+                        assert!(!["anyOf", "oneOf", "allOf"].contains(&key.as_str()));
+                        no_composition(child);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(no_composition),
+                _ => {}
+            }
+        }
+        let defs = artifact_catalog();
+        let publish = defs.iter().find(|d| d.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
+        let get = defs.iter().find(|d| d.name == agent_tool_names::REVIEW_GET).unwrap();
+        no_composition(&publish.input_schema);
+        no_composition(&get.input_schema);
+        let review_schema = &publish.input_schema["properties"]["review"];
+        let review = json!({"schema":"mast.review/v1", "pr":{"repo":"a/b", "number":1, "baseSha":"b", "headSha":"a"}, "summary":"review", "steps":[], "highlights":[], "questions":[], "suggestedComments":[]});
+        for field in ["schema", "pr", "summary", "steps", "highlights", "questions", "suggestedComments"] {
+            let mut missing = review.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<mast_proto::ReviewSidecar>(missing).is_err(), "{field}");
+            if field != "pr" { assert!(review_schema["required"].as_array().unwrap().contains(&json!(field))); }
+        }
+        assert!(serde_json::from_value::<mast_proto::ReviewSidecar>(review).is_ok());
+        let target_schema = &publish.input_schema["properties"]["target"];
+        assert_eq!(target_schema["properties"]["kind"]["enum"], json!(["pr", "branch"]));
+        for target in [json!({"kind":"pr", "repo":"a/b", "number":1, "baseSha":"b", "headSha":"a"}), json!({"kind":"branch", "headSha":"a"})] {
+            assert!(serde_json::from_value::<mast_proto::ReviewTarget>(target).is_ok());
+        }
+        let step = &review_schema["properties"]["steps"]["items"]["properties"];
+        assert_eq!(step["risk"]["enum"], json!(["none", "low", "med", "high"]));
+        for value in step["risk"]["enum"].as_array().unwrap() { assert!(serde_json::from_value::<mast_proto::ReviewRisk>(value.clone()).is_ok()); }
+        let side = &review_schema["properties"]["highlights"]["items"]["properties"]["anchor"]["properties"]["side"]["enum"];
+        assert_eq!(side, &json!(["left", "right"]));
+        for value in side.as_array().unwrap() { assert!(serde_json::from_value::<mast_proto::ReviewSide>(value.clone()).is_ok()); }
+    }
+
     #[tokio::test]
     async fn review_publish_forwards_review_to_engine() {
         let def = artifact_catalog().into_iter()
             .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
         assert_eq!(def.input_schema["required"], json!(["review"]));
-        assert_eq!(def.input_schema["anyOf"][0]["properties"]["review"]["required"], json!(["pr"]));
+        assert!(def.input_schema.get("anyOf").is_none());
         let world = Arc::new(World::default());
         let agent = tools(world.clone(), Some(BETA_TOKEN));
         let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
