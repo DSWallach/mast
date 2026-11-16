@@ -144,6 +144,7 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.dismiss_overview_overlay(cx);
         // A side chat only shows in its main chat's pane (a notification
         // or link to it lands on the main chat).
         let chat_id = self
@@ -174,6 +175,7 @@ impl Shell {
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_overview_overlay(cx);
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -286,8 +288,7 @@ impl Shell {
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control
         // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
+        let content_left = (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
 
         // Trailing titlebar section. With the changes pane open this is the
         // PANE'S HEADER — a strip exactly as wide as the pane carrying its
@@ -318,8 +319,7 @@ impl Shell {
             // own 8px pad lands the first chip on the pane gutter. The
             // window-control cluster still wins while the sidebar is
             // collapsed (the chips clear it instead of underlapping).
-            let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
+            let cluster_end = self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
             (sidebar_now - 8.0).max(cluster_end)
         } else {
             content_left
@@ -522,7 +522,9 @@ impl Shell {
                                 )
                             },
                         )
-                        .child(crate::components::shell_parts::titlebar_title(&theme, title, on_canvas)),
+                        .child(crate::components::shell_parts::titlebar_title(
+                            &theme, title, on_canvas,
+                        )),
                 )
                 // Keep the action OUTSIDE the clipped title/target text.
                 // Putting a 20px icon inside that overflow-hidden flex group
@@ -556,9 +558,9 @@ impl Shell {
                     ))
                 })
                 .when_some(target, |el, target| {
-                    el.child(
-                        crate::components::shell_parts::titlebar_target(&theme, target),
-                    )
+                    el.child(crate::components::shell_parts::titlebar_target(
+                        &theme, target,
+                    ))
                 })
             })
             .child(div().flex_1())

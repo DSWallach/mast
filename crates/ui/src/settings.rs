@@ -20,8 +20,8 @@ pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
-pub mod devices;
 pub mod design_panel;
+pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
@@ -32,7 +32,7 @@ pub mod workflow_pack;
 /// Sidebar drag-resize bounds (px).
 pub const SIDEBAR_MIN: f32 = 200.0;
 pub const SIDEBAR_MAX: f32 = 520.0;
-pub const SIDEBAR_DEFAULT: f32 = 256.0;
+pub const SIDEBAR_DEFAULT: f32 = 360.0;
 
 /// Independent file explorer width preference and drag bounds (px).
 pub const FILES_PANEL_DEFAULT: f32 = 286.0;
@@ -318,8 +318,7 @@ pub fn current(cx: &App) -> UiSettings {
 }
 
 pub fn current_ref(cx: &App) -> Option<&UiSettings> {
-    cx.try_global::<SettingsStore>()
-        .map(|store| &store.current)
+    cx.try_global::<SettingsStore>().map(|store| &store.current)
 }
 
 /// Active default model preference at `now`: an unexpired temporary quota
@@ -697,6 +696,8 @@ pub struct UiSettings {
     pub sidebar_width: f32,
     pub changes_file_list_width: f32,
     pub sidebar_collapsed: bool,
+    /// Use the Work Outline presentation in the unified Overview column.
+    pub sidebar_overview: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -926,6 +927,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             changes_file_list_width: 240.0,
             sidebar_collapsed: false,
+            sidebar_overview: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -1787,8 +1789,33 @@ pub fn combo_from_keystroke_on(
 
 /// Outline and side-panel shortcuts cannot be active at the same time.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
-    let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff);
-    if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
+    let review = |id| {
+        matches!(
+            id,
+            ShortcutId::ReviewNextStep
+                | ShortcutId::ReviewPreviousStep
+                | ShortcutId::ReviewNextStepArrow
+                | ShortcutId::ReviewPreviousStepArrow
+                | ShortcutId::ReviewNextHunk
+                | ShortcutId::ReviewPreviousHunk
+                | ShortcutId::ReviewMarkReviewed
+                | ShortcutId::ReviewToggleMode
+                | ShortcutId::ExplainDiff
+        )
+    };
+    if (review(left)
+        && matches!(
+            right,
+            ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel
+        ))
+        || (review(right)
+            && matches!(
+                left,
+                ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel
+            ))
+    {
+        return false;
+    }
     !matches!(
         (left, right),
         (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
@@ -2089,7 +2116,10 @@ impl UiSettings {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
                     if let Some(settings) = value.as_object_mut() {
                         // Legacy uiStyle selected density and look in one field.
-                        let legacy = settings.get("uiStyle").and_then(serde_json::Value::as_str).map(str::to_owned);
+                        let legacy = settings
+                            .get("uiStyle")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
                         let (style, layout) = match legacy.as_deref() {
                             Some("dense") => ("default", "compact"),
                             Some("guided") => ("default", "guided"),
@@ -2101,7 +2131,9 @@ impl UiSettings {
                         if matches!(legacy.as_deref(), Some("dense" | "guided" | "minimal")) {
                             settings.insert("uiStyle".into(), serde_json::json!(style));
                         }
-                        settings.entry("uiLayout").or_insert(serde_json::json!(layout));
+                        settings
+                            .entry("uiLayout")
+                            .or_insert(serde_json::json!(layout));
                         let previous_sound = settings
                             .get("soundEnabled")
                             .and_then(serde_json::Value::as_bool)
@@ -2224,17 +2256,26 @@ impl UiSettings {
                             (ShortcutId::ReviewNextStep, "reviewNextStep"),
                             (ShortcutId::ReviewPreviousStep, "reviewPreviousStep"),
                             (ShortcutId::ReviewNextStepArrow, "reviewNextStepArrow"),
-                            (ShortcutId::ReviewPreviousStepArrow, "reviewPreviousStepArrow"),
+                            (
+                                ShortcutId::ReviewPreviousStepArrow,
+                                "reviewPreviousStepArrow",
+                            ),
                             (ShortcutId::ReviewNextHunk, "reviewNextHunk"),
                             (ShortcutId::ReviewPreviousHunk, "reviewPreviousHunk"),
                             (ShortcutId::ReviewMarkReviewed, "reviewMarkReviewed"),
                             (ShortcutId::ReviewToggleMode, "reviewToggleMode"),
                             (ShortcutId::ExplainDiff, "explainDiff"),
                         ] {
-                            let taken = !keymap.contains_key(field) && keymap.iter().any(|(name, existing)| {
-                                name != "openTeamTabFromPanel" && existing.as_str().is_some_and(|combo| shortcut_combos_conflict(combo, id.default_combo()))
-                            });
-                            if taken { keymap.insert(field.into(), serde_json::json!("")); }
+                            let taken = !keymap.contains_key(field)
+                                && keymap.iter().any(|(name, existing)| {
+                                    name != "openTeamTabFromPanel"
+                                        && existing.as_str().is_some_and(|combo| {
+                                            shortcut_combos_conflict(combo, id.default_combo())
+                                        })
+                                });
+                            if taken {
+                                keymap.insert(field.into(), serde_json::json!(""));
+                            }
                         }
                     }
                     serde_json::from_value::<UiSettings>(value)
@@ -3082,6 +3123,7 @@ mod tests {
             changes_file_list_width: 240.0,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
+            sidebar_overview: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
@@ -3198,14 +3240,24 @@ mod tests {
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
-            artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {
-                revision: 3,
-                decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
-                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, override_recommendation: false, note: Some("keep".into()),
-                    option_id: None, label: None,
-                }],
-            })]),
-            artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),
+            artifact_decision_drafts: HashMap::from([(
+                "a1".into(),
+                mast_proto::decision_sheet::SheetDecisionDrafts {
+                    revision: 3,
+                    decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
+                        row_id: "D-2".into(),
+                        outcome: mast_proto::decision_sheet::DecisionOutcome::Decided,
+                        override_recommendation: false,
+                        note: Some("keep".into()),
+                        option_id: None,
+                        label: None,
+                    }],
+                },
+            )]),
+            artifact_question_drafts: HashMap::from([(
+                "a2".into(),
+                (3, HashMap::from([("Q-1".into(), "UTC".into())])),
+            )]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
             default_model: DefaultModelPreference::default(),
@@ -3767,7 +3819,8 @@ mod tests {
     #[test]
     fn defaults_match_zeron() {
         let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, 256.0);
+        assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
+        assert!(d.sidebar_overview);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
@@ -4012,7 +4065,12 @@ mod tests {
                 continue;
             }
             let bound = platform_combo(id.default_combo());
-            assert!(!seen.iter().any(|(other, combo)| shortcut_contexts_overlap(id, *other) && *combo == bound), "{bound:?} bound twice");
+            assert!(
+                !seen
+                    .iter()
+                    .any(|(other, combo)| shortcut_contexts_overlap(id, *other) && *combo == bound),
+                "{bound:?} bound twice"
+            );
             seen.push((id, bound));
         }
     }
@@ -4227,7 +4285,11 @@ mod tests {
     #[test]
     fn review_defaults_preserve_existing_global_bindings() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"n","openTeamTabFromPanel":"t"}}"#).unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap":{"saveFile":"n","openTeamTabFromPanel":"t"}}"#,
+        )
+        .unwrap();
         let keymap = UiSettings::load(dir.path()).keymap;
         assert_eq!(keymap.review_next_step, "");
         assert_eq!(keymap.review_toggle_mode, "t");

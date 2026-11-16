@@ -4,8 +4,9 @@ The Work Outline organizes a Space's Chats under nested **work items**. A work
 item can stand for a workstream, a ticket, a pull request, or an investigation.
 It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
-surface. The Outline is the main Overview view, with List beside it, and a Chat
-never needs a work item.
+surface. Overview is the persistent left column, with the Work Outline as its
+default presentation. Choose Sessions for the session list and its grouping
+controls. A Chat never needs a work item.
 
 | Concept | What it is |
 | --- | --- |
@@ -43,10 +44,13 @@ that harness. Claude Code's existing permission handling is unchanged.
 
 ## Quick start
 
-1. Open the Overview and choose **Outline**, or press `⇧⌘L` (`Ctrl+Shift+L`). The Overview has two views, List and
-   Outline. A saved view setting that says Canvas (the removed third view) loads as Outline.
-2. Create a work item with **New item**, `⇧⌘I` (`Ctrl+Shift+I`), or `N`. Type a
-   title and press Enter. In a Space with no work items, the Outline offers
+1. Choose **Overview** in the left column, or press `⇧⌘L` (`Ctrl+Shift+L`) to
+   reveal and focus the Outline. **Sessions** retains the session list's
+   grouping, sorting and metadata controls.
+2. Click **New item** for the full creation dialog. Choose a Space and parent
+   work item, enter the title and optional description, then set status and
+   placement and click **Create item**. For quick inline creation, use `⇧⌘I`
+   (`Ctrl+Shift+I`) or `N`, type a title and press Enter. In a Space with no work items, the Outline offers
    **Create work item** in place of the empty tree.
 3. Select the item and press Enter to open **Work Item Details**. Under
    **Instructions**, add an instruction and click **Save**.
@@ -56,19 +60,15 @@ that harness. Claude Code's existing permission handling is unchanged.
 5. To bring existing Chats under the item, drag their rows onto it or run
    **Associate Chat with Work Item**.
 
-Moving the selection onto a Chat row, with the arrow keys or a click, shows
-that Chat beside the Outline after a brief pause while the tree keeps focus, so
-you can keep browsing with `↑` / `↓`. Moving onto a work item row leaves the
-last Chat showing. While Work Item Details or Required Actions is open beside
-the Outline, browsing leaves it open and shows no Chat. Showing a Chat this way
-marks it seen the same way opening it beside the Outline does, and it never
-opens the full chat.
+Moving the selection with the arrow keys leaves the workspace and its draft
+alone. Click a Chat row or press Enter to open it in the main workspace. Work
+Item Details, Required Actions and Inbox use that workspace too; closing them
+returns to the selected Chat when no other Overview panel remains open.
 
-Press Enter on a Chat row to open the Chat beside the Outline with its composer
-focused. Press `⌘;` (`Ctrl+;`) to jump back to the Outline tree with that Chat's
-row selected, and press it again to return to the Chat. Press `⇧⌘↩`
-(`Ctrl+Shift+Enter`) to open that Chat as the full chat. See
-[Jumping between a Chat and the Outline](#jumping-between-a-chat-and-the-outline).
+Press `⌘;` (`Ctrl+;`) to jump between the Chat composer and its Outline row.
+The row is revealed by expanding its ancestors and scrolling it into view.
+On narrow windows Overview floats over the workspace, and opening a destination
+or clicking outside dismisses it. The saved wide-window width is preserved.
 
 Press `?` while the Outline has focus, or click the keyboard button in the
 Outline toolbar, to open the shortcut reference (its **Linear** group covers the
@@ -113,20 +113,13 @@ ignore it. The **Archive Chat** and **Archive…** menu entries show the key.
 
 ### Search
 
-`⌘F` (`Ctrl+F`) focuses the Overview's search field and selects its text, in
-List and Outline. It is one shared field: in the Outline it filters the
-rows ("Nothing matches the search" when none do). The key is fixed (not in
-**Settings → Shortcuts**) and works with or without focus in the Overview; the
-file editor's own Find still wins inside a file, and in a full chat `⌘F` does
-nothing. In the search field:
-
-| Key | Action |
-| --- | --- |
-| `Esc` | Clear the query; when it is already empty, return focus to the List or Outline tree (with a side panel open, an empty-field `Esc` closes the panel first) |
-| `↩` / `↓` | Select the first matching row in List or Outline and focus it, so the arrow keys work at once |
-
-In List, `↑` / `↓` then move the selected row (`↑` on the first row returns to the
-search) and `↩` opens the selected Chat beside the Overview.
+`⌘F` (`Ctrl+F`) focuses Overview's search when navigation has focus, selecting
+the existing query. Search and the repository/attention filters apply to the
+Outline and shortcut collections. The fixed current-chat entry stays reachable.
+The file editor's own Find still wins inside a file; typing in the Chat composer
+keeps its existing Find behavior. In the search field, `Esc` clears a non-empty
+query, then returns to the tree; `↩` or `↓` selects and focuses the first result.
+Sessions retains its own grouping and sort state independently of these filters.
 
 Every Work Outline command is also in the command palette and can be rebound in
 **Settings → Shortcuts**. Only five commands ship with a global key, because
@@ -158,8 +151,7 @@ composer. Earlier builds used `⌘\`, which 1Password takes system-wide for
 autofill. If you never changed that key, it moves to `⌘;` automatically; a key
 you chose yourself is kept.
 
-- From a Chat (the full chat or the Chat beside the Outline), it switches to the
-  Outline, selects that Chat's row, expands any collapsed parent items, scrolls
+- From a Chat, it reveals and focuses the Outline, selects that Chat's row, expands any collapsed parent items, scrolls
   the row into view, and focuses the tree. If the Outline does not show the
   Chat (a Chat without a Space, or one hidden by a filter), the selection
   stays where it was and the tree is focused.
@@ -174,19 +166,11 @@ not part of this: it still closes Details and menus.
 
 ### Opening the full chat
 
-**Open Full Chat** (`⇧⌘↩`, `Ctrl+Shift+Enter` on Windows and Linux) does what
-the chat panel's **Open full chat →** button does: it closes the panel and
-switches to the full chat with its composer focused. It works while you type in
-the panel's composer, and a draft you started there is still there. It opens:
-
-- the Chat on the selected Outline row, while the Outline tree has focus;
-- otherwise the Chat beside the Overview (the highlighted row in List);
-- otherwise the Chat on the selected Outline row.
-
-With none of these, the Outline shows a short notice. In the full chat, Toggle
-Outline Focus takes you back to that Chat's Outline row. The command is also in
-the command palette and on every Chat row's menu, and **Open full chat →** shows
-its key when you hover over it.
+**Open Full Chat** (`⇧⌘↩`, `Ctrl+Shift+Enter` on Windows and Linux) opens the
+Chat on the selected Outline row with its composer focused. From an already
+open Chat it focuses that Chat's composer. Drafts survive this focus change.
+With no eligible Chat, the Outline shows a notice. The command is also in the
+command palette and on Chat row menus.
 
 ## Context menus
 
@@ -290,7 +274,7 @@ A single-Space Outline has no Space rows, so none of this applies there.
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
 - **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
-  and its Chats disappear from the Outline only. The sidebar and List
+  and its Chats disappear from the Outline only. The Sessions presentation and shortcut collections
   still show them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
@@ -303,8 +287,9 @@ A single-Space Outline has no Space rows, so none of this applies there.
 
 ## Work Item Details
 
-Details open in the Overview's right panel and restore the previous panel when
-closed. Sections stay collapsed until you open them.
+Details open in the main workspace while Overview stays in the left column.
+Closing Details restores another open Overview panel or returns to the selected
+Chat. Sections stay collapsed until you open them.
 
 | Section | Contents |
 | --- | --- |
@@ -460,12 +445,11 @@ automatically: items and links come only from the actions below.
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
   choose **Open Linear Panel** on a Space row. The panel opens in the
-  **Inbox** column on the left of the Outline (List too), above
-  the [GitHub section](#pr-review-sync) when that applies, so the chat panel,
-  Work Item Details, and Required Actions stay open beside it on the right.
-  The column's × closes both.
-  - The key works anywhere in the Overview, including the chat panel's
-    composer. With the panel closed it opens it and puts the cursor in its
+  main workspace beside the persistent Overview, above the
+  [GitHub section](#pr-review-sync) when that applies. Work Item Details and
+  Required Actions can remain beside Inbox; the live chat is restored when
+  those panels close. The column's × closes both integrations.
+  - The key works from Overview and the Chat composer. With the panel closed it opens it and puts the cursor in its
     search. With the panel open and the cursor elsewhere, it moves the cursor
     to the search. With the cursor in the panel, it closes the panel and
     returns to the Outline tree. `Esc` in the panel also closes it.

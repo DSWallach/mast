@@ -1,8 +1,8 @@
 //! The personal assistant chat, UI side: which chat it is (the engine owns
 //! the designation, `mast_proto::personal_assistant`) and the RPC calls.
-//! The sidebar draws it in its own section above the space filter and
-//! leaves it out of the session lists. A scheduled-task assistant is drawn
-//! as its task's latest run.
+//! Overview keeps fixed access in its header; Sessions keeps its own section
+//! above the space filter and leaves it out of the session lists. Scheduled-task
+//! assistants show their task's latest run.
 
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,23 @@ impl PersonalAssistantState {
     /// The chat the sidebar shows and opens (a task's latest run).
     pub(crate) fn current<'a>(&self, chats: &'a [Chat]) -> Option<&'a Chat> {
         self.assistant.as_ref()?.current(chats)
+    }
+
+    /// Include designation changes in view invalidation once, independent of chat count.
+    pub(crate) fn hash_designation(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.assistant
+            .as_ref()
+            .map(|assistant| {
+                (
+                    &assistant.chat_id,
+                    assistant
+                        .scheduled_task
+                        .as_ref()
+                        .map(|task| (&task.task_id, &task.device_id, &task.space_id)),
+                )
+            })
+            .hash(hasher);
     }
 
     /// Apply an engine reply; `true` when the designation changed.
@@ -138,6 +155,35 @@ impl AppState {
         })
         .detach();
     }
+}
+
+/// Small role labels shared by the overview list and outline, including compact rows.
+pub(crate) fn session_badge(
+    state: &AppState,
+    chat_id: &str,
+    theme: &crate::theme::Theme,
+) -> Option<gpui::AnyElement> {
+    use gpui::{div, prelude::*, px};
+    let assistant = state.is_personal_assistant(chat_id);
+    let current = state.selected_chat.as_deref() == Some(chat_id);
+    let label = match (assistant, current) {
+        (true, true) => "Assistant · Current",
+        (true, false) => "Assistant",
+        (false, true) => "Current",
+        (false, false) => return None,
+    };
+    Some(
+        div()
+            .flex_none()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(3.0))
+            .bg(theme.element_hover)
+            .text_color(theme.text_muted)
+            .text_size(crate::typography::ui_rems(9.5))
+            .child(label)
+            .into_any_element(),
+    )
 }
 
 #[cfg(test)]

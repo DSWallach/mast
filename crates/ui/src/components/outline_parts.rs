@@ -316,28 +316,9 @@ pub fn outline_toolbar_button(
 
 /// Keyboard shortcut action in the outline toolbar.
 pub fn outline_shortcuts_button(theme: &Theme) -> Stateful<Div> {
-    let scale = super::layout_spacing(theme);
-    let button = div()
-        .id("outline-shortcuts")
+    outline_toolbar_button("outline-shortcuts", "?".into(), false, theme)
         .debug_selector(|| "outline-shortcuts".into())
         .aria_label("Keyboard shortcuts")
-        .flex()
-        .items_center()
-        .px(px(6.0 * scale))
-        .py(px(4.0 * scale))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0)))
-        .cursor_pointer()
-        .bg(theme.element_hover.opacity(0.5))
-        .text_color(theme.text_muted)
-        .hover(|el| el.text_color(theme.text));
-    super::toolbar_control(
-        crate::surface_chrome::segmented_key(button, theme, false),
-        theme,
-        false,
-    )
-    .when(super::is_horizon(theme), |el| el.rounded_full())
-    .child(crate::icons::icon(crate::icons::KEYBOARD).size(px(12.0)))
-    .child("?")
 }
 
 /// Container for descendant status totals.
@@ -3358,7 +3339,9 @@ pub fn outline_first_use(theme: &Theme) -> Div {
     div()
         .debug_selector(|| "outline-first-use".into())
         .flex_none()
-        .mx(px(14.0))
+        .w_full()
+        .min_w_0()
+        .px(px(14.0))
         .my(px(6.0))
         .flex()
         .flex_wrap()
@@ -3368,7 +3351,14 @@ pub fn outline_first_use(theme: &Theme) -> Div {
             11.5 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .child("No work items yet — group Chats and share instructions under one.")
+        .child(
+            div()
+                .debug_selector(|| "outline-first-use-copy".into())
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .child("No work items yet — group Chats and share instructions under one."),
+        )
 }
 pub fn outline_editor_frame(submitting: bool, theme: &Theme) -> Div {
     div()

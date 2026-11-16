@@ -163,6 +163,14 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.in_sidebar {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(panel)
+                .into_any_element();
+        }
         let hover = theme.border_strong;
         let active = self.details_width.resize_from.is_some();
         let handle = div()

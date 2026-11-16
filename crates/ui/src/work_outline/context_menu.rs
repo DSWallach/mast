@@ -91,6 +91,7 @@ pub(crate) enum MenuAction {
     /// Open the grant dialog ("Grant admin for this Space…" / "Renew admin…").
     GrantAdmin(String),
     RevokeAdmin(String),
+    TogglePersonalAssistant(String),
     ArchiveChat(String),
     HandOffChat(String),
     /// Open a side chat of this Chat in its right pane.
@@ -154,6 +155,7 @@ impl MenuAction {
             | Self::CloseOutChat(_)
             | Self::GrantAdmin(_)
             | Self::RevokeAdmin(_)
+            | Self::TogglePersonalAssistant(_)
             | Self::HandOffChat(_)
             | Self::AskOnSide(_)
             | Self::HideSpace(_)

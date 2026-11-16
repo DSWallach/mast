@@ -1539,7 +1539,7 @@ mod tests {
             reply(&params)
         }));
         shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
+            shell.state.update(cx, |state, cx| {
                 state.spaces = vec![
                     serde_json::from_value(serde_json::json!({
                         "id": "s1", "deviceId": "d", "path": "/work/alpha",
@@ -1572,6 +1572,8 @@ mod tests {
                 state.set_work_outline_visible(vec!["s1".into()]);
                 assert!(state.apply_work_outline_frame("s1", snapshot));
                 state.work_outline_actions_override = Some(actions);
+                // The persistent Overview already exists when a fixture is seeded.
+                cx.notify();
             })
         });
         calls
@@ -1583,7 +1585,10 @@ mod tests {
             window.draw(cx).clear();
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
     }
 
     fn ok_ids(params: &serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> {
@@ -1623,8 +1628,7 @@ mod tests {
         });
     }
 
-    /// The Overview List row's drift mark opens Compare without toggling
-    /// the row.
+    /// The persistent Outline's drift mark opens Compare without opening a chat.
     #[gpui::test]
     fn overview_drift_mark_opens_compare(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1632,22 +1636,24 @@ mod tests {
         seed(&shell, cx, fixture::snapshot("s1"), ok_ids);
         shell.update(cx, |shell, cx| shell.open_overview(cx));
         let overview = shell.read_with(cx, |shell, _| shell.overview_page.clone().unwrap());
-        overview.update(cx, |overview, cx| overview.set_mode_for_test(crate::overview::OverviewMode::List, cx));
+        let outline = overview.read_with(cx, |overview, _| overview.outline_entity());
+        outline.update(cx, |outline, cx| {
+            outline.set_compact_single_chat(false, cx);
+        });
         draw(cx);
-        assert!(
-            cx.debug_bounds("overview-row-instruction-drift-chat-auth")
-                .is_none()
-        );
+        outline.update(cx, |outline, cx| {
+            outline.reveal(&crate::work_outline::model::row_key::chat(CHAT_API), cx);
+        });
+        draw(cx);
         let mark = cx
-            .debug_bounds("overview-row-instruction-drift-chat-api")
+            .debug_bounds("outline-drift-chat:chat-api")
             .expect("drifted Chat is marked")
             .center();
         cx.simulate_click(mark, gpui::Modifiers::default());
         draw(cx);
         assert!(cx.debug_bounds("instruction-compare").is_some());
-        let page = shell.read_with(cx, |shell, _| shell.overview_page.clone().unwrap());
-        page.read_with(cx, |overview, _| {
-            assert!(overview.expanded_is_empty(), "the row did not toggle")
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).selected_chat.is_none())
         });
     }
 
@@ -1823,7 +1829,8 @@ mod tests {
         assert_eq!(blocker(&shell, cx), None);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                state.chats[0].config = Some(mast_proto::ChatConfig { approval_rules: false,
+                state.chats[0].config = Some(mast_proto::ChatConfig {
+                    approval_rules: false,
                     harness: mast_proto::HarnessId::Codex,
                     model: None,
                     reasoning: None,
@@ -1865,7 +1872,8 @@ mod tests {
     fn codex_with_session(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext, session: bool) {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                state.chats[0].config = Some(mast_proto::ChatConfig { approval_rules: false,
+                state.chats[0].config = Some(mast_proto::ChatConfig {
+                    approval_rules: false,
                     harness: mast_proto::HarnessId::Codex,
                     model: None,
                     reasoning: None,
