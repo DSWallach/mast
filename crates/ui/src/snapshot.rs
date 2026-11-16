@@ -1,4 +1,5 @@
 //! Offscreen Metal snapshots for test fixtures. No native window is created.
+mod code_reference;
 use std::{path::PathBuf, sync::Arc};
 
 use gpui::{App, AppContext, Entity, HeadlessAppContext, Pixels, Render, Size, Window};
@@ -65,6 +66,10 @@ pub fn render_to_png_with_layout<V: Render + 'static>(
     let path = directory.join(format!("{name}.png"));
     image.save(&path)?;
     Ok(path)
+}
+
+pub fn code_reference_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
+    code_reference::fixture(window, cx)
 }
 
 /// Construct the walkthrough test fixture using the production view.

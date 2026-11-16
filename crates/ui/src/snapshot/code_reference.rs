@@ -1,0 +1,35 @@
+//! Offscreen fixture for the production editor and code selection action bar.
+use gpui::{App, Context, Entity, Render, Window, div, prelude::*, px};
+use gpui_base::input::{Editor, EditorState};
+
+pub struct CodeReferenceFixture {
+    editor: Entity<EditorState>,
+}
+
+impl Render for CodeReferenceFixture {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::Theme::of(cx);
+        let state = self.editor.read(cx);
+        let top = state
+            .range_to_bounds(&state.selected_range())
+            .map(|bounds| bounds.origin.y + bounds.size.height - state.input_bounds().origin.y)
+            .unwrap_or(px(90.0));
+        div()
+            .size_full()
+            .relative()
+            .bg(theme.surface)
+            .child(Editor::new(&self.editor))
+            .child(
+                crate::components::code_ref::selection_action_bar(theme, top)
+                    .child("Add to chat")
+                    .child("Copy ref"),
+            )
+    }
+}
+
+pub fn fixture(window: &mut Window, cx: &mut App) -> Entity<CodeReferenceFixture> {
+    let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true)
+        .default_value("fn review() {\n    let first = 1;\n    let second = 2;\n    inspect(first, second);\n}\n"));
+    editor.update(cx, |state, cx| state.set_selected_range(14..57, cx));
+    cx.new(|_| CodeReferenceFixture { editor })
+}
