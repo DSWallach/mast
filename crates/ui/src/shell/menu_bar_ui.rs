@@ -218,6 +218,11 @@ impl Shell {
                     self.sync_menu_bar(true, cx);
                 }
             }
+            MenuEvent::Action(MenuAction::DismissAllRequests(request_ids)) => {
+                if !matches!(self.route, Route::Overview) { self.open_overview(cx); }
+                let page = self.ensure_overview_page(cx);
+                page.update(cx, |overview, cx| overview.dismiss_required_actions(request_ids, cx));
+            }
             MenuEvent::Action(MenuAction::ResumeAll(chat_ids)) => {
                 self.handle_interrupted(chat_ids, true, cx);
                 self.sync_menu_bar(true, cx);

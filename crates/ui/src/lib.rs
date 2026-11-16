@@ -389,7 +389,7 @@ fn handle_menu_bar_event(
         MenuEvent::Action(MenuAction::OpenChat(chat_id)) => {
             open_notified_chat(Some(chat_id), state, cx)
         }
-        event @ MenuEvent::Action(MenuAction::OpenRequest { .. } | MenuAction::DecideRequest { .. }) => {
+        event @ MenuEvent::Action(MenuAction::OpenRequest { .. } | MenuAction::DecideRequest { .. } | MenuAction::DismissAllRequests(_)) => {
             open_notified_chat(None, state, cx);
             let shell = cx.windows().into_iter().find_map(|window| window.downcast::<shell::Shell>());
             if let Some(shell) = shell {

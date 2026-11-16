@@ -7,3 +7,5 @@ Open the Space root's details and find **Friction**. Agents can report obstacles
 ## Use the menu bar
 
 Enable the menu bar item in settings. Its lamp reflects chat status and its menu shows account usage and reset times, chats needing you, and interrupted chats. Select a chat to open it; use **Resume all** for interrupted work. When a newer build is installed, the menu also offers **Restart when idle**. It includes **Open Mast** and **Quit**.
+
+With **Needs you** enabled for the menu bar, **Dismiss all** beneath **Requests** dismisses the Required Actions listed in that menu. It uses the same dismissal as each request's card and opens Needs you so any delivery errors are visible. Requests arriving afterward stay open; waiting or failed chat notifications are unchanged.
