@@ -1299,13 +1299,17 @@ fn menu_dismiss_all_handles_available_and_missing_chats_once(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn menu_dismiss_failure_keeps_the_request_and_shows_an_error(cx: &mut gpui::TestAppContext) {
+fn menu_dismiss_failure_stays_visible_when_another_dismissal_succeeds(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), |_| {
-        Err(mast_rpc::RpcError::Failed("Dismiss failed".into()))
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), m4::snapshot("s1"), |params| {
+        if params["userActionRequestId"] == m4::R_API {
+            Err(mast_rpc::RpcError::Failed("Dismiss failed".into()))
+        } else {
+            reply_started(params)
+        }
     });
     overview.update(vcx, |overview, cx| {
-        overview.dismiss_required_actions(vec![m4::R_API.into()], cx);
+        overview.dismiss_required_actions(vec![m4::R_API.into(), m4::R_UI.into()], cx);
     });
     vcx.run_until_parked();
     let list = overview.read_with(vcx, |overview, _| overview.required_actions_panel().unwrap());
@@ -1313,8 +1317,8 @@ fn menu_dismiss_failure_keeps_the_request_and_shows_an_error(cx: &mut gpui::Test
         assert!(list.rows().open.iter().any(|row| row.request_id == m4::R_API));
         assert!(list.error.as_ref().unwrap().contains("Dismiss failed"));
     });
-    assert_eq!(resolves(&calls).len(), 1);
-    assert!(sends(&calls).is_empty());
+    assert_eq!(resolves(&calls).len(), 2);
+    assert_eq!(sends(&calls).len(), 1);
 }
 
 #[gpui::test]

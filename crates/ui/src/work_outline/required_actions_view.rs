@@ -270,6 +270,7 @@ impl RequiredActionsList {
     fn accept_approval_proposal(&mut self, row: RequiredActionRow, rule: mast_proto::work_outline::ApprovalRule, cx: &mut Context<Self>) {
         let request_id = row.request_id.clone();
         if !self.in_flight.insert(request_id.clone()) { return; }
+        self.clear_error();
         let operation_id = derive_id(&request_id, "approval-rule-save");
         let task = self.state.read(cx).work_outline_actions().mutate(mast_proto::WorkOutlineMutation::SetApprovalRule(mast_proto::SetApprovalRuleParams {
             space_id: row.space_id, rule, operation_id,
@@ -583,6 +584,7 @@ impl RequiredActionsList {
         if !self.in_flight.insert(request_id.clone()) {
             return;
         }
+        self.clear_error();
         let operation_id = self
             .ops
             .entry(request_id.clone())
@@ -732,6 +734,7 @@ impl RequiredActionsList {
                 return;
             }
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             let operation_id = super::actions::new_operation_id();
             self.send_resolve(
                 request_id,
@@ -869,7 +872,6 @@ impl RequiredActionsList {
                 answer: None,
                 operation_id,
             });
-        self.clear_error();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
