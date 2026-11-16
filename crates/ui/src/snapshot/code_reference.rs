@@ -36,6 +36,10 @@ pub fn fixture(window: &mut Window, cx: &mut App) -> Entity<CodeReferenceFixture
     let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true)
         .default_value("fn review() {\n    let first = 1;\n    let second = 2;\n    inspect(first, second);\n}\n"));
     window.focus(&editor.focus_handle(cx), cx);
-    editor.update(cx, |state, cx| state.set_selected_range(14..57, cx));
+    let theme = crate::theme::Theme::of(cx).clone();
+    editor.update(cx, |state, cx| {
+        state.set_editor_style(crate::files::editor_adapter::editor_style(&theme));
+        state.set_selected_range(14..57, cx);
+    });
     cx.new(|_| CodeReferenceFixture { editor })
 }
