@@ -7485,6 +7485,7 @@ fn user_bubble_text(
     let wash = theme.code_wash;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
+    let hit_mentions = mentions.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
@@ -7525,7 +7526,6 @@ fn user_bubble_text(
     .absolute()
     .size_full();
     let hit_layout = styled.layout().clone();
-    let hit_mentions = mentions.clone();
     div()
         .relative()
         .on_mouse_up(gpui::MouseButton::Left, move |event, window, cx| {
