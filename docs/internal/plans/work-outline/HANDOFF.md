@@ -1187,6 +1187,39 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-16; coordinator 9fd580ac handing off)
+
+- **Installed: release 90.** Releases 86–90 under this coordinator: Needs-you cards in place + smaller outline reads (86),
+  worker Changes in one click + GitHub-style file tree (87), workflow pack + agent logging/error fixes (88),
+  coordinator reach + approach options (89), review follow-ups (90). Confirm Mikey has restarted onto 90, then
+  verify the decision-sheet table wrapping: artifact_render_check on docs/artifact-kit/decision-sheet-example.json,
+  800 px wide, light and dark. The Data model rejected-table card must not overflow.
+- **Running:** nothing.
+- **Waiting on Mikey (Needs-you):**
+  - approval rule for Codex cargo test in worktrees (ec30a2df)
+  - three proposed Space-root instructions: coordinator talk rules (19300dcc), don't poll finished sessions
+    (5d1d1f92), shell/CI habits (ac32201c)
+  - pinned tabs A (eb86590b; recommend approving all three)
+  - older: a53732a1, 99cf645c, 1ad5d3ee
+- **Not started, needs Mikey's go:** coordinator context-size meter plus hand-off past ~200k tokens (the real Opus
+  cost driver per the quiet-wakes research); freeze watchdog (17c9d278); perf follow-ups (2694931e); structured
+  sender provenance, to re-enable last-sender reach safely.
+- **Cofactr (other Space, Mikey pastes):**
+  - The Space-root instructions (coordinator talk rules, shell/CI habits).
+  - An admin-chat prompt to clean stale `cofactr/workspace/.worktrees` (145 GB, 135 worktrees): dry-run table,
+    approval, then `git worktree remove` only.
+- **Disk:** 178 GB free after `cargo sweep --time 3` (69 GB), the nvm cache plus old Node versions (12 GB) and a Docker
+  prune. A Thunderbolt 5 external SSD for build caches is on hold: prices doubled in 2026.
+- **Skills:** the friction edits are live in ~/.agents/skills (backup ~/skills-backups/2026-11-12-friction/). On
+  2026-11-14 project-planner learned approach-row `options` (backup ~/skills-backups/2026-11-14-approach-options/).
+- **Lessons:**
+  - Terra stops early when a design choice or the finish line is vague. Give it a numbered checklist ending in the
+    Required Action; when it says "blocked", ask exactly what and answer with decisions. Use Sonnet if it stalls 3+
+    times.
+  - Review every permission-scope change adversarially. Coordinator reach first shipped with workers able to
+    approve each other's prompts, and the review caught it.
+  - Worker reports use STATUS / RESULT / NEXT. Worker updates that need nothing from Mikey get one line, or none.
+
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
 - **Installed: release 90** (89 and 90 built overnight 11-14 while Mikey was away; he still needs to restart).
