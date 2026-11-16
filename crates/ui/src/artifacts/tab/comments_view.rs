@@ -176,8 +176,8 @@ impl ArtifactTab {
             FrameMessage::QuestionUndo(id) => {
                 if self.artifact(cx).is_some_and(|artifact| self.can_comment(&artifact)) { self.undo_question_draft(id, cx); }
             }
-            FrameMessage::SheetStage { id, outcome, note, override_recommendation } => {
-                self.stage_sheet_decision(id, outcome, note, override_recommendation, cx);
+            FrameMessage::SheetStage { id, outcome, note, override_recommendation, option_id } => {
+                self.stage_sheet_decision(id, outcome, note, override_recommendation, option_id, cx);
             }
             FrameMessage::SheetUndo(id) => self.undo_sheet_decision(Some(id), cx),
             FrameMessage::SheetDiscard => self.undo_sheet_decision(None, cx),
@@ -269,13 +269,16 @@ impl ArtifactTab {
         cx.notify();
     }
 
-    fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, override_recommendation: bool, cx: &mut Context<Self>) {
+    fn stage_sheet_decision(&mut self, id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, override_recommendation: bool, option_id: Option<String>, cx: &mut Context<Self>) {
         use mast_proto::decision_sheet::{SheetDecisionDraft, SheetDecisionDrafts};
         let (artifact, sheet) = match self.current_sheet(cx) {
             Ok(sheet) => sheet,
             Err(reason) => { self.sheet_refusal(&reason, Some(&id), cx); return; }
         };
-        let reason = if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open") {
+        let label = sheet.decision_rows().iter().find(|row| row.id == id).and_then(|row| row.options.iter().find(|option| Some(option.id.as_str()) == option_id.as_deref())).map(|option| option.label.clone());
+        let reason = if outcome == mast_proto::decision_sheet::DecisionOutcome::Option && (label.is_none() || override_recommendation) || outcome != mast_proto::decision_sheet::DecisionOutcome::Option && option_id.is_some() {
+            Some("Invalid option selection.")
+        } else if !sheet.decision_rows().iter().any(|row| row.id == id && row.status.state == "open") {
             Some("This row is missing or no longer open.")
         } else if outcome == mast_proto::decision_sheet::DecisionOutcome::Rejected && !sheet.decision_rows().iter().any(|row| row.id == id && row.optional) {
             Some("This row cannot be omitted.")
@@ -289,7 +292,7 @@ impl ArtifactTab {
             let draft = settings.artifact_decision_drafts.entry(artifact.id).or_insert_with(|| SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() });
             if draft.revision != artifact.current_revision { *draft = SheetDecisionDrafts { revision: artifact.current_revision, decisions: Vec::new() }; }
             draft.decisions.retain(|decision| decision.row_id != id);
-            draft.decisions.push(SheetDecisionDraft { row_id: id.clone(), outcome, override_recommendation, note: Some(note) });
+            draft.decisions.push(SheetDecisionDraft { row_id: id.clone(), outcome, option_id, label, override_recommendation, note: Some(note) });
         });
     }
 
@@ -311,9 +314,9 @@ impl ArtifactTab {
         if self.comments.busy { self.sheet_refusal("A decision batch is already being sent.", None, cx); return; }
         let draft = crate::settings::current(cx).artifact_decision_drafts.get(&artifact.id).cloned();
         let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { self.sheet_refusal("There are no staged decisions for this revision.", None, cx); return; };
-        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let chat = artifact.current_owner_chat_id().map(str::to_owned).filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
         let Some(chat) = chat else {
-            self.sheet_refusal("The origin chat is unavailable. Decisions remain staged.", None, cx);
+            self.sheet_refusal("The current owner chat is unavailable. Decisions remain staged.", None, cx);
             return;
         };
         self.comments.busy = true;

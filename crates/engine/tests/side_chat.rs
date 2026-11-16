@@ -94,6 +94,8 @@ impl Harness for TurnHarness {
             cwd: request.cwd.clone(),
             session_id: session.clone(),
             assistant_message_id: format!("a-{n}"),
+            chat_id: None,
+            space_id: None,
         };
         if self.fail_fork && request.fork_from.is_some() {
             return Ok(futures::stream::iter(vec![

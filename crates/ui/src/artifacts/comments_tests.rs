@@ -130,11 +130,14 @@ fn open_page<'a>(
     let factory = FakeWebHost::probed_factory(shown.clone(), probe.clone());
     let mut view: ArtifactView = artifact(&id(1), "Flow", kind);
     view.comments = comments;
+    if kind == ArtifactKind::DecisionSheet {
+        view.revisions[0].by.chat_id = Some("chat-latest".into());
+    }
     let state = cx.new(|_| crate::state::AppState::new());
     state.update(cx, |state, _| {
         state.local_device_id = Some("dev".into());
         state.work_outline_actions_override = Some(actions);
-        state.chats = vec![chat("chat-api")];
+        state.chats = vec![chat("chat-api"), chat("chat-latest")];
         state.set_test_artifacts(snapshot(vec![view.clone()]));
     });
     let artifact_id = view.id.clone();
@@ -439,10 +442,21 @@ fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
     assert_eq!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).len(), 1);
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["chatId"], "chat-latest");
     let message = sent[0].to_string();
     assert!(message.contains("D-2 answered: Use UTC"));
     assert!(message.contains("D-4 rejected (too slow)"));
     vcx.update(|_, cx| assert!(!crate::settings::current(cx).artifact_decision_drafts.contains_key(&id(1))));
+}
+
+#[gpui::test]
+fn sheet_option_stages_with_label(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let page = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}],"steps":[]}]}"#;
+    let (tab, _calls, _probe, shown, vcx) = open_page(cx, ArtifactKind::DecisionSheet, Vec::new(), page);
+    assert!(shown.borrow().last().unwrap().1.contains("data-sheet-option"));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"option","optionId":"night","note":""}));
+    vcx.update(|_, cx| { let d = &crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions[0]; assert_eq!(d.label.as_deref(), Some("Night")); assert_eq!(d.option_id.as_deref(), Some("night")); });
 }
 
 #[gpui::test]

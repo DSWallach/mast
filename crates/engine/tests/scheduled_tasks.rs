@@ -517,6 +517,8 @@ impl mast_harness::Harness for ProviderFixture {
                 cwd: request.cwd,
                 session_id: format!("fixture-{:?}", self.0),
                 assistant_message_id: "reply".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta {
                 text: "Completed fixture task".into(),

@@ -117,7 +117,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
         let (controls, _steer, _token) = controls("Yes");
         let events = run_to_end(&harness(), request(&format!("scenario:{scenario}")), controls).await;
         assert!(events.iter().any(|event| matches!(event,
-            AgentEvent::Error { message } | AgentEvent::Done { error: Some(message), .. }
+            AgentEvent::Error { message, .. } | AgentEvent::Done { error: Some(message), .. }
                 if message == "Authentication failed — sign in to Codex again."
         )), "{scenario}: {events:?}");
     }
@@ -237,6 +237,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "c1".into(),
         is_error: true,
         output: Some("command output\n".into()),
+        exit_code: Some(1),
         diff: None,
     }));
 
@@ -259,6 +260,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "f1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 
@@ -274,7 +276,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "mcp1".into(),
         is_error: true,
-        output: None,
+        output: Some(r#"{"message":"MCP request failed"}"#.into()),
+        exit_code: None,
         diff: None,
     }));
 
@@ -289,6 +292,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "w1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 
@@ -312,6 +316,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "td1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 
@@ -1319,6 +1324,7 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             id: "cs1".into(),
             is_error: false,
             output: None,
+            exit_code: Some(0),
             diff: None,
         }),
     }));

@@ -77,6 +77,8 @@ pub mod uploads;
 pub mod work_outline;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
+pub mod workflow_pack;
+pub mod workflow_pack_service;
 mod watch_budget;
 pub mod workspace_files;
 pub mod workspace_content_search;
@@ -221,6 +223,8 @@ pub struct EngineCore {
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
     workspace_scope: WorkspaceScope,
+    /// Host-local workflow pack import receipts.
+    workflow_pack_receipts: PathBuf,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
@@ -676,6 +680,7 @@ impl EngineCore {
             artifacts,
             orchestrator_wakes,
             workspace_scope: profile.scope(),
+            workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
@@ -817,6 +822,9 @@ impl EngineCore {
         .with_artifacts(self.artifacts.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        rpc.work_outline()
+            .workflow_pack()
+            .set_receipt_dir(self.workflow_pack_receipts.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

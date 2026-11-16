@@ -794,6 +794,7 @@ fn attributed_note(context: &CallContext, note: Option<String>) -> Option<String
 }
 
 mod admin_tool;
+mod workflow_pack_tool;
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -1069,6 +1070,11 @@ impl AgentToolsService {
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
             tools::PROPOSE_APPROVAL_RULE => self.propose_approval_rule(context, arguments),
             tools::ADMIN => self.admin(context, arguments),
+            tools::WORKFLOW_PACK_EXPORT
+            | tools::WORKFLOW_PACK_PREVIEW_IMPORT
+            | tools::WORKFLOW_PACK_APPLY
+            | tools::WORKFLOW_PACK_UNDO
+            | tools::WORKFLOW_PACK_RECEIPTS => self.workflow_pack_tool(context, tool, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
             tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
@@ -1225,6 +1231,7 @@ impl AgentToolsService {
             },
             fingerprint: String::new(),
             occurrences: 0,
+            occurrence_history: Vec::new(),
             last_seen: now,
             status: mast_proto::FrictionStatus::Open,
             promoted_item_id: None,
@@ -1740,7 +1747,7 @@ impl AgentToolsService {
                 };
             if !valid {
                 return Err(AgentToolError::invalid(format!(
-                    "invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url",
+                    "invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url; example: {{\"label\":\"Changes\",\"target\":{{\"type\":\"diff\",\"branch\":\"feature\"}}}}",
                     link.label
                 )));
             }
@@ -2031,14 +2038,13 @@ impl AgentToolsService {
     /// Chat and message) as the user's. Delivery comes first, so a failure
     /// leaves the request open; a replay of the same key never delivers twice.
     /// `chat_project_scope_chats`: the Chats on items inside the caller's
-    /// project (the nearest project at or above its item; the item itself
-    /// counts). Empty without a project. Read-only reach for `read_chat`.
+    /// project, or the caller's own item subtree when outside a project.
     fn project_scope_chats(&self, context: &CallContext) -> Value {
         let chat_ids: Vec<String> = context
             .current_item_id()
             .and_then(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-                let project = snapshot.project_root(&root)?.id.clone();
+                let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
                 Some(
                     snapshot
                         .assignments

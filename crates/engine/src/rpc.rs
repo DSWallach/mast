@@ -3284,7 +3284,7 @@ impl RpcService for EngineRpc {
                             space_id: p.space_id.clone(), work_item_id: None, branch: None,
                             created_at: entry.created_at, source: mast_proto::FrictionSource::Import,
                             file_name: Some(filename.clone()),
-                        }, fingerprint: String::new(), occurrences: 0, last_seen: entry.created_at,
+                        }, fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: entry.created_at,
                         status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
                     };
                     let fingerprint = mast_doc::registry::friction::friction_fingerprint(&report);
@@ -3352,6 +3352,57 @@ impl RpcService for EngineRpc {
             methods::WATCH_WORK_OUTLINE => {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
+            }
+            methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
+                let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
+                let (pack, redactions) = self
+                    .work_outline
+                    .workflow_pack()
+                    .export_preview(&p.space_id, p.mode)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"pack": pack, "redactions": redactions}))
+            }
+            methods::WORKFLOW_PACK_IMPORT_PREVIEW => {
+                let p: crate::workflow_pack::ImportPreviewParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let preview = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().preview_import(&p.space_id, &p.path)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&preview)
+            }
+            methods::WORKFLOW_PACK_APPLY => {
+                let p: crate::workflow_pack::ApplyParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let receipt = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().apply(&p.space_id, &p.preview_id, &p.resolutions, &service.local_user(), None)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&receipt)
+            }
+            methods::WORKFLOW_PACK_UNDO => {
+                let p: crate::workflow_pack::UndoParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let receipt = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().undo(&p.space_id, &p.receipt_id, &service.local_user(), None)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&receipt)
+            }
+            methods::WORKFLOW_PACK_RECEIPTS => {
+                let p: crate::workflow_pack::ReceiptsParams = parse_params(params)?;
+                let receipts = self
+                    .work_outline
+                    .workflow_pack()
+                    .list_receipts(&p.space_id)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"receipts": receipts}))
             }
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
@@ -5837,6 +5888,7 @@ mod tests {
             assert!(!is_stream_method(github));
         }
         assert!(!forwardable(methods::WORK_OUTLINE_QUERY));
+        assert!(!forwardable(methods::WORKFLOW_PACK_APPLY));
         assert!(!is_stream_method(methods::WORK_OUTLINE_QUERY));
         assert!(!is_stream_method(methods::WATCH_WORK_OUTLINE));
         // Execution validation runs against the owner's disk.
@@ -6150,22 +6202,20 @@ mod tests {
         let full = stream.next().await.unwrap();
         assert!(full.get("historyPending").is_none());
         assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
-        let mut entries = Vec::new();
-        let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
-        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         handle
             .write_user_message("live", "after attach", 2)
             .unwrap();
-        while entries.last().map(|e| e.id.as_str()) != Some("live") {
+        let mut entries = Vec::new();
+        let update: mast_doc::TranscriptUpdate = serde_json::from_value(full).unwrap();
+        mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
+        while entries.len() < 3 {
             let value = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .unwrap()
-                .unwrap();
+                .await.unwrap().unwrap();
             let update: mast_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
             mast_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
         }
-        let ids: Vec<_> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, ["turn", "arrived", "live"]);
+        assert_eq!(entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+            vec!["turn", "arrived", "live"]);
         host.shutdown_workers().await;
     }
 
