@@ -3743,6 +3743,31 @@ impl Changes {
         }
     }
 
+    fn add_hunk_to_chat(&mut self, path: String, range: mast_proto::CodeRefRange, expected: String, cx: &mut Context<Self>) {
+        let key = self.owner_chat_id_owned().unwrap_or_default();
+        let state = self.state.read(cx);
+        let Some(member) = state.selected_execution_member(&key) else { return; };
+        let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, &key) else { return; };
+        let Some(engine) = state.engine().cloned() else { return; };
+        let request = mast_proto::ReadWorkspaceFileRequest { target: context.target.clone(), path: path.clone() };
+        let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
+        cx.spawn(async move |this, cx| {
+            let Ok(file) = client.read_file(request).await else { return; };
+            let Some(contents) = file.text else { return; };
+            let Some(snippet) = crate::code_ref::snippet(&contents, range) else { return; };
+            if snippet != expected { return; }
+            let reference = crate::code_ref::StagedCodeRef {
+                id: uuid::Uuid::new_v4().to_string(),
+                reference: mast_proto::CodeRef { version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: member.repo_id, worktree_id: member.checkout_id, path },
+                    kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None,
+                    at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: crate::code_ref::content_hash(&contents) },
+                }, snippet,
+            };
+            let _ = this.update(cx, |this, cx| this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); }));
+        }).detach();
+    }
+
     fn open_draft(
         &mut self,
         path: String,
@@ -4402,17 +4427,7 @@ impl Changes {
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
                             .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let key = this.owner_chat_id_owned().unwrap_or_default();
-                                let Some(member) = this.state.read(cx).selected_execution_member(&key) else { return; };
-                                let reference = crate::code_ref::StagedCodeRef {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    reference: mast_proto::CodeRef { version: 1,
-                                        location: mast_proto::CodeRefLocation { repo_id: member.repo_id, worktree_id: member.checkout_id, path: path.clone() },
-                                        kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None,
-                                        at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: crate::code_ref::content_hash(&snippet) },
-                                    }, snippet: snippet.clone(),
-                                };
-                                this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); });
+                                this.add_hunk_to_chat(path.clone(), range, snippet.clone(), cx);
                             }))))
                     .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
