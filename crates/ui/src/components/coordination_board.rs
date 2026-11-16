@@ -518,6 +518,10 @@ impl OutlineView {
                     .child(
                         div()
                             .id(SharedString::from(format!("board-action-{}", item.id)))
+                            .debug_selector({
+                                let id = item.id.clone();
+                                move || format!("board-action-{id}").into()
+                            })
                             .cursor_pointer()
                             .px(px(10.0))
                             .py(px(4.0))
@@ -599,5 +603,84 @@ mod tests {
             vcx.run_until_parked();
         }
         assert_eq!(notifications.get(), 0);
+    }
+    #[gpui::test]
+    fn review_opens_the_worker_diff(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chat_diff_rpc_override = Some(std::sync::Arc::new(move |method, params| { captured.lock().unwrap().push((method.to_owned(), params)); Ok(serde_json::json!({})) }));
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView { chat_id:"worker".into(), targets:vec![mast_proto::ChatDiffTargetView { path:"/work/worker".into(), checkout_id:"checkout".into(), source:mast_proto::ChatDiffTargetSource::Agent, selected:true, repo_name:"repo".into(), branch:Some("feature/test".into()), head_sha:None }], ref_targets:vec![] }]);
+            state.chats.push(serde_json::from_value(serde_json::json!({"id":"worker","deviceId":"local","spaceId":"s","archived":false,"branch":"feature/test","createdAt":"2026-09-08T00:00:00Z"})).unwrap());
+            state
+        });
+        let shell = cx.new(|cx| {
+            Shell::new(
+                state.clone(),
+                crate::EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({"spaceId":"s","available":true,"items":[{"id":"item","spaceId":"s","title":"Item","effectiveStatus":"active","chatIds":["worker"]}]})).unwrap();
+        let (outline, vcx) = cx.add_window_view(|_, cx| {
+            OutlineView::new(state.clone(), cx).with_shell(shell.downgrade())
+        });
+        outline.update(vcx, |outline, cx| {
+            outline.set_inputs(
+                OutlineInputs {
+                    spaces: vec![OutlineSpace {
+                        id: "s".into(),
+                        label: "Space".into(),
+                        load: WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+                        hidden: false,
+                    }],
+                    ..Default::default()
+                },
+                cx,
+            );
+            outline.board_mode = BoardMode::Board;
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let point = vcx
+            .debug_bounds("board-action-item")
+            .expect("review button")
+            .center();
+        vcx.simulate_click(point, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        state.read_with(vcx, |state, _| {
+            assert_eq!(state.selected_chat.as_deref(), Some("worker"))
+        });
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, params)| params.to_string().contains("/work/worker"))
+        );
     }
 }
