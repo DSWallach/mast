@@ -108,6 +108,20 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
             ("fixture-tests", "Verify the changes"),
         ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
         preview_chat_outline(&mut state);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() {
+            state.add_code_ref("fixture-chat", crate::code_ref::StagedCodeRef {
+                id: "fixture-reference".into(),
+                reference: mast_proto::CodeRef {
+                    version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: "fixture-repo".into(), worktree_id: None, path: "src/review.rs".into() },
+                    kind: mast_proto::CodeRefKind::Lines,
+                    range: Some(mast_proto::CodeRefRange { start_line: 88, end_line: 112 }),
+                    symbol: None,
+                    at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "fixture".into() },
+                },
+                snippet: "fn review() {}".into(),
+            });
+        }
         state
     });
     state.update(cx, |state, cx| {
