@@ -2008,8 +2008,12 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
      bounded?), timers and polls, retry loops (backoff?), `cx.notify()`/redraw on ticks, whole-list scans in render.
   2. The release suite's budget tests (engine `idle_spawn_budget`, UI PR-link index and retry budgets) must pass at
      real scale.
-  3. Once it exists: headless engine soak of the candidate on a scratch data copy, compared with the installed
-     release. Worse CPU or git spawn rate = no install.
+  3. `scripts/perf-soak.sh target/installed/mast --baseline /Applications/Mast.app/Contents/MacOS/mast --real`:
+     sandboxed headless engine soak (MAST_SOAK=1, no network, no writes, git guard) on a `.backup` copy of the data.
+     Worse CPU, git spawns/min or footprint growth = no install.
+  `scripts/install-macos-app.sh` enforces 2 and 3 via stamps in target/perf-gate/ (scripts/perf-gate.py): it refuses a
+  binary without a passing release-test stamp for HEAD and a passing soak of that exact binary. `--skip-perf-gate
+  "<reason>"` only with Mikey's OK; it appends to docs/internal/perf-gate-overrides.md, which must be committed.
 - **Perf check after every release** (post-mortem 2026-11-16, P6): about 2 minutes after Mikey restarts, run
   `scripts/perf-sample.py` and record CPU, physical footprint and the top frames in the snapshot (RSS includes GPU
   maps and overstates by GBs). Steady CPU above ~25%, or footprint
