@@ -1914,7 +1914,9 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   and write `.cargo/config.toml` with `[build]\nincremental = false` (untracked; `.cargo/` is in
   info/exclude). Incremental caches were roughly 20 GB per worktree.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
-  merging**; keep at least 100 GB free. **At most 2 building workers at once.**
+  merging**; keep at least 100 GB free. **At most 2 builds at once in total, counting the coordinator's own release
+  run**: release only while a worker is idle, or pause one first. Worktree `.cargo/config.toml` also sets `jobs = 8`
+  under `[build]`. On 2026-11-16, 4 concurrent builds (load 44 on 18 cores) made Mast lag badly.
   Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
   If disk still nears 100 GB, first run `cargo sweep --time 3` in the main checkout (cargo-sweep is
   installed; it removes build outputs not touched in 3 days and freed 69 GB on 2026-11-14), then clear
