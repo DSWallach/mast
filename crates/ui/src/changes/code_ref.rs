@@ -1,0 +1,297 @@
+//! Hunk reference staging.
+use super::*;
+
+/// A zero new-line count identifies deleted-only hunks without scanning their lines.
+pub(super) fn deleted_only_hunk(header: &str) -> bool {
+    header
+        .split_whitespace()
+        .nth(2)
+        .and_then(|part| part.strip_prefix('+'))
+        .and_then(|part| part.split_once(','))
+        .and_then(|(_, count)| count.parse::<u32>().ok())
+        == Some(0)
+}
+
+pub(super) fn hunk_selection(
+    file: &FileDiff,
+    hunk: &Hunk,
+) -> Option<(String, mast_proto::CodeRefRange, String, bool)> {
+    let old_side = hunk.lines.iter().all(|line| line.new_no.is_none());
+    let path = if old_side {
+        file.old_path.clone().unwrap_or_else(|| file.path.clone())
+    } else {
+        file.path.clone()
+    };
+    let lines: Vec<_> = hunk
+        .lines
+        .iter()
+        .filter(|line| {
+            if old_side {
+                line.old_no.is_some()
+            } else {
+                line.new_no.is_some()
+            }
+        })
+        .collect();
+    let number = |line: &DiffLine| if old_side { line.old_no } else { line.new_no };
+    let range = mast_proto::CodeRefRange {
+        start_line: number(lines.first()?)?,
+        end_line: number(lines.last()?)?,
+    };
+    let snippet = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((path, range, snippet, old_side))
+}
+
+fn apply_owner_context(
+    context: &mut crate::files::client::FilesRequestContext,
+    owner: &ChangesTarget,
+    local_device_id: Option<&str>,
+) {
+    if let Some(cwd) = &owner.cwd {
+        // The chat's own checkout must keep checkout_path unset: the
+        // workspace API accepts an explicit path only for a bound target.
+        if context.cwd != *cwd {
+            context.target.checkout_path = Some(cwd.clone());
+        }
+        context.cwd = cwd.clone();
+        context.checkout_id = owner
+            .checkout_id
+            .clone()
+            .or_else(|| context.checkout_id.clone());
+    }
+    context.target_device_id =
+        (local_device_id != Some(owner.device_id.as_str())).then(|| owner.device_id.clone());
+}
+
+impl Changes {
+    pub(super) fn add_indexed_hunk_to_chat(
+        &mut self,
+        file: usize,
+        hunk: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let reference = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(file))
+            .and_then(|file| {
+                file.hunks
+                    .get(hunk)
+                    .and_then(|hunk| hunk_selection(file, hunk))
+            });
+        if let Some((path, range, snippet, old_side)) = reference {
+            self.add_hunk_to_chat(path, range, snippet, old_side, cx);
+        }
+    }
+
+    fn code_ref_context(
+        &self,
+        state: &AppState,
+        key: &str,
+    ) -> Option<crate::files::client::FilesRequestContext> {
+        let mut context = crate::files::client::FilesRequestContext::for_chat(state, key)?;
+        if let Some(owner) = &self.owner {
+            apply_owner_context(&mut context, owner, state.local_device_id.as_deref());
+        }
+        Some(context)
+    }
+
+    pub(super) fn add_hunk_to_chat(
+        &mut self,
+        path: String,
+        range: mast_proto::CodeRefRange,
+        expected: String,
+        old_side: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.owner_chat_id_owned() else {
+            self.error = Some("Open a chat to add this hunk.".into());
+            cx.notify();
+            return;
+        };
+        let state = self.state.read(cx);
+        let Some(context) = self.code_ref_context(state, &key) else {
+            return;
+        };
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        let commit = match self.scope {
+            DiffScope::Commit => self.commit.as_ref().and_then(|commit| {
+                if old_side {
+                    commit.parent_shas.first().cloned()
+                } else {
+                    Some(commit.sha.clone())
+                }
+            }),
+            DiffScope::Range if !old_side => self
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.range.as_ref())
+                .and_then(|range| range.head_sha.clone()),
+            _ => None,
+        };
+        let source_refs = match self.scope {
+            DiffScope::WorkingTree if old_side => {
+                Some(("HEAD".to_string(), "HEAD".to_string(), false))
+            }
+            DiffScope::Branch if old_side => self
+                .base_ref
+                .clone()
+                .map(|base| (base, "HEAD".to_string(), false)),
+            DiffScope::Range => self
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.range.as_ref())
+                .map(|range| {
+                    (
+                        range.base_ref.clone(),
+                        range
+                            .head_sha
+                            .clone()
+                            .unwrap_or_else(|| range.head_ref.clone()),
+                        !old_side,
+                    )
+                }),
+            _ => None,
+        };
+        if commit.is_none()
+            && source_refs.is_none()
+            && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range))
+        {
+            self.error = Some("The base revision for this hunk is unavailable.".into());
+            cx.notify();
+            return;
+        }
+        let request = mast_proto::ReadWorkspaceFileRequest {
+            target: context.target.clone(),
+            path: path.clone(),
+        };
+        let client =
+            crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
+        let state_handle = self.state.clone();
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.error = Some("Too many code references are loading.".into());
+            cx.notify();
+            return;
+        };
+        let accepted = state_handle.update(cx, |state, cx| {
+            let accepted = state.begin_code_ref_load(&key);
+            cx.notify();
+            accepted
+        });
+        if !accepted {
+            self.error = Some("Too many code references are loading.".into());
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
+            let identity = crate::code_ref::repository_identity(&engine, &context).await;
+            let snapshot = if let Some((base_ref, head_ref, head)) = source_refs {
+                let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "baseRef": base_ref, "headRef": head_ref, "path": path.clone(), "head": head });
+                engine.client().call(mast_rpc::methods::RESOLVE_CODE_REF_SOURCE, params).await.ok().and_then(|value| {
+                    let sha = value.get("revisionSha")?.as_str()?.to_string();
+                    let contents = value.get("text")?.as_str()?;
+                    let snippet = crate::code_ref::snippet(contents, range)?;
+                    (snippet == expected).then(|| (mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
+                })
+            } else if let Some(commit) = commit {
+                Some((mast_proto::CodeRefRevision::Commit { commit }, expected.clone()))
+            } else {
+                match client.read_file(request).await {
+                    Ok(file) if !file.truncated => file.text.and_then(|contents| {
+                        let snippet = crate::code_ref::snippet(&contents, range)?;
+                        (snippet == expected).then(|| (mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: crate::code_ref::content_hash(&contents) }, snippet))
+                    }),
+                    _ => None,
+                }
+            };
+            let _ = state_handle.update(cx, |state, cx| { state.end_code_ref_load(&key); cx.notify(); });
+            let _ = this.update(cx, |this, cx| {
+                let current = this.code_ref_context(this.state.read(cx), &key);
+                if current.as_ref() != Some(&context) { return; }
+                if let (Some(identity), Some((at, snippet))) = (identity, snapshot) {
+                    let reference = crate::code_ref::StagedCodeRef {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        reference: mast_proto::CodeRef { version: 1,
+                            location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), path },
+                            kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None, at,
+                        }, snippet,
+                    };
+                    this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); });
+                } else { this.error = Some("Could not capture the hunk at its revision.".into()); cx.notify(); }
+            });
+        }).detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_checkout_does_not_become_an_explicit_bound_target() {
+        let mut context = crate::files::client::FilesRequestContext {
+            target: mast_proto::WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            target_device_id: None,
+            cwd: "/repo".into(),
+            checkout_id: Some("checkout".into()),
+        };
+        let owner = ChangesTarget {
+            chat_id: "chat".into(),
+            device_id: "local".into(),
+            cwd: Some("/repo".into()),
+            checkout_id: Some("checkout".into()),
+            branch: None,
+            unconfirmed: None,
+            exact_checkout: false,
+            range: None,
+        };
+        apply_owner_context(&mut context, &owner, Some("local"));
+        assert_eq!(context.target.checkout_path, None);
+        assert_eq!(context.checkout_id.as_deref(), Some("checkout"));
+    }
+
+    #[test]
+    fn deleted_only_detection_uses_hunk_header() {
+        assert!(deleted_only_hunk("@@ -1,2 +0,0 @@"));
+        assert!(!deleted_only_hunk("@@ -1,2 +1,2 @@"));
+        assert!(!deleted_only_hunk("@@ -1 +1 @@"));
+    }
+
+    #[test]
+    fn hunk_anchors_new_lines_and_deleted_file_preimage() {
+        let diff = parse_patch(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
+        );
+        let (path, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
+        assert_eq!(
+            (
+                path.as_str(),
+                range.start_line,
+                range.end_line,
+                snippet.as_str(),
+                old
+            ),
+            ("a.rs", 1, 2, "one\nnew", false)
+        );
+        let diff = parse_patch(
+            "diff --git a/a.rs b/a.rs\ndeleted file mode 100644\n--- a/a.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n",
+        );
+        let (_, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
+        assert_eq!(
+            (range.start_line, range.end_line, snippet.as_str(), old),
+            (1, 2, "one\ntwo", true)
+        );
+    }
+}

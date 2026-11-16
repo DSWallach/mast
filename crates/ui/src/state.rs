@@ -750,6 +750,8 @@ pub struct AppState {
     transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
     review_comments: HashMap<String, Vec<ReviewComment>>,
+    code_refs: HashMap<String, Vec<crate::code_ref::StagedCodeRef>>,
+    code_ref_pending: HashMap<String, usize>,
     /// File surfaces whose editor-backed comments currently cite a buffer
     /// revision that has not reached disk yet. A chat remains blocked until
     /// every surface waiting on a workspace write has finished or cancelled.
@@ -884,6 +886,8 @@ impl AppState {
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
+            code_refs: HashMap::new(),
+            code_ref_pending: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
@@ -932,6 +936,35 @@ impl AppState {
     /// first send survives the chat being minted.
     pub fn composer_key(&self) -> String {
         self.selected_chat.clone().unwrap_or_default()
+    }
+
+    pub fn begin_code_ref_load(&mut self, key: &str) -> bool {
+        let count = self.code_ref_pending.entry(key.to_string()).or_default();
+        if *count >= 32 { return false; }
+        *count += 1;
+        true
+    }
+    pub fn end_code_ref_load(&mut self, key: &str) {
+        if let Some(count) = self.code_ref_pending.get_mut(key) { *count = count.saturating_sub(1); if *count == 0 { self.code_ref_pending.remove(key); } }
+    }
+    pub fn code_ref_load_pending(&self, key: &str) -> bool { self.code_ref_pending.get(key).copied().unwrap_or(0) > 0 }
+
+    pub fn code_refs(&self, key: &str) -> &[crate::code_ref::StagedCodeRef] {
+        self.code_refs.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn add_code_ref(&mut self, key: &str, reference: crate::code_ref::StagedCodeRef) {
+        self.code_refs.entry(key.to_string()).or_default().push(reference);
+    }
+
+    pub fn remove_code_ref(&mut self, key: &str, id: &str) {
+        if let Some(references) = self.code_refs.get_mut(key) {
+            references.retain(|reference| reference.id != id);
+        }
+    }
+
+    pub fn take_code_refs(&mut self, key: &str) -> Vec<crate::code_ref::StagedCodeRef> {
+        self.code_refs.remove(key).unwrap_or_default()
     }
 
     pub fn review_comments(&self, key: &str) -> &[ReviewComment] {

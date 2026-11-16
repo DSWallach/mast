@@ -964,6 +964,7 @@ pub enum ShortcutId {
     ToggleTerminal,
     OpenMyPrs,
     QuickOpen,
+    AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
     ReviewNextStepArrow,
@@ -1007,7 +1008,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 28 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 29 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1036,6 +1037,7 @@ impl ShortcutId {
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
         ShortcutId::OpenOutline,
+        ShortcutId::AddCodeToChat,
         ShortcutId::ToggleOutlineFocus,
         ShortcutId::OpenFullChat,
         ShortcutId::CreateWorkItem,
@@ -1108,6 +1110,7 @@ impl ShortcutId {
             ShortcutId::GoToLine => "Go to line",
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
+            ShortcutId::AddCodeToChat => "Add code to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
             ShortcutId::ReviewNextStepArrow => "Next review step (arrow)",
@@ -1173,6 +1176,7 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
+            ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
             ShortcutId::ReviewNextStepArrow => "down",
@@ -1290,6 +1294,7 @@ pub struct KeymapConfig {
     pub go_to_line: String,
     pub search_workspace_content: String,
     pub quick_open: String,
+    pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
     pub review_next_step_arrow: String,
@@ -1391,6 +1396,7 @@ impl Default for KeymapConfig {
             go_to_line: ShortcutId::GoToLine.default_combo().into(),
             search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
+            add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
             review_next_step_arrow: ShortcutId::ReviewNextStepArrow.default_combo().into(),
@@ -1454,6 +1460,7 @@ impl KeymapConfig {
             ShortcutId::GoToLine => &self.go_to_line,
             ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
             ShortcutId::QuickOpen => &self.quick_open,
+            ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
             ShortcutId::ReviewNextStepArrow => &self.review_next_step_arrow,
@@ -1515,6 +1522,7 @@ impl KeymapConfig {
             ShortcutId::GoToLine => self.go_to_line = combo,
             ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
             ShortcutId::QuickOpen => self.quick_open = combo,
+            ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
             ShortcutId::ReviewNextStepArrow => self.review_next_step_arrow = combo,
@@ -1699,7 +1707,9 @@ pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
     !matches!(
         (left, right),
-        (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
+        (ShortcutId::AddCodeToChat, ShortcutId::OpenOutline)
+            | (ShortcutId::OpenOutline, ShortcutId::AddCodeToChat)
+            | (ShortcutId::Outline(_), ShortcutId::OpenTeamTabFromPanel)
             | (ShortcutId::OpenTeamTabFromPanel, ShortcutId::Outline(_))
     )
 }
@@ -2109,6 +2119,7 @@ impl UiSettings {
                             (ShortcutId::GoToLine, "goToLine"),
                             (ShortcutId::SearchWorkspaceContent, "searchWorkspaceContent"),
                             (ShortcutId::QuickOpen, "quickOpen"),
+                            (ShortcutId::AddCodeToChat, "addCodeToChat"),
                             (ShortcutId::OpenOutline, "openOutline"),
                             (ShortcutId::ToggleOutlineFocus, "toggleOutlineFocus"),
                             (ShortcutId::OpenFullChat, "openFullChat"),
@@ -3740,6 +3751,15 @@ mod tests {
         assert_eq!(restored.get(ShortcutId::OpenTeamTab), "mod-alt-o");
         keymap.set(ShortcutId::OpenTeamTab, "mod-o".into());
         assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::OpenTeamTab));
+    }
+
+    #[test]
+    fn add_code_shortcut_default_and_rebinding_persist() {
+        let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(keymap.get(ShortcutId::AddCodeToChat), "mod-shift-l");
+        keymap.set(ShortcutId::AddCodeToChat, "mod-alt-l".into());
+        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::AddCodeToChat), "mod-alt-l");
     }
 
     #[test]
