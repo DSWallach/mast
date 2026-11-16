@@ -2661,6 +2661,7 @@ impl Render for AppearancePage {
                     cx.emit(AppearanceSettingsEvent::CompactSingleChatChanged(!ui_settings.compact_single_chat));
                     cx.notify();
                 }))).into_any_element());
+        settings_rows.push(crate::artifacts::preview_thumb::settings_row(&theme, ui_settings.open_diagrams_automatically, cx));
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))

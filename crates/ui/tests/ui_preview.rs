@@ -121,6 +121,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "controls",
         "components",
         "browser",
+        "diagram-card",
     ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
