@@ -308,8 +308,18 @@ impl Repos {
             cmd.current_dir(cwd);
         }
         cmd.stdin(std::process::Stdio::null());
+        // Network operations can run for minutes; they must not hold a slot
+        // that quick local lookups are queued behind.
+        let network = args
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|arg| matches!(*arg, "fetch" | "clone" | "push" | "pull"));
         let output = {
-            let _permit = crate::git_gate::acquire().await;
+            let _permit = if network {
+                None
+            } else {
+                Some(crate::git_gate::acquire().await)
+            };
             cmd.output().await
         }
         .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
