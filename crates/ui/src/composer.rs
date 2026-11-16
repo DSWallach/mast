@@ -5213,6 +5213,7 @@ impl Composer {
                 input.insert_dropped_mention(reference, metadata.is_dir(), cx)
             });
             if inserted {
+                if !metadata.is_dir() && relative.is_some() { self.stage_workspace_file(reference, cx); }
                 self.reset_mention(None, cx);
                 self.reset_slash(None, cx);
                 self.focus_pending = true;
@@ -5875,6 +5876,7 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.replace_mention(token.range, &path, is_dir, cx)
         });
+        if !is_dir { self.stage_workspace_file(&path, cx); }
         self.reset_mention(None, cx);
         cx.notify();
     }
