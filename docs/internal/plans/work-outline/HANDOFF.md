@@ -1236,7 +1236,8 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
   Mikey restarted; typing is responsive. perf-sample at 3 min: 6–15% CPU, 2.6 GB (94: 200–380%).
   Post-mortem: `docs/internal/postmortems/2026-11-16-slow-mast.md`; prevention items P1–P7 there.
 - Integration is ahead of installed by fd5675865 (network git ops skip the spawn gate); ships with the next release.
-- Still open: 94 grew to 8 GB RSS in 15 min (watch on 95); `pr_ticket_cache` gh calls and `diff_sync::read_head` lead
+- Not a leak: the "8 GB RSS" on 94 is mapped GPU memory (IOAccelerator); 95's physical footprint is 1.1 GB
+  (peak 1.8) while RSS reads 6.4 GB. Gate on footprint, not RSS. Still open: `pr_ticket_cache` gh calls and `diff_sync::read_head` lead
   the startup profile; spinner ticks re-render the sidebar (2694931e); freeze watchdog (17c9d278).
 - Paused workers unchanged from the previous snapshot (code-ref, board, inline diagrams).
 
@@ -2010,7 +2011,8 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   3. Once it exists: headless engine soak of the candidate on a scratch data copy, compared with the installed
      release. Worse CPU or git spawn rate = no install.
 - **Perf check after every release** (post-mortem 2026-11-16, P6): about 2 minutes after Mikey restarts, run
-  `scripts/perf-sample.py` and record CPU, RSS and the top frames in the snapshot. Steady CPU above ~25%, or RSS
+  `scripts/perf-sample.py` and record CPU, physical footprint and the top frames in the snapshot (RSS includes GPU
+  maps and overstates by GBs). Steady CPU above ~25%, or footprint
   growing more than 1 GB in 15 minutes, blocks further feature releases until explained.
 - **Perf review rules** (same post-mortem, P4/P5): no fixed-interval retry loops (back off; "not found" and bad
   params are non-transient); any per-Space, per-worktree or per-chat loop that runs git or I/O is cached and bounded;

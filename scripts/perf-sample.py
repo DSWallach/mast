@@ -34,9 +34,20 @@ def find_pid():
     sys.exit("Mast is not running")
 
 
+def footprint(pid):
+    # RSS counts mapped GPU memory (IOAccelerator) and overstates Mast by GBs;
+    # physical footprint is what memory pressure and Activity Monitor use.
+    out = subprocess.run(["vmmap", "--summary", str(pid)], capture_output=True, text=True).stdout
+    now = re.search(r"Physical footprint:\s+(\S+)", out)
+    peak = re.search(r"Physical footprint \(peak\):\s+(\S+)", out)
+    return f"footprint {now.group(1) if now else '?'} (peak {peak.group(1) if peak else '?'})"
+
+
 def cpu_rss(pid):
     out = subprocess.run(["ps", "-o", "%cpu=,rss=,etime=", "-p", str(pid)], capture_output=True, text=True).stdout.split()
-    return f"cpu {out[0]}%  rss {int(out[1]) / 1048576:.1f} GB  up {out[2]}" if len(out) == 3 else "gone"
+    if len(out) != 3:
+        return "gone"
+    return f"cpu {out[0]}%  {footprint(pid)}  rss {int(out[1]) / 1048576:.1f} GB (incl. GPU maps)  up {out[2]}"
 
 
 def short(sym):
