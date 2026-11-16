@@ -65,6 +65,7 @@ mod file_list;
 mod explanation;
 mod ref_picker;
 mod review_state;
+mod review_drafts;
 pub(crate) mod walkthrough;
 
 use file_list::*;

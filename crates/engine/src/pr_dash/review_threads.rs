@@ -131,6 +131,41 @@ fn parse_page(connection: &Value) -> Result<Vec<ReviewThread>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeGh(AtomicUsize);
+    #[async_trait::async_trait]
+    impl GhRunner for FakeGh {
+        async fn current_user(&self) -> Result<String, String> {
+            Ok("reviewer".into())
+        }
+        async fn graphql(&self, _: &str, _: &[(&str, &str)]) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+                    "pageInfo":{"hasNextPage":false}, "nodes":[]
+                }}}}}),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_visible_reads_share_the_cache() {
+        let gh = Arc::new(FakeGh(AtomicUsize::new(0)));
+        let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        for _ in 0..100 {
+            assert!(
+                dash.review_threads("owner", "repo", 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(gh.0.load(Ordering::SeqCst), 1);
+        assert!(dash.review_threads("owner", "repo", 0).await.is_err());
+        assert_eq!(gh.0.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn recorded_thread_page() {
         let page = serde_json::json!({"nodes":[{"id":"T1","path":"src/a.rs","line":4,"diffSide":"RIGHT","isOutdated":false,"isResolved":true,
