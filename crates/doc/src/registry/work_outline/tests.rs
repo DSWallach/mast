@@ -1710,3 +1710,106 @@ fn undo_inverse_operations_restore_order_parent_fields_and_archive() {
     assert!(s.items.iter().all(|i| i.archived_at.is_none()));
     assert_eq!(titles(&s, Some(&a)), ["A child"]);
 }
+
+fn doc_with_worktree_space(device: &str) -> RegistryDoc {
+    let mut doc = RegistryDoc::new(device);
+    for (id, path) in [
+        (SPACE, "/tmp/repo"),
+        (OTHER_SPACE, "/tmp/repo/.worktrees/x"),
+    ] {
+        doc.create_space_with_pr_prompts(
+            &space(id, device, path),
+            &mast_proto::PrReviewPrompts::neutral(),
+        )
+        .unwrap();
+    }
+    doc
+}
+
+#[test]
+fn fold_space_moves_chats_and_deletes_the_emptied_space() {
+    let mut doc = doc_with_worktree_space("dev-a");
+    let mut moved = chat("chat-1", "dev-a");
+    moved.space_id = Some(OTHER_SPACE.into());
+    moved.cwd = Some("/tmp/repo/.worktrees/x".into());
+    let mut stays = chat("chat-2", "dev-a");
+    stays.space_id = Some(SPACE.into());
+    doc.upsert_chat(&moved).unwrap();
+    doc.upsert_chat(&stays).unwrap();
+
+    assert_eq!(
+        doc.fold_space(OTHER_SPACE, SPACE).unwrap(),
+        Some(vec!["chat-1".to_string()])
+    );
+    let spaces: Vec<String> = doc
+        .read_spaces()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(spaces, [SPACE]);
+    let chat = doc.chat("chat-1").unwrap().expect("chat survives the fold");
+    assert_eq!(chat.space_id.as_deref(), Some(SPACE));
+    assert_eq!(chat.cwd.as_deref(), Some("/tmp/repo/.worktrees/x"));
+    assert_eq!(doc.read_chats().unwrap().len(), 2);
+}
+
+#[test]
+fn fold_space_refuses_peer_chats_outline_rows_and_missing_targets() {
+    let mut doc = doc_with_worktree_space("dev-a");
+    let mut peer = chat("chat-peer", "dev-b");
+    peer.space_id = Some(OTHER_SPACE.into());
+    doc.upsert_chat(&peer).unwrap();
+    assert!(!doc.space_foldable(OTHER_SPACE).unwrap());
+    assert_eq!(doc.fold_space(OTHER_SPACE, SPACE).unwrap(), None);
+
+    let mut doc = doc_with_worktree_space("dev-a");
+    create_in(
+        &mut doc,
+        OTHER_SPACE,
+        "op-wt",
+        None,
+        WorkOutlinePlacement::Last,
+        "Worktree item",
+    );
+    assert!(!doc.space_foldable(OTHER_SPACE).unwrap());
+    assert_eq!(doc.fold_space(OTHER_SPACE, SPACE).unwrap(), None);
+
+    // A live run's agent grant is pinned to its Space: wait for it to settle.
+    let mut doc = doc_with_worktree_space("dev-a");
+    let mut running = chat("chat-running", "dev-a");
+    running.space_id = Some(OTHER_SPACE.into());
+    doc.upsert_chat(&running).unwrap();
+    for status in [SessionStatus::Working, SessionStatus::AwaitingInput] {
+        doc.upsert_session(&Session {
+            last_completed_turn: None,
+            awaiting_input: None,
+            last_turn_tool_failures: None,
+            chat_id: "chat-running".into(),
+            device_id: "dev-a".into(),
+            status,
+            started_at: None,
+            updated_at: Utc::now(),
+        })
+        .unwrap();
+        assert!(!doc.space_foldable(OTHER_SPACE).unwrap());
+    }
+    doc.upsert_session(&Session {
+        last_completed_turn: None,
+        awaiting_input: None,
+        last_turn_tool_failures: None,
+        chat_id: "chat-running".into(),
+        device_id: "dev-a".into(),
+        status: SessionStatus::Idle,
+        started_at: None,
+        updated_at: Utc::now(),
+    })
+    .unwrap();
+    assert!(doc.space_foldable(OTHER_SPACE).unwrap());
+
+    let mut doc = doc_with_worktree_space("dev-a");
+    assert!(doc.space_foldable(OTHER_SPACE).unwrap());
+    assert_eq!(doc.fold_space(OTHER_SPACE, "sp-missing").unwrap(), None);
+    assert_eq!(doc.fold_space(OTHER_SPACE, OTHER_SPACE).unwrap(), None);
+    assert_eq!(doc.read_spaces().unwrap().len(), 2);
+}

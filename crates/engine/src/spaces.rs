@@ -1,5 +1,5 @@
 //! SpacesSync — owner-side upkeep of space rows (git presence) plus the
-//! orphan-chat repair sweep.
+//! orphan-chat repair sweep and the worktree-Space fold.
 //!
 //! A space is a synced (device, folder) pair; the folder need NOT be a git
 //! repo. This service watches the workspace `spaces` rows owned by THIS device
@@ -296,6 +296,15 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
         tracing::debug!("spaces: orphan sweep skipped (registry not yet synced this boot)");
         return;
     }
+    // Worktree Spaces (minted before claims and imports resolved worktrees to
+    // their checkout's Space) fold into that Space; same synced gate, since
+    // the fold deletes the emptied Space.
+    if !crate::work_outline::writes_disabled() {
+        let folded = inner.workspace.fold_worktree_spaces();
+        if folded > 0 {
+            tracing::info!(spaces = folded, "folded worktree spaces");
+        }
+    }
     let spaces = inner.workspace.watch_spaces().borrow().clone();
     let live: std::collections::HashSet<&str> = spaces.iter().map(|s| s.id.as_str()).collect();
     let chats = inner.workspace.watch_chats().borrow().clone();
@@ -307,6 +316,10 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
             continue;
         };
         if live.contains(space_id) {
+            continue;
+        }
+        if inner.workspace.rehome_worktree_chat(&chat) {
+            tracing::info!(chat = %chat.id, space = %space_id, "re-homed orphaned worktree chat");
             continue;
         }
         tracing::info!(chat = %chat.id, space = %space_id, "deleting orphaned chat (space gone)");
