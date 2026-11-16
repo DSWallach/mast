@@ -4737,11 +4737,23 @@ impl Shell {
                     cx.notify();
                     return;
                 }
-                if let Some(status) = result.ok().and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok()) {
-                    crate::review_chats::note_chat_links(cx, &chat_id, &crate::review_chats::links_of_status(&status));
-                    this.chat_header_links.insert(chat_id, ChatHeaderLinkCache {
-                        checkout, status: Some(status), fetched_at: Instant::now(),
-                    });
+                if let Some(status) = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok())
+                {
+                    crate::review_chats::note_chat_links(
+                        cx,
+                        &chat_id,
+                        &crate::review_chats::links_of_status(&status),
+                    );
+                    this.chat_header_links.insert(
+                        chat_id,
+                        ChatHeaderLinkCache {
+                            checkout,
+                            status: Some(status),
+                            fetched_at: Instant::now(),
+                        },
+                    );
                 }
                 cx.notify();
             })
