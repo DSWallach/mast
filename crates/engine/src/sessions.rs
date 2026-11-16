@@ -257,8 +257,11 @@ pub struct SessionsEngine {
 
 /// A side chat reads, never writes, and never waits on a person: read-only
 /// sandbox with approvals off, on every run whatever its config says.
-pub(crate) fn confine_side_chat(request: &mut RunRequest) {
-    request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+pub(crate) fn confine_side_chat(harness: HarnessId, request: &mut RunRequest) {
+    // Antigravity can't run read-only; the UI warns instead.
+    if mast_proto::side_chat::harness_supports_read_only(harness) {
+        request.sandbox = mast_proto::SandboxLevel::ReadOnly;
+    }
     request.auto_approve = true;
 }
 
@@ -1008,7 +1011,7 @@ impl SessionsEngine {
                 return Err(EngineError::Other("this side chat was closed".into()));
             }
             Some(_) => {
-                confine_side_chat(&mut request);
+                confine_side_chat(harness_id, &mut request);
                 true
             }
             None => false,

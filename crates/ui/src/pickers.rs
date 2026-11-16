@@ -5691,7 +5691,12 @@ impl Pickers {
                         .absolute()
                         .inset_0(),
                     );
-                row = row.child(popover::nested_menu(
+                let nested = if self.launcher.is_some() {
+                    popover::nested_menu_over_modal
+                } else {
+                    popover::nested_menu
+                };
+                row = row.child(nested(
                     format!("setting-menu-{ix}"),
                     menu.into_any_element(),
                     self.setting_on_left,
