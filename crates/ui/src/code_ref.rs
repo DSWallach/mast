@@ -106,6 +106,15 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             reference,
             snippet,
         };
+        if staged.reference.kind == mast_proto::CodeRefKind::File {
+            if let Some(span) = spans.iter_mut().find(|span| {
+                span.path.as_ref() == staged.reference.location.path && span.code_ref.is_none()
+            }) {
+                span.code_ref = Some(staged);
+                remaining = rest;
+                continue;
+            }
+        }
         let start = result.len();
         result.push_str(&staged.label());
         let end = result.len();

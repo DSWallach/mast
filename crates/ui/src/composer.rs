@@ -5238,15 +5238,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !is_directory && self.stage_workspace_file(path, cx) {
-            self.focus_pending = true;
-            cx.notify();
-            return;
-        }
         let inserted = self.input.update(cx, |input, cx| {
             input.insert_dropped_mention(path, is_directory, cx)
         });
         if inserted {
+            if !is_directory { self.stage_workspace_file(path, cx); }
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
             let focus = self.input.read(cx).focus_handle.clone();
@@ -6709,7 +6705,7 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
         );
         send_button_mode(self.run_live(cx), has_text)
     }
@@ -6731,7 +6727,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -6758,7 +6754,7 @@ impl Composer {
         let has_content = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
+            self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
@@ -6892,8 +6888,16 @@ impl Composer {
             }
             taken
         });
-        let code_refs = self.state.update(cx, |state, cx| { let references = state.take_code_refs(&key); cx.notify(); references });
         let typed = text.clone();
+        let mentioned_files: HashSet<_> = file_mention_links(&typed).into_iter().filter(|link| !link.is_dir).map(|link| link.path).collect();
+        let code_refs = self.state.update(cx, |state, cx| {
+            let mut seen_files = HashSet::new();
+            let references = state.take_code_refs(&key).into_iter().filter(|reference| {
+                reference.reference.kind != mast_proto::CodeRefKind::File || (mentioned_files.contains(&reference.reference.location.path) && seen_files.insert(reference.reference.location.path.clone()))
+            }).collect::<Vec<_>>();
+            cx.notify();
+            references
+        });
         // Visible preamble ahead of the user's words (never hidden prompt
         // injection): the transcript, queue row and Run prompt all carry it.
         let text = with_skill_preamble(&staged_skills, &text);
@@ -8435,7 +8439,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len() + self.staged_skills().len(),
-                self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).len(),
+                self.staged_comments(cx).len() + self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count(),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
@@ -8500,7 +8504,7 @@ impl Render for Composer {
         // both fold into one height term so every sizing site below agrees.
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len())
             + comment_strip_height(self.staged_skills().len())
-            + comment_strip_height(self.state.read(cx).code_refs(&self.current_key).len());
+            + comment_strip_height(self.state.read(cx).code_refs(&self.current_key).iter().filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File).count());
         let base_height = if self.dock_frame.is_some() {
             dock_height(dock_amount)
         } else if expanded {

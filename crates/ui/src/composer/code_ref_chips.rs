@@ -7,7 +7,14 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
-        let references = self.state.read(cx).code_refs(&self.current_key).to_vec();
+        let references: Vec<_> = self
+            .state
+            .read(cx)
+            .code_refs(&self.current_key)
+            .iter()
+            .filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File)
+            .cloned()
+            .collect();
         if references.is_empty() {
             return None;
         }
