@@ -129,3 +129,50 @@ impl Composer {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn staged_reference_renders_and_can_be_removed(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "ref".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation {
+                    repo_id: "repo".into(),
+                    worktree_id: None,
+                    path: "src/file.rs".into(),
+                },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange {
+                    start_line: 1,
+                    end_line: 2,
+                }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree {
+                    working_tree: true,
+                    content_hash: "hash".into(),
+                },
+            },
+            snippet: "one\ntwo".into(),
+        };
+        state.update(cx, |state, cx| {
+            state.add_code_ref("", reference);
+            cx.notify();
+        });
+        composer.update(cx, |composer, cx| {
+            assert!(composer.render_code_refs(&Theme::dark(), cx).is_some());
+            assert_eq!(composer.button_mode(cx), SendButtonMode::Send);
+            composer.state.update(cx, |state, cx| {
+                state.remove_code_ref("", "ref");
+                cx.notify();
+            });
+            assert!(composer.render_code_refs(&Theme::dark(), cx).is_none());
+        });
+    }
+}
