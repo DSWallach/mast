@@ -14,11 +14,16 @@ impl RegistryDoc {
         if row.fields.get("target").and_then(Value::as_str) != Some(target) {
             return Vec::new();
         }
-        row.fields
-            .get("drafts")
-            .and_then(Value::as_str)
-            .and_then(|value| serde_json::from_str(value).ok())
-            .unwrap_or_default()
+        let mut drafts: Vec<ReviewDraft> = row
+            .fields
+            .iter()
+            .filter(|(key, _)| key.starts_with("d:"))
+            .filter_map(|(_, value)| value.as_str())
+            .filter_map(|value| serde_json::from_str::<ReviewDraft>(value).ok())
+            .filter(|draft| draft.target == target)
+            .collect();
+        drafts.sort_by(|a, b| a.id.cmp(&b.id));
+        drafts
     }
 
     /// Compare before writing to avoid needless registry operations.
@@ -27,23 +32,60 @@ impl RegistryDoc {
         target: &str,
         drafts: &[ReviewDraft],
     ) -> Result<bool, DocError> {
-        if target.trim().is_empty() || drafts.iter().any(|draft| draft.target != target) {
+        let mut ids = std::collections::HashSet::new();
+        if target.trim().is_empty()
+            || drafts.iter().any(|draft| {
+                draft.target != target || draft.id.trim().is_empty() || !ids.insert(&draft.id)
+            })
+        {
             return Err(DocError::Schema(
                 "review drafts need matching targets".into(),
             ));
         }
-        if self.review_drafts(target) == drafts {
+        let before = self.review_drafts(target);
+        let old: BTreeMap<_, _> = before
+            .iter()
+            .map(|draft| (draft.id.clone(), draft))
+            .collect();
+        let new: BTreeMap<_, _> = drafts
+            .iter()
+            .map(|draft| (draft.id.clone(), draft))
+            .collect();
+        if old == new {
             return Ok(false);
         }
-        self.write(
-            KIND_REVIEW_DRAFTS,
-            &row_id(target),
-            OpKind::Upsert,
-            fields([
-                ("target", json!(target)),
-                ("drafts", json!(serde_json::to_string(drafts)?)),
-            ]),
-        );
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let hlc = self.mint_hlc();
+        let mut updates = vec![fields([("target", json!(target))])];
+        let keys: std::collections::BTreeSet<String> =
+            old.keys().chain(new.keys()).cloned().collect();
+        for key in &keys {
+            if old.get(key) == new.get(key) {
+                continue;
+            }
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                format!("d:{}", derive_id(key, "review-draft")),
+                match new.get(key) {
+                    Some(draft) => json!(serde_json::to_string(draft)?),
+                    None => Value::Null,
+                },
+            );
+            updates.push(fields);
+        }
+        let ops = updates
+            .into_iter()
+            .map(|set| RowOp {
+                kind: KIND_REVIEW_DRAFTS.into(),
+                id: id.clone(),
+                op: OpKind::Upsert,
+                set: Some(set),
+                hlc: hlc.clone(),
+                clocks: None,
+            })
+            .collect();
+        self.write_ops(ops)?;
         Ok(true)
     }
 }
@@ -80,5 +122,29 @@ mod tests {
         assert!(!registry.put_review_drafts(target, &[draft]).unwrap());
         assert!(registry.put_review_drafts(target, &[]).unwrap());
         assert!(registry.review_drafts(target).is_empty());
+    }
+
+    #[test]
+    fn many_drafts_use_bounded_operations() {
+        let mut registry = RegistryDoc::new("device");
+        let target = "branch:owner/repo#feature";
+        let drafts: Vec<_> = (0..500)
+            .map(|i| ReviewDraft {
+                id: format!("draft-{i:04}"),
+                target: target.into(),
+                body: "x".repeat(200),
+                source: ReviewDraftSource::User,
+                created_at: 1,
+                anchor: ReviewAnchor {
+                    file: "a.rs".into(),
+                    side: ReviewSide::Right,
+                    start_line: i + 1,
+                    end_line: i + 1,
+                    hunk_hash: Some("hash".into()),
+                },
+            })
+            .collect();
+        assert!(registry.put_review_drafts(target, &drafts).unwrap());
+        assert_eq!(registry.review_drafts(target), drafts);
     }
 }

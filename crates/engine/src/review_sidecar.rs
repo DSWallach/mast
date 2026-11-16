@@ -238,8 +238,15 @@ pub fn validate_review(
     for comment in &mut review.suggested_comments {
         validate_anchor(&mut comment.anchor)?;
         let id = comment.id.get_or_insert_with(|| {
-            let seed = format!("{}\n{:?}\n{}\n{}", comment.anchor.file,
-                comment.anchor.side, comment.anchor.hunk_hash.as_deref().unwrap_or_default(), comment.body);
+            let seed = format!(
+                "{}\n{:?}\n{}\n{}\n{}\n{}",
+                comment.anchor.file,
+                comment.anchor.side,
+                comment.anchor.start_line,
+                comment.anchor.end_line,
+                comment.anchor.hunk_hash.as_deref().unwrap_or_default(),
+                comment.body
+            );
             mast_proto::derive_id(&seed, "review-suggestion")
         });
         if id.trim().is_empty() || !suggestion_ids.insert(id.clone()) {
@@ -339,6 +346,44 @@ mod tests {
             validate_review(dir.path(), &mut wrong, &head)
                 .unwrap_err()
                 .contains("does not match")
+        );
+    }
+
+    #[test]
+    fn suggestions_validate_and_keep_stable_ids() {
+        let (dir, base, head) = fixture();
+        let mut value = review(&base, &head);
+        value
+            .suggested_comments
+            .push(mast_proto::ReviewSuggestedComment {
+                id: None,
+                anchor: value.highlights[0].anchor.clone(),
+                body: "Check this".into(),
+                severity: "low".into(),
+                suggestion: None,
+            });
+        let mut republished = value.clone();
+        validate_review(dir.path(), &mut value, &head).unwrap();
+        validate_review(dir.path(), &mut republished, &head).unwrap();
+        assert_eq!(
+            value.suggested_comments[0].id,
+            republished.suggested_comments[0].id
+        );
+        let mut invalid = value.clone();
+        invalid.suggested_comments[0].anchor.start_line = 100;
+        invalid.suggested_comments[0].anchor.end_line = 100;
+        assert!(
+            validate_review(dir.path(), &mut invalid, &head)
+                .unwrap_err()
+                .contains("Valid hunks per file")
+        );
+        value
+            .suggested_comments
+            .push(value.suggested_comments[0].clone());
+        assert!(
+            validate_review(dir.path(), &mut value, &head)
+                .unwrap_err()
+                .contains("unique")
         );
     }
 }
