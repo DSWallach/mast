@@ -4309,6 +4309,22 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::GET_REVIEW_DRAFTS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.review_drafts(target))
+            }
+            methods::SET_REVIEW_DRAFTS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                let drafts: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params.get("drafts").cloned().ok_or_else(|| RpcError::Failed("drafts is required".into()))?
+                ).map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&self.workspace.put_review_drafts(target, &drafts)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
             methods::GET_DIFF_REVIEW_STATE => {
                 let target = params
                     .get("target")

@@ -816,6 +816,14 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.diff_review_state(target)))
     }
 
+    pub fn review_drafts(&self, target: &str) -> Vec<mast_proto::ReviewDraft> {
+        self.read(|doc| doc.review_drafts(target))
+    }
+
+    pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_review_drafts(target, drafts))?)
+    }
+
     /// Initialize PR marks from a branch once, under the workspace lock.
     pub fn inherit_diff_review_state(&self, target: &str, branch: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
         Ok(self.mutate(|doc| {
