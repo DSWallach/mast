@@ -25,6 +25,8 @@
 //! Wheel/touch releases that anchor immediately, including when background
 //! streaming has advanced beyond the last measured frame.
 
+mod code_refs;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -3039,6 +3041,7 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3396,6 +3399,7 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            code_ref_resolutions: HashMap::new(),
             list,
             rows: Vec::new(),
             last_source: None,
@@ -5514,6 +5518,8 @@ impl Transcript {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.resolve_code_refs(&mentions, cx);
+        let (text, mentions) = self.project_code_ref_resolutions(&text, &mentions);
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
         let line_height =
@@ -7495,9 +7501,9 @@ fn user_bubble_text(
                         rect,
                         px(5.0),
                         wash,
-                        px(0.0),
-                        gpui::transparent_black(),
-                        BorderStyle::default(),
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { px(1.0) } else { px(0.0) },
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { theme.border } else { gpui::transparent_black() },
+                        if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { BorderStyle::Dashed } else { BorderStyle::default() },
                     ));
                 }
             }

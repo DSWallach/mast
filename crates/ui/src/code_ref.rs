@@ -118,6 +118,7 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             path: path.into(),
             is_dir: false,
             code_ref: Some(staged),
+            resolution: None,
         });
         remaining = rest;
     }

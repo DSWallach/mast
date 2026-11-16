@@ -1345,6 +1345,7 @@ pub struct SentMentionSpan {
     pub path: SharedString,
     pub is_dir: bool,
     pub code_ref: Option<crate::code_ref::StagedCodeRef>,
+    pub resolution: Option<crate::code_ref::Resolution>,
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1372,6 +1373,7 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
             )),
             is_dir: link.is_dir,
             code_ref: None,
+            resolution: None,
         })
         .collect();
     Some((projection.display, spans))
