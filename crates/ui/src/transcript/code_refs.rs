@@ -151,6 +151,13 @@ pub(super) fn activate(
         return;
     };
     let Some(range) = reference.reference.range else {
+        render::activate_link(
+            crate::markdown::links::LinkTarget::new("", &reference.reference.location.path),
+            crate::markdown::links::LinkAction::Primary,
+            link_ui.as_ref(),
+            window,
+            cx,
+        );
         return;
     };
     let request = mast_proto::ReadWorkspaceFileRequest {

@@ -5234,6 +5234,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !is_directory && self.stage_workspace_file(path, cx) {
+            self.focus_pending = true;
+            cx.notify();
+            return;
+        }
         let inserted = self.input.update(cx, |input, cx| {
             input.insert_dropped_mention(path, is_directory, cx)
         });
