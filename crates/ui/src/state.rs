@@ -37,7 +37,7 @@ use mast_proto::{
 use mast_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 use crate::change_requests::{
-    ChangeRequestClientState, ChangeRequestWatchKey, watch_params,
+    ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
 };
 
 // Recently viewed transcripts stay renderable while a fresh watch opens. Move
@@ -1953,7 +1953,10 @@ impl AppState {
 
     /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
     pub fn change_request_for_chat(&self, chat: &Chat) -> Option<&ChangeRequestSummary> {
-        let key = crate::change_requests::checkout_watch_key(chat, self.selected_chat_diff_target(&chat.id))?;
+        let key = crate::change_requests::checkout_watch_key(
+            chat,
+            self.selected_chat_diff_target(&chat.id),
+        )?;
         self.change_requests.change_request_for_key(&key)
     }
 
@@ -2047,6 +2050,14 @@ impl AppState {
                 }
             }
         }
+        for chat in &self.chats {
+            if let Some(target) = self.selected_chat_diff_target(&chat.id) {
+                chat.id.hash(&mut h);
+                target.path.hash(&mut h);
+                target.checkout_id.hash(&mut h);
+                target.branch.hash(&mut h);
+            }
+        }
         self.selected_chat.hash(&mut h);
         self.engine.is_some().hash(&mut h);
         self.data_dir.hash(&mut h);
@@ -2073,14 +2084,6 @@ impl AppState {
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.overview_fingerprint(now).hash(&mut h);
-        for chat in &self.chats {
-            if let Some(target) = self.selected_chat_diff_target(&chat.id) {
-                chat.id.hash(&mut h);
-                target.path.hash(&mut h);
-                target.checkout_id.hash(&mut h);
-                target.branch.hash(&mut h);
-            }
-        }
         let _ = write!(
             Feed(&mut h),
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
@@ -2388,9 +2391,31 @@ impl AppState {
         true
     }
 
+    /// Selection is engine-owned: a session-local pill pick affects the header
+    /// only after its selection has round-tripped through the engine.
+    pub(crate) fn display_chat_branch<'a>(&'a self, chat: &'a Chat) -> Option<&'a str> {
+        let target = self.selected_chat_diff_target(&chat.id);
+        if target.is_none() && chat.source_context.is_none() {
+            return None;
+        }
+        crate::change_requests::display_checkout(chat, target)
+            .branch
+            .filter(|branch| !branch.trim().is_empty())
+    }
+
+    pub(crate) fn selected_checkout_key(&self, chat_id: &str) -> Option<(String, String, Option<String>)> {
+        self.selected_chat_diff_target(chat_id)
+            .map(|target| (target.path.clone(), target.checkout_id.clone(), target.branch.clone()))
+    }
+
     /// The explicitly selected checkout target, if any.
-    pub(crate) fn selected_chat_diff_target(&self, chat_id: &str) -> Option<&mast_proto::ChatDiffTargetView> {
-        self.chat_diff_targets(chat_id).iter().find(|target| target.selected)
+    pub(crate) fn selected_chat_diff_target(
+        &self,
+        chat_id: &str,
+    ) -> Option<&mast_proto::ChatDiffTargetView> {
+        self.chat_diff_targets(chat_id)
+            .iter()
+            .find(|target| target.selected)
     }
 
     /// Resolved diff targets of a Chat (empty when none).
@@ -3132,9 +3157,12 @@ impl AppState {
             return;
         };
         let targets = if self.change_requests_visible {
-            self.chats.iter().filter(|chat| !chat.archived && self.change_requests.is_supported(&chat.device_id))
-                .filter_map(|chat| crate::change_requests::checkout_watch_key(chat, self.selected_chat_diff_target(&chat.id)))
-                .collect()
+            desired_watch_targets(
+                &self.chats,
+                &self.spaces,
+                |device| !self.change_requests.is_supported(device),
+                |chat_id| self.selected_chat_diff_target(chat_id),
+            )
         } else {
             HashSet::new()
         };
@@ -3875,7 +3903,12 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                     let changed = apply(state, parsed);
                     state.apply_pending_deep_link(cx);
                     if changed {
-                        if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES | methods::WATCH_CHAT_DIFF_TARGETS) {
+                        if matches!(
+                            method,
+                            methods::WATCH_SPACES
+                                | methods::WATCH_DEVICES
+                                | methods::WATCH_CHAT_DIFF_TARGETS
+                        ) {
                             state.reconcile_change_request_watches(cx);
                         }
                         if method == methods::WATCH_SPACES {

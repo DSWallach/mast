@@ -108,7 +108,7 @@ const CHAT_HEADER_LINK_REFRESH: Duration = Duration::from_secs(15);
 const CHAT_HEADER_METADATA_CLEARANCE: f32 = 52.0;
 
 struct ChatHeaderLinkCache {
-    checkout: Option<(String, Option<String>)>,
+    checkout: Option<(String, String, Option<String>)>,
     status: Option<ChatLinkStatus>,
     fetched_at: Instant,
 }
@@ -4712,13 +4712,10 @@ impl Shell {
     }
 
     fn ensure_chat_header_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let checkout = self.state.read(cx).selected_chat_diff_target(&chat_id)
-            .map(|target| (target.path.clone(), target.branch.clone()));
-        if self
-            .chat_header_links
-            .get(&chat_id)
-            .is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
-            || self.chat_header_links_pending.contains(&chat_id)
+        let checkout = self.state.read(cx).selected_checkout_key(&chat_id);
+        if self.chat_header_links.get(&chat_id).is_some_and(|entry| {
+            entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH
+        }) || self.chat_header_links_pending.contains(&chat_id)
         {
             return;
         }
@@ -4736,24 +4733,16 @@ impl Shell {
                 .await;
             this.update(cx, |this, cx| {
                 this.chat_header_links_pending.remove(&chat_id);
-                let status = result
-                    .ok()
-                    .and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok());
-                if let Some(status) = &status {
-                    crate::review_chats::note_chat_links(
-                        cx,
-                        &chat_id,
-                        &crate::review_chats::links_of_status(status),
-                    );
+                if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    cx.notify();
+                    return;
                 }
-                this.chat_header_links.insert(
-                    chat_id,
-                    ChatHeaderLinkCache {
-                        checkout,
-                        status,
-                        fetched_at: Instant::now(),
-                    },
-                );
+                if let Some(status) = result.ok().and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok()) {
+                    crate::review_chats::note_chat_links(cx, &chat_id, &crate::review_chats::links_of_status(&status));
+                    this.chat_header_links.insert(chat_id, ChatHeaderLinkCache {
+                        checkout, status: Some(status), fetched_at: Instant::now(),
+                    });
+                }
                 cx.notify();
             })
             .ok();

@@ -4530,7 +4530,8 @@ impl Shell {
         }
         // The branch shows whenever the engine has stamped one —
         // main-checkout sessions included, not just worktrees.
-        let branch = crate::change_requests::conversation_branch(&chat, &state.spaces)
+        let branch = state
+            .display_chat_branch(&chat)
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .map(str::to_string)

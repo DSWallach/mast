@@ -1451,6 +1451,7 @@ pub struct Overview {
     /// navigation; only the explicit "Open chat" affordance does that.
     expanded: HashSet<String>,
     link_status: HashMap<String, LinkStatusEntry>,
+    link_checkouts: HashMap<String, Option<(String, String, Option<String>)>>,
     link_status_pending: HashSet<String>,
     /// Subagents per chat id. Fetched once per chat (not refreshed on an
     /// interval like `link_status` — a session's own subagent set is
@@ -1820,6 +1821,7 @@ impl Overview {
             view_mode: OverviewMode::Outline,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
+            link_checkouts: HashMap::new(),
             link_status_pending: HashSet::new(),
             subagents: HashMap::new(),
             subagent_pending: HashSet::new(),
@@ -2777,10 +2779,12 @@ impl Overview {
     }
 
     fn ensure_link_status(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let fresh_enough = self
-            .link_status
-            .get(&chat_id)
-            .is_some_and(|e| e.fetched_at.elapsed() < LINK_STATUS_REFRESH);
+        let checkout = self.state.read(cx).selected_checkout_key(&chat_id);
+        let fresh_enough = self.link_checkouts.get(&chat_id).cloned().unwrap_or(None) == checkout
+            && self
+                .link_status
+                .get(&chat_id)
+                .is_some_and(|e| e.fetched_at.elapsed() < LINK_STATUS_REFRESH);
         if fresh_enough || self.link_status_pending.contains(&chat_id) {
             return;
         }
@@ -2799,6 +2803,10 @@ impl Overview {
                 .await;
             this.update(cx, |this, cx| {
                 this.link_status_pending.remove(&chat_id);
+                if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    cx.notify();
+                    return;
+                }
                 if let Ok(value) = result
                     && let Ok(status) = serde_json::from_value::<OverviewLinkStatus>(value.clone())
                 {
@@ -2822,6 +2830,7 @@ impl Overview {
                         status,
                     );
                     let fingerprint = link_fingerprint(&status);
+                    this.link_checkouts.insert(chat_id.clone(), checkout);
                     let previous = this
                         .link_status
                         .insert(
@@ -3516,8 +3525,12 @@ impl Overview {
             .link_status
             .get(&chat_id)
             .map(|entry| header_links(&entry.status));
-        let mut metadata =
-            crate::chat_metadata::metadata_items(&chat, space.as_ref(), links.as_ref());
+        let mut metadata = crate::chat_metadata::metadata_items(
+            &chat,
+            space.as_ref(),
+            links.as_ref(),
+            self.state.read(cx).selected_chat_diff_target(&chat_id),
+        );
         crate::chat_metadata::insert_account_item(
             &mut metadata,
             self.state.read(cx).chat_account_badge(&chat_id),

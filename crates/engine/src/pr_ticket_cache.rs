@@ -257,6 +257,7 @@ pub struct MyPrItem {
 #[derive(Clone, Hash, Eq, PartialEq)]
 enum PrKey {
     Branch { cwd: PathBuf, branch: String },
+    CheckoutBranch { cwd: PathBuf, branch: String },
     Url(String),
 }
 
@@ -365,24 +366,47 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
     ) -> ChatLinkStatus {
-        self.status_for_chat_links_with_checkout(space_id, cwd, branch, linked_pr_links, linked_ticket_id, None)
+        self.status_for_chat_links_with_checkout(
+            space_id,
+            cwd,
+            branch,
+            linked_pr_links,
+            linked_ticket_id,
+            None,
+        )
     }
 
     /// Resolve the PR from a selected checkout while retaining the chat's
     /// original ticket and execution context.
     pub fn status_for_chat_links_with_checkout(
-        &self, space_id: Option<&str>, cwd: Option<&str>, branch: Option<&str>,
-        linked_pr_links: &[mast_proto::ChatPrLink], linked_ticket_id: Option<&str>,
+        &self,
+        space_id: Option<&str>,
+        cwd: Option<&str>,
+        branch: Option<&str>,
+        linked_pr_links: &[mast_proto::ChatPrLink],
+        linked_ticket_id: Option<&str>,
         checkout: Option<(&str, Option<&str>)>,
     ) -> ChatLinkStatus {
         let linear_space = space_id.is_some_and(|space| {
-            lock(&self.inner.linear).as_ref().is_some_and(|(_, workspace)| workspace.space_linear_enabled(space))
+            lock(&self.inner.linear)
+                .as_ref()
+                .is_some_and(|(_, workspace)| workspace.space_linear_enabled(space))
         });
-        if linear_space && let Some(ticket) = linked_ticket_id.filter(|id| !id.is_empty()).map(str::to_string)
-            .or_else(|| branch.and_then(extract_ticket_id)) {
+        if linear_space
+            && let Some(ticket) = linked_ticket_id
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .or_else(|| branch.and_then(extract_ticket_id))
+        {
             lock(&self.inner.linear_tickets).insert(ticket);
         }
-        self.status_for_links_with_checkout(cwd, branch, linked_pr_links, linked_ticket_id, checkout)
+        self.status_for_links_with_checkout(
+            cwd,
+            branch,
+            linked_pr_links,
+            linked_ticket_id,
+            checkout,
+        )
     }
 
     /// One ticket: through the Linear API when the ticket came from a
@@ -456,8 +480,12 @@ impl PrTicketCache {
     }
 
     fn status_for_links_with_checkout(
-        &self, cwd: Option<&str>, branch: Option<&str>, linked_pr_links: &[mast_proto::ChatPrLink],
-        linked_ticket_id: Option<&str>, checkout: Option<(&str, Option<&str>)>,
+        &self,
+        cwd: Option<&str>,
+        branch: Option<&str>,
+        linked_pr_links: &[mast_proto::ChatPrLink],
+        linked_ticket_id: Option<&str>,
+        checkout: Option<(&str, Option<&str>)>,
     ) -> ChatLinkStatus {
         let mut status = ChatLinkStatus::default();
         let automatic_cwd =
@@ -494,13 +522,23 @@ impl PrTicketCache {
         // and URL de-duplication gives durable provenance precedence.
         let has_durable_pr_links = !status.pr_links.is_empty();
         let (pr_cwd, pr_branch) = checkout.map_or((automatic_cwd, branch), |(path, branch)| {
-            (Some(path).filter(|cwd| !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))), branch)
+            (
+                Some(path).filter(|cwd| {
+                    !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))
+                }),
+                branch,
+            )
         });
         let branch_key = match (pr_cwd, pr_branch) {
-            (Some(cwd), Some(branch)) if !branch.is_empty() => Some(PrKey::Branch {
-                cwd: PathBuf::from(cwd),
-                branch: branch.to_string(),
-            }),
+            (Some(cwd), Some(branch)) if !branch.is_empty() => {
+                let cwd = PathBuf::from(cwd);
+                let branch = branch.to_string();
+                Some(if checkout.is_some() {
+                    PrKey::CheckoutBranch { cwd, branch }
+                } else {
+                    PrKey::Branch { cwd, branch }
+                })
+            }
             _ => None,
         };
         if let Some(key) = branch_key {
@@ -552,8 +590,11 @@ impl PrTicketCache {
         // Worktree/diff-stat: pure string check + a local, cheap-but-not-free
         // `git` shell-out gated the same way PR/ticket are — never inline, a
         // cache read that registers a miss for the sweep to fill.
-        if let Some(cwd) = cwd {
-            status.is_worktree = automatic_cwd.is_some() && is_worktree_cwd(cwd);
+        let context_cwd = checkout.map(|(path, _)| path).or(cwd);
+        if let Some(cwd) = context_cwd {
+            status.is_worktree =
+                !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))
+                    && is_worktree_cwd(cwd);
             if status.is_worktree {
                 let key = PathBuf::from(cwd);
                 let cache = lock(&self.inner.diff_stat_cache);
@@ -652,6 +693,9 @@ impl PrTicketCache {
             let key2 = key.clone();
             let data = tokio::task::spawn_blocking(move || match &key2 {
                 PrKey::Branch { cwd, branch } => fetch_github_pr(cwd, branch),
+                PrKey::CheckoutBranch { cwd, branch } => {
+                    run_gh_pr_view(cwd, branch).map(|data| pr_json_to_status(&data))
+                }
                 PrKey::Url(url) => fetch_github_pr_by_url(url),
             })
             .await
@@ -660,7 +704,7 @@ impl PrTicketCache {
             if let (Some(wakes), Some(status)) = (&wakes, &data) {
                 let url = match &key {
                     PrKey::Url(url) => Some(url.as_str()),
-                    PrKey::Branch { .. } => status.url.as_deref(),
+                    PrKey::Branch { .. } | PrKey::CheckoutBranch { .. } => status.url.as_deref(),
                 };
                 if let Some(url) = url {
                     wakes.observe(url, status).await;
@@ -1428,11 +1472,53 @@ mod tests {
     #[test]
     fn selected_checkout_is_the_only_branch_pr_lookup() {
         let cache = PrTicketCache::new();
-        cache.status_for_chat_links_with_checkout(None, Some("/tmp/root"), Some("root-branch"), &[], None,
-            Some(("/tmp/root/submodule", Some("checkout-branch"))));
+        cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root-branch"),
+            &[],
+            None,
+            Some(("/tmp/root/submodule", Some("checkout-branch"))),
+        );
         let pending = lock(&cache.inner.pending_pr);
         assert_eq!(pending.len(), 1);
-        assert!(pending.contains(&PrKey::Branch { cwd: PathBuf::from("/tmp/root/submodule"), branch: "checkout-branch".into() }));
+        assert!(pending.contains(&PrKey::CheckoutBranch {
+            cwd: PathBuf::from("/tmp/root/submodule"),
+            branch: "checkout-branch".into()
+        }));
+    }
+
+    #[test]
+    fn detached_checkout_does_not_enqueue_a_branch_lookup() {
+        let cache = PrTicketCache::new();
+        cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root-branch"),
+            &[],
+            None,
+            Some(("/tmp/target", None)),
+        );
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn durable_pr_link_survives_a_selected_checkout() {
+        let cache = PrTicketCache::new();
+        let links = vec![mast_proto::ChatPrLink {
+            url: "https://github.com/acme/app/pull/3".into(),
+            source: mast_proto::ChatLinkSource::Manual,
+        }];
+        let status = cache.status_for_chat_links_with_checkout(
+            None,
+            Some("/tmp/root"),
+            Some("root"),
+            &links,
+            None,
+            Some(("/tmp/target", Some("feature"))),
+        );
+        assert_eq!(status.pr_links.len(), 1);
+        assert_eq!(status.pr_links[0].url, links[0].url);
     }
 
     #[test]

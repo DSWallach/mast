@@ -102,12 +102,9 @@ impl Shell {
             .space_id
             .as_deref()
             .and_then(|id| state.artifacts().snapshot(id).cloned());
-        let checkout = state.selected_chat_diff_target(chat_id)
-            .map(|target| (target.path.clone(), target.branch.clone()));
         let links = self
             .chat_header_links
             .get(chat_id)
-            .filter(|entry| entry.checkout == checkout)
             .and_then(|entry| entry.status.as_ref())
             .map(crate::chat_metadata::HeaderLinks::from_status);
         let mut facts = facts(&FactsInput {
@@ -412,7 +409,10 @@ impl Shell {
                             crate::components::shell_parts::chat_header_chip_icon_color(theme, text, is_model && tone == ChipTone::Plain, tone == ChipTone::Link),
                         )),
                 )
-                .child(div().min_w_0().truncate().child(SharedString::from(label)))
+                .child({
+                    let label_selector = format!("chat-header-label-{key}:{label}");
+                    div().debug_selector(move || label_selector.clone()).min_w_0().truncate().child(SharedString::from(label))
+                })
                 .tooltip(move |_, cx| {
                     cx.new(|_| SurfaceTabTooltip {
                         text: tooltip.clone(),
@@ -865,7 +865,9 @@ impl Shell {
                 block = block.child(muted(format!("\u{2387} {branch}")));
             }
             if let Some(root) = &facts.execution_root {
-                block = block.child(muted(format!("Execution root: {root}")));
+                let label = format!("Execution root: {root}");
+                let selector = format!("chat-item-execution-root:{label}");
+                block = block.child(div().debug_selector(move || selector.clone()).child(muted(label)));
             }
             if facts.runs_in.is_none() && facts.branch.is_none() {
                 block = block.child(muted("Not started yet".into()));

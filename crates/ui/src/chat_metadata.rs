@@ -80,7 +80,9 @@ impl HeaderPr {
         });
     }
 
-    pub(crate) fn status_from_detail(detail: &mast_engine::pr_ticket_cache::PrStatus) -> HeaderPrStatus {
+    pub(crate) fn status_from_detail(
+        detail: &mast_engine::pr_ticket_cache::PrStatus,
+    ) -> HeaderPrStatus {
         use mast_engine::pr_ticket_cache::ChecksStatus;
         HeaderPrStatus {
             state: match detail.state.as_str() {
@@ -271,6 +273,7 @@ pub(crate) fn metadata_items(
     chat: &Chat,
     space: Option<&Space>,
     links: Option<&HeaderLinks>,
+    checkout_target: Option<&mast_proto::ChatDiffTargetView>,
 ) -> Vec<MetadataItem> {
     let mut items = Vec::new();
     if let Some(links) = links {
@@ -312,11 +315,8 @@ pub(crate) fn metadata_items(
         model_tooltip,
     ));
 
-    if let Some(branch) = chat
-        .source_context
-        .as_ref()
-        .map(|context| context.branch.as_str())
-        .or(chat.branch.as_deref())
+    if let Some(branch) = crate::change_requests::display_checkout(chat, checkout_target)
+        .branch
         .map(str::trim)
         .filter(|branch| !branch.is_empty())
     {
@@ -510,7 +510,7 @@ mod tests {
                 state: None,
             }),
         };
-        let items = metadata_items(&chat(), None, Some(&links));
+        let items = metadata_items(&chat(), None, Some(&links), None);
         let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(labels.contains(&"PR #7"));
         assert!(labels.contains(&"PR #8"));
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn header_shows_the_model_that_ran_not_a_default() {
         let model_item = |chat: &Chat| {
-            let items = metadata_items(chat, None, None);
+            let items = metadata_items(chat, None, None, None);
             let item = items.iter().find(|item| item.key == "model").unwrap();
             (item.label.clone(), item.tooltip.clone())
         };
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn ids_are_compact_but_copy_the_complete_value() {
-        let items = metadata_items(&chat(), None, None);
+        let items = metadata_items(&chat(), None, None, None);
         let chat_id = items.iter().find(|item| item.key == "chat-id").unwrap();
         assert_eq!(chat_id.label, "Chat chat-12345…");
         assert_eq!(
