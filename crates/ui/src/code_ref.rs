@@ -240,14 +240,15 @@ pub enum Resolution {
 /// Search complete lines only. Ambiguous matches are treated as changed rather
 /// than silently navigating to an arbitrary occurrence.
 pub fn reanchor(contents: &str, original: CodeRefRange, pinned_snippet: &str) -> Resolution {
-    if pinned_snippet.is_empty() {
-        return Resolution::Changed;
-    }
     if snippet(contents, original).as_deref() == Some(pinned_snippet) {
         return Resolution::Unchanged(original);
     }
     let file: Vec<_> = contents.lines().collect();
-    let target: Vec<_> = pinned_snippet.lines().collect();
+    let target: Vec<_> = if pinned_snippet.is_empty() {
+        vec![""]
+    } else {
+        pinned_snippet.lines().collect()
+    };
     let matches: Vec<_> = file
         .windows(target.len())
         .enumerate()
