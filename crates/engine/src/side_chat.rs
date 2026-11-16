@@ -169,13 +169,16 @@ impl DocHost {
 
     /// Retire every side chat this device hosts as soon as it is archived,
     /// whichever path (UI, agent tool, another device) archived it.
+    ///
+    /// Runs as a host worker so `shutdown_workers` ends it: the chat watch
+    /// never closes on its own, because the loop holds the workspace.
     pub fn spawn_side_chat_reaper(&self) {
         let Some(workspace) = self.workspace().cloned() else {
             return;
         };
         let host = self.clone();
         let mut chats = workspace.watch_chats();
-        tokio::spawn(async move {
+        self.spawn_worker(async move {
             let mut retired = std::collections::HashSet::<String>::new();
             loop {
                 let due: Vec<String> = {
