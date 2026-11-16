@@ -75,9 +75,13 @@ impl Changes {
         let mut context = crate::files::client::FilesRequestContext::for_chat(state, key)?;
         if let Some(owner) = &self.owner {
             if let Some(cwd) = &owner.cwd {
+                // The chat's own checkout must keep checkout_path unset: the
+                // workspace API accepts an explicit path only for a bound target.
+                if context.cwd != *cwd {
+                    context.target.checkout_path = Some(cwd.clone());
+                }
                 context.cwd = cwd.clone();
-                context.target.checkout_path = Some(cwd.clone());
-                context.checkout_id = owner.checkout_id.clone();
+                context.checkout_id = owner.checkout_id.clone().or(context.checkout_id);
             }
             context.target_device_id = (state.local_device_id.as_deref()
                 != Some(owner.device_id.as_str()))
