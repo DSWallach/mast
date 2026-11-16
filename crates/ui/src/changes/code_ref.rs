@@ -1,6 +1,40 @@
 //! Hunk reference staging.
 use super::*;
 
+pub(super) fn hunk_selection(
+    file: &FileDiff,
+    hunk: &Hunk,
+) -> Option<(String, mast_proto::CodeRefRange, String, bool)> {
+    let old_side = hunk.lines.iter().all(|line| line.new_no.is_none());
+    let path = if old_side {
+        file.old_path.clone().unwrap_or_else(|| file.path.clone())
+    } else {
+        file.path.clone()
+    };
+    let lines: Vec<_> = hunk
+        .lines
+        .iter()
+        .filter(|line| {
+            if old_side {
+                line.old_no.is_some()
+            } else {
+                line.new_no.is_some()
+            }
+        })
+        .collect();
+    let number = |line: &DiffLine| if old_side { line.old_no } else { line.new_no };
+    let range = mast_proto::CodeRefRange {
+        start_line: number(lines.first()?)?,
+        end_line: number(lines.last()?)?,
+    };
+    let snippet = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((path, range, snippet, old_side))
+}
+
 impl Changes {
     pub(super) fn add_hunk_to_chat(
         &mut self,
@@ -90,5 +124,36 @@ impl Changes {
                 } else { this.error = Some("Could not capture the hunk at its revision.".into()); cx.notify(); }
             });
         }).detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hunk_anchors_new_lines_and_deleted_file_preimage() {
+        let diff = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
+        );
+        let (path, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
+        assert_eq!(
+            (
+                path.as_str(),
+                range.start_line,
+                range.end_line,
+                snippet.as_str(),
+                old
+            ),
+            ("a.rs", 1, 2, "one\nnew", false)
+        );
+        let diff = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\ndeleted file mode 100644\n--- a/a.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n",
+        );
+        let (_, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
+        assert_eq!(
+            (range.start_line, range.end_line, snippet.as_str(), old),
+            (1, 2, "one\ntwo", true)
+        );
     }
 }

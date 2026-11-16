@@ -4393,14 +4393,9 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
-                let old_side = hunk_diff.lines.iter().all(|line| line.new_no.is_none());
-                let path = if old_side { file_diff.old_path.clone().unwrap_or_else(|| file_diff.path.clone()) } else { file_diff.path.clone() };
-                let lines: Vec<_> = hunk_diff.lines.iter().filter(|line| if old_side { line.old_no.is_some() } else { line.new_no.is_some() }).collect();
-                let number = |line: &DiffLine| if old_side { line.old_no } else { line.new_no };
-                let hunk_range = lines.first().and_then(|first| lines.last().map(|last| mast_proto::CodeRefRange { start_line: number(first).unwrap(), end_line: number(last).unwrap() }));
-                let snippet = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n");
+                let hunk_reference = code_ref::hunk_selection(file_diff, hunk_diff);
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
-                    .when_some(hunk_range, |row, range| row.child(
+                    .when_some(hunk_reference, |row, (path, range, snippet, old_side)| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
                             .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
