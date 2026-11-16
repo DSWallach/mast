@@ -1558,16 +1558,16 @@ pub fn body_rows(
     fn push_cards(
         rows: &mut Vec<DiffRow>,
         file_ix: u32,
-        comments: &[ReviewComment],
+        cards: &HashMap<(CommentSide, u32), Vec<u32>>,
         draft: Option<(CommentSide, u32)>,
         anchors: &[Option<(CommentSide, u32)>],
     ) {
         for anchor in anchors.iter().flatten() {
-            for (ix, comment) in comments.iter().enumerate() {
-                if comment.diff_anchor() == Some(*anchor) {
+            if let Some(indices) = cards.get(anchor) {
+                for &ix in indices {
                     rows.push(DiffRow::CommentCard {
                         file: file_ix,
-                        card: ix as u32,
+                        card: ix,
                     });
                 }
             }
@@ -1577,6 +1577,12 @@ pub fn body_rows(
         }
     }
 
+    let mut cards: HashMap<(CommentSide, u32), Vec<u32>> = HashMap::new();
+    for (ix, comment) in comments.iter().enumerate() {
+        if let Some(anchor) = comment.diff_anchor() {
+            cards.entry(anchor).or_default().push(ix as u32);
+        }
+    }
     let mut rows = Vec::with_capacity(body_row_count(file));
     for notice in 0..file_notices(file).len() {
         rows.push(DiffRow::Notice {
@@ -1599,7 +1605,7 @@ pub fn body_rows(
                         line: line_ix as u32,
                         flat: hunk_flat + line_ix as u32,
                     });
-                    push_cards(&mut rows, file_ix, comments, draft, &[line_anchor(line)]);
+                    push_cards(&mut rows, file_ix, &cards, draft, &[line_anchor(line)]);
                 }
             }
             DiffMode::Split => {
@@ -1611,7 +1617,7 @@ pub fn body_rows(
                         right,
                     });
                     let anchors = pair_anchors(&hunk.lines, (left, right));
-                    push_cards(&mut rows, file_ix, comments, draft, &anchors);
+                    push_cards(&mut rows, file_ix, &cards, draft, &anchors);
                 }
             }
         }

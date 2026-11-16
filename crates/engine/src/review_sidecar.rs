@@ -234,8 +234,17 @@ pub fn validate_review(
     for highlight in &mut review.highlights {
         validate_anchor(&mut highlight.anchor)?;
     }
+    let mut suggestion_ids = std::collections::HashSet::new();
     for comment in &mut review.suggested_comments {
         validate_anchor(&mut comment.anchor)?;
+        let id = comment.id.get_or_insert_with(|| {
+            let seed = format!("{}\n{:?}\n{}\n{}", comment.anchor.file,
+                comment.anchor.side, comment.anchor.hunk_hash.as_deref().unwrap_or_default(), comment.body);
+            mast_proto::derive_id(&seed, "review-suggestion")
+        });
+        if id.trim().is_empty() || !suggestion_ids.insert(id.clone()) {
+            return Err("Suggested comment ids must be nonempty and unique".into());
+        }
     }
     Ok(())
 }
