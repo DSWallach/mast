@@ -2566,11 +2566,12 @@ impl FilesSurface {
                 let state = editor.read(cx);
                 let value = state.value().to_string();
                 let selection = state.selected_range();
+                let top = state.range_to_bounds(&selection).map(|bounds| bounds.origin.y + bounds.size.height - state.input_bounds().origin.y).unwrap_or(px(12.0));
                 crate::code_ref::selection_lines(&value, selection).and_then(|range| {
-                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value)))
+                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value), top))
                 })
             };
-            let action_bar = selected.and_then(|(range, snippet, hash)| {
+            let action_bar = selected.and_then(|(range, snippet, hash, top)| {
                 let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;
                 let key = self.chat_id.clone();
                 let path = path.to_string();
@@ -2584,7 +2585,7 @@ impl FilesSurface {
                         at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
                     }, snippet,
                 };
-                Some(crate::components::code_ref::selection_action_bar(theme)
+                Some(crate::components::code_ref::selection_action_bar(theme, top)
                     .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference.clone()); cx.notify(); });
