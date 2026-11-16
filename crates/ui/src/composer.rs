@@ -6884,8 +6884,8 @@ impl Composer {
         // Visible preamble ahead of the user's words (never hidden prompt
         // injection): the transcript, queue row and Run prompt all carry it.
         let text = with_skill_preamble(&staged_skills, &text);
-        let text = crate::comments::with_comments(&text, &comments);
         let text = crate::code_ref::with_code_refs(&text, &code_refs);
+        let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         self.instruction_reset.remember_send(&message_id, &typed);
         let created_at = chrono::Utc::now().timestamp_millis();
