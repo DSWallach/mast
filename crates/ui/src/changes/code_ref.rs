@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn hunk_anchors_new_lines_and_deleted_file_preimage() {
-        let diff = parse_unified_diff(
+        let diff = parse_patch(
             "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
         );
         let (path, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
@@ -147,7 +147,7 @@ mod tests {
             ),
             ("a.rs", 1, 2, "one\nnew", false)
         );
-        let diff = parse_unified_diff(
+        let diff = parse_patch(
             "diff --git a/a.rs b/a.rs\ndeleted file mode 100644\n--- a/a.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n",
         );
         let (_, range, snippet, old) = hunk_selection(&diff[0], &diff[0].hunks[0]).unwrap();
