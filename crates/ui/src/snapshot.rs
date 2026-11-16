@@ -409,3 +409,8 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         _shell: shell,
     })
 }
+
+/// Construct a transcript diagram card with a deterministic preview.
+pub fn diagram_card_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::artifacts::preview_thumb::snapshot_fixture(cx)
+}

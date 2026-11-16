@@ -82,6 +82,7 @@ pub(crate) fn artifact_card(
     card: CardModel,
     link_ui: Option<render::LinkUi>,
     theme: &Theme,
+    thumbnail: Option<std::sync::Arc<gpui::Image>>,
 ) -> AnyElement {
     let selector = format!("{row_id}#artifact");
     let title: SharedString = card.title.clone().into();
@@ -105,6 +106,8 @@ pub(crate) fn artifact_card(
             crate::components::browser_parts::artifact_card_frame(
                 SharedString::from(selector), format!("Open artifact {title}"), theme,
             )
+                .flex_col()
+                .child(div().w_full().flex().items_center().gap(px(10.0))
                 .child(crate::components::browser_parts::artifact_card_icon(card.icon, theme))
                 .child(
                     div()
@@ -137,6 +140,11 @@ pub(crate) fn artifact_card(
                             open_button(window, cx)
                         }),
                 )
+                )
+                .when_some(thumbnail, |card, image| card.child(
+                    div().w_full().max_h(px(220.0)).overflow_hidden()
+                        .child(gpui::img(image).w_full().max_h(px(220.0)).object_fit(gpui::ObjectFit::Contain))
+                ))
                 .on_click(move |_, window, cx| open(window, cx)),
         )
         .into_any_element()

@@ -13,12 +13,48 @@ pub(crate) struct ArtifactTabs {
     pub(crate) tabs: std::collections::HashMap<u64, Entity<ArtifactTab>>,
     subs: std::collections::HashMap<u64, Subscription>,
     seq: u64,
+    observed_diagrams: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Tests: the web renderer new tabs use.
     #[cfg(test)]
     pub(crate) web_factory: Option<WebHostFactory>,
 }
 
 impl Shell {
+    /// Observe newly published diagrams without changing keyboard focus.
+    pub(super) fn auto_open_diagrams(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() { return; }
+        let chat = self.active_chat.clone();
+        let diagrams = {
+            let state = self.state.read(cx);
+            let Some(space) = state.chats.iter().find(|row| row.id == chat).and_then(|row| row.space_id.as_deref()) else { return; };
+            let Some(snapshot) = state.artifacts().snapshot(space) else { return; };
+            snapshot.for_chat(&chat).into_iter().filter(|artifact| {
+                matches!(artifact.kind, mast_proto::ArtifactKind::Mermaid | mast_proto::ArtifactKind::Image)
+                    || artifact.role.as_deref() == Some("diagram")
+            }).map(|artifact| artifact.id.clone()).collect::<std::collections::HashSet<_>>()
+        };
+        let Some(seen) = self.artifact_tabs.observed_diagrams.get_mut(&chat) else {
+            self.artifact_tabs.observed_diagrams.insert(chat, diagrams);
+            return;
+        };
+        let added: Vec<_> = diagrams.difference(seen).cloned().collect();
+        seen.extend(diagrams);
+        if !crate::settings::current(cx).open_diagrams_automatically { return; }
+        for artifact_id in added {
+            let chat = chat.clone();
+            cx.defer_in(window, move |this, window, cx| {
+                if this.active_chat == chat && matches!(this.route, Route::Chat) {
+                    let key = this.panel_key(cx);
+                    let already_open = this.right_tabs.get(&key).is_some_and(|tabs| tabs.iter().any(|surface| match surface {
+                        RightSurface::Artifact(id) => this.artifact_tabs.tabs.get(id).is_some_and(|tab| tab.read(cx).artifact_id == artifact_id),
+                        _ => false,
+                    }));
+                    if !already_open { this.open_artifact_here(artifact_id, false, window, cx); }
+                }
+            });
+        }
+    }
+
     fn artifact_web_factory(&self) -> WebHostFactory {
         #[cfg(test)]
         if let Some(factory) = &self.artifact_tabs.web_factory {
@@ -152,19 +188,20 @@ impl Shell {
             let this = cx.weak_entity();
             window.defer(cx, move |window, cx| {
                 this.update(cx, |this, cx| {
-                    this.open_artifact_here(artifact_id, window, cx)
+                    this.open_artifact_here(artifact_id, true, window, cx)
                 })
                 .ok();
             });
             return;
         }
         self.leave_overview_for_chat(cx);
-        self.open_artifact_here(artifact_id, window, cx);
+        self.open_artifact_here(artifact_id, true, window, cx);
     }
 
     fn open_artifact_here(
         &mut self,
         artifact_id: String,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -186,7 +223,7 @@ impl Shell {
         });
         if let Some(id) = existing {
             self.set_right_active(RightSurface::Artifact(id), cx);
-            self.focus_artifact_tab(id, window, cx);
+            if focus { self.focus_artifact_tab(id, window, cx); }
             return;
         }
         self.artifact_tabs.seq += 1;
@@ -219,7 +256,7 @@ impl Shell {
             .or_default()
             .push(RightSurface::Artifact(id));
         self.set_right_active(RightSurface::Artifact(id), cx);
-        self.focus_artifact_tab(id, window, cx);
+        if focus { self.focus_artifact_tab(id, window, cx); }
     }
 
     /// Put keyboard focus in an Artifact tab, so ⌘F finds in it.
@@ -485,6 +522,55 @@ mod tests {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("review-stale").is_some());
+    }
+
+    #[gpui::test]
+    fn published_diagrams_open_once_and_respect_setting(cx: &mut gpui::TestAppContext) {
+        let dir = init_ui(cx);
+        let reply: Reply = Arc::new(|_, _| Ok(content_reply(ArtifactKind::Mermaid, 1, "graph TD; A-->B", ArtifactContentEncoding::Utf8)));
+        let (shell, calls, _, vcx) = artifact_shell(cx, dir.path(), vec![], reply);
+        shell.update_in(vcx, |shell, window, cx| shell.auto_open_diagrams(window, cx));
+        let focus = shell.read_with(vcx, |shell, cx| shell.composer.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| window.focus(&focus, cx));
+        let mut diagram = artifact(&id(1), "Diagram", ArtifactKind::Mermaid);
+        diagram.space_id = "s1".into();
+        diagram.chat_id = Some("c1".into());
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram.clone()])));
+            shell.auto_open_diagrams(window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(open_artifact_ids(&shell, vcx), [id(1)]);
+        assert!(vcx.update(|window, _| focus.is_focused(window)));
+        let initial_calls = calls.lock().unwrap().len();
+        diagram.current_revision += 1;
+        shell.update(vcx, |shell, cx| shell.state.update(cx, |state, cx| {
+            state.set_test_artifacts(snapshot(vec![diagram.clone()]));
+            cx.notify();
+        }));
+        vcx.run_until_parked();
+        assert!(calls.lock().unwrap().len() > initial_calls, "the open tab reloads a new revision");
+        shell.update(vcx, |shell, cx| {
+            let key = shell.panel_key(cx);
+            let tab = match shell.right_tabs.get_mut(&key).unwrap().pop().unwrap() { RightSurface::Artifact(id) => id, _ => panic!("artifact") };
+            shell.close_artifact_tab(tab, cx);
+        });
+        diagram.current_revision += 1;
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram.clone()])));
+            shell.auto_open_diagrams(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(open_artifact_ids(&shell, vcx).is_empty());
+        vcx.update(|_, cx| { crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.open_diagrams_automatically = false); });
+        let mut second = diagram.clone();
+        second.id = id(2);
+        shell.update_in(vcx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| state.set_test_artifacts(snapshot(vec![diagram, second])));
+            shell.auto_open_diagrams(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(open_artifact_ids(&shell, vcx).is_empty());
     }
 
     #[gpui::test]

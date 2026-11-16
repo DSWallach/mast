@@ -11610,6 +11610,7 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.auto_open_diagrams(window, cx);
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("shell");
         self.render_time = Some(std::time::Instant::now());
