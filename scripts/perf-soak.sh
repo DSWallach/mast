@@ -22,7 +22,7 @@
 # Fails (exit 1) when candidate avg CPU or git spawns/min (whole run, and steady state after
 # the first 60 s) > RATIO x baseline
 # (baseline floors: CPU 3%, 10 spawns/min, so near-idle noise cannot trip it) or
-# candidate RSS grows more than RSS_MAX_MB between warm-up and the end.
+# candidate physical footprint (vmmap) grows more than RSS_MAX_MB between warm-up and the end.
 # With --real/--template and a baseline it also writes the soak result (pass or fail, with
 # CPU, physical footprint, git spawns/min and baseline numbers) into the perf-gate stamp for HEAD.
 # Exit 2: could not run (sandbox unavailable, engine refused/died). Never falls back.
@@ -81,6 +81,8 @@ fi
 # ---- one run -----------------------------------------------------------------
 free_port() { local p; while :; do p=$((20000 + RANDOM % 30000)); nc -z 127.0.0.1 "$p" 2>/dev/null || { echo "$p"; return; }; done; }
 cpu_seconds() { ps -o cputime= -p "$1" 2>/dev/null | awk '{n=split($1,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; print s}'; }
+# Physical footprint (MB) from `vmmap --summary`; RSS counts mapped GPU memory and overstates Mast.
+footprint_mb() { vmmap --summary "$1" 2>/dev/null | awk '/^Physical footprint:/ {v=$3; u=substr(v,length(v)); n=substr(v,1,length(v)-1)+0; if(u=="G")n*=1024; else if(u=="K")n/=1024; else if(u=="B")n/=1048576; printf "%d", n; exit}'; }
 rss_mb() { ps -o rss= -p "$1" 2>/dev/null | awk '{printf "%d", $1/1024}'; }
 
 # run <label> <binary>; writes $ROOT/<label>.result (key=value lines)
@@ -106,12 +108,17 @@ run_one() {
       sandbox-exec -f "$dir/sandbox.sb" "$bin" headless > "$dir/engine.log" 2>&1 &
   local pid=$!
   # sandbox-exec execs the target, so $pid is the engine.
-  local peak=0 warm_rss="" t=0 sampled60=0 cpu60=0 git60=0 t60=0
+  local peak=0 warm_rss="" warm_fp="" peak_fp=0 next_fp=15 t=0 sampled60=0 cpu60=0 git60=0 t60=0
   while [ "$t" -lt "$SECONDS_TOTAL" ]; do
     sleep 5; t=$(( $(date +%s) - start ))
     kill -0 "$pid" 2>/dev/null || { echo "engine exited early (see $dir/engine.log)" >&2; tail -5 "$dir/engine.log" >&2; echo "failed=exited" > "$ROOT/$label.result"; return 2; }
     local r; r=$(rss_mb "$pid"); [ -n "$r" ] && [ "$r" -gt "$peak" ] && peak=$r
     if [ -z "$warm_rss" ] && [ "$t" -ge 30 ]; then warm_rss=$r; fi
+    if [ "$t" -ge "$next_fp" ]; then
+      next_fp=$((t + 15)); local f; f=$(footprint_mb "$pid")
+      [ -n "$f" ] && [ "$f" -gt "$peak_fp" ] && peak_fp=$f
+      [ -z "$warm_fp" ] && [ "$t" -ge 30 ] && [ -n "$f" ] && warm_fp=$f
+    fi
     if [ "$sampled60" = 0 ] && [ "$t" -ge 60 ]; then
       sampled60=1; t60=$t; cpu60=$(cpu_seconds "$pid"); git60=$(wc -l < "$dir/git.log" | tr -d ' ')
       # In the background: `sample` of a busy multi-GB process can take minutes and must not stretch the window.
@@ -121,7 +128,9 @@ run_one() {
   # Metrics are frozen here, before the end sample, so both binaries get the same window.
   local cpu_end end_rss git_end wall; cpu_end=$(cpu_seconds "$pid"); end_rss=$(rss_mb "$pid")
   git_end=$(wc -l < "$dir/git.log" | tr -d ' '); wall=$(( $(date +%s) - start ))
-  local foot; foot=$(vmmap --summary "$pid" 2>/dev/null | awk '/^Physical footprint:/ {v=$3; u=substr(v,length(v)); n=substr(v,1,length(v)-1)+0; if(u=="G")n*=1024; else if(u=="K")n/=1024; else if(u=="B")n/=1048576; printf "%d", n; exit}')
+  local foot; foot=$(footprint_mb "$pid")
+  if [ -z "$foot" ] || [ -z "$warm_fp" ]; then echo "could not read physical footprint (vmmap --summary) for $label" >&2; echo "failed=footprint" > "$ROOT/$label.result"; kill -TERM "$pid" 2>/dev/null; return 2; fi
+  [ "$foot" -gt "$peak_fp" ] && peak_fp=$foot
   echo "--- $label @ ${t60}s ---"; head -14 "$dir/sample60.txt" 2>/dev/null
   echo "--- $label @ end ---"; python3 "$SCRIPTS/perf-sample.py" --pid "$pid" --seconds 3 --top 8 2>&1 | head -14
   kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
@@ -133,7 +142,9 @@ run_one() {
     echo "peak_rss_mb=$peak"
     echo "warm_rss_mb=${warm_rss:-0}"
     echo "end_rss_mb=${end_rss:-0}"
-    echo "footprint_mb=${foot:-0}"
+    echo "footprint_mb=$foot"
+    echo "warm_footprint_mb=$warm_fp"
+    echo "peak_footprint_mb=$peak_fp"
     echo "git_spawns=$((a + r2))"
     echo "git_refused=$r2"
     echo "steady_cpu_pct=$(awk -v c="$cpu_end" -v c0="$cpu60" -v w="$wall" -v w0="$t60" 'BEGIN{printf "%.1f", 100*(c-c0)/(w-w0)}')"
@@ -157,14 +168,14 @@ fi
 # ---- compare -----------------------------------------------------------------
 echo; echo "=== perf-soak: ${SECONDS_TOTAL}s, data=$MODE ==="
 printf '%-18s %12s %12s\n' metric candidate baseline
-for k in cpu_pct steady_cpu_pct peak_rss_mb end_rss_mb git_per_min steady_git_per_min git_spawns git_refused stub_calls; do
+for k in cpu_pct steady_cpu_pct peak_rss_mb end_rss_mb footprint_mb peak_footprint_mb git_per_min steady_git_per_min git_spawns git_refused stub_calls; do
   printf '%-18s %12s %12s\n' "$k" "$(get candidate $k)" "$( [ -n "$BASE" ] && get baseline $k || echo -)"
 done
 FAIL=0
 cc=$(get candidate cpu_pct); cg=$(get candidate git_per_min)
-grow=$(( $(get candidate end_rss_mb) - $(get candidate warm_rss_mb) ))
-echo "candidate RSS growth after warm-up: ${grow} MB (limit ${RSS_MAX_MB})"
-[ "$grow" -gt "$RSS_MAX_MB" ] && { echo "FAIL: RSS grew ${grow} MB"; FAIL=1; }
+grow=$(( $(get candidate footprint_mb) - $(get candidate warm_footprint_mb) ))
+echo "candidate physical footprint growth after warm-up: ${grow} MB (limit ${RSS_MAX_MB})"
+[ "$grow" -gt "$RSS_MAX_MB" ] && { echo "FAIL: physical footprint grew ${grow} MB"; FAIL=1; }
 if [ -n "$BASE" ]; then
   bc_=$(get baseline cpu_pct); bg=$(get baseline git_per_min)
   sc=$(get candidate steady_cpu_pct); sb=$(get baseline steady_cpu_pct)
@@ -174,7 +185,7 @@ if [ -n "$BASE" ]; then
   awk -v c="$cc" -v b="$bc_" -v r="$RATIO" -v f="$CPU_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: candidate CPU ${cc}% > ${RATIO}x baseline ${bc_}% (floor ${CPU_FLOOR}%)"; FAIL=1; }
   awk -v c="$cg" -v b="$bg" -v r="$RATIO" -v f="$SPAWN_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: candidate git ${cg}/min > ${RATIO}x baseline ${bg}/min (floor ${SPAWN_FLOOR}/min)"; FAIL=1; }
 else
-  echo "(no baseline: only the RSS-growth rule applied)"
+  echo "(no baseline: only the footprint-growth rule applied)"
 fi
 # Perf-gate stamp (scripts/perf-gate.py): real-data soak with a baseline, keyed by HEAD.
 if [ "$MODE" != synthetic ] && [ -n "$BASE" ]; then
@@ -191,7 +202,7 @@ def res(label):
     return out
 def pick(r):
     return {"cpu_pct": r["cpu_pct"], "steady_cpu_pct": r["steady_cpu_pct"], "footprint_mb": r["footprint_mb"],
-            "rss_mb": r["end_rss_mb"], "git_spawns_per_min": r["git_per_min"], "steady_git_spawns_per_min": r["steady_git_per_min"]}
+            "rss_mb": r["end_rss_mb"], "warm_footprint_mb": r["warm_footprint_mb"], "peak_footprint_mb": r["peak_footprint_mb"], "git_spawns_per_min": r["git_per_min"], "steady_git_spawns_per_min": r["steady_git_per_min"]}
 soak = {"pass": passed == "true", "mode": mode, "seconds": int(seconds), "candidate_sha256": digest, **pick(res("candidate")),
         "baseline": pick(res("baseline"))}
 print(json.dumps(soak))
