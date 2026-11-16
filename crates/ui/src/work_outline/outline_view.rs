@@ -449,6 +449,8 @@ pub(crate) struct OutlineView {
     picker_focus: FocusHandle,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
+    /// PR link index per Space, rebuilt only when the Space's snapshot changes.
+    pr_links: pr_sync_outline::PrLinkCache,
     model: OutlineModel,
     collapsed: HashSet<String>,
     collapsed_loaded: bool,
@@ -549,6 +551,7 @@ impl OutlineView {
             picker_focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
+            pr_links: Default::default(),
             model: OutlineModel::default(),
             collapsed: HashSet::new(),
             collapsed_loaded: false,

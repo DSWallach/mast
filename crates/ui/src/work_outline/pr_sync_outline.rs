@@ -37,7 +37,58 @@ pub(super) struct ExternalRow {
     pub pr_slots: Option<AnyElement>,
 }
 
+/// The PR link index per Space, keyed by the snapshot it was built from (the
+/// `Arc` itself, so a pointer match means the same snapshot).
+#[derive(Default)]
+pub(super) struct PrLinkCache {
+    spaces: std::cell::RefCell<
+        std::collections::HashMap<
+            String,
+            (
+                std::sync::Arc<mast_proto::WorkOutlineSnapshot>,
+                std::rc::Rc<crate::github::PrLinkIndex>,
+            ),
+        >,
+    >,
+    builds: std::cell::Cell<usize>,
+}
+
+impl PrLinkCache {
+    pub(super) fn get(
+        &self,
+        space_id: &str,
+        snapshot: &std::sync::Arc<mast_proto::WorkOutlineSnapshot>,
+    ) -> std::rc::Rc<crate::github::PrLinkIndex> {
+        let mut spaces = self.spaces.borrow_mut();
+        if let Some((cached, index)) = spaces.get(space_id)
+            && std::sync::Arc::ptr_eq(cached, snapshot)
+        {
+            return index.clone();
+        }
+        self.builds.set(self.builds.get() + 1);
+        let index = std::rc::Rc::new(crate::github::PrLinkIndex::build(snapshot));
+        spaces.insert(space_id.to_owned(), (snapshot.clone(), index.clone()));
+        index
+    }
+
+    #[cfg(test)]
+    pub(super) fn builds(&self) -> usize {
+        self.builds.get()
+    }
+}
+
 impl OutlineView {
+    /// The PR link index of `space_id`'s current snapshot (built once per
+    /// snapshot).
+    pub(super) fn pr_link_index(
+        &self,
+        space_id: &str,
+    ) -> Option<std::rc::Rc<crate::github::PrLinkIndex>> {
+        let space = self.inputs.spaces.iter().find(|space| space.id == space_id)?;
+        let snapshot = space.load.snapshot()?;
+        Some(self.pr_links.get(space_id, snapshot))
+    }
+
     /// Whether the GitHub surfaces apply to `space_id` here.
     fn github_available(&self, space_id: &str, cx: &gpui::App) -> bool {
         self.snapshot(space_id).is_some_and(|snapshot| {
@@ -206,7 +257,10 @@ impl OutlineView {
         let destination = (snapshot.pr_review_sync_destination() == Some(item.item_id.as_str()))
             .then(|| destination_marker(format!("outline-pr-destination-{key}"), theme));
         let mut other_width = other_width + if destination.is_some() { 28.0 } else { 0.0 };
-        let prs = crate::github::item_pull_requests(snapshot, &item.item_id);
+        let Some(index) = self.pr_link_index(&item.space_id) else {
+            return (destination, None);
+        };
+        let prs = index.item_pull_requests(&item.item_id);
         if prs.is_empty() {
             return (destination, None);
         }
@@ -215,9 +269,12 @@ impl OutlineView {
         let review_label = {
             let state = self.state.read(cx);
             prs.iter().find_map(|pr| {
-                let chats = review_chats::for_pr(cx, Some(snapshot), pr, &[], |id| {
-                    review_chats::fact_from_state(state, id)
-                });
+                let chats = review_chats::for_pr_indexed(
+                    cx,
+                    index.assigned_chat_ids(pr),
+                    pr,
+                    |id| review_chats::fact_from_state(state, id),
+                );
                 review_chats::marker_label(&chats)
             })
         };

@@ -64,15 +64,17 @@ pub(crate) fn item_pull_requests(
     snapshot: &WorkOutlineSnapshot,
     item_id: &str,
 ) -> Vec<PullRequestRef> {
-    let mut references: Vec<_> = snapshot
-        .external_references
-        .iter()
-        .filter(|r| {
-            r.work_item_id == item_id
-                && r.provider == GITHUB_PROVIDER
-                && r.reference_type == GITHUB_PULL_REQUEST_REFERENCE
-        })
-        .collect();
+    let references = snapshot.external_references.iter().filter(|r| {
+        r.work_item_id == item_id
+            && r.provider == GITHUB_PROVIDER
+            && r.reference_type == GITHUB_PULL_REQUEST_REFERENCE
+    });
+    prs_of_references(references.collect())
+}
+
+fn prs_of_references(
+    mut references: Vec<&mast_proto::WorkItemExternalReferenceView>,
+) -> Vec<PullRequestRef> {
     references.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     let mut keys = std::collections::HashSet::new();
     references
@@ -85,6 +87,60 @@ pub(crate) fn item_pull_requests(
             keys.insert(pr.key()).then_some(pr)
         })
         .collect()
+}
+
+/// Everything the Outline rows need about PR links, computed once per
+/// snapshot: each item's PRs (what [`item_pull_requests`] returns) and, per
+/// PR key, the chats assigned to its review items (what
+/// `review_chats::assigned_chat_ids` returns).
+#[derive(Debug, Default)]
+pub(crate) struct PrLinkIndex {
+    item_prs: HashMap<String, Vec<PullRequestRef>>,
+    assigned: HashMap<String, Vec<String>>,
+}
+
+impl PrLinkIndex {
+    pub(crate) fn build(snapshot: &WorkOutlineSnapshot) -> Self {
+        let mut grouped: HashMap<&str, Vec<&mast_proto::WorkItemExternalReferenceView>> =
+            HashMap::new();
+        for r in &snapshot.external_references {
+            if r.provider == GITHUB_PROVIDER && r.reference_type == GITHUB_PULL_REQUEST_REFERENCE {
+                grouped.entry(r.work_item_id.as_str()).or_default().push(r);
+            }
+        }
+        let item_prs: HashMap<String, Vec<PullRequestRef>> = grouped
+            .into_iter()
+            .map(|(id, refs)| (id.to_owned(), prs_of_references(refs)))
+            .filter(|(_, prs)| !prs.is_empty())
+            .collect();
+        let mut assigned: HashMap<String, Vec<String>> = HashMap::new();
+        for item in &snapshot.items {
+            let Some(prs) = item_prs.get(&item.id) else {
+                continue;
+            };
+            for pr in prs {
+                if crate::chat_work_context::is_review_item(snapshot, item, pr) {
+                    let ids = assigned.entry(pr.key()).or_default();
+                    for chat_id in &item.chat_ids {
+                        if !ids.contains(chat_id) {
+                            ids.push(chat_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Self { item_prs, assigned }
+    }
+
+    /// Same as [`item_pull_requests`].
+    pub(crate) fn item_pull_requests(&self, item_id: &str) -> &[PullRequestRef] {
+        self.item_prs.get(item_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Same as `review_chats::assigned_chat_ids`.
+    pub(crate) fn assigned_chat_ids(&self, pr: &PullRequestRef) -> Vec<String> {
+        self.assigned.get(&pr.key()).cloned().unwrap_or_default()
+    }
 }
 
 /// The PR of a PR review item: a live item linking a PR that the sync
