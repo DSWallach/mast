@@ -23,6 +23,8 @@
 # the first 60 s) > RATIO x baseline
 # (baseline floors: CPU 3%, 10 spawns/min, so near-idle noise cannot trip it) or
 # candidate RSS grows more than RSS_MAX_MB between warm-up and the end.
+# With --real/--template and a baseline it also writes the soak result (pass or fail, with
+# CPU, physical footprint, git spawns/min and baseline numbers) into the perf-gate stamp for HEAD.
 # Exit 2: could not run (sandbox unavailable, engine refused/died). Never falls back.
 set -u
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
@@ -119,6 +121,7 @@ run_one() {
   # Metrics are frozen here, before the end sample, so both binaries get the same window.
   local cpu_end end_rss git_end wall; cpu_end=$(cpu_seconds "$pid"); end_rss=$(rss_mb "$pid")
   git_end=$(wc -l < "$dir/git.log" | tr -d ' '); wall=$(( $(date +%s) - start ))
+  local foot; foot=$(vmmap --summary "$pid" 2>/dev/null | awk '/^Physical footprint:/ {v=$3; u=substr(v,length(v)); n=substr(v,1,length(v)-1)+0; if(u=="G")n*=1024; else if(u=="K")n/=1024; else if(u=="B")n/=1048576; printf "%d", n; exit}')
   echo "--- $label @ ${t60}s ---"; head -14 "$dir/sample60.txt" 2>/dev/null
   echo "--- $label @ end ---"; python3 "$SCRIPTS/perf-sample.py" --pid "$pid" --seconds 3 --top 8 2>&1 | head -14
   kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
@@ -130,6 +133,7 @@ run_one() {
     echo "peak_rss_mb=$peak"
     echo "warm_rss_mb=${warm_rss:-0}"
     echo "end_rss_mb=${end_rss:-0}"
+    echo "footprint_mb=${foot:-0}"
     echo "git_spawns=$((a + r2))"
     echo "git_refused=$r2"
     echo "steady_cpu_pct=$(awk -v c="$cpu_end" -v c0="$cpu60" -v w="$wall" -v w0="$t60" 'BEGIN{printf "%.1f", 100*(c-c0)/(w-w0)}')"
@@ -171,6 +175,29 @@ if [ -n "$BASE" ]; then
   awk -v c="$cg" -v b="$bg" -v r="$RATIO" -v f="$SPAWN_FLOOR" 'BEGIN{lim=(b>f?b:f)*r; exit !(c>lim)}' && { echo "FAIL: candidate git ${cg}/min > ${RATIO}x baseline ${bg}/min (floor ${SPAWN_FLOOR}/min)"; FAIL=1; }
 else
   echo "(no baseline: only the RSS-growth rule applied)"
+fi
+# Perf-gate stamp (scripts/perf-gate.py): real-data soak with a baseline, keyed by HEAD.
+if [ "$MODE" != synthetic ] && [ -n "$BASE" ]; then
+  [ "$FAIL" = 0 ] && PASSED=true || PASSED=false
+  STAMP_JSON=$(python3 -I - "$ROOT" "$PASSED" "$MODE" "$SECONDS_TOTAL" "$(shasum -a 256 "$CAND" | cut -d' ' -f1)" <<'PY'
+import json, sys
+root, passed, mode, seconds, digest = sys.argv[1:6]
+def res(label):
+    out = {}
+    for line in open(f"{root}/{label}.result"):
+        k, _, v = line.strip().partition("=")
+        try: out[k] = float(v)
+        except ValueError: out[k] = v
+    return out
+def pick(r):
+    return {"cpu_pct": r["cpu_pct"], "steady_cpu_pct": r["steady_cpu_pct"], "footprint_mb": r["footprint_mb"],
+            "rss_mb": r["end_rss_mb"], "git_spawns_per_min": r["git_per_min"], "steady_git_spawns_per_min": r["steady_git_per_min"]}
+soak = {"pass": passed == "true", "mode": mode, "seconds": int(seconds), "candidate_sha256": digest, **pick(res("candidate")),
+        "baseline": pick(res("baseline"))}
+print(json.dumps(soak))
+PY
+)
+  python3 -I "$SCRIPTS/perf-gate.py" write --section soak --json "$STAMP_JSON" || echo "WARN: soak stamp not written"
 fi
 [ "$(get candidate preflight_logged)" = yes ] || echo "WARN: candidate did not log the network preflight"
 [ "$FAIL" = 0 ] && echo "PASS" || echo "RESULT: FAIL (artifacts kept in $ROOT)"
