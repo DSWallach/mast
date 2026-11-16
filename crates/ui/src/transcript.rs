@@ -7532,7 +7532,7 @@ fn user_bubble_text(
             if !hit_layout.bounds().contains(&event.position) { return; }
             let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
             if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
-                render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Source, link_ui.as_ref(), window, cx);
+                render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Primary, link_ui.as_ref(), window, cx);
             }
         })
         .child(underlay)
