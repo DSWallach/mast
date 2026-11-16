@@ -26,6 +26,7 @@ use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
+mod board_view;
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
@@ -447,6 +448,10 @@ pub(crate) struct OutlineView {
     state: Entity<AppState>,
     focus: FocusHandle,
     picker_focus: FocusHandle,
+    board_mode: board_view::BoardMode,
+    board_root: Option<(String, String)>,
+    board_space_scope: bool,
+    board_show_all: bool,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
     model: OutlineModel,
@@ -547,6 +552,10 @@ impl OutlineView {
             state,
             focus: cx.focus_handle(),
             picker_focus: cx.focus_handle(),
+            board_mode: board_view::BoardMode::Tree,
+            board_root: None,
+            board_space_scope: false,
+            board_show_all: false,
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
             model: OutlineModel::default(),
@@ -3736,7 +3745,9 @@ impl Render for OutlineView {
         let mut first_use = self
             .shows_first_use(cx)
             .then(|| self.render_first_use(&theme, cx));
-        let list: AnyElement = if count == 0 && first_use.is_some() {
+        let list: AnyElement = if self.board_mode != board_view::BoardMode::Tree {
+            self.render_board(&theme, cx)
+        } else if count == 0 && first_use.is_some() {
             // First use: the compact line takes the empty tree's place.
             div()
                 .flex_1()
@@ -3916,7 +3927,8 @@ impl Render for OutlineView {
                 )
             })
             .children(crate::ui_style::help_card("outline", "Group work items and chats here to share context and instructions.", &theme, cx))
-            .when_some(space_root_entry, |el, entry| el.child(entry))
+            .child(self.render_board_controls(&theme, cx))
+            .when(self.board_mode == board_view::BoardMode::Tree, |el| el.children(space_root_entry))
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.
             .children(first_use)
