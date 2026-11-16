@@ -39,9 +39,17 @@ impl super::FilesSurface {
             return;
         };
         let key = self.chat_id.clone();
+        self.state.update(cx, |state, cx| {
+            state.begin_code_ref_load(&key);
+            cx.notify();
+        });
         cx.spawn(async move |this, cx| {
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
             let _ = this.update(cx, |this, cx| {
+                this.state.update(cx, |state, cx| {
+                    state.end_code_ref_load(&key);
+                    cx.notify();
+                });
                 if this.request_context.as_ref() != Some(&context) {
                     return;
                 }

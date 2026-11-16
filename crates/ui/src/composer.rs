@@ -4373,6 +4373,7 @@ struct ComposerSlice {
     queue: Vec<mast_doc::QueuedMessage>,
     comments: Vec<crate::comments::ReviewComment>,
     code_refs: Vec<crate::code_ref::StagedCodeRef>,
+    code_ref_pending: bool,
     comment_flush_pending: bool,
     delivery_degraded: bool,
     connectivity: mast_proto::Connectivity,
@@ -4399,6 +4400,7 @@ impl ComposerSlice {
             queue: state.queue.clone(),
             comments: state.review_comments(key).to_vec(),
             code_refs: state.code_refs(key).to_vec(),
+            code_ref_pending: state.code_ref_load_pending(key),
             comment_flush_pending: state.review_comment_flush_pending(key),
             delivery_degraded: selected.is_some_and(|id| state.chat_delivery_degraded(id)),
             connectivity: state.connectivity.clone(),
@@ -6687,7 +6689,7 @@ impl Composer {
             return true;
         }
         let state = self.state.read(cx);
-        if state.review_comment_flush_pending(&self.current_key) {
+        if state.review_comment_flush_pending(&self.current_key) || state.code_ref_load_pending(&self.current_key) {
             return true;
         }
         if state.selected_chat.is_some() {
