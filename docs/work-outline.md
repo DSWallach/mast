@@ -765,3 +765,11 @@ Configure a **Child template** in a parent item's details to apply a structure a
 live instructions to its direct children. New children follow the rules; existing
 children can use **Apply child template…**. Unlike a Blueprint, changes to the
 child template apply as live rules.
+
+### Scheduled task runs
+
+A scheduled task can select a Work item in its Space. Each run is attached to
+that item and receives the item's inherited instructions. Only the latest
+unarchived run per task and device appears in item chat lists, associated-chat
+counts, and the unassociated chat list. Older and retired runs remain readable
+through Scheduled tasks → Run history. See [Scheduled tasks](guide/scheduled-tasks.md).

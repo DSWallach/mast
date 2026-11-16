@@ -5767,7 +5767,7 @@ impl Overview {
         let history_device = chat.device_id.clone();
         let row_selector = format!("overview-task-row-{}", info.task_id);
         let history_selector = format!("overview-task-history-{}", info.task_id);
-        div()
+        crate::components::scheduled_task_parts::task_row()
             .id(("overview-task-row", ix))
             .debug_selector(move || row_selector.clone())
             .flex_none()
@@ -5776,7 +5776,6 @@ impl Overview {
             .gap(px(10.0))
             .px(px(10.0))
             .py(px(8.0))
-            .rounded(px(6.0))
             .border_1()
             .border_color(gpui::transparent_black())
             .when(
@@ -5800,9 +5799,8 @@ impl Overview {
                             .items_center()
                             .gap(px(6.0))
                             .child(
-                                div()
+                                crate::components::scheduled_task_parts::task_kind()
                                     .flex_none()
-                                    .text_size(crate::typography::ui_rems(9.5))
                                     .text_color(theme.text_muted)
                                     .child("Scheduled task"),
                             )
@@ -5816,30 +5814,26 @@ impl Overview {
                             ),
                     )
                     .child(
-                        div()
+                        crate::components::scheduled_task_parts::task_details()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted.opacity(0.7))
                             .child(meta.join(" · ")),
                     ),
             )
             .child(
-                div()
+                crate::components::scheduled_task_parts::task_time()
                     .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_muted.opacity(0.6))
                     .child(last_run),
             )
             .child(
-                div()
+                crate::components::scheduled_task_parts::task_history()
                     .id(SharedString::from(history_selector.clone()))
                     .debug_selector(move || history_selector.clone())
                     .flex_none()
                     .px(px(8.0))
                     .py(px(2.0))
-                    .rounded(px(4.0))
                     .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.accent)
                     .bg(theme.accent.opacity(0.1))
                     .hover(|el| el.bg(theme.accent.opacity(0.2)))
@@ -9341,6 +9335,50 @@ mod logic_tests {
         assert!(vcx.debug_bounds("overview-task-history-watch").is_some());
         assert!(vcx.debug_bounds("overview-list-chat-latest").is_none());
         assert!(vcx.debug_bounds("overview-list-chat-plain").is_some());
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
+        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+            for width in [640.0, 1440.0] {
+                crate::snapshot::render_to_png(
+                    &format!("scheduled-task-rows-{name}-{}", width as u32),
+                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    |_, cx| {
+                        let _ = crate::typography::register_fonts(cx);
+                        let state = cx.new(|_| AppState::new());
+                        state.update(cx, |s, _| {
+                            s.chats = vec![serde_json::from_value(serde_json::json!({
+                                "id":"latest", "deviceId":"host", "archived":false,
+                                "cwd":"/work/alpha", "createdAt":"2026-11-16T12:00:00Z",
+                                "scheduledTaskInfo":{"taskId":"watch", "taskName":"Routine", "runId":"latest"}
+                            })).unwrap()];
+                        });
+                        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        cx.new(|cx| {
+                            let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
+                            overview.view_mode = OverviewMode::List;
+                            let task = serde_json::from_value(serde_json::json!({
+                                "id":"watch", "revision":1, "deviceId":"host", "createdAt":0, "updatedAt":0,
+                                "nextDue":1_800_000_000_000i64,
+                                "draft":{"name":"Workspace health check", "prompt":"p", "cwd":"/work",
+                                "enabled":true, "graceMinutes":30,
+                                "schedule":{"type":"cron", "expression":"*/30 9-17 * * 1-5", "timezone":"America/New_York"},
+                                "config":{"harness":"mock", "sandbox":"workspace-write"}}
+                            })).unwrap();
+                            overview.scheduled_tasks.insert("host".into(), (Instant::now(), std::sync::Arc::new(mast_proto::ScheduledTasksSnapshot {
+                                device_id:"host".into(), tasks:vec![task], ..Default::default()
+                            })));
+                            overview
+                        })
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[gpui::test]

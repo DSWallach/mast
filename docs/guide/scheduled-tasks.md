@@ -17,6 +17,9 @@ Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
 Choose a **Work item** within the selected Space to attach each run to that item
 and deliver its inherited instructions. Changing the Space clears the work item.
+The execution device must support task-to-item attachment. Older engines ignore
+the work-item field when saving a task, so they run without the item association
+or its inherited instructions; update the execution device before using it.
 Each run captures its configuration, so editing a task changes future editions.
 You can change the model or switch agents, including Claude Code to Codex, after
 a task has run. Past editions retain their original agent and model.
