@@ -695,6 +695,21 @@ pub struct ArtifactsService {
     inner: Arc<Inner>,
 }
 
+fn deserialize_review_field<T: serde::de::DeserializeOwned>(
+    field: &str,
+    value: Value,
+) -> Outcome<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let location = if path == "." {
+            field.to_owned()
+        } else {
+            format!("{field}.{path}")
+        };
+        ArtifactError::invalid(format!("{location}: expected a valid value; received {error}"))
+    })
+}
+
 impl ArtifactsService {
     pub fn new(workspace: WorkspaceHost) -> Self {
         let snapshots = workspace.store_root().join("artifacts");
@@ -2346,13 +2361,12 @@ impl ArtifactsService {
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(|value| deserialize_review_field("target", value))
+            .transpose()?;
         let mut value = arguments
             .get("review")
             .cloned()
-            .ok_or_else(|| ArtifactError::invalid("review is required"))?;
+            .ok_or_else(|| ArtifactError::invalid("review: expected an object; received missing field"))?;
         let head = match &target {
             Some(mast_proto::ReviewTarget::Branch {
                 repo,
@@ -2416,11 +2430,10 @@ impl ArtifactsService {
             None => arguments
                 .get("headSha")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ArtifactError::invalid("headSha is required"))?
+                .ok_or_else(|| ArtifactError::invalid("headSha: expected a full commit SHA string when target is absent; received missing or non-string value"))?
                 .to_owned(),
         };
-        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(value)
-            .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        let mut review: mast_proto::ReviewSidecar = deserialize_review_field("review", value)?;
         if arguments
             .get("headSha")
             .and_then(Value::as_str)
@@ -2464,7 +2477,7 @@ impl ArtifactsService {
                 return Err(ArtifactError::invalid("review.pr does not match prUrl"));
             }
         } else if target.is_none() {
-            return Err(ArtifactError::invalid("prUrl or target is required"));
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
         }
         if let Some(mast_proto::ReviewTarget::PullRequest {
             repo,
@@ -2527,9 +2540,8 @@ impl ArtifactsService {
         let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(|value| deserialize_review_field("target", value))
+            .transpose()?;
         if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
             && repo.as_deref().is_none_or(str::is_empty)
         {

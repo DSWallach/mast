@@ -146,6 +146,41 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         Some(lease.token().to_owned()),
     )));
 
+    // Exercise the published example and audit failures through MCP and the offline engine.
+    let git = |args: &[&str]| {
+        let output = mast_harness::git_command().current_dir(&project).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "base"]);
+    let sha = git(&["rev-parse", "HEAD"]);
+    let description = tools.list().into_iter().find(|tool| tool.name == "review_publish").unwrap().description;
+    let example = description.split_once("Example: ").unwrap().1;
+    let mut valid: Value = serde_json::from_str(example).unwrap();
+    valid["headSha"] = json!(sha);
+    valid["review"]["pr"]["headSha"] = json!(sha);
+    valid["review"]["pr"]["baseSha"] = json!(sha);
+    let mut missing_head = valid.clone();
+    missing_head.as_object_mut().unwrap().remove("headSha");
+    let mut missing_review = valid.clone();
+    let flattened = missing_review.as_object_mut().unwrap().remove("review").unwrap();
+    missing_review.as_object_mut().unwrap().extend(flattened.as_object().unwrap().clone());
+    let mut summary_array = valid.clone();
+    summary_array["review"]["summary"] = json!(["First line", "Second line"]);
+    let mut missing_target = valid.clone();
+    missing_target.as_object_mut().unwrap().remove("prUrl");
+    for (arguments, expected) in [
+        (missing_head, "headSha"), (missing_review, "review"),
+        (summary_array, "review.summary"), (missing_target, "prUrl or target"),
+    ] {
+        let error = tools.call("review_publish", arguments).await.unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains("expected"), "{error}");
+        assert!(error.contains("received"), "{error}");
+    }
+    tools.call("review_publish", valid).await.expect("description example validates");
+
     // The Work Outline tools are listed and reach the engine.
     assert!(tools.has("work_outline_read_current"));
     let current = tools

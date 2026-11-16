@@ -576,25 +576,68 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::REVIEW_PUBLISH,
-            description: "Publish a review sidecar scoped to this chat for a PR or committed branch range. Mast validates every step hunk and anchor against the merge-base diff at headSha and reports valid hunks on errors. review is mast.review/v1: schema, pr {repo, number, headSha, baseSha} for a PR, summary (3–8 lines), optional verdictHint, steps [{id, title, file, hunks [{newStart, newEnd}], what, why, risk (none|low|med|high), riskNote, tags, optional group}], highlights [{kind (risk|missing-tests|behaviour-change|security|migration|perf|style), severity, text, anchor}], questions, suggestedComments [{anchor, body, severity, optional suggestion}]. An anchor is {file, side (left|right), startLine, endLine}. Mast stores hunk hashes. Verdict hints and suggested comments are never posted.",
+            description: "Publish a review for a PR or committed branch range. summary is a single string; use newlines for multiple lines. Hunks and anchors must match the merge-base diff. Verdict hints and suggested comments are never posted. Example: {\"prUrl\":\"https://github.com/a/b/pull/1\",\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"review\":{\"schema\":\"mast.review/v1\",\"pr\":{\"repo\":\"a/b\",\"number\":1,\"headSha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"baseSha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"summary\":\"Reviewed changes\",\"steps\":[],\"highlights\":[],\"questions\":[],\"suggestedComments\":[]}}",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prUrl": { "type": "string", "description": "Pull request URL." },
-                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA (for prUrl)." },
-                    "target": { "type": "object", "description": "Alternative to prUrl: {kind: pr, repo, number, baseSha, headSha} or {kind: branch, repo, checkoutPath, branch, baseRef or baseSha, headSha}." },
-                    "review": { "type": "object", "description": "The mast.review/v1 object described above." }
+                    "prUrl": { "type": "string", "description": "GitHub pull request URL; requires headSha and review.pr." },
+                    "headSha": { "type": "string", "description": "Full reviewed head commit SHA, required with prUrl." },
+                    "target": review_target_schema(true),
+                    "review": review_schema()
                 },
                 "required": ["review"],
-                "anyOf": [{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]
+                "anyOf": [{"required": ["prUrl", "headSha"], "properties": {"review": {"required": ["pr"]}}}, {"required": ["target"]}]
             }),
         },
         ToolDef {
             name: agent_tool_names::REVIEW_GET,
-            description: "Read the calling chat's published review artifact and content, or null when none exists. Pass prUrl or target to select a review; otherwise the latest review is returned.",
-            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" }, "target": { "type": "object", "description": "The PR or branch target used to publish the review." } } }),
+            description: "Read this chat's published review, or null. Select with prUrl or target; omit both for the latest review.",
+            input_schema: json!({ "type": "object", "properties": { "prUrl": { "type": "string" }, "target": review_target_schema(false) } }),
         },
     ]
+}
+
+fn review_target_schema(publish: bool) -> Value {
+    let mut schema = json!({"oneOf": [
+        {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["pr"]}, "repo": {"type": "string"},
+            "number": {"type": "integer", "minimum": 0}, "headSha": {"type": "string"}, "baseSha": {"type": "string"}
+        }, "required": ["kind", "repo", "number", "headSha", "baseSha"]},
+        {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["branch"]}, "repo": {"type": "string"},
+            "checkoutPath": {"type": "string"}, "checkout": {"type": "string", "description": "Alias for checkoutPath."},
+            "branch": {"type": "string"}, "baseRef": {"type": "string"}, "baseSha": {"type": "string"}, "headSha": {"type": "string"}
+        }, "required": ["kind", "headSha"], "allOf": [
+            {"anyOf": [{"required": ["repo"]}, {"required": ["checkoutPath"]}, {"required": ["checkout"]}]},
+            {"anyOf": [{"required": ["baseRef"]}, {"required": ["baseSha"]}]}
+        ]}
+    ]});
+    if !publish {
+        schema["oneOf"][1].as_object_mut().unwrap().remove("allOf");
+    }
+    schema
+}
+
+fn review_schema() -> Value {
+    let anchor = json!({"type": "object", "properties": {
+        "file": {"type": "string"}, "side": {"type": "string", "enum": ["left", "right"]},
+        "startLine": {"type": "integer", "minimum": 0}, "endLine": {"type": "integer", "minimum": 0},
+        "hunkHash": {"type": "string"}
+    }, "required": ["file", "side", "startLine", "endLine"]});
+    json!({"type": "object", "properties": {
+        "schema": {"type": "string", "enum": ["mast.review/v1"]},
+        "pr": {"type": "object", "properties": {"repo": {"type": "string"}, "number": {"type": "integer", "minimum": 0}, "headSha": {"type": "string"}, "baseSha": {"type": "string"}}, "required": ["repo", "number", "headSha", "baseSha"]},
+        "target": review_target_schema(false), "summary": {"type": "string"}, "verdictHint": {"type": "string"},
+        "steps": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"}, "title": {"type": "string"}, "file": {"type": "string"},
+            "hunks": {"type": "array", "items": {"type": "object", "properties": {"newStart": {"type": "integer", "minimum": 0}, "newEnd": {"type": "integer", "minimum": 0}, "hunkHash": {"type": "string"}}, "required": ["newStart", "newEnd"]}},
+            "what": {"type": "string"}, "why": {"type": "string"}, "risk": {"type": "string", "enum": ["none", "low", "med", "high"]}, "riskNote": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "group": {"type": "string"}
+        }, "required": ["id", "title", "file", "hunks", "what", "why", "risk", "riskNote", "tags"]}},
+        "highlights": {"type": "array", "items": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["risk", "missing-tests", "behaviour-change", "security", "migration", "perf", "style"]}, "severity": {"type": "string"}, "text": {"type": "string"}, "anchor": anchor}, "required": ["kind", "severity", "text", "anchor"]}},
+        "questions": {"type": "array", "description": "Questions as JSON strings.", "items": {"type": "string"}},
+        "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
+    }, "required": ["schema", "summary", "steps", "highlights", "questions", "suggestedComments"],
+       "description": "With prUrl, pr is required. With target, Mast supplies pr when omitted."})
 }
 
 /// Chat diff target tools (agent mode only; `m0-contract.md`, "Amendment:
@@ -2797,7 +2840,7 @@ mod tests {
         let def = artifact_catalog().into_iter()
             .find(|def| def.name == agent_tool_names::REVIEW_PUBLISH).unwrap();
         assert_eq!(def.input_schema["required"], json!(["review"]));
-        assert_eq!(def.input_schema["anyOf"], json!([{"required": ["prUrl", "headSha"]}, {"required": ["target"]}]));
+        assert_eq!(def.input_schema["anyOf"][0]["properties"]["review"]["required"], json!(["pr"]));
         let world = Arc::new(World::default());
         let agent = tools(world.clone(), Some(BETA_TOKEN));
         let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
