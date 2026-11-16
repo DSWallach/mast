@@ -70,9 +70,10 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
     const OPEN: &str = "\n\n<!-- mast-code-ref:";
     const END: &str = "\n<!-- /mast-code-ref -->";
     let first = raw.find(OPEN)?;
-    let mut result = raw[..first].to_string();
+    let prefix = &raw[..first];
+    let (mut result, mut spans) = crate::composer::sent_mention_display(prefix)
+        .unwrap_or_else(|| (prefix.to_string(), Vec::new()));
     let mut remaining = &raw[first..];
-    let mut spans = Vec::new();
     while let Some(tail) = remaining.strip_prefix(OPEN) {
         let (encoded, tail) = tail.split_once(" -->\n")?;
         if encoded.len() % 2 != 0 {

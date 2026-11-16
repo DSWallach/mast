@@ -1455,13 +1455,9 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let (body, code_refs) = crate::code_ref::project_sent_refs(&body).unwrap_or_else(|| (body, Vec::new()));
-        let (text, mut mentions) = match crate::composer::sent_mention_display(&body) {
-            Some((display, spans)) => (display, spans),
-            None => (body, Vec::new()),
-        };
-        mentions.extend(code_refs);
-        mentions.sort_by_key(|span| span.range.start);
+        let (text, mentions) = crate::code_ref::project_sent_refs(&body)
+            .or_else(|| crate::composer::sent_mention_display(&body))
+            .unwrap_or_else(|| (body, Vec::new()));
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
