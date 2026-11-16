@@ -365,20 +365,24 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
     ) -> ChatLinkStatus {
+        self.status_for_chat_links_with_checkout(space_id, cwd, branch, linked_pr_links, linked_ticket_id, None)
+    }
+
+    /// Resolve the PR from a selected checkout while retaining the chat's
+    /// original ticket and execution context.
+    pub fn status_for_chat_links_with_checkout(
+        &self, space_id: Option<&str>, cwd: Option<&str>, branch: Option<&str>,
+        linked_pr_links: &[mast_proto::ChatPrLink], linked_ticket_id: Option<&str>,
+        checkout: Option<(&str, Option<&str>)>,
+    ) -> ChatLinkStatus {
         let linear_space = space_id.is_some_and(|space| {
-            lock(&self.inner.linear)
-                .as_ref()
-                .is_some_and(|(_, workspace)| workspace.space_linear_enabled(space))
+            lock(&self.inner.linear).as_ref().is_some_and(|(_, workspace)| workspace.space_linear_enabled(space))
         });
-        if linear_space
-            && let Some(ticket) = linked_ticket_id
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .or_else(|| branch.and_then(extract_ticket_id))
-        {
+        if linear_space && let Some(ticket) = linked_ticket_id.filter(|id| !id.is_empty()).map(str::to_string)
+            .or_else(|| branch.and_then(extract_ticket_id)) {
             lock(&self.inner.linear_tickets).insert(ticket);
         }
-        self.status_for_links(cwd, branch, linked_pr_links, linked_ticket_id)
+        self.status_for_links_with_checkout(cwd, branch, linked_pr_links, linked_ticket_id, checkout)
     }
 
     /// One ticket: through the Linear API when the ticket came from a
@@ -448,6 +452,13 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
     ) -> ChatLinkStatus {
+        self.status_for_links_with_checkout(cwd, branch, linked_pr_links, linked_ticket_id, None)
+    }
+
+    fn status_for_links_with_checkout(
+        &self, cwd: Option<&str>, branch: Option<&str>, linked_pr_links: &[mast_proto::ChatPrLink],
+        linked_ticket_id: Option<&str>, checkout: Option<(&str, Option<&str>)>,
+    ) -> ChatLinkStatus {
         let mut status = ChatLinkStatus::default();
         let automatic_cwd =
             cwd.filter(|cwd| !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd)));
@@ -482,7 +493,10 @@ impl PrTicketCache {
         // Already-cached branch detail may still add a distinct inferred PR,
         // and URL de-duplication gives durable provenance precedence.
         let has_durable_pr_links = !status.pr_links.is_empty();
-        let branch_key = match (automatic_cwd, branch) {
+        let (pr_cwd, pr_branch) = checkout.map_or((automatic_cwd, branch), |(path, branch)| {
+            (Some(path).filter(|cwd| !crate::repos::is_automatic_access_blocked(std::path::Path::new(cwd))), branch)
+        });
+        let branch_key = match (pr_cwd, pr_branch) {
             (Some(cwd), Some(branch)) if !branch.is_empty() => Some(PrKey::Branch {
                 cwd: PathBuf::from(cwd),
                 branch: branch.to_string(),
@@ -1409,6 +1423,16 @@ mod tests {
         let status = cache.status_for(Some("/tmp/repo"), Some("eng-2715-fix-thing"), None, None);
         assert_eq!(status.pr.map(|p| p.number), Some(7));
         assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn selected_checkout_is_the_only_branch_pr_lookup() {
+        let cache = PrTicketCache::new();
+        cache.status_for_chat_links_with_checkout(None, Some("/tmp/root"), Some("root-branch"), &[], None,
+            Some(("/tmp/root/submodule", Some("checkout-branch"))));
+        let pending = lock(&cache.inner.pending_pr);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains(&PrKey::Branch { cwd: PathBuf::from("/tmp/root/submodule"), branch: "checkout-branch".into() }));
     }
 
     #[test]

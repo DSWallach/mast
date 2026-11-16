@@ -146,6 +146,7 @@ pub(super) fn mount<'a>(
             shell.chat_header_links.insert(
                 chat_id.into(),
                 ChatHeaderLinkCache {
+                    checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -503,6 +504,7 @@ fn changing_chat_drops_the_card_and_its_pin(cx: &mut TestAppContext) {
         shell.chat_header_links.insert(
             CHAT_UI.into(),
             ChatHeaderLinkCache {
+                    checkout: None,
                 status: None,
                 fetched_at: Instant::now(),
             },
@@ -1110,6 +1112,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
             shell.chat_header_links.insert(
                 format!("w-{i}"),
                 ChatHeaderLinkCache {
+                    checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },

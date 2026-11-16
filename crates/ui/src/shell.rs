@@ -108,6 +108,7 @@ const CHAT_HEADER_LINK_REFRESH: Duration = Duration::from_secs(15);
 const CHAT_HEADER_METADATA_CLEARANCE: f32 = 52.0;
 
 struct ChatHeaderLinkCache {
+    checkout: Option<(String, Option<String>)>,
     status: Option<ChatLinkStatus>,
     fetched_at: Instant,
 }
@@ -4711,10 +4712,12 @@ impl Shell {
     }
 
     fn ensure_chat_header_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let checkout = self.state.read(cx).selected_chat_diff_target(&chat_id)
+            .map(|target| (target.path.clone(), target.branch.clone()));
         if self
             .chat_header_links
             .get(&chat_id)
-            .is_some_and(|entry| entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
+            .is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
             || self.chat_header_links_pending.contains(&chat_id)
         {
             return;
@@ -4746,6 +4749,7 @@ impl Shell {
                 this.chat_header_links.insert(
                     chat_id,
                     ChatHeaderLinkCache {
+                        checkout,
                         status,
                         fetched_at: Instant::now(),
                     },
