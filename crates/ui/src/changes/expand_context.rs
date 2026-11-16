@@ -6,9 +6,36 @@ use std::collections::HashMap;
 pub(super) const MAX_FILES: usize = 8;
 
 pub(super) enum Entry {
-    Loading { gap: usize, all: bool },
-    Ready { gaps: Vec<Gap>, shown: Vec<usize> },
+    Loading,
+    Ready {
+        gaps: Vec<Gap>,
+        shown: Vec<usize>,
+        max_columns: usize,
+        max_line: u32,
+    },
     Failed,
+}
+
+impl Entry {
+    pub fn ready(gaps: Vec<Gap>, shown: Vec<usize>) -> Self {
+        let max_columns = gaps
+            .iter()
+            .flat_map(|gap| gap.columns.iter())
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let max_line = gaps
+            .last()
+            .and_then(|gap| gap.lines.last())
+            .map(|line| line.old_no.unwrap_or(0).max(line.new_no.unwrap_or(0)))
+            .unwrap_or(0);
+        Self::Ready {
+            gaps,
+            shown,
+            max_columns,
+            max_line,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -21,7 +48,7 @@ impl Cache {
     pub fn expand(&mut self, key: &(String, u32), gap: usize, all: bool) -> bool {
         self.order.retain(|item| item != key);
         self.order.push(key.clone());
-        let Some(Entry::Ready { gaps, shown }) = self.entries.get_mut(key) else {
+        let Some(Entry::Ready { gaps, shown, .. }) = self.entries.get_mut(key) else {
             return false;
         };
         let (Some(data), Some(count)) = (gaps.get(gap), shown.get_mut(gap)) else {
@@ -35,11 +62,11 @@ impl Cache {
         true
     }
 
-    pub fn begin(&mut self, key: (String, u32), gap: usize, all: bool) -> bool {
+    pub fn begin(&mut self, key: (String, u32)) -> bool {
         if self
             .entries
             .values()
-            .filter(|entry| matches!(entry, Entry::Loading { .. }))
+            .filter(|entry| matches!(entry, Entry::Loading))
             .count()
             >= 4
         {
@@ -50,14 +77,14 @@ impl Cache {
             let Some(oldest) = self
                 .order
                 .iter()
-                .position(|item| !matches!(self.entries.get(item), Some(Entry::Loading { .. })))
+                .position(|item| !matches!(self.entries.get(item), Some(Entry::Loading)))
             else {
                 return false;
             };
             self.entries.remove(&self.order.remove(oldest));
         }
         self.order.push(key.clone());
-        self.entries.insert(key, Entry::Loading { gap, all });
+        self.entries.insert(key, Entry::Loading);
         true
     }
 }
@@ -85,7 +112,7 @@ pub(super) fn add_rows(
         {
             let entry = cache.entries.get(&(revision.to_string(), file));
             match entry {
-                Some(Entry::Ready { gaps, shown }) => {
+                Some(Entry::Ready { gaps, shown, .. }) => {
                     if let (Some(data), Some(&count)) =
                         (gaps.get(gap as usize), shown.get(gap as usize))
                     {
@@ -120,6 +147,7 @@ pub(super) fn add_rows(
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Gap {
     pub lines: Vec<DiffLine>,
+    pub columns: Vec<usize>,
 }
 
 fn range(token: &str, prefix: char) -> Option<(u32, u32)> {
@@ -187,9 +215,7 @@ pub(super) fn gaps(file: &FileDiff, text: &str) -> Option<Vec<Gap>> {
         if old_gap != new_gap {
             return None;
         }
-        result.push(Gap {
-            lines: make_lines(&source, old_next, new_next, new_gap)?,
-        });
+        result.push(make_gap(&source, old_next, new_next, new_gap)?);
         for line in &hunk.lines {
             if let Some(number) = line.new_no {
                 if source.get(number.checked_sub(1)? as usize).copied()? != line.text {
@@ -202,14 +228,12 @@ pub(super) fn gaps(file: &FileDiff, text: &str) -> Option<Vec<Gap>> {
     }
     let end = u32::try_from(source.len()).ok()?.checked_add(1)?;
     let count = end.checked_sub(new_next)?;
-    result.push(Gap {
-        lines: make_lines(&source, old_next, new_next, count)?,
-    });
+    result.push(make_gap(&source, old_next, new_next, count)?);
     Some(result)
 }
 
-fn make_lines(source: &[&str], old: u32, new: u32, count: u32) -> Option<Vec<DiffLine>> {
-    (0..count)
+fn make_gap(source: &[&str], old: u32, new: u32, count: u32) -> Option<Gap> {
+    let lines: Vec<DiffLine> = (0..count)
         .map(|offset| {
             Some(DiffLine {
                 kind: LineKind::Context,
@@ -220,7 +244,12 @@ fn make_lines(source: &[&str], old: u32, new: u32, count: u32) -> Option<Vec<Dif
                     .to_string(),
             })
         })
-        .collect()
+        .collect::<Option<_>>()?;
+    let columns = lines
+        .iter()
+        .map(|line| super::visual_columns(&line.text))
+        .collect();
+    Some(Gap { lines, columns })
 }
 
 #[cfg(test)]
@@ -257,16 +286,12 @@ mod tests {
         let mut reads = 0;
         for _ in 0..10 {
             if !cache.entries.contains_key(&key) {
-                assert!(cache.begin(key.clone(), 0, false));
+                assert!(cache.begin(key.clone()));
                 reads += 1;
                 let gaps = gaps(&file, source).unwrap();
-                cache.entries.insert(
-                    key.clone(),
-                    Entry::Ready {
-                        shown: vec![0; gaps.len()],
-                        gaps,
-                    },
-                );
+                cache
+                    .entries
+                    .insert(key.clone(), Entry::ready(gaps.clone(), vec![0; gaps.len()]));
             }
             assert!(cache.expand(&key, 0, false));
         }
@@ -307,8 +332,16 @@ mod tests {
     fn git_patch_context_works_in_both_layouts() {
         let repo = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let output = mast_harness::git_command().current_dir(repo.path()).args(args).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = mast_harness::git_command()
+                .current_dir(repo.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             String::from_utf8(output.stdout).unwrap()
         };
         run(&["init", "-q"]);
@@ -324,16 +357,67 @@ mod tests {
         let file = super::super::parse_patch(&patch).remove(0);
         let gaps = gaps(&file, &new).unwrap();
         assert_eq!(gaps.len(), 2);
-        assert_eq!((gaps[0].lines[0].old_no, gaps[0].lines[0].new_no), (Some(1), Some(1)));
+        assert_eq!(
+            (gaps[0].lines[0].old_no, gaps[0].lines[0].new_no),
+            (Some(1), Some(1))
+        );
         let last = gaps[1].lines.last().unwrap();
         assert_eq!((last.old_no, last.new_no), (Some(50), Some(51)));
         let mut cache = Cache::default();
         let key = ("git".to_string(), 0);
-        cache.entries.insert(key.clone(), Entry::Ready { shown: gaps.iter().map(|gap| gap.lines.len()).collect(), gaps });
-        for mode in [super::super::DiffMode::Unified, super::super::DiffMode::Split] {
+        cache.entries.insert(
+            key.clone(),
+            Entry::ready(
+                gaps.clone(),
+                gaps.iter().map(|gap| gap.lines.len()).collect(),
+            ),
+        );
+        for mode in [
+            super::super::DiffMode::Unified,
+            super::super::DiffMode::Split,
+        ] {
             let rows = super::super::body_rows(0, &file, &[], None, mode);
             let (expanded, _) = add_rows(rows, std::slice::from_ref(&file), "git", &cache);
-            assert!(expanded.iter().any(|row| matches!(row, DiffRow::ContextLine { .. })));
+            assert!(
+                expanded
+                    .iter()
+                    .any(|row| matches!(row, DiffRow::ContextLine { .. }))
+            );
         }
+    }
+
+    #[test]
+    fn unsupported_files_never_offer_controls() {
+        let mut file =
+            super::super::parse_patch("diff --git a/a b/a\n@@ -3 +3 @@\n-old\n+new\n").remove(0);
+        file.binary = true;
+        assert!(!may_have_gap(&file, 0));
+        file.binary = false;
+        file.status = FileStatus::Deleted;
+        assert!(!may_have_gap(&file, 0));
+        file.status = FileStatus::Renamed;
+        assert!(!may_have_gap(&file, 0));
+    }
+
+    #[test]
+    fn source_cache_limits_concurrent_reads_and_retained_files() {
+        let mut cache = Cache::default();
+        for file in 0..4 {
+            assert!(cache.begin(("rev".into(), file)));
+        }
+        assert!(!cache.begin(("rev".into(), 4)));
+        for file in 0..4 {
+            cache
+                .entries
+                .insert(("rev".into(), file), Entry::ready(Vec::new(), Vec::new()));
+        }
+        for file in 4..20 {
+            let key = ("rev".into(), file);
+            assert!(cache.begin(key.clone()));
+            cache
+                .entries
+                .insert(key, Entry::ready(Vec::new(), Vec::new()));
+        }
+        assert_eq!(cache.entries.len(), MAX_FILES);
     }
 }

@@ -21,6 +21,8 @@ pub(super) struct Cache {
     entries: HashMap<Key, (HunkSpans, u64)>,
     clock: u64,
     pending: HashSet<Key>,
+    #[cfg(test)]
+    pub computations: usize,
 }
 
 impl Cache {
@@ -35,7 +37,12 @@ impl Cache {
         if self.pending.len() >= MAX_PENDING_HUNKS || self.pending.contains(key) {
             return false;
         }
-        self.pending.insert(key.clone())
+        let inserted = self.pending.insert(key.clone());
+        #[cfg(test)]
+        if inserted {
+            self.computations += 1;
+        }
+        inserted
     }
 
     pub(super) fn finish(&mut self, key: Key, spans: HunkSpans) {

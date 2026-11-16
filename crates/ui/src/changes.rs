@@ -4216,29 +4216,24 @@ impl Changes {
         let commit = (self.scope == DiffScope::Commit).then(|| self.commit.as_ref().map(|c| c.sha.clone())).flatten();
         let request = file_diff_text_request(&diff, &origin, mode, base_ref, self.owner_chat_id_owned(), commit, head_ref);
         let target = self.desired_target(cx);
-        if !self.expanded_context.begin(key.clone(), gap as usize, all) { return; }
+        if !self.expanded_context.begin(key.clone()) { return; }
         self.reflatten(cx);
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::to_value(request).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
             if let Some(target) = target { params.insert("targetDeviceId".into(), serde_json::Value::String(target)); }
             let response = engine.client().call(methods::GET_CHECKOUT_FILE_DIFF_TEXT, serde_json::Value::Object(params)).await.ok()
                 .and_then(|v| serde_json::from_value::<mast_proto::CheckoutFileDiffText>(v).ok());
-            let gaps = cx.background_executor().spawn(async move {
+            let entry = cx.background_executor().spawn(async move {
                 let response = response?;
                 if response.binary || response.truncated || response.stale { return None; }
-                expand_context::gaps(&file, response.new_text.as_deref()?)
+                let gaps = expand_context::gaps(&file, response.new_text.as_deref()?)?;
+                let mut shown = vec![0; gaps.len()];
+                if let (Some(data), Some(count)) = (gaps.get(gap as usize), shown.get_mut(gap as usize)) { *count = if all { data.lines.len() } else { data.lines.len().min(20) }; }
+                Some(expand_context::Entry::ready(gaps, shown))
             }).await;
             this.update(cx, |this, cx| {
-                let Some(expand_context::Entry::Loading { gap, all }) = this.expanded_context.entries.remove(&key) else { return; };
-                let entry = match gaps {
-                    Some(gaps) => {
-                        let mut shown = vec![0; gaps.len()];
-                        if let (Some(data), Some(count)) = (gaps.get(gap), shown.get_mut(gap)) { *count = if all { data.lines.len() } else { data.lines.len().min(20) }; }
-                        expand_context::Entry::Ready { gaps, shown }
-                    }
-                    None => expand_context::Entry::Failed,
-                };
-                this.expanded_context.entries.insert(key, entry);
+                let Some(expand_context::Entry::Loading) = this.expanded_context.entries.remove(&key) else { return; };
+                this.expanded_context.entries.insert(key, entry.unwrap_or(expand_context::Entry::Failed));
                 this.reflatten(cx);
             }).ok();
         }).detach();
@@ -4440,24 +4435,43 @@ impl Changes {
             .and_then(|data| self.request_word_spans((parsed_key.clone(), file_ix as u32, hunk), data, cx)));
         let horizontal = &self.parsed.as_ref().unwrap().horizontal[file_ix];
         let code_width = match files.get(file_ix) {
-            Some(file) if !self.wrap_lines => DiffCodeWidth::Scrollable(horizontal.metrics(
+            Some(file) if !self.wrap_lines => {
+                let mut metrics = horizontal.metrics(
                 file,
                 highlight.as_ref(),
                 &theme,
                 window.text_system(),
                 crate::typography::generation(cx),
-            )),
+                );
+                if let Some(expand_context::Entry::Ready { max_columns, max_line, .. }) = self.expanded_context.entries.get(&(parsed_key.clone(), file_ix as u32)) {
+                    let mono = font(theme.font_mono.clone());
+                    let size = px(diff_text_size(&theme));
+                    let advance = window.text_system().ch_advance(window.text_system().resolve_font(&mono), size).unwrap_or(size * 0.6).as_f32();
+                    metrics.max_text_width = metrics.max_text_width.max(*max_columns as f32 * advance);
+                    let digits = (*max_line).max(1).ilog10() + 1;
+                    metrics.max_gutter_width = metrics.max_gutter_width.max((digits as f32 * 6.6 + 14.0).max(GUTTER_WIDTH));
+                }
+                DiffCodeWidth::Scrollable(metrics)
+            },
             _ => DiffCodeWidth::Wrapped,
         };
         let code_scroll = DiffCodeScrollContext {
             handle: horizontal.scroll.clone(),
             prefix: SharedString::from(format!("changes-code-row-{ix}")),
         };
+        let file_gutter_width = files.get(file_ix).map(|file| {
+            let max_line = match self.expanded_context.entries.get(&(parsed_key.clone(), file_ix as u32)) {
+                Some(expand_context::Entry::Ready { max_line, .. }) => file.max_line.max(*max_line),
+                _ => file.max_line,
+            };
+            let digits = max_line.max(1).ilog10() + 1;
+            (digits as f32 * 6.6 + 14.0).max(GUTTER_WIDTH)
+        }).unwrap_or(GUTTER_WIDTH);
         match row {
             DiffRow::SubmoduleHeader { .. } => gpui::Empty.into_any_element(),
             DiffRow::ContextControl { file, gap } => {
                 let entry = self.expanded_context.entries.get(&(parsed_key.clone(), file));
-                let loading = matches!(entry, Some(expand_context::Entry::Loading { .. }));
+                let loading = matches!(entry, Some(expand_context::Entry::Loading));
                 let failed = matches!(entry, Some(expand_context::Entry::Failed));
                 div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center().gap(px(12.0))
                     .text_color(theme.text_muted).text_size(px(10.0))
@@ -4470,7 +4484,7 @@ impl Changes {
             DiffRow::ContextLine { file, gap, line } => {
                 let Some(expand_context::Entry::Ready { gaps, .. }) = self.expanded_context.entries.get(&(parsed_key.clone(), file)) else { return gpui::Empty.into_any_element(); };
                 let Some(line) = gaps.get(gap as usize).and_then(|gap| gap.lines.get(line as usize)) else { return gpui::Empty.into_any_element(); };
-                let gutter = files.get(file as usize).map(gutter_width).unwrap_or(40.0);
+                let gutter = file_gutter_width;
                 if self.mode == DiffMode::Unified {
                     diff_line_row(line, &[], &[], &theme, gutter, code_width, Some(code_scroll.slot("unified")))
                 } else {
@@ -4551,7 +4565,7 @@ impl Changes {
                     .as_deref()
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
-                let gutter_px = gutter_width(file_diff);
+                let gutter_px = file_gutter_width;
                 let row = diff_line_row(
                     line,
                     spans,
@@ -4614,7 +4628,7 @@ impl Changes {
                 let Some(lines) = file_diff.hunks.get(hunk as usize).map(|h| &h.lines) else {
                     return gpui::Empty.into_any_element();
                 };
-                let gutter_px = gutter_width(file_diff);
+                let gutter_px = file_gutter_width;
                 // Same slot on both sides = a context row: one line, drawn in
                 // both columns.
                 let mirrored = left.is_some() && left == right;
@@ -7173,7 +7187,7 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
     let state = cx.new(|_| AppState::new());
     cx.new(|cx| {
         let mut changes = Changes::new(state, cx);
-        let patch = "diff --git a/src/hooks/decorated/main.rs b/src/hooks/decorated/main.rs\n--- a/src/hooks/decorated/main.rs\n+++ b/src/hooks/decorated/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    validate();\n+    save();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
+        let patch = "diff --git a/src/hooks/decorated/main.rs b/src/hooks/decorated/main.rs\n--- a/src/hooks/decorated/main.rs\n+++ b/src/hooks/decorated/main.rs\n@@ -3,3 +3,3 @@\n fn main() {\n-    old();\n+    new();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
         let diff = CheckoutDiff {
             checkout_id: "snapshot".into(),
             device_id: "local".into(),
@@ -7192,9 +7206,17 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
         let key = changes.parse_key(&diff);
         let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
         let identities = hunk_identities(&files);
-        let (rows, ranges, headers) = flatten_diff_tree(
+        let (rows, mut ranges, mut headers) = flatten_diff_tree(
             &files, &submodules, &layout, &[], None, changes.mode, |_| false, |_| false,
         );
+        changes.word_spans.finish((key.clone(), 0, 0), Arc::new(word_diff::spans(&files[0].hunks[0].lines)));
+        if let Some(gaps) = expand_context::gaps(&files[0], "// configuration\n// entry point\nfn main() {\n    new();\n}\n// end\n") {
+            changes.expanded_context.entries.insert((key.clone(), 0), expand_context::Entry::ready(gaps, vec![2, 0]));
+            changes.expanded_context.order.push((key.clone(), 0));
+        }
+        let (rows, indices) = expand_context::add_rows(rows, &files, &key, &changes.expanded_context);
+        for range in ranges.iter_mut().flatten() { *range = indices[range.start]..indices[range.end]; }
+        for index in &mut headers { *index = indices[*index]; }
         changes.list.reset_with_uniform_height(
             rows.len(), px(diff_line_height(Theme::of(cx))),
         );
@@ -7221,6 +7243,36 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn visible_hunk_word_budget_across_frames(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut changes = Changes::new(state, cx);
+            let mut patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n".to_string();
+            for hunk in 0..32 {
+                patch.push_str(&format!("@@ -{},50 +{},50 @@\n", hunk * 100 + 1, hunk * 100 + 1));
+                for line in 0..50 { patch.push_str(&format!("-old line {line} with more text\n")); }
+                for line in 0..50 { patch.push_str(&format!("+new line {line} with more text\n")); }
+            }
+            let (files, origins, submodules, layout) = parse_diff_tree(&patch, &[]);
+            let (rows, ranges, headers) = flatten_diff_tree(&files, &submodules, &layout, &[], None, changes.mode, |_| false, |_| false);
+            changes.rows = rows;
+            changes.row_ranges = ranges;
+            changes.section_headers = headers;
+            changes.parsed = Some(ParsedDiff { key: "budget".into(), truncated: false, additions: 1600, deletions: 1600, file_count: 1, horizontal: files.iter().map(FileHorizontalState::new).collect(), hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes
+        });
+        for _ in 0..10 {
+            vcx.update(|window, cx| view.update(cx, |changes, cx| {
+                let indices = changes.rows.iter().enumerate().filter_map(|(ix, row)| matches!(row, DiffRow::Line { line: 0, .. }).then_some(ix)).collect::<Vec<_>>();
+                assert_eq!(indices.len(), 32);
+                for ix in indices { drop(changes.render_row(ix, window, cx)); }
+            }));
+            vcx.run_until_parked();
+        }
+        view.read_with(vcx, |changes, _| assert_eq!(changes.word_spans.computations, 32));
+    }
     use super::*;
     use chrono::Utc;
 
