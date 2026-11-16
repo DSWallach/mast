@@ -36,3 +36,20 @@ impl Shell {
         }
     }
 }
+
+#[cfg(feature = "snapshot")]
+impl Shell {
+    pub(crate) fn fixture_changed_code_ref(&mut self, cx: &mut Context<Self>) {
+        let reference = self
+            .state
+            .read(cx)
+            .code_refs("fixture-chat")
+            .first()
+            .cloned();
+        if let Some(reference) = reference {
+            self.transcript.update(cx, |transcript, cx| {
+                transcript.fixture_changed_code_ref(&reference, cx)
+            });
+        }
+    }
+}

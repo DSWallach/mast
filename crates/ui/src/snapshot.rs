@@ -167,6 +167,7 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
     shell.update(cx, |shell, cx| {
         shell.fixture_snapshot_item_panel(cx);
         shell.fixture_snapshot_expand_tool_group(cx);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() { shell.fixture_changed_code_ref(cx); }
         if std::env::var("MAST_OPEN_DIALOG").is_ok_and(|value| value == "model") {
             shell.fixture_snapshot_model_catalog(cx);
         }

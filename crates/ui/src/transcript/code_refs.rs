@@ -277,3 +277,18 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "snapshot")]
+impl Transcript {
+    pub(crate) fn fixture_changed_code_ref(
+        &mut self,
+        reference: &crate::code_ref::StagedCodeRef,
+        cx: &mut Context<Self>,
+    ) {
+        self.code_ref_resolutions.insert(
+            key(reference),
+            (Instant::now(), Some(crate::code_ref::Resolution::Changed)),
+        );
+        cx.notify();
+    }
+}
