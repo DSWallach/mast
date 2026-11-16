@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -975,7 +976,12 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             }
         }
         for id in &removed {
-            entries.remove(id); // dropping the entry drops watchers + ends its task
+            // Dropping the entry drops watchers + ends its task; its budget
+            // decision is forgotten so a later re-add re-measures.
+            if let Some(entry) = entries.remove(id) {
+                forget_watch_budget(&entry.identity.root);
+                forget_watch_budget(&entry.identity.git_dir);
+            }
         }
         removed
     };
@@ -1004,13 +1010,71 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     }
 }
 
+/// Directory names that mark a heavy dependency or build tree. Finding one
+/// anywhere in the walk means the checkout is over budget at once; the walk
+/// never descends into it.
+const HEAVY_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "dist",
+    "build",
+    ".next",
+    "vendor",
+];
+
+/// At most this many budget walks plus watcher setups run at once. Startup adds
+/// one entry per checkout (~100+ worktrees); unbounded, they all walk together
+/// and pin every core for minutes.
+const MAX_CONCURRENT_WATCH_SETUPS: usize = 2;
+
+fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WATCH_SETUPS)))
+}
+
+/// Runs blocking `work` on the blocking pool once `gate` has a free permit, so
+/// queued setups wait as cheap async tasks rather than parked threads.
+async fn run_gated_blocking<F>(gate: Arc<tokio::sync::Semaphore>, work: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let Ok(_permit) = gate.acquire_owned().await else {
+        return;
+    };
+    let _ = tokio::task::spawn_blocking(work).await;
+}
+
+/// Budget decision per root path, kept for the process lifetime so the same
+/// root is never walked twice. Forgotten when its entry is torn down (which
+/// only happens after the orphan grace, [`REPAIR_INTERVAL`] by default).
+fn budget_cache() -> &'static Mutex<HashMap<PathBuf, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn forget_watch_budget(root: &Path) {
+    lock(budget_cache()).remove(root);
+}
+
+/// Cached [`walk_exceeds_watch_budget`].
+fn exceeds_watch_budget(root: &Path) -> bool {
+    if let Some(&decided) = lock(budget_cache()).get(root) {
+        return decided;
+    }
+    let exceeds = walk_exceeds_watch_budget(root);
+    lock(budget_cache()).insert(root.to_path_buf(), exceeds);
+    exceeds
+}
+
 /// True if `root`'s directory tree exceeds [`MAX_WATCH_DIRS`] — the signal that
 /// a live recursive watch would cost more than it's worth. Bounded BFS: stops
-/// the moment the budget is blown (never walks a whole node_modules), skips
-/// symlinks (a symlinked dep cycle must not send this into a spin), and treats
-/// unreadable dirs as leaves. `.git` internal churn is real diff signal, so it
-/// counts toward the budget rather than being skipped.
-fn exceeds_watch_budget(root: &Path) -> bool {
+/// the moment the budget is blown (never walks a whole node_modules), returns
+/// at once on a heavy dependency/build dir ([`HEAVY_DIR_NAMES`]) without
+/// descending into it, skips symlinks (a symlinked dep cycle must not send this
+/// into a spin), and treats unreadable dirs as leaves. `.git` internal churn is
+/// real diff signal, so it counts toward the budget rather than being skipped.
+fn walk_exceeds_watch_budget(root: &Path) -> bool {
     if crate::repos::is_automatic_access_blocked(root) {
         return true;
     }
@@ -1025,6 +1089,13 @@ fn exceeds_watch_budget(root: &Path) -> bool {
             // directory reports as a symlink and is skipped, so cyclic deps
             // (pnpm/npm) can't blow up the walk.
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| HEAVY_DIR_NAMES.contains(&name))
+                {
+                    return true;
+                }
                 seen += 1;
                 if seen > MAX_WATCH_DIRS {
                     return true;
@@ -1099,15 +1170,17 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
     // it runs on the blocking pool and attaches to the entry when ready. Events
     // occurring before attachment are covered by the initial sync; one extra
     // kick after attachment closes the capture→attach gap.
+    // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
+    // checkout).
     let weak = Arc::downgrade(&entry);
-    tokio::task::spawn_blocking(move || {
+    tokio::spawn(run_gated_blocking(watch_setup_gate().clone(), move || {
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
         let watchers = build_watchers(&entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
         let _ = kick_tx.send(());
-    });
+    }));
 }
 
 /// Recursive watchers on the worktree root (budget permitting) and the git
@@ -3119,10 +3192,14 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         Capture, CheckoutIdentity, MAX_EXPANDED_SUBMODULES, MAX_SUBMODULE_METADATA_BYTES,
-        MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, kick_relevant, parse_raw_diff,
-        watch_targets,
+        MAX_CONCURRENT_WATCH_SETUPS, MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget,
+        forget_watch_budget, kick_relevant, parse_raw_diff, run_gated_blocking,
+        walk_exceeds_watch_budget, watch_targets,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn branch_review_base_counts_commits_without_fetching() {
@@ -3329,5 +3406,75 @@ mod watch_budget_tests {
         // A self-referential symlink cycle must not send the walk into a spin.
         std::os::unix::fs::symlink(root.join("real"), root.join("real/inner/loop")).unwrap();
         assert!(!exceeds_watch_budget(root)); // terminates, under budget
+    }
+
+    #[test]
+    fn top_level_heavy_dir_is_over_budget_without_walking_into_it() {
+        for name in ["node_modules", "target", ".venv", "dist", "build", ".next", "vendor"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let heavy = root.join(name);
+            std::fs::create_dir_all(&heavy).unwrap();
+            // Unreadable: a walk that descended would treat it as a leaf, so
+            // the verdict can only come from the name.
+            assert!(exceeds_watch_budget(root), "{name}");
+        }
+        // Nested a few levels down also trips it.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("packages/app/node_modules")).unwrap();
+        assert!(exceeds_watch_budget(tmp.path()));
+    }
+
+    #[test]
+    fn heavy_dir_contents_are_never_enumerated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Far more dirs than the budget inside node_modules; the heavy name
+        // verdict must come first, so under the budget the walk is trivial.
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(walk_exceeds_watch_budget(root));
+        let small = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(small.path().join("src")).unwrap();
+        assert!(!walk_exceeds_watch_budget(small.path()));
+    }
+
+    #[test]
+    fn repeated_root_uses_the_cached_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert!(!exceeds_watch_budget(root));
+        // Tree changes underneath; the cached verdict stands (no second walk).
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(!exceeds_watch_budget(root));
+        // Tearing the entry down forgets it.
+        forget_watch_budget(root);
+        assert!(exceeds_watch_budget(root));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn watch_setups_are_bounded_to_the_gate() {
+        use std::sync::atomic::AtomicUsize;
+        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WATCH_SETUPS));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let (running, peak, done) = (running.clone(), peak.clone(), done.clone());
+            tasks.push(tokio::spawn(run_gated_blocking(gate.clone(), move || {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+                running.fetch_sub(1, Ordering::SeqCst);
+                done.fetch_add(1, Ordering::SeqCst);
+            })));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(done.load(Ordering::SeqCst), 20);
+        assert!(peak.load(Ordering::SeqCst) <= MAX_CONCURRENT_WATCH_SETUPS);
+        assert!(peak.load(Ordering::SeqCst) >= 1);
     }
 }
