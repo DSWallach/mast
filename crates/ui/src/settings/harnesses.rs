@@ -104,6 +104,10 @@ pub struct HarnessesPage {
     title_menu: Option<bool>, // false = harness, true = model
     title_task: Option<Task<()>>,
     title_saving: bool,
+    default_models: Loadable<Vec<Model>>,
+    default_menu: Option<bool>, // false = harness, true = model
+    default_models_task: Option<Task<()>>,
+    default_models_loaded_for: Option<HarnessId>,
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
@@ -179,6 +183,10 @@ impl HarnessesPage {
             title_menu: None,
             title_task: None,
             title_saving: false,
+            default_models: Loadable::Idle,
+            default_menu: None,
+            default_models_task: None,
+            default_models_loaded_for: None,
             state,
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
@@ -196,6 +204,8 @@ impl HarnessesPage {
         };
         page.load(cx);
         page.load_friction_settings(cx);
+        let default_harness = crate::settings::current(cx).default_model.harness;
+        page.load_default_models(default_harness, cx);
         page
     }
 
@@ -492,6 +502,285 @@ impl HarnessesPage {
             }
         }));
         cx.notify();
+    }
+
+    fn load_default_models(&mut self, harness: Option<HarnessId>, cx: &mut Context<Self>) {
+        let Some(harness) = harness else {
+            self.default_models = Loadable::Idle;
+            self.default_models_loaded_for = None;
+            self.default_models_task = None;
+            cx.notify();
+            return;
+        };
+        if self.default_models_loaded_for == Some(harness)
+            && matches!(self.default_models, Loadable::Ready(_))
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.target_device.clone();
+        self.default_models_loaded_for = Some(harness);
+        self.default_models = Loadable::Loading;
+        self.default_models_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::LIST_MODELS,
+                    serde_json::json!({"harness": harness, "targetDeviceId": target}),
+                )
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| serde_json::from_value::<Vec<Model>>(v).map_err(|e| e.to_string()));
+            this.update(cx, |page, cx| {
+                if page.default_models_loaded_for == Some(harness) {
+                    page.default_models = match result {
+                        Ok(models) => Loadable::Ready(models),
+                        Err(error) => Loadable::Error(error),
+                    };
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn set_default_model(
+        &mut self,
+        pref: crate::settings::DefaultModelPreference,
+        cx: &mut Context<Self>,
+    ) {
+        let harness = pref.harness;
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+            s.default_model = pref;
+            s.temporary_default_override = None;
+        });
+        self.default_menu = None;
+        self.load_default_models(harness, cx);
+        cx.notify();
+    }
+
+    fn revert_temporary_default_override(&mut self, cx: &mut Context<Self>) {
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+            if let Some(ov) = s.temporary_default_override.take() {
+                s.default_model = ov.previous;
+            }
+        });
+        let harness = crate::settings::current(cx).default_model.harness;
+        self.load_default_models(harness, cx);
+        cx.notify();
+    }
+
+    fn render_default_model(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let ui_settings = crate::settings::current(cx);
+        let now = chrono::Utc::now();
+        let active_override = ui_settings
+            .temporary_default_override
+            .as_ref()
+            .filter(|ov| ov.expires_at > now);
+        let pref = &ui_settings.default_model;
+        let harness_name = |id: HarnessId| match id {
+            HarnessId::ClaudeCode => "Claude Code".to_string(),
+            HarnessId::Codex => "Codex".to_string(),
+            HarnessId::Cursor => "Cursor".to_string(),
+            HarnessId::Antigravity => "Antigravity".to_string(),
+            _ => format!("{id:?}"),
+        };
+
+        let mut card = widgets::section_card(theme)
+            .mt(px(20.0))
+            .p(px(16.0))
+            .child(widgets::row_title(theme, "Default model"))
+            .child(widgets::page_subtitle(
+                theme,
+                "Explicitly choose the default agent and model for new sessions. Leave on Automatic to remember your last pick.",
+            ));
+
+        if let Some(ov) = active_override {
+            let mins_left = (ov.expires_at - now).num_minutes().max(1);
+            let remaining = if mins_left >= 60 {
+                let h = mins_left / 60;
+                let m = mins_left % 60;
+                if m == 0 { format!("{h}h") } else { format!("{h}h {m}m") }
+            } else {
+                format!("{mins_left}m")
+            };
+            let temp_label = ov
+                .model_label
+                .clone()
+                .unwrap_or_else(|| ov.model.clone());
+            let prev_label = ov
+                .previous
+                .model_label
+                .clone()
+                .or_else(|| ov.previous.model.clone())
+                .or_else(|| ov.previous.harness.map(harness_name))
+                .unwrap_or_else(|| "Automatic".to_string());
+            card = card.child(
+                div()
+                    .mt(px(10.0))
+                    .p(px(10.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.warning)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!(
+                                "Temporarily using {} ({remaining} left) — reverts to {prev_label}",
+                                temp_label
+                            ))),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("default-model-revert-now")
+                            .cursor_pointer()
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.revert_temporary_default_override(cx)
+                            }))
+                            .child("Revert now"),
+                    ),
+            );
+        }
+
+        for is_model in [false, true] {
+            let label = if is_model {
+                pref.model
+                    .as_ref()
+                    .map(|id| {
+                        if let Loadable::Ready(models) = &self.default_models {
+                            models
+                                .iter()
+                                .find(|m| &m.id == id)
+                                .map(|m| m.label.clone())
+                                .unwrap_or_else(|| pref.model_label.clone().unwrap_or_else(|| id.clone()))
+                        } else {
+                            pref.model_label.clone().unwrap_or_else(|| id.clone())
+                        }
+                    })
+                    .unwrap_or_else(|| "Built-in default".into())
+            } else {
+                pref.harness
+                    .map(harness_name)
+                    .unwrap_or_else(|| "Automatic (remember last used)".into())
+            };
+            let interactive = !is_model || pref.harness.is_some();
+            let mut row = div()
+                .mt(px(12.0))
+                .child(widgets::row_title(
+                    theme,
+                    if is_model {
+                        "Default model"
+                    } else {
+                        "Default agent"
+                    },
+                ))
+                .child(
+                    widgets::ghost_action(theme)
+                        .id(if is_model {
+                            "default-model-picker"
+                        } else {
+                            "default-harness-picker"
+                        })
+                        .when(interactive, |el| {
+                            el.cursor_pointer()
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    page.default_menu = if page.default_menu == Some(is_model) {
+                                        None
+                                    } else {
+                                        Some(is_model)
+                                    };
+                                    cx.notify();
+                                }))
+                        })
+                        .when(!interactive, |el| el.opacity(0.5))
+                        .child(label),
+                );
+            if self.default_menu == Some(is_model) {
+                let mut choices = vec![(
+                    if is_model {
+                        "Built-in default".to_string()
+                    } else {
+                        "Automatic (remember last used)".to_string()
+                    },
+                    crate::settings::DefaultModelPreference {
+                        harness: if is_model { pref.harness } else { None },
+                        model: None,
+                        model_label: None,
+                    },
+                )];
+                if is_model {
+                    if let Loadable::Ready(models) = &self.default_models {
+                        choices.extend(models.iter().map(|m| {
+                            (
+                                m.label.clone(),
+                                crate::settings::DefaultModelPreference {
+                                    harness: pref.harness,
+                                    model: Some(m.id.clone()),
+                                    model_label: Some(m.label.clone()),
+                                },
+                            )
+                        }));
+                    }
+                } else if let Loadable::Ready(harnesses) = &self.harnesses {
+                    choices.extend(
+                        harnesses
+                            .iter()
+                            .filter(|h| {
+                                descriptor_enabled(h)
+                                    && h.installed
+                                    && h.id != HarnessId::Mock
+                            })
+                            .map(|h| {
+                                (
+                                    h.name.clone(),
+                                    crate::settings::DefaultModelPreference {
+                                        harness: Some(h.id),
+                                        model: None,
+                                        model_label: None,
+                                    },
+                                )
+                            }),
+                    );
+                }
+                row = row.child(
+                    div()
+                        .id(if is_model {
+                            "default-model-options"
+                        } else {
+                            "default-harness-options"
+                        })
+                        .max_h(px(240.0))
+                        .overflow_y_scroll()
+                        .children(choices.into_iter().enumerate().map(|(ix, (label, choice))| {
+                            popover::menu_row(
+                                theme,
+                                &choice == pref,
+                                format!("default-choice-{is_model}-{ix}"),
+                            )
+                            .id(("default-choice", ix))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                page.set_default_model(choice.clone(), cx)
+                            }))
+                            .child(label)
+                        })),
+                );
+            }
+            card = card.child(row);
+        }
+        if let Loadable::Error(error) = &self.default_models {
+            card = card.child(widgets::error_strip(theme, error.clone()));
+        }
+        card.into_any_element()
     }
 
     fn render_titles(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1248,6 +1537,7 @@ impl Render for HarnessesPage {
             .clone()
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
+        let default_model = self.render_default_model(&theme, cx);
         let titles = self.render_titles(&theme, cx);
         let permission_rules = self.render_permission_rules(&theme, cx);
         let friction = self.friction_settings.as_ref().map(|settings| {
@@ -1307,6 +1597,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .child(default_model)
                             .children(friction)
                             .child(titles)
                             .child(permission_rules),

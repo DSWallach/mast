@@ -48,6 +48,7 @@ impl From<crate::running_chats::RunState> for Status {
         match value {
             RunState::Working => Self::Working,
             RunState::Awaiting => Self::Waiting,
+            RunState::Finished => Self::Done,
             RunState::Errored | RunState::ToolFailed => Self::Errored,
             RunState::IdleBackground => Self::Idle,
         }

@@ -279,7 +279,7 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
             ArtifactKind::Mermaid,
             "graph TD; A-->B".into(),
             utf8,
-            if cfg!(target_os = "macos") {
+            if cfg!(any(target_os = "macos", target_os = "linux")) {
                 Presenter::Web(WebKind::Mermaid)
             } else {
                 Presenter::Markdown
@@ -321,7 +321,7 @@ fn each_kind_renders_with_its_component(cx: &mut TestAppContext) {
                 assert!(documents[0].1.contains("srcdoc="));
                 assert!(documents[0].1.contains("sandbox=\"allow-scripts\""));
             }
-            ArtifactKind::Mermaid if cfg!(target_os = "macos") => {
+            ArtifactKind::Mermaid if cfg!(any(target_os = "macos", target_os = "linux")) => {
                 assert!(documents[0].1.contains(MERMAID_SRC));
             }
             _ => assert!(documents.is_empty(), "{kind:?} renders natively"),
@@ -982,8 +982,8 @@ fn render_check_times_out_and_reports_missing_probes_and_platforms(cx: &mut Test
     assert!(result.screenshot_png_base64.is_none());
     assert_eq!(result.warnings.len(), 1);
 
-    // Standalone Mermaid renders natively on Linux without requiring an offscreen renderer.
-    #[cfg(not(target_os = "macos"))]
+    // Standalone Mermaid renders natively only on platforms without WebKit rendering.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let mermaid = serve_now(
             cx,

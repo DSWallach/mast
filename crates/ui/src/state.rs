@@ -2074,6 +2074,16 @@ impl AppState {
                 .hash(&mut h);
             chat.scheduled_task_info.hash(&mut h);
             discriminant(&self.display_status_for(chat, now)).hash(&mut h);
+            if let Some(failures) = self
+                .session_for(&chat.id)
+                .and_then(|s| s.last_turn_tool_failures.as_ref())
+            {
+                1u8.hash(&mut h);
+                failures.count.hash(&mut h);
+                failures.tools.hash(&mut h);
+            } else {
+                0u8.hash(&mut h);
+            }
         }
         self.spaces.len().hash(&mut h);
         for space in &self.spaces {

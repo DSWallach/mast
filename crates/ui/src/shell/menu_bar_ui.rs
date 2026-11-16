@@ -21,6 +21,7 @@ pub(super) struct MenuBarUi {
     checked_at: Option<std::time::Instant>,
     /// `None` until the first probe answers.
     usage: Option<Vec<menu_bar::UsageAccount>>,
+    pub(super) last_accounts_snapshot: Option<mast_proto::AgentAccountsSnapshot>,
     /// Why the last probe failed outright; shown only while there is no data.
     usage_error: Option<String>,
     schedule: menu_bar::UsageSchedule,
@@ -31,25 +32,27 @@ impl Shell {
     /// Keep the menu bar item in step with the app. Cheap when nothing
     /// changed: the view is compared and AppKit is only touched on a change.
     pub(super) fn sync_menu_bar(&mut self, force: bool, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let due = force
+            || self
+                .menu_bar
+                .checked_at
+                .is_none_or(|at| now.duration_since(at) >= CHECK_EVERY);
+        if due {
+            self.menu_bar.checked_at = Some(now);
+            // Startup (once the engine answers) and the periodic refresh ride the
+            // heartbeat; the schedule says when a probe is actually due.
+            self.request_usage(menu_bar::UsageTrigger::Tick, cx);
+        }
         if !self.settings.show_menu_bar_item {
             if self.menu_bar.last.take().is_some() {
                 menu_bar::apply(None);
             }
             return;
         }
-        let now = std::time::Instant::now();
-        if !force
-            && self
-                .menu_bar
-                .checked_at
-                .is_some_and(|at| now.duration_since(at) < CHECK_EVERY)
-        {
+        if !due {
             return;
         }
-        self.menu_bar.checked_at = Some(now);
-        // Startup (once the engine answers) and the periodic refresh ride the
-        // heartbeat; the schedule says when a probe is actually due.
-        self.request_usage(menu_bar::UsageTrigger::Tick, cx);
         let utc_now = Utc::now();
         let light = crate::status_light::summarize_state(self.state.read(cx), utc_now).light;
         let snapshot = self.running_snapshot(cx);
@@ -177,6 +180,9 @@ impl Shell {
         }
         if ok {
             self.menu_bar.usage_error = None;
+            if let Ok(global_snap) = &global {
+                self.menu_bar.last_accounts_snapshot = Some(global_snap.clone());
+            }
             self.menu_bar.usage = Some(menu_bar::usage_accounts(
                 global.as_ref().ok(),
                 managed.as_ref().ok(),
@@ -186,6 +192,7 @@ impl Shell {
             self.menu_bar.usage_error = global.err().or(managed.err());
         }
         self.sync_menu_bar(true, cx);
+        self.check_quota_and_override(cx);
     }
 
     /// Clicks that need the Shell (the rest are handled at the App level).

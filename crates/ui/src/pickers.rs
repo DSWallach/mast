@@ -1176,13 +1176,26 @@ impl Pickers {
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
-    /// Effective harness: picked, or the chat's config, or the first listed.
+    /// Effective harness: picked, or the chat's config, or the explicit default
+    /// (or active temporary quota override), or the sticky last-used, or the first listed.
     pub(crate) fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if let Some(harness) = self.config.harness {
             return Some(harness);
         }
         if let Some(config) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
             return Some(config.harness);
+        }
+        if let Some(settings) = crate::settings::current_ref(cx) {
+            let pref = crate::settings::effective_default_model(settings, chrono::Utc::now());
+            if let Some(harness) = pref.harness {
+                let offered = match self.harnesses.ready() {
+                    Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
+                    None => true,
+                };
+                if offered {
+                    return Some(harness);
+                }
+            }
         }
         // New-chat canvas: the remembered last-used harness (sticky defaults),
         // when the loaded catalog still offers it (the device may have
@@ -1206,13 +1219,31 @@ impl Pickers {
     }
 
     /// Effective model id: the draft pick, the selected chat's config, or (on
-    /// the new-chat canvas) the remembered last-used model for the harness.
+    /// the new-chat canvas) the explicit default / active temporary override,
+    /// else the remembered last-used model for the harness.
     pub(crate) fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
         if let Some(id) = self.config.model.as_deref() {
             return Some(id);
         }
         if let Some(chat) = self.chat_row(cx) {
             return chat.config.as_ref().and_then(|c| c.model.as_deref());
+        }
+        if let Some(settings) = crate::settings::current_ref(cx) {
+            let now = chrono::Utc::now();
+            let (pref_harness, pref_model) = match &settings.temporary_default_override {
+                Some(ov) if ov.expires_at > now => (Some(ov.harness), Some(ov.model.as_str())),
+                Some(ov) => (ov.previous.harness, ov.previous.model.as_deref()),
+                None => (
+                    settings.default_model.harness,
+                    settings.default_model.model.as_deref(),
+                ),
+            };
+            if let Some(model_id) = pref_model {
+                let harness = self.effective_harness(cx);
+                if pref_harness.is_none() || pref_harness == harness {
+                    return Some(model_id);
+                }
+            }
         }
         let harness = self.effective_harness(cx)?;
         self.defaults.model_for(harness).map(|m| m.id.as_str())
@@ -1253,14 +1284,25 @@ impl Pickers {
         self.selected_model(cx)
             .map(|model| model.label.clone())
             .or_else(|| {
+                let explicit_label = crate::settings::current_ref(cx)
+                    .map(|s| crate::settings::effective_default_model(s, chrono::Utc::now()))
+                    .and_then(|pref| {
+                        let id = self.effective_model_id(cx)?;
+                        (pref.model.as_deref() == Some(id))
+                            .then_some(pref.model_label)
+                            .flatten()
+                    });
                 let remembered = self
                     .effective_harness(cx)
                     .and_then(|h| self.defaults.model_for(h));
                 match self.effective_model_id(cx) {
                     Some(id) => Some(
-                        remembered
-                            .filter(|m| m.id == id)
-                            .map(|m| m.label.clone())
+                        explicit_label
+                            .or_else(|| {
+                                remembered
+                                    .filter(|m| m.id == id)
+                                    .map(|m| m.label.clone())
+                            })
                             .or_else(|| self.defaults.label_for(id).map(str::to_owned))
                             .unwrap_or_else(|| id.to_owned()),
                     ),
@@ -7523,6 +7565,63 @@ mod tests {
                 pickers.resolved(cx).model.as_deref(),
                 Some("claude-fable-5")
             );
+        });
+    }
+
+    #[gpui::test]
+    fn explicit_default_model_and_temporary_override_drive_new_chats(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            let mut initial = crate::settings::UiSettings::default();
+            initial.default_model = crate::settings::DefaultModelPreference {
+                harness: Some(HarnessId::Codex),
+                model: Some("gpt-5.4".into()),
+                model_label: Some("GPT-5.4".into()),
+            };
+            crate::settings::init(initial, dir.path().to_path_buf(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+            assert_eq!(pickers.effective_model_id(cx), Some("gpt-5.4"));
+        });
+
+        // Temporary quota override wins while unexpired, then reverts to previous.
+        let now = chrono::Utc::now();
+        cx.update(|cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+                s.temporary_default_override = Some(
+                    crate::settings::TemporaryDefaultModelOverride {
+                        harness: HarnessId::ClaudeCode,
+                        model: "claude-sonnet-5".into(),
+                        model_label: Some("Sonnet 5".into()),
+                        previous: s.default_model.clone(),
+                        started_at: now,
+                        expires_at: now + chrono::Duration::minutes(30),
+                        reason: Some("quota".into()),
+                    },
+                );
+            });
+        });
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::ClaudeCode));
+            assert_eq!(pickers.effective_model_id(cx), Some("claude-sonnet-5"));
+        });
+
+        // Once expired, expire_temporary_default_override restores Codex / gpt-5.4.
+        cx.update(|cx| {
+            let expired = crate::settings::expire_temporary_default_override(
+                cx,
+                now + chrono::Duration::minutes(31),
+            );
+            assert!(expired.is_some());
+        });
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+            assert_eq!(pickers.effective_model_id(cx), Some("gpt-5.4"));
         });
     }
 

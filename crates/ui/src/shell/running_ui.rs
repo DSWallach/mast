@@ -89,6 +89,7 @@ thread_local! {
 
 fn run_state(
     indicator: crate::state::Indicator,
+    unseen: bool,
     background: u32,
     failed: bool,
 ) -> Option<RunState> {
@@ -98,13 +99,15 @@ fn run_state(
         Indicator::AwaitingInput => Some(RunState::Awaiting),
         Indicator::Errored => Some(RunState::Errored),
         Indicator::None if failed => Some(RunState::ToolFailed),
+        Indicator::None if unseen => Some(RunState::Finished),
         Indicator::None if background > 0 => Some(RunState::IdleBackground),
         Indicator::None => None,
     }
 }
 
 impl Shell {
-    /// Every non-archived chat that is running, waiting or errored.
+    /// Every non-archived chat that is running, waiting, errored, or finished
+    /// and not yet seen/dismissed.
     fn running_inputs(&self, cx: &App) -> Vec<Input> {
         let now = Utc::now();
         let state = self.state.read(cx);
@@ -117,8 +120,12 @@ impl Shell {
             let background = 0; // not tracked at session level yet
             let session = state.session_for(&chat.id);
             let failed = session.is_some_and(|s| s.last_turn_tool_failures.is_some());
-            let Some(run) = run_state(state.indicator_for(&chat.id, now), background, failed)
-            else {
+            let Some(run) = run_state(
+                state.indicator_for(&chat.id, now),
+                chat.unseen(),
+                background,
+                failed,
+            ) else {
                 continue;
             };
             let facts = self.chat_item_facts(&chat.id, cx);
@@ -142,7 +149,9 @@ impl Shell {
                     .map(|facts| facts.title.clone())
                     .unwrap_or_else(|| "New session".to_owned()),
                 state: run,
-                since: session.and_then(|s| s.started_at.or(Some(s.updated_at))),
+                since: session
+                    .and_then(|s| s.started_at.or(Some(s.updated_at)))
+                    .or(chat.last_message_at),
                 activity: chat
                     .last_message_preview
                     .as_deref()
@@ -262,6 +271,19 @@ impl Shell {
         }
     }
 
+    pub(super) fn dismiss_finished_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
+        cx.notify();
+    }
+
+    fn dismiss_running_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.selected_running_row(cx)
+            && row.state == RunState::Finished
+        {
+            self.dismiss_finished_chat(row.chat_id, cx);
+        }
+    }
+
     /// → opens the fold under the highlight (or the coordinator's own); ← closes it.
     fn fold_running_selected(&mut self, open: bool, cx: &mut Context<Self>) {
         let snapshot = self.running_snapshot(cx);
@@ -312,6 +334,11 @@ impl Shell {
             "left" => self.fold_running_selected(false, cx),
             "i" if !modifiers.platform && !modifiers.control && !modifiers.alt => {
                 self.interrupt_running_selected(cx)
+            }
+            "d" | "backspace" | "delete"
+                if !modifiers.platform && !modifiers.control && !modifiers.alt =>
+            {
+                self.dismiss_running_selected(cx)
             }
             _ => return,
         }
@@ -1080,6 +1107,8 @@ impl Shell {
         let chat_id = row.chat_id.clone();
         let pane_id = row.chat_id.clone();
         let changes_id = row.chat_id.clone();
+        let dismiss_id = row.chat_id.clone();
+        let finished = row.state == RunState::Finished;
         let changes_branch = self.state.read(cx).chats.iter()
             .find(|chat| chat.id == row.chat_id)
             .and_then(|chat| chat.branch.clone());
@@ -1135,6 +1164,40 @@ impl Shell {
                                         this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx);
                                     })),
                             )
+                            .when(finished, |el| {
+                                el.child(
+                                    div()
+                                        .debug_selector({
+                                            let selector =
+                                                format!("running-finished-{}", row.chat_id);
+                                            move || selector.clone()
+                                        })
+                                        .text_color(
+                                            crate::status_style::status_style(
+                                                crate::status_style::Status::Done,
+                                                theme.appearance,
+                                            )
+                                            .color,
+                                        )
+                                        .text_size(crate::typography::ui_rems(10.5))
+                                        .child("finished"),
+                                )
+                                .child(
+                                    running_button(
+                                        SharedString::from(format!(
+                                            "running-dismiss-{}",
+                                            row.chat_id
+                                        )),
+                                        "Dismiss",
+                                        false,
+                                        theme,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.dismiss_finished_chat(dismiss_id.clone(), cx);
+                                    })),
+                                )
+                            })
                             .when(row.state == RunState::Awaiting || failed, |el| {
                                 let (label, color) = if row.state == RunState::Awaiting {
                                     ("waiting for input", crate::status_style::status_style(crate::status_style::Status::Waiting, theme.appearance).color)
@@ -1222,6 +1285,7 @@ fn running_key_hints(theme: &Theme) -> AnyElement {
         .child(hint("\u{21a9}", "open"))
         .child(hint("\u{2318}\u{21a9}", "in pane"))
         .child(hint("I", "interrupt"))
+        .child(hint("D", "dismiss"))
         .into_any_element()
 }
 
@@ -1661,6 +1725,55 @@ mod tests {
             assert!(shell.interrupted_block(cx).is_none())
         });
         redraw(cx);
+    }
+
+    #[gpui::test]
+    fn finished_chats_stay_until_dismissed_or_opened(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        state.update(cx, |state, _| {
+            let mut c0 = chat("c0", None);
+            c0.last_message_at = Some(chrono::Utc::now() - chrono::Duration::minutes(3));
+            let mut c1 = chat("c1", None);
+            c1.last_message_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+            state.chats = vec![c0, c1];
+            state.sessions = vec![
+                session("c0", SessionStatus::Idle, 3),
+                session("c1", SessionStatus::Idle, 1),
+            ];
+        });
+        shell.update_in(cx, |shell, window, cx| {
+            shell.toggle_running_chats(window, cx)
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("running-finished-c0").is_some());
+        assert!(cx.debug_bounds("running-finished-c1").is_some());
+        shell.read_with(cx, |shell, cx| {
+            let snapshot = shell.running_snapshot(cx);
+            assert_eq!(snapshot.headline(), "2 finished");
+            assert_eq!(shell.running.selected.as_deref(), Some("c0"));
+        });
+
+        // Dismiss c0 via keyboard (`d`).
+        press(&shell, cx, "d");
+        redraw(cx);
+        assert!(cx.debug_bounds("running-finished-c0").is_none());
+        assert!(cx.debug_bounds("running-finished-c1").is_some());
+        shell.read_with(cx, |shell, cx| {
+            let snapshot = shell.running_snapshot(cx);
+            assert_eq!(snapshot.headline(), "1 finished");
+            assert_eq!(shell.running.selected.as_deref(), Some("c1"));
+        });
+
+        // Open c1 via Enter: marks c1 seen and removes it from the list.
+        press(&shell, cx, "enter");
+        redraw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.running.open);
+            let snapshot = shell.running_snapshot(cx);
+            assert_eq!(snapshot.headline(), "Nothing running");
+        });
     }
 
     #[test]

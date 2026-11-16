@@ -105,6 +105,25 @@ fn idle_with_background_is_its_own_state_with_idle_elapsed() {
 }
 
 #[test]
+fn finished_chats_appear_in_space_section_and_update_headline() {
+    let inputs = vec![
+        input("done1", "m", RunState::Finished, 4),
+        input("work1", "c", RunState::Working, 2),
+    ];
+    let snap = snapshot(&inputs, &spaces(), &Toggled::new(), now());
+    assert_eq!(snap.headline(), "1 running \u{b7} 1 finished");
+    assert_eq!(ids(&snap), ["done1", "work1"]);
+
+    let only_done = snapshot(
+        &[input("done1", "m", RunState::Finished, 4)],
+        &spaces(),
+        &Toggled::new(),
+        now(),
+    );
+    assert_eq!(only_done.headline(), "1 finished");
+}
+
+#[test]
 fn fifteen_chats_fold_children_and_late_spaces() {
     let mut inputs = vec![
         input("mc", "m", RunState::Working, 72),

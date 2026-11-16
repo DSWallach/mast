@@ -90,11 +90,11 @@ impl Default for RenderConfig {
 
 /// The platform renderer, or `None` where there is no offscreen web view.
 pub(crate) fn platform_renderer() -> Option<Rc<dyn ArtifactRenderer>> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        Some(Rc::new(webkit::WebKitRenderer))
+        Some(Rc::new(webkit::WebKitRenderer::default()))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -146,11 +146,11 @@ pub(crate) fn request_document(
         ArtifactKind::HtmlFragment => Ok(web(WebKind::Fragment, &text()?, "text/html")),
         ArtifactKind::HtmlPage => Ok(web(WebKind::Page, &text()?, "text/html")),
         ArtifactKind::Mermaid => {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 Ok(web(WebKind::Mermaid, &text()?, "text/plain"))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 Err(RenderSkip::Native)
             }
@@ -577,6 +577,7 @@ pub(crate) mod webkit {
     };
     use mast_proto::ArtifactViewport;
 
+    #[derive(Default)]
     pub(crate) struct WebKitRenderer;
 
     /// The probe reports after load + settle (+ Mermaid); wait a little
@@ -852,4 +853,98 @@ pub(crate) mod webkit {
     // `MainThreadOnly` brings `alloc(mtm)` into scope.
     #[allow(unused)]
     fn _assert_main_thread_only<T: MainThreadOnly>() {}
+}
+
+/// The Linux offscreen renderer: an offscreen `WebKitWebView` inside Mast's
+/// `zeron-webkit` WebKitGTK helper process, captured via
+/// `webkit_web_view_get_snapshot`.
+#[cfg(target_os = "linux")]
+pub(crate) mod webkit {
+    use std::time::{Duration, Instant};
+
+    use super::{ArtifactRenderer, ProbeReport, RenderFuture, RenderOutput};
+    use crate::artifacts::document::{
+        MERMAID_WAIT_MS, READ_PROBE_SCRIPT, SETTLE_MS, compare_render_plan,
+    };
+    use crate::browser::linux::{BrowserData, OffscreenPage};
+    use mast_proto::ArtifactViewport;
+
+    #[derive(Default)]
+    pub(crate) struct WebKitRenderer {
+        data: BrowserData,
+    }
+
+    fn probe_budget() -> Duration {
+        Duration::from_millis(u64::from(SETTLE_MS + MERMAID_WAIT_MS) + 6_000)
+    }
+
+    async fn render_document(
+        data: BrowserData,
+        document: String,
+        viewport: ArtifactViewport,
+        full_height: bool,
+        executor: gpui::BackgroundExecutor,
+    ) -> Result<RenderOutput, String> {
+        let offscreen = OffscreenPage::new(&data, viewport.width, viewport.height)?;
+        offscreen.load_document(&document)?;
+        let deadline = Instant::now() + probe_budget();
+        let mut report: Option<ProbeReport> = None;
+        while Instant::now() < deadline {
+            executor.timer(Duration::from_millis(100)).await;
+            if let Some(json) = offscreen.evaluate_string(READ_PROBE_SCRIPT).await {
+                report = serde_json::from_str(&json).ok();
+                if report.is_some() {
+                    break;
+                }
+            }
+        }
+        if full_height
+            && let Some(content) = report.as_ref().and_then(|report| report.content_height)
+            && content > viewport.height
+        {
+            let (height, _width) = compare_render_plan(content, 1.0);
+            let height = height.min(8192);
+            if height > viewport.height {
+                let _ = offscreen.resize(viewport.width, height);
+                executor.timer(Duration::from_millis(300)).await;
+            }
+        }
+        let png = offscreen.snapshot_png().await;
+        drop(offscreen);
+        match png {
+            Ok(png) => Ok(RenderOutput {
+                png: Some(png),
+                report,
+            }),
+            Err(error) if report.is_some() => {
+                tracing::warn!(%error, "artifact snapshot failed");
+                Ok(RenderOutput { png: None, report })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    impl ArtifactRenderer for WebKitRenderer {
+        fn render(
+            &self,
+            document: String,
+            viewport: ArtifactViewport,
+            cx: &mut gpui::AsyncApp,
+        ) -> RenderFuture {
+            let data = self.data.clone();
+            let executor = cx.background_executor().clone();
+            Box::pin(render_document(data, document, viewport, false, executor))
+        }
+
+        fn render_full_height(
+            &self,
+            document: String,
+            viewport: ArtifactViewport,
+            cx: &mut gpui::AsyncApp,
+        ) -> RenderFuture {
+            let data = self.data.clone();
+            let executor = cx.background_executor().clone();
+            Box::pin(render_document(data, document, viewport, true, executor))
+        }
+    }
 }

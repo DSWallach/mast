@@ -353,6 +353,26 @@ struct OverviewRow {
     /// The Chat captured an execution configuration that differs from its
     /// item's current one (Work Outline exception). Shares the title line.
     execution_exception: bool,
+    /// Mast agent-tool calls that failed in the session's last completed turn.
+    tool_failures: Option<mast_proto::ToolFailures>,
+}
+
+impl OverviewRow {
+    fn needs_interaction(&self) -> bool {
+        self.status == ChatIndicator::AwaitingInput || self.user_action_required
+    }
+
+    fn is_stalled(&self) -> bool {
+        self.status == ChatIndicator::Errored || self.tool_failures.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AttentionFilter {
+    #[default]
+    All,
+    NeedsInteraction,
+    Stalled,
 }
 
 impl GroupKeyed for OverviewRow {
@@ -1520,6 +1540,12 @@ pub struct Overview {
     /// "Show archived" toggle — default off, matches the reference's own
     /// `showArchived` default. Archived rows render heavily dimmed when on.
     show_archived: bool,
+    /// Quick filter for sessions needing interaction or stalled.
+    attention_filter: AttentionFilter,
+    /// Pre-attention-filter count of rows needing user interaction.
+    needs_interaction_count: usize,
+    /// Pre-attention-filter count of stalled rows (errored or failed tool calls).
+    stalled_count: usize,
     /// The chat the List should scroll into view on the next render (opening
     /// the link editor) — consumed by the List body
     /// and cleared after that render either way.
@@ -1843,6 +1869,9 @@ impl Overview {
             active_groups: Vec::new(),
             hide_stale: false,
             show_archived: false,
+            attention_filter: AttentionFilter::All,
+            needs_interaction_count: 0,
+            stalled_count: 0,
             focus_due: None,
             rows_dirty: true,
             perf: OverviewPerf::default(),
@@ -2333,13 +2362,21 @@ impl Overview {
         let outlines_loaded = outline_spaces
             .iter()
             .all(|space| !matches!(space.load, WorkOutlineLoad::Loading));
-        let (raw, spaces): (Vec<(ChatIndicator, Chat)>, HashMap<String, Space>) = {
+        let (raw, spaces): (
+            Vec<(ChatIndicator, Chat, Option<mast_proto::ToolFailures>)>,
+            HashMap<String, Space>,
+        ) = {
             let state = self.state.read(cx);
             (
                 state
                     .overview_chats_with_archived(now, self.show_archived)
                     .into_iter()
-                    .map(|(status, chat)| (status, chat.clone()))
+                    .map(|(status, chat)| {
+                        let failures = state
+                            .session_for(&chat.id)
+                            .and_then(|s| s.last_turn_tool_failures.clone());
+                        (status, chat.clone(), failures)
+                    })
                     .collect(),
                 state
                     .spaces
@@ -2354,7 +2391,7 @@ impl Overview {
         let mut known_repos: BTreeSet<String> = BTreeSet::new();
         let mut acknowledged_changed = false;
         let mut all: Vec<OverviewRow> = Vec::with_capacity(raw.len());
-        for (status, chat) in raw {
+        for (status, chat, tool_failures) in raw {
             let stale = is_stale(&chat, status, now);
             self.ensure_row_fetches(chat.id.clone(), chat.harness_session_id.is_some(), cx);
             let link = self.link_status.get(&chat.id).map(|e| &e.status);
@@ -2423,6 +2460,7 @@ impl Overview {
                 user_action_count,
                 instruction_drift,
                 execution_exception,
+                tool_failures,
             });
         }
         self.known_repos = known_repos;
@@ -2488,6 +2526,15 @@ impl Overview {
                 matches_search(&query, &fields)
             })
             .collect();
+        self.needs_interaction_count = rows.iter().filter(|r| r.needs_interaction()).count();
+        self.stalled_count = rows.iter().filter(|r| r.is_stalled()).count();
+        let rows: Vec<OverviewRow> = match self.attention_filter {
+            AttentionFilter::All => rows,
+            AttentionFilter::NeedsInteraction => {
+                rows.into_iter().filter(|r| r.needs_interaction()).collect()
+            }
+            AttentionFilter::Stalled => rows.into_iter().filter(|r| r.is_stalled()).collect(),
+        };
         self.work_item_index = work_item_index;
         let rows = std::rc::Rc::new(rows);
         self.rows_cache = std::rc::Rc::clone(&rows);
@@ -2524,16 +2571,34 @@ impl Overview {
                 let stale = row.map_or_else(|| is_stale(chat, status, now), |r| r.stale);
                 let shown_by_toggles =
                     (self.show_archived || !chat.archived) && !(self.hide_stale && stale);
-                let visible = shown_by_toggles && {
-                    let repo = match row {
-                        Some(row) => row.repo.clone(),
-                        None => repo_key_for_chat(
-                            chat,
-                            chat.space_id.as_deref().and_then(|id| state.space_row(id)),
-                        ),
+                let tool_failures = row
+                    .and_then(|r| r.tool_failures.clone())
+                    .or_else(|| {
+                        state
+                            .session_for(&chat.id)
+                            .and_then(|s| s.last_turn_tool_failures.clone())
+                    });
+                let user_action_required = row.is_some_and(|r| r.user_action_required);
+                let visible = shown_by_toggles
+                    && {
+                        let repo = match row {
+                            Some(row) => row.repo.clone(),
+                            None => repo_key_for_chat(
+                                chat,
+                                chat.space_id.as_deref().and_then(|id| state.space_row(id)),
+                            ),
+                        };
+                        !self.hidden_repos.contains(&repo)
+                    }
+                    && match self.attention_filter {
+                        AttentionFilter::All => true,
+                        AttentionFilter::NeedsInteraction => {
+                            status == ChatIndicator::AwaitingInput || user_action_required
+                        }
+                        AttentionFilter::Stalled => {
+                            status == ChatIndicator::Errored || tool_failures.is_some()
+                        }
                     };
-                    !self.hidden_repos.contains(&repo)
-                };
                 let pr_number = row.and_then(|r| r.pr_number).or_else(|| {
                     self.link_status.get(&chat.id).and_then(|entry| {
                         effective_pr_links(&entry.status).first().map(|link| {
@@ -2562,6 +2627,7 @@ impl Overview {
                         .last_message_at
                         .unwrap_or(chat.created_at)
                         .timestamp_millis(),
+                    tool_failures,
                 }
             })
             .collect()
@@ -2618,6 +2684,10 @@ impl Overview {
     /// instead of navigating away — see `chat_panel_open`'s doc comment.
     /// Selecting the chat is what wires the Shell's transcript/composer to
     /// it; re-clicking the already-shown chat just refocuses the composer.
+    pub(crate) fn is_chat_panel_open(&self) -> bool {
+        self.chat_panel_open
+    }
+
     pub(crate) fn open_chat_panel(&mut self, chat_id: String, cx: &mut Context<Self>) {
         // Web `openTranscriptPanel` → `acknowledgeDone`.
         self.acknowledge_done(&chat_id, cx);
@@ -4626,6 +4696,95 @@ impl Render for Overview {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(format!("{} chats", rows.len()))),
                     )
+                    .when(
+                        self.needs_interaction_count > 0
+                            || self.attention_filter == AttentionFilter::NeedsInteraction,
+                        |el| {
+                            let active = self.attention_filter == AttentionFilter::NeedsInteraction;
+                            let color = crate::status_style::status_style(
+                                crate::status_style::Status::Waiting,
+                                theme.appearance,
+                            )
+                            .color;
+                            let label = if self.needs_interaction_count == 1 {
+                                "1 needs interaction".to_string()
+                            } else {
+                                format!("{} need interaction", self.needs_interaction_count)
+                            };
+                            el.child(
+                                div()
+                                    .id("overview-filter-needs-interaction")
+                                    .debug_selector(|| "overview-filter-needs-interaction".into())
+                                    .px(px(7.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if active {
+                                        color
+                                    } else {
+                                        color.opacity(0.3)
+                                    })
+                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(color)
+                                    .child(SharedString::from(label))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.attention_filter = if this.attention_filter
+                                            == AttentionFilter::NeedsInteraction
+                                        {
+                                            AttentionFilter::All
+                                        } else {
+                                            AttentionFilter::NeedsInteraction
+                                        };
+                                        this.rows_dirty = true;
+                                        cx.notify();
+                                    })),
+                            )
+                        },
+                    )
+                    .when(
+                        self.stalled_count > 0
+                            || self.attention_filter == AttentionFilter::Stalled,
+                        |el| {
+                            let active = self.attention_filter == AttentionFilter::Stalled;
+                            let color = crate::status_style::status_style(
+                                crate::status_style::Status::Errored,
+                                theme.appearance,
+                            )
+                            .color;
+                            let label = format!("{} stalled", self.stalled_count);
+                            el.child(
+                                div()
+                                    .id("overview-filter-stalled")
+                                    .debug_selector(|| "overview-filter-stalled".into())
+                                    .px(px(7.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if active {
+                                        color
+                                    } else {
+                                        color.opacity(0.3)
+                                    })
+                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(color)
+                                    .child(SharedString::from(label))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.attention_filter =
+                                            if this.attention_filter == AttentionFilter::Stalled {
+                                                AttentionFilter::All
+                                            } else {
+                                                AttentionFilter::Stalled
+                                            };
+                                        this.rows_dirty = true;
+                                        cx.notify();
+                                    })),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .id("overview-search")
@@ -5134,6 +5293,39 @@ impl Overview {
                     this.rows_dirty = true;
                     cx.notify();
                 })),
+            )
+            .child(
+                row(
+                    "overview-filter-needs-interaction-menu",
+                    "Needs interaction",
+                    self.attention_filter == AttentionFilter::NeedsInteraction,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.attention_filter =
+                        if this.attention_filter == AttentionFilter::NeedsInteraction {
+                            AttentionFilter::All
+                        } else {
+                            AttentionFilter::NeedsInteraction
+                        };
+                    this.rows_dirty = true;
+                    cx.notify();
+                })),
+            )
+            .child(
+                row(
+                    "overview-filter-stalled-menu",
+                    "Stalled",
+                    self.attention_filter == AttentionFilter::Stalled,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.attention_filter = if this.attention_filter == AttentionFilter::Stalled {
+                        AttentionFilter::All
+                    } else {
+                        AttentionFilter::Stalled
+                    };
+                    this.rows_dirty = true;
+                    cx.notify();
+                })),
             );
         trigger
             .child(popover::anchored_menu_below(
@@ -5177,6 +5369,11 @@ impl Overview {
             }
             if self.hide_stale {
                 active.push("hide stale".into());
+            }
+            match self.attention_filter {
+                AttentionFilter::All => {}
+                AttentionFilter::NeedsInteraction => active.push("needs interaction".into()),
+                AttentionFilter::Stalled => active.push("stalled".into()),
             }
             let detail =
                 (!active.is_empty()).then(|| format!("Active filters: {}.", active.join(", ")));
@@ -5491,8 +5688,81 @@ impl Overview {
             row.status == ChatIndicator::Completed,
         );
         let (dim, ribbon) = card_dimming(row.chat.archived, row.stale, unread);
-        // A chat whose work item needs the user stays at full opacity.
-        let dim = dim.filter(|_| !(row.user_action_required && !row.chat.archived));
+        // A chat needing interaction or stalled stays at full opacity.
+        let dim = dim.filter(|_| {
+            row.chat.archived || !(row.needs_interaction() || row.is_stalled())
+        });
+        let needs_input_pill = (row.status == ChatIndicator::AwaitingInput).then(|| {
+            let color = crate::status_style::status_style(
+                crate::status_style::Status::Waiting,
+                theme.appearance,
+            )
+            .color;
+            let selector = format!("overview-row-needs-input-{chat_id}");
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .flex_none()
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded(px(3.0))
+                .bg(color.opacity(0.15))
+                .text_size(crate::typography::ui_rems(9.5))
+                .text_color(color)
+                .child("Needs input")
+        });
+        let stalled_pill = if let Some(failures) = &row.tool_failures {
+            let color = crate::status_style::status_style(
+                crate::status_style::Status::Errored,
+                theme.appearance,
+            )
+            .color;
+            let label = if failures.count == 1 {
+                "1 tool call failed".to_string()
+            } else {
+                format!("{} tool calls failed", failures.count)
+            };
+            let selector = format!("overview-row-stalled-{chat_id}");
+            let mut pill = div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .flex_none()
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded(px(3.0))
+                .bg(color.opacity(0.15))
+                .text_size(crate::typography::ui_rems(9.5))
+                .text_color(color)
+                .child(SharedString::from(label));
+            if !failures.tools.is_empty() {
+                let tip: SharedString =
+                    format!("Failed tools: {}", failures.tools.join(", ")).into();
+                pill = pill.tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into());
+            }
+            Some(pill)
+        } else if row.status == ChatIndicator::Errored {
+            let color = crate::status_style::status_style(
+                crate::status_style::Status::Errored,
+                theme.appearance,
+            )
+            .color;
+            let selector = format!("overview-row-stalled-{chat_id}");
+            Some(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .flex_none()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .bg(color.opacity(0.15))
+                    .text_size(crate::typography::ui_rems(9.5))
+                    .text_color(color)
+                    .child("Stalled"),
+            )
+        } else {
+            None
+        };
         let attention = crate::work_outline::chips::attention_indicator(
             format!("overview-row-attention-{chat_id}"),
             row.user_action_required,
@@ -5618,6 +5888,8 @@ impl Overview {
                                     )
                                     .children(drift_mark)
                                     .children(exception_mark)
+                                    .when_some(needs_input_pill, |el, pill| el.child(pill))
+                                    .when_some(stalled_pill, |el, pill| el.child(pill))
                                     .when_some(attention, |el, attention| el.child(attention)),
                             )
                             .child(
@@ -8361,6 +8633,7 @@ mod logic_tests {
             user_action_count: 0,
             instruction_drift: false,
             execution_exception: false,
+            tool_failures: None,
         }
     }
 
@@ -8943,6 +9216,145 @@ mod logic_tests {
             overview.read_with(vcx, |o, _| o.list_selected.clone()),
             Some(before)
         );
+    }
+
+    #[gpui::test]
+    fn overview_indicates_sessions_needing_interaction_or_stalled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let now = Utc::now();
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                row("c-awaiting", "/work/alpha", None).chat,
+                row("c-failed-tools", "/work/alpha", None).chat,
+                row("c-errored", "/work/alpha", None).chat,
+                row("c-idle", "/work/alpha", None).chat,
+            ];
+            state.sessions = vec![
+                mast_proto::Session {
+                    chat_id: "c-awaiting".into(),
+                    device_id: "d".into(),
+                    status: mast_proto::SessionStatus::AwaitingInput,
+                    started_at: Some(now),
+                    updated_at: now,
+                    last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: None,
+                },
+                mast_proto::Session {
+                    chat_id: "c-failed-tools".into(),
+                    device_id: "d".into(),
+                    status: mast_proto::SessionStatus::Idle,
+                    started_at: None,
+                    updated_at: now,
+                    last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: Some(mast_proto::ToolFailures {
+                        count: 2,
+                        tools: vec!["report_to_parent".into()],
+                    }),
+                },
+                mast_proto::Session {
+                    chat_id: "c-errored".into(),
+                    device_id: "d".into(),
+                    status: mast_proto::SessionStatus::Errored,
+                    started_at: None,
+                    updated_at: now,
+                    last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: None,
+                },
+            ];
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let (overview, vcx) = cx.add_window_view(|_, cx| {
+            let mut overview = Overview::new(
+                state.clone(),
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            );
+            overview.view_mode = OverviewMode::List;
+            overview
+        });
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        draw(vcx);
+
+        assert!(vcx.debug_bounds("overview-row-needs-input-c-awaiting").is_some());
+        assert!(vcx.debug_bounds("overview-row-stalled-c-failed-tools").is_some());
+        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
+        assert!(vcx.debug_bounds("overview-row-needs-input-c-idle").is_none());
+        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
+
+        overview.read_with(vcx, |o, _| {
+            assert_eq!(o.needs_interaction_count, 1);
+            assert_eq!(o.stalled_count, 2);
+            assert_eq!(o.list_order.len(), 4);
+        });
+
+        // Clicking the "need interaction" pill filters to just c-awaiting.
+        let needs_pill = vcx.debug_bounds("overview-filter-needs-interaction").unwrap();
+        vcx.simulate_click(needs_pill.center(), gpui::Modifiers::default());
+        draw(vcx);
+        overview.read_with(vcx, |o, _| {
+            assert_eq!(o.attention_filter, AttentionFilter::NeedsInteraction);
+            assert_eq!(o.list_order.len(), 1);
+            assert_eq!(o.list_order[0].0, "c-awaiting");
+        });
+
+        // Clicking the "stalled" pill switches to the 2 stalled sessions.
+        let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
+        vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
+        draw(vcx);
+        overview.read_with(vcx, |o, _| {
+            assert_eq!(o.attention_filter, AttentionFilter::Stalled);
+            assert_eq!(o.list_order.len(), 2);
+        });
+
+        // Clicking "stalled" again clears the filter.
+        let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
+        vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
+        draw(vcx);
+        overview.read_with(vcx, |o, _| {
+            assert_eq!(o.attention_filter, AttentionFilter::All);
+            assert_eq!(o.list_order.len(), 4);
+        });
+
+        // Updating last_turn_tool_failures on an existing idle session updates the overview.
+        state.update(vcx, |state, cx| {
+            state.sessions.push(mast_proto::Session {
+                chat_id: "c-idle".into(),
+                device_id: "d".into(),
+                status: mast_proto::SessionStatus::Idle,
+                started_at: None,
+                updated_at: now,
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: Some(mast_proto::ToolFailures {
+                    count: 1,
+                    tools: vec!["bind_chat_worktree".into()],
+                }),
+            });
+            cx.notify();
+        });
+        draw(vcx);
+        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_some());
+        overview.read_with(vcx, |o, _| {
+            assert_eq!(o.stalled_count, 3);
+        });
     }
 
     /// List mode with more rows than fit on screen: each row keeps its full

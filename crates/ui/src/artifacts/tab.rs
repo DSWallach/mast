@@ -241,8 +241,7 @@ impl ArtifactWebHost for BrowserWebHost {
     }
 
     fn supports_scripts(&self) -> bool {
-        // The script bridge is macOS-only for now.
-        cfg!(target_os = "macos")
+        cfg!(any(target_os = "macos", target_os = "linux"))
     }
 }
 

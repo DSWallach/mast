@@ -24,6 +24,8 @@ pub enum RunState {
     Awaiting,
     Errored,
     Working,
+    /// Turn finished and not yet seen or dismissed by the user.
+    Finished,
     /// Turn over, but background work (a shell, a subagent) is still going.
     IdleBackground,
     /// An idle worker ended its last turn with failed Mast tool calls.
@@ -40,6 +42,7 @@ impl RunState {
             Self::Awaiting => "needs you",
             Self::Errored => "errored",
             Self::Working => "working",
+            Self::Finished => "finished",
             Self::IdleBackground => "idle",
             Self::ToolFailed => "tool calls failed",
         }
@@ -123,15 +126,23 @@ pub struct Snapshot {
     pub sections: Vec<Section>,
     pub total: usize,
     pub needs_you: usize,
+    pub finished: usize,
 }
 
 impl Snapshot {
-    /// "Nothing running" / "9 running · 2 need you".
+    /// "Nothing running" / "9 running · 2 need you" / "2 finished".
     pub fn headline(&self) -> String {
-        match (self.total, self.needs_you) {
-            (0, _) => "Nothing running".to_owned(),
-            (total, 0) => format!("{total} running"),
-            (total, n) => format!("{total} running \u{b7} {n} need you"),
+        let active = self.total.saturating_sub(self.finished);
+        match (active, self.finished, self.needs_you) {
+            (0, 0, _) => "Nothing running".to_owned(),
+            (0, finished, 0) => format!("{finished} finished"),
+            (0, finished, n) => format!("{finished} finished \u{b7} {n} need you"),
+            (active, 0, 0) => format!("{active} running"),
+            (active, 0, n) => format!("{active} running \u{b7} {n} need you"),
+            (active, finished, 0) => format!("{active} running \u{b7} {finished} finished"),
+            (active, finished, n) => {
+                format!("{active} running \u{b7} {finished} finished \u{b7} {n} need you")
+            }
         }
     }
 
@@ -295,10 +306,15 @@ pub fn snapshot(
             entries,
         });
     }
+    let finished = inputs
+        .iter()
+        .filter(|i| i.state == RunState::Finished)
+        .count();
     Snapshot {
         sections,
         total,
         needs_you: needs.len(),
+        finished,
     }
 }
 

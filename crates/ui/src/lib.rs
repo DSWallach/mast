@@ -80,6 +80,7 @@ pub(crate) mod pr_page;
 pub(crate) mod pr_review_launch;
 pub(crate) mod branch_review_launch;
 pub mod project_actions;
+pub mod quota_guard;
 pub mod scheduled_tasks;
 pub mod queue;
 pub mod rail;

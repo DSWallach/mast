@@ -833,6 +833,9 @@ impl Shell {
                         .last_message_at
                         .unwrap_or(chat.created_at)
                         .timestamp_millis(),
+                    tool_failures: state
+                        .session_for(&chat.id)
+                        .and_then(|s| s.last_turn_tool_failures.clone()),
                 })
                 .collect();
             (spaces, chats)

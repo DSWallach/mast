@@ -579,6 +579,10 @@ mod pinned_session_tests {
             cx.notify();
         });
         assert!(cx.debug_bounds("sidebar-personal-assistant").is_none());
+        assert!(
+            cx.debug_bounds("current-session-chat-open").is_some(),
+            "the active session still appears at the top without a personal assistant"
+        );
     }
 
     fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
@@ -5955,22 +5959,23 @@ impl Shell {
 
     /// The personal assistant's own section, above the space filter: it stays
     /// put whatever the filter, sort or grouping. A scheduled-task assistant
-    /// shows and opens its latest run, and stays lit on any of its runs.
-    /// The open session sits directly below it, independent of list filters.
+    /// The personal assistant (when assigned) and the active/open session at
+    /// the top of the sidebar, independent of list filters.
     pub(super) fn render_personal_assistant_section(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let (row, selected, open_row) = {
+        let (assistant_data, open_row) = {
             let state = self.state.read(cx);
-            let chat = state.personal_assistant.current(&state.chats)?.clone();
-            // Keep the open session reachable even outside the current filter.
-            // Older assistant task runs also get their own row beneath the latest.
+            let assistant_chat = state.personal_assistant.current(&state.chats).cloned();
+            let assistant_id = assistant_chat.as_ref().map(|c| c.id.as_str());
+            // Keep the open session reachable even outside the current filter,
+            // whether or not a personal assistant is assigned.
             let open_row = state
                 .selected_chat_row()
-                .filter(|open| open.id != chat.id)
+                .filter(|open| assistant_id != Some(open.id.as_str()))
                 .map(|open| {
                     self.sidebar_chat_data(
                         state.display_status_for(open, now),
@@ -5978,15 +5983,20 @@ impl Shell {
                         state,
                     )
                 });
-            let selected = state
-                .selected_chat_row()
-                .is_some_and(|selected| state.personal_assistant.covers(selected));
-            (
-                self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
-                selected,
-                open_row,
-            )
+            let assistant_data = assistant_chat.map(|chat| {
+                let selected = state
+                    .selected_chat_row()
+                    .is_some_and(|selected| state.personal_assistant.covers(selected));
+                (
+                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
+                    selected,
+                )
+            });
+            (assistant_data, open_row)
         };
+        if assistant_data.is_none() && open_row.is_none() {
+            return None;
+        }
         let open_element = open_row.map(|row| {
             let chat = row.chat;
             let harness = self
@@ -6014,41 +6024,41 @@ impl Shell {
                 cx,
             )
         });
-        let chat = row.chat;
-        let harness = self
-            .settings
-            .sidebar_show_harness
-            .then(|| chat.config.as_ref().map(|c| c.harness))
-            .flatten();
-        let element = self.render_chat_row(
-            chat.id.clone(),
-            None,
-            transcript::single_line(&chat.title.clone().unwrap_or_else(|| "New session".into()))
+        let has_assistant = assistant_data.is_some();
+        let assistant_block = assistant_data.map(|(row, selected)| {
+            let chat = row.chat;
+            let harness = self
+                .settings
+                .sidebar_show_harness
+                .then(|| chat.config.as_ref().map(|c| c.harness))
+                .flatten();
+            let element = self.render_chat_row(
+                chat.id.clone(),
+                None,
+                transcript::single_line(
+                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                )
                 .into(),
-            format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
-            row.folder.into(),
-            row.branch.map(SharedString::from),
-            row.change_request,
-            harness,
-            row.status,
-            selected,
-            chat.archived,
-            false,
-            None,
-            None,
-            None,
-            theme,
-            cx,
-        );
-        Some(
+                format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                row.folder.into(),
+                row.branch.map(SharedString::from),
+                row.change_request,
+                harness,
+                row.status,
+                selected,
+                chat.archived,
+                false,
+                None,
+                None,
+                None,
+                theme,
+                cx,
+            );
             div()
                 .id("sidebar-personal-assistant")
                 .debug_selector(|| "sidebar-personal-assistant".into())
-                .flex_none()
                 .flex()
                 .flex_col()
-                .px(px(Theme::SPACE_SM))
-                .pt(px(8.0))
                 .child(
                     div()
                         .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
@@ -6061,12 +6071,37 @@ impl Shell {
                         )),
                 )
                 .child(element)
+        });
+        Some(
+            div()
+                .id("sidebar-top-session")
+                .flex_none()
+                .flex()
+                .flex_col()
+                .px(px(Theme::SPACE_SM))
+                .pt(px(8.0))
+                .when_some(assistant_block, |el, block| el.child(block))
                 .when_some(open_element, |el, row| {
                     el.child(
                         div()
                             .id("sidebar-current-session")
                             .debug_selector(|| "sidebar-current-session".into())
-                            .pt(px(SIDEBAR_LIST_GAP))
+                            .when(!has_assistant, |el| {
+                                el.child(
+                                    div()
+                                        .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
+                                        .flex()
+                                        .items_center()
+                                        .px(px(Theme::SPACE_SM))
+                                        .child(
+                                            crate::components::shell_parts::sidebar_section_label(
+                                                theme,
+                                                "Active session".into(),
+                                            ),
+                                        ),
+                                )
+                            })
+                            .when(has_assistant, |el| el.pt(px(SIDEBAR_LIST_GAP)))
                             .child(row),
                     )
                 })

@@ -379,6 +379,7 @@ impl Shell {
         };
         let compare_chat = chat_id.to_owned();
         let apply_chat = chat_id.to_owned();
+        let accept_all_chat = chat_id.to_owned();
         let keep_chat = chat_id.to_owned();
         let confirm_chat = chat_id.to_owned();
         let cancel_chat = chat_id.to_owned();
@@ -445,6 +446,38 @@ impl Shell {
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.apply_chat_instructions(&apply_chat, cx)
+                                    },
+                                ))
+                            })
+                            .child(if blocker.is_some() {
+                                div()
+                                    .id("chat-header-instructions-accept-all-disabled")
+                                    .debug_selector(|| {
+                                        "chat-header-instructions-accept-all-disabled".into()
+                                    })
+                                    .flex_none()
+                                    .px(px(4.0))
+                                    .text_color(theme.text_faint)
+                                    .child("Accept all updates")
+                            } else {
+                                link(
+                                    "chat-header-instructions-accept-all",
+                                    if in_flight {
+                                        "Applying\u{2026}"
+                                    } else {
+                                        "Accept all updates"
+                                    },
+                                )
+                                .hint(
+                                    "Apply updated instructions to all chats for this item",
+                                    HintKey::None,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.apply_all_chat_instructions_for_item(
+                                            &accept_all_chat,
+                                            cx,
+                                        )
                                     },
                                 ))
                             }),
@@ -560,6 +593,66 @@ impl Shell {
             entry.confirm = None;
         }
         cx.notify();
+    }
+
+    /// Apply updated instructions to all chats assigned to `item_id` in `space_id`
+    /// that currently have instruction drift. Returns whether any chats were applied.
+    pub(crate) fn apply_all_instructions_for_work_item(
+        &mut self,
+        space_id: &str,
+        item_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let chats_to_apply = {
+            let state = self.state.read(cx);
+            let Some(snapshot) = state.work_outline(space_id).snapshot().cloned() else {
+                return false;
+            };
+            let assigned = instructions::assigned_chats(&snapshot);
+            let mut chats = Vec::new();
+            for (cid, iid) in assigned {
+                if iid == item_id {
+                    let is_drifted = snapshot
+                        .chat_instruction_state(&cid)
+                        .is_some_and(|s| s.drift);
+                    if is_drifted {
+                        chats.push(cid);
+                    }
+                }
+            }
+            chats
+        };
+
+        let had_chats = !chats_to_apply.is_empty();
+        for cid in chats_to_apply {
+            self.apply_chat_instructions(&cid, cx);
+        }
+        had_chats
+    }
+
+    /// Apply updated instructions to all chats assigned to the same work item
+    /// as `chat_id` that currently have instruction drift.
+    pub(crate) fn apply_all_chat_instructions_for_item(
+        &mut self,
+        chat_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (space_id, item_id) = {
+            let state = self.state.read(cx);
+            let Some(context) = chat_instruction_context(state, chat_id) else {
+                return;
+            };
+            (context.snapshot.space_id.clone(), context.item_id.clone())
+        };
+
+        if let Some(item_id) = item_id {
+            let had_chats = self.apply_all_instructions_for_work_item(&space_id, &item_id, cx);
+            if !had_chats {
+                self.apply_chat_instructions(chat_id, cx);
+            }
+        } else {
+            self.apply_chat_instructions(chat_id, cx);
+        }
     }
 
     /// Keep current session: `keepInstructionSession` reverts the Chat's
@@ -1204,8 +1297,9 @@ pub(super) fn compare_card(
                             popover::btn_primary(theme, "Apply")
                                 .id("instruction-compare-apply-confirm")
                                 .debug_selector(|| "instruction-compare-apply-confirm".into())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.confirm_apply_chat_instructions(&confirm_chat, cx)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_apply_chat_instructions(&confirm_chat, cx);
+                                    this.resolve_work_outline_modal(true, window, cx);
                                 })),
                         )
                         .into_any_element()
@@ -1229,8 +1323,16 @@ pub(super) fn compare_card(
                     .id("instruction-compare-apply")
                     .debug_selector(|| "instruction-compare-apply".into())
                     .hint(APPLY_HINT, HintKey::None)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.apply_chat_instructions(&apply_chat, cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.apply_chat_instructions(&apply_chat, cx);
+                        if this
+                            .instruction_apply
+                            .get(&apply_chat)
+                            .and_then(|a| a.confirm.as_ref())
+                            .is_none()
+                        {
+                            this.resolve_work_outline_modal(true, window, cx);
+                        }
                     }))
                     .into_any_element()
                 }),
@@ -1940,6 +2042,48 @@ mod tests {
         draw(cx);
         assert_eq!(calls.lock().unwrap()[0]["query"], "getInstructionRevision");
         assert!(cx.debug_bounds("instruction-comparison-diff").is_some());
+    }
+
+    #[gpui::test]
+    fn compare_apply_closes_modal(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let _calls = seed(&shell, cx, fixture::snapshot("s1"), ok_ids);
+        shell.update(cx, |shell, cx| shell.open_instruction_compare(CHAT_API, cx));
+        draw(cx);
+        assert!(cx.debug_bounds("instruction-compare").is_some());
+        assert!(cx.debug_bounds("instruction-compare-apply").is_some());
+
+        let apply = cx
+            .debug_bounds("instruction-compare-apply")
+            .unwrap()
+            .center();
+        cx.simulate_click(apply, gpui::Modifiers::default());
+        draw(cx);
+
+        shell.read_with(cx, |shell, _| assert!(shell.work_outline_modal.is_none()));
+        assert!(cx.debug_bounds("instruction-compare").is_none());
+    }
+
+    #[gpui::test]
+    fn accept_all_chat_instructions_for_item(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let snapshot = fixture::snapshot("s1");
+        let calls = seed(&shell, cx, snapshot, ok_ids);
+
+        shell.update(cx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            let status = shell.render_chat_instruction_status(CHAT_API, &theme, cx);
+            assert!(status.is_some());
+        });
+
+        shell.update(cx, |shell, cx| {
+            shell.apply_all_chat_instructions_for_item(CHAT_API, cx);
+        });
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|c| c["op"] == "createInstructionRevision"));
     }
 
     #[gpui::test]

@@ -400,6 +400,7 @@ mod tests {
                         pr_number: None,
                         visible: true,
                         activity: 0,
+                        tool_failures: None,
                     },
                     work_item: None,
                     dangling: false,

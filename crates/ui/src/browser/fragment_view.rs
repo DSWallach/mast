@@ -197,7 +197,7 @@ impl BrowserSurface {
             view.rendered = Some(key);
         }
         self.page.error = None;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let result = if let Some(native) = &self.native {
                 native.load_document(&document)
@@ -205,6 +205,7 @@ impl BrowserSurface {
                 super::native::NativePage::new(window, &self.context.data, self.native_tx.clone())
                     .map(|mut native| {
                         native.present(self.presentation);
+                        #[cfg(target_os = "macos")]
                         native.set_extra_forwarded_keys(self.extra_forwarded_keys.clone());
                         self.native = Some(native);
                     })
@@ -216,7 +217,7 @@ impl BrowserSurface {
             }
             window.focus(&self.focus, cx);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (window, document);
             if let Some(view) = &mut self.fragment {

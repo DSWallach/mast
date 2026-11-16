@@ -9,14 +9,14 @@
 #include <unistd.h>
 #include <webkit2/webkit2.h>
 
-#define MAX_COMMAND (1024 * 1024)
+#define MAX_COMMAND (16 * 1024 * 1024)
 #define MAX_DIMENSION 8192
 
 typedef struct {
     guint id;
     GtkWidget *window;
     WebKitWebView *web;
-    gboolean visible, dirty;
+    gboolean visible, dirty, document, offscreen;
     gchar *error;
     guint width, height;
     double scale;
@@ -166,10 +166,14 @@ static void loaded(WebKitWebView *web, WebKitLoadEvent event, Page *p) {
     if (event == WEBKIT_LOAD_STARTED)
         g_clear_pointer(&p->error, g_free);
     state(p);
+    if (event == WEBKIT_LOAD_FINISHED && !p->offscreen)
+        send_packet('L', p->id, NULL, 0);
 }
 static gboolean failed(WebKitWebView *web, WebKitLoadEvent event, const char *uri, GError *error,
                        Page *p) {
-    if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
+    if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED) ||
+        g_error_matches(error, WEBKIT_POLICY_ERROR,
+                        WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE))
         return TRUE;
     g_free(p->error);
     p->error = g_strdup(error->message);
@@ -180,6 +184,13 @@ static void terminated(WebKitWebView *web, WebKitWebProcessTerminationReason rea
     g_free(p->error);
     p->error = g_strdup("The browser process stopped. Reload to try again.");
     state(p);
+}
+static gboolean is_document_navigation(const char *uri) {
+    if (!uri)
+        return FALSE;
+    if (!strcmp(uri, "about:blank") || !strcmp(uri, "about:srcdoc"))
+        return TRUE;
+    return g_str_has_prefix(uri, "about:srcdoc#");
 }
 static gboolean allowed(const char *uri) {
     GUri *u = g_uri_parse(uri, G_URI_FLAGS_NONE, NULL);
@@ -198,6 +209,23 @@ static gboolean policy(WebKitWebView *web, WebKitPolicyDecision *decision,
         WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(
             WEBKIT_NAVIGATION_POLICY_DECISION(decision));
         const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+        if (p->document) {
+            if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION &&
+                is_document_navigation(uri))
+                return FALSE;
+            gboolean link_activated = webkit_navigation_action_get_navigation_type(action) ==
+                                      WEBKIT_NAVIGATION_TYPE_LINK_CLICKED;
+            if (link_activated && uri && *uri) {
+                JsonBuilder *b = json_builder_new();
+                json_builder_begin_object(b);
+                member_string(b, "url", uri);
+                member_bool(b, "link", TRUE);
+                json_builder_end_object(b);
+                send_json('D', p->id, b);
+            }
+            webkit_policy_decision_ignore(decision);
+            return TRUE;
+        }
         if (!allowed(uri)) {
             webkit_policy_decision_ignore(decision);
             return TRUE;
@@ -249,7 +277,8 @@ static gboolean context_menu(WebKitWebView *web, WebKitContextMenu *menu, GdkEve
     JsonBuilder *b = menu_builder(x / p->scale, y / p->scale);
     if (webkit_hit_test_result_context_is_link(hit)) {
         p->context_link = g_strdup(webkit_hit_test_result_get_link_uri(hit));
-        menu_item(b, "Open link in new tab", "open-link", allowed(p->context_link), FALSE);
+        menu_item(b, "Open link in new tab", "open-link",
+                  !p->document && allowed(p->context_link), FALSE);
         menu_item(b, "Copy link address", "copy-link", TRUE, FALSE);
     }
     menu_item(b, "Copy", "copy",
@@ -259,9 +288,11 @@ static gboolean context_menu(WebKitWebView *web, WebKitContextMenu *menu, GdkEve
     if (webkit_hit_test_result_context_is_editable(hit))
         menu_item(b, "Paste", "text", TRUE, FALSE);
     menu_item(b, "Select all", "select-all", TRUE, FALSE);
-    menu_item(b, "Back", "back", webkit_web_view_can_go_back(web), FALSE);
-    menu_item(b, "Forward", "forward", webkit_web_view_can_go_forward(web), FALSE);
-    menu_item(b, "Reload", "reload", TRUE, FALSE);
+    if (!p->document) {
+        menu_item(b, "Back", "back", webkit_web_view_can_go_back(web), FALSE);
+        menu_item(b, "Forward", "forward", webkit_web_view_can_go_forward(web), FALSE);
+        menu_item(b, "Reload", "reload", TRUE, FALSE);
+    }
     send_menu(p, b);
     return TRUE;
 }
@@ -299,13 +330,14 @@ static void free_page(gpointer data) {
     g_free(p->context_link);
     g_free(p);
 }
-static Page *new_page(guint id) {
+static Page *new_page(guint id, gboolean offscreen) {
     Page *p = g_new0(Page, 1);
     p->id = id;
     p->width = 800;
     p->height = 600;
     p->scale = 1;
     p->visible = TRUE;
+    p->offscreen = offscreen;
     p->window = gtk_offscreen_window_new();
     p->web = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
     BrowserIM *im = g_object_new(browser_im_get_type(), NULL);
@@ -336,7 +368,7 @@ static gboolean render_frames(gpointer unused) {
     g_hash_table_iter_init(&it, pages);
     while (g_hash_table_iter_next(&it, NULL, &value)) {
         Page *p = value;
-        if (!p->visible || !p->dirty)
+        if (p->offscreen || !p->visible || !p->dirty)
             continue;
         p->dirty = FALSE;
         GdkPixbuf *pix = gtk_offscreen_window_get_pixbuf(GTK_OFFSCREEN_WINDOW(p->window));
@@ -460,6 +492,10 @@ static void copied(GObject *web, GAsyncResult *result, gpointer data) {
     }
     g_clear_error(&error);
 }
+typedef struct {
+    guint id;
+    guint seq;
+} PageRequest;
 static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     guint id = GPOINTER_TO_UINT(data);
     GError *error = NULL;
@@ -470,13 +506,84 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     g_clear_object(&v);
     g_clear_error(&error);
 }
+static void evaluated_string(GObject *web, GAsyncResult *result, gpointer data) {
+    PageRequest *req = data;
+    GError *error = NULL;
+    JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(web), result, &error);
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "eval_id");
+    json_builder_add_int_value(b, req->seq);
+    if (v && jsc_value_is_string(v)) {
+        gchar *text = jsc_value_to_string(v);
+        member_string(b, "value", text);
+        g_free(text);
+    } else {
+        member_string(b, "value", NULL);
+    }
+    json_builder_end_object(b);
+    send_json('E', req->id, b);
+    g_clear_object(&v);
+    g_clear_error(&error);
+    g_free(req);
+}
+static cairo_status_t png_write_cb(void *closure, const unsigned char *data, unsigned int length) {
+    GByteArray *buf = closure;
+    g_byte_array_append(buf, data, length);
+    return CAIRO_STATUS_SUCCESS;
+}
+static void send_snapshot_result(guint id, guint snap_id, cairo_surface_t *surface,
+                                 const char *err) {
+    GByteArray *pkt = g_byte_array_new();
+    guint32 sid = GUINT32_TO_LE(snap_id);
+    g_byte_array_append(pkt, (const guint8 *)&sid, 4);
+    if (surface) {
+        GByteArray *png = g_byte_array_new();
+        cairo_status_t st = cairo_surface_write_to_png_stream(surface, png_write_cb, png);
+        if (st == CAIRO_STATUS_SUCCESS && png->len > 0) {
+            guint8 ok = 1;
+            g_byte_array_append(pkt, &ok, 1);
+            g_byte_array_append(pkt, png->data, png->len);
+        } else {
+            guint8 ok = 0;
+            const char *msg = "the snapshot could not be encoded";
+            g_byte_array_append(pkt, &ok, 1);
+            g_byte_array_append(pkt, (const guint8 *)msg, strlen(msg));
+        }
+        g_byte_array_free(png, TRUE);
+    } else {
+        guint8 ok = 0;
+        const char *msg = err ? err : "the web view returned no snapshot";
+        g_byte_array_append(pkt, &ok, 1);
+        g_byte_array_append(pkt, (const guint8 *)msg, strlen(msg));
+    }
+    send_packet('P', id, pkt->data, pkt->len);
+    g_byte_array_free(pkt, TRUE);
+}
+static void snapshot_ready(GObject *web, GAsyncResult *result, gpointer data) {
+    PageRequest *req = data;
+    GError *error = NULL;
+    cairo_surface_t *surface =
+        webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(web), result, &error);
+    if (surface) {
+        send_snapshot_result(req->id, req->seq, surface, NULL);
+        cairo_surface_destroy(surface);
+    } else {
+        send_snapshot_result(req->id, req->seq, NULL, error ? error->message : NULL);
+    }
+    g_clear_error(&error);
+    g_free(req);
+}
 static void command(JsonObject *o) {
     guint id = number(o, "id");
     const char *cmd = string(o, "cmd");
     Page *p = g_hash_table_lookup(pages, GUINT_TO_POINTER(id));
     if (!strcmp(cmd, "create")) {
-        if (!p)
-            new_page(id);
+        if (!p) {
+            gboolean offscreen = json_object_has_member(o, "offscreen") &&
+                                 json_object_get_boolean_member(o, "offscreen");
+            new_page(id, offscreen);
+        }
         return;
     }
     if (!p)
@@ -487,8 +594,16 @@ static void command(JsonObject *o) {
     }
     if (!strcmp(cmd, "load")) {
         const char *url = string(o, "url");
-        if (allowed(url))
+        if (allowed(url)) {
+            p->document = FALSE;
+            g_clear_pointer(&p->error, g_free);
             webkit_web_view_load_uri(p->web, url);
+        }
+    } else if (!strcmp(cmd, "load_document")) {
+        const char *html = string(o, "html");
+        p->document = TRUE;
+        g_clear_pointer(&p->error, g_free);
+        webkit_web_view_load_html(p->web, html, NULL);
     } else if (!strcmp(cmd, "dismiss-menu")) {
         if (p->options) {
             webkit_option_menu_close(p->options);
@@ -558,6 +673,7 @@ static void command(JsonObject *o) {
             p->scale = scale;
             webkit_web_view_set_zoom_level(p->web, scale);
             gtk_window_set_default_size(GTK_WINDOW(p->window), w, h);
+            gtk_window_resize(GTK_WINDOW(p->window), w, h);
             gtk_widget_set_size_request(GTK_WIDGET(p->web), w, h);
             gtk_widget_queue_resize(p->window);
             p->dirty = TRUE;
@@ -572,7 +688,22 @@ static void command(JsonObject *o) {
     } else if (!strcmp(cmd, "eval"))
         webkit_web_view_evaluate_javascript(p->web, string(o, "script"), -1, NULL, NULL, NULL,
                                             evaluated, GUINT_TO_POINTER(id));
-    else
+    else if (!strcmp(cmd, "eval_quiet"))
+        webkit_web_view_evaluate_javascript(p->web, string(o, "script"), -1, NULL, NULL, NULL,
+                                            NULL, NULL);
+    else if (!strcmp(cmd, "eval_string")) {
+        PageRequest *req = g_new(PageRequest, 1);
+        req->id = id;
+        req->seq = (guint)number(o, "eval_id");
+        webkit_web_view_evaluate_javascript(p->web, string(o, "script"), -1, NULL, NULL, NULL,
+                                            evaluated_string, req);
+    } else if (!strcmp(cmd, "snapshot")) {
+        PageRequest *req = g_new(PageRequest, 1);
+        req->id = id;
+        req->seq = (guint)number(o, "snap_id");
+        webkit_web_view_get_snapshot(p->web, WEBKIT_SNAPSHOT_REGION_VISIBLE,
+                                     WEBKIT_SNAPSHOT_OPTIONS_NONE, NULL, snapshot_ready, req);
+    } else
         input_event(p, o, cmd);
 }
 static gboolean read_commands(gint fd, GIOCondition condition, gpointer unused) {

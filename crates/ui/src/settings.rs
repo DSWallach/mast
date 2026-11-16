@@ -316,6 +316,49 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+pub fn current_ref(cx: &App) -> Option<&UiSettings> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| &store.current)
+}
+
+/// Active default model preference at `now`: an unexpired temporary quota
+/// override wins; an expired override falls back to its `previous` selection.
+pub fn effective_default_model(
+    settings: &UiSettings,
+    now: chrono::DateTime<chrono::Utc>,
+) -> DefaultModelPreference {
+    if let Some(ov) = &settings.temporary_default_override {
+        if ov.expires_at > now {
+            return DefaultModelPreference {
+                harness: Some(ov.harness),
+                model: Some(ov.model.clone()),
+                model_label: ov.model_label.clone(),
+            };
+        }
+        return ov.previous.clone();
+    }
+    settings.default_model.clone()
+}
+
+/// If a temporary default model override has expired at `now`, restore
+/// `default_model` to `previous`, clear the override, persist immediately,
+/// and return the expired override.
+pub fn expire_temporary_default_override(
+    cx: &mut App,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<TemporaryDefaultModelOverride> {
+    let ov = current(cx).temporary_default_override?;
+    if ov.expires_at > now {
+        return None;
+    }
+    let previous = ov.previous.clone();
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.default_model = previous;
+        settings.temporary_default_override = None;
+    });
+    Some(ov)
+}
+
 /// Copy a selected image into Mast's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -831,6 +874,47 @@ pub struct UiSettings {
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
     legacy_accent_color: Option<crate::theme::AccentColor>,
+    /// Explicitly configured default harness and model for new sessions.
+    #[serde(default, skip_serializing_if = "DefaultModelPreference::is_empty")]
+    pub default_model: DefaultModelPreference,
+    /// Temporary default model override active after a quota hit, with an
+    /// expiration timestamp to revert to `previous`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_default_override: Option<TemporaryDefaultModelOverride>,
+}
+
+/// User-configured explicit default harness and model for new sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DefaultModelPreference {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<mast_proto::HarnessId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
+}
+
+impl DefaultModelPreference {
+    pub fn is_empty(&self) -> bool {
+        self.harness.is_none() && self.model.is_none()
+    }
+}
+
+/// Temporary default model switch triggered when a model hits its quota.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporaryDefaultModelOverride {
+    pub harness: mast_proto::HarnessId,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
+    #[serde(default)]
+    pub previous: DefaultModelPreference,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Default for UiSettings {
@@ -918,6 +1002,8 @@ impl Default for UiSettings {
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             legacy_accent_color: None,
+            default_model: DefaultModelPreference::default(),
+            temporary_default_override: None,
         }
     }
 }
@@ -3120,6 +3206,8 @@ mod tests {
             artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
+            default_model: DefaultModelPreference::default(),
+            temporary_default_override: None,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();

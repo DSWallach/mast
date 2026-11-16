@@ -1,6 +1,6 @@
 //! Device-local browser tabs. GPUI owns chrome; the native host owns pages.
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "linux")]
@@ -263,12 +263,11 @@ impl BrowserSurface {
     /// Run a script in the page without waiting for a result. No-op until the
     /// native page exists.
     pub(crate) fn run_script(&self, script: &str) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &self.native {
             native.run_script(script);
         }
-        // TODO: the linux helper only exposes a fixture-gated evaluate.
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = script;
     }
 
@@ -287,7 +286,12 @@ impl BrowserSurface {
             });
             return cx.spawn(async move |_, _| rx.await.ok().flatten());
         }
-        // TODO: linux has no result-returning evaluate yet.
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.native {
+            let rx = native.evaluate_string(script);
+            return cx.spawn(async move |_, _| rx.await.ok().flatten());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = script;
         cx.spawn(async move |_, _| None)
     }
@@ -547,7 +551,7 @@ impl BrowserSurface {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn static_document_event(
     fragment: bool,
     document: bool,
@@ -809,7 +813,7 @@ impl BrowserSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn static_artifact_messages_reach_the_tab_only_when_live() {
         let json = r#"{"t":"sheet-stage","id":"ui-4","outcome":"decided","note":""}"#;

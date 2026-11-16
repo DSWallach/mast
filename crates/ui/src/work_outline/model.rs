@@ -93,6 +93,8 @@ pub(crate) struct OutlineChat {
     pub visible: bool,
     /// Last activity, unix millis; newer sorts first.
     pub activity: i64,
+    /// Mast agent-tool calls that failed in the session's last completed turn.
+    pub tool_failures: Option<mast_proto::ToolFailures>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -732,6 +734,7 @@ fn missing_chat(chat_id: &str, space_id: &str) -> OutlineChat {
         pr_number: None,
         visible: true,
         activity: 0,
+        tool_failures: None,
     }
 }
 
@@ -966,6 +969,7 @@ pub(crate) mod tests {
             pr_number: None,
             visible: true,
             activity: 0,
+            tool_failures: None,
         }
     }
 

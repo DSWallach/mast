@@ -3587,7 +3587,8 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
             .into_any_element();
     }
     let status = crate::status_style::Status::from(chat.status);
-    let indicator = crate::components::outline_selected_chat_indicator(status, format!("outline-chat-status-{key}"), crate::status_style::status_style(status, theme.appearance).color, theme, selected, cx.entity_id(), cx);
+    let status_color = crate::status_style::status_style(status, theme.appearance).color;
+    let indicator = crate::components::outline_selected_chat_indicator(status, format!("outline-chat-status-{key}"), status_color, theme, selected, cx.entity_id(), cx);
     let status_label = match chat.status {
         mast_proto::ChatIndicator::Working => "Working",
         mast_proto::ChatIndicator::AwaitingInput => "Needs you",
@@ -3595,6 +3596,39 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
         mast_proto::ChatIndicator::Completed => "Done",
         mast_proto::ChatIndicator::Idle => "Idle",
     };
+    let word_color = match chat.status {
+        mast_proto::ChatIndicator::AwaitingInput | mast_proto::ChatIndicator::Errored => {
+            status_color
+        }
+        _ => theme.text_muted,
+    };
+    let tool_failures_pill = chat.tool_failures.as_ref().map(|failures| {
+        let error_color =
+            crate::status_style::status_style(crate::status_style::Status::Errored, theme.appearance)
+                .color;
+        let label = if failures.count == 1 {
+            "1 tool call failed".to_string()
+        } else {
+            format!("{} tool calls failed", failures.count)
+        };
+        let selector = format!("outline-chat-stalled-{key}");
+        let mut pill = div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .flex_none()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(3.0))
+            .bg(error_color.opacity(0.15))
+            .text_size(crate::typography::ui_rems(9.5))
+            .text_color(error_color)
+            .child(SharedString::from(label));
+        if !failures.tools.is_empty() {
+            let tip: SharedString = format!("Failed tools: {}", failures.tools.join(", ")).into();
+            pill = pill.tooltip(move |_, cx| cx.new(|_| TextTooltip(tip.clone())).into());
+        }
+        pill
+    });
     div()
         .flex_1()
         .min_w_0()
@@ -3602,7 +3636,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
         .items_center()
         .gap(px(6.0))
         .child(indicator)
-        .children(crate::components::outline_status_word(status_label, theme.text_muted, theme))
+        .children(crate::components::outline_status_word(status_label, word_color, theme))
         .child(
             div()
                 .flex_1()
@@ -3611,6 +3645,7 @@ fn chat_body(key: &str, row: &ChatRow, drift: Option<AnyElement>, selected: bool
                 .text_color(theme.text_muted)
                 .child(SharedString::from(chat.title.clone())),
         )
+        .when_some(tool_failures_pill, |el, pill| el.child(pill))
         .when_some(drift.filter(|_| crate::components::outline_row_extras(theme)), |el, drift| el.child(drift))
         .when_some(chat.branch.clone().filter(|_| crate::components::outline_row_extras(theme)), |el, branch| {
             el.child(

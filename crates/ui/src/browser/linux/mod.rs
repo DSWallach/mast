@@ -1,5 +1,6 @@
 //! WebKitGTK renders offscreen in an isolated helper process. GPUI composites
 //! its frames, so browser content uses the same clipping and blur as other UI.
+use super::document_view::{DocumentAction, document_decision};
 use super::model::{PageState, Presentation};
 use gpui::{Bounds, Pixels, RenderImage};
 use serde_json::{Value, json};
@@ -18,8 +19,11 @@ use tokio::sync::mpsc::Sender;
 #[derive(Clone, Debug)]
 pub enum NativeEvent {
     Changed,
+    Finished,
     Frame,
     NewTab(String),
+    Link(String),
+    Message(String),
     Clipboard(String),
     Menu(Value),
 }
@@ -42,12 +46,64 @@ impl Drop for Worker {
     }
 }
 struct Route {
-    tx: Sender<NativeEvent>,
+    tx: Option<Sender<NativeEvent>>,
     state: Mutex<PageState>,
     frame: Mutex<Option<(Arc<RenderImage>, f32)>>,
     input: Mutex<Value>,
+    evals: Mutex<HashMap<u32, futures::channel::oneshot::Sender<Option<String>>>>,
+    snapshots: Mutex<HashMap<u32, futures::channel::oneshot::Sender<Result<Vec<u8>, String>>>>,
+    next_req: AtomicU32,
     #[cfg(feature = "browser-fixture")]
     evaluation: Mutex<Option<Value>>,
+}
+impl Route {
+    fn new(tx: Option<Sender<NativeEvent>>) -> Arc<Self> {
+        Arc::new(Self {
+            tx,
+            state: Mutex::default(),
+            frame: Mutex::default(),
+            input: Mutex::new(json!({})),
+            evals: Mutex::default(),
+            snapshots: Mutex::default(),
+            next_req: AtomicU32::new(1),
+            #[cfg(feature = "browser-fixture")]
+            evaluation: Mutex::default(),
+        })
+    }
+
+    fn evaluate_string(
+        &self,
+        worker: &Worker,
+        id: u32,
+        script: &str,
+    ) -> futures::channel::oneshot::Receiver<Option<String>> {
+        let eval_id = self.next_req.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.evals.lock().unwrap().insert(eval_id, tx);
+        if worker
+            .send(id, json!({"cmd":"eval_string","eval_id":eval_id,"script":script}))
+            .is_err()
+        {
+            self.evals.lock().unwrap().remove(&eval_id);
+        }
+        rx
+    }
+
+    fn snapshot_png(
+        &self,
+        worker: &Worker,
+        id: u32,
+    ) -> futures::channel::oneshot::Receiver<Result<Vec<u8>, String>> {
+        let snap_id = self.next_req.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.snapshots.lock().unwrap().insert(snap_id, tx);
+        if let Err(err) = worker.send(id, json!({"cmd":"snapshot","snap_id":snap_id}))
+            && let Some(tx) = self.snapshots.lock().unwrap().remove(&snap_id)
+        {
+            let _ = tx.send(Err(err));
+        }
+        rx
+    }
 }
 
 fn helper_path() -> Result<std::path::PathBuf, String> {
@@ -137,6 +193,42 @@ impl BrowserData {
                             let Ok(state) = serde_json::from_slice(&data) else { continue; };
                             *route.state.lock().unwrap() = state; NativeEvent::Changed
                         }
+                        b'L' => NativeEvent::Finished,
+                        b'D' => {
+                            let Ok(val) = serde_json::from_slice::<Value>(&data) else { continue; };
+                            let Some(url) = val["url"].as_str() else { continue; };
+                            let link = val["link"].as_bool().unwrap_or(false);
+                            match document_decision(url, link).action {
+                                DocumentAction::None => continue,
+                                DocumentAction::NewTab(url) => NativeEvent::NewTab(url),
+                                DocumentAction::Link(raw) => NativeEvent::Link(raw),
+                                DocumentAction::Message(json) => NativeEvent::Message(json),
+                            }
+                        }
+                        b'E' => {
+                            if let Ok(val) = serde_json::from_slice::<Value>(&data)
+                                && let Some(eval_id) = val["eval_id"].as_u64().and_then(|n| u32::try_from(n).ok())
+                                && let Some(tx) = route.evals.lock().unwrap().remove(&eval_id)
+                            {
+                                let _ = tx.send(val["value"].as_str().map(str::to_owned));
+                            }
+                            continue;
+                        }
+                        b'P' => {
+                            if data.len() >= 5 {
+                                let snap_id = u32::from_le_bytes(data[..4].try_into().unwrap());
+                                let ok = data[4] != 0;
+                                let payload = data[5..].to_vec();
+                                if let Some(tx) = route.snapshots.lock().unwrap().remove(&snap_id) {
+                                    let _ = tx.send(if ok {
+                                        Ok(payload)
+                                    } else {
+                                        Err(String::from_utf8_lossy(&payload).into_owned())
+                                    });
+                                }
+                            }
+                            continue;
+                        }
                         b'M' => {let Ok(menu)=serde_json::from_slice(&data) else {continue;};NativeEvent::Menu(menu)}
                         b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
                         b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
@@ -146,18 +238,33 @@ impl BrowserData {
                     };
                     // At most one latest frame is retained per page. A busy UI
                     // never accumulates video frames or blocks the engine.
-                    match event {
-                        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => { let _ = route.tx.blocking_send(event); }
-                        _ => { let _ = route.tx.try_send(event); }
+                    if let Some(tx) = &route.tx {
+                        match event {
+                            NativeEvent::NewTab(_)
+                            | NativeEvent::Clipboard(_)
+                            | NativeEvent::Menu(_)
+                            | NativeEvent::Link(_)
+                            | NativeEvent::Message(_) => {
+                                let _ = tx.blocking_send(event);
+                            }
+                            _ => {
+                                let _ = tx.try_send(event);
+                            }
+                        }
                     }
                 }
             })();
             if result.is_err() {
                 for route in reader_routes.lock().unwrap().values().filter_map(Weak::upgrade) {
+                    route.evals.lock().unwrap().clear();
+                    route.snapshots.lock().unwrap().clear();
                     let mut state = route.state.lock().unwrap();
                     state.loading = false;
                     state.error = Some("The browser helper stopped. Check that WebKitGTK 4.1 is installed, then reopen the tab.".into());
-                    drop(state); let _ = route.tx.try_send(NativeEvent::Changed);
+                    drop(state);
+                    if let Some(tx) = &route.tx {
+                        let _ = tx.try_send(NativeEvent::Changed);
+                    }
                 }
             }
         }).map_err(|e| e.to_string())?;
@@ -205,14 +312,7 @@ impl NativePage {
     ) -> Result<Self, String> {
         let worker = data.worker()?;
         let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
-        let route = Arc::new(Route {
-            tx,
-            state: Mutex::default(),
-            frame: Mutex::default(),
-            input: Mutex::new(json!({})),
-            #[cfg(feature = "browser-fixture")]
-            evaluation: Mutex::default(),
-        });
+        let route = Route::new(Some(tx));
         worker
             .routes
             .lock()
@@ -237,6 +337,16 @@ impl NativePage {
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
+    }
+    pub fn load_document(&self, html: &str) -> Result<(), String> {
+        self.worker
+            .send(self.id, json!({"cmd":"load_document","html":html}))
+    }
+    pub fn run_script(&self, script: &str) {
+        self.command(json!({"cmd":"eval_quiet","script":script}));
+    }
+    pub fn evaluate_string(&self, script: &str) -> futures::channel::oneshot::Receiver<Option<String>> {
+        self.route.evaluate_string(&self.worker, self.id, script)
     }
     pub fn reload(&self) {
         self.command(json!({"cmd":"reload"}));
@@ -305,6 +415,57 @@ impl Drop for NativePage {
     }
 }
 
+pub(crate) struct OffscreenPage {
+    worker: Arc<Worker>,
+    route: Arc<Route>,
+    id: u32,
+}
+impl OffscreenPage {
+    pub(crate) fn new(data: &BrowserData, width: u32, height: u32) -> Result<Self, String> {
+        let worker = data.worker()?;
+        let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
+        let route = Route::new(None);
+        worker
+            .routes
+            .lock()
+            .unwrap()
+            .insert(id, Arc::downgrade(&route));
+        worker.send(id, json!({"cmd":"create","offscreen":true}))?;
+        let page = Self { worker, route, id };
+        page.resize(width, height)?;
+        Ok(page)
+    }
+    pub(crate) fn load_document(&self, html: &str) -> Result<(), String> {
+        self.worker
+            .send(self.id, json!({"cmd":"load_document","html":html}))
+    }
+    pub(crate) fn resize(&self, width: u32, height: u32) -> Result<(), String> {
+        self.worker.send(
+            self.id,
+            json!({"cmd":"resize","width":width.clamp(1, 8192),"height":height.clamp(1, 8192),"scale":1.0}),
+        )
+    }
+    pub(crate) async fn evaluate_string(&self, script: &str) -> Option<String> {
+        self.route
+            .evaluate_string(&self.worker, self.id, script)
+            .await
+            .ok()
+            .flatten()
+    }
+    pub(crate) async fn snapshot_png(&self) -> Result<Vec<u8>, String> {
+        self.route
+            .snapshot_png(&self.worker, self.id)
+            .await
+            .unwrap_or_else(|_| Err("the snapshot was cancelled".to_owned()))
+    }
+}
+impl Drop for OffscreenPage {
+    fn drop(&mut self) {
+        let _ = self.worker.send(self.id, json!({"cmd":"close"}));
+        self.worker.routes.lock().unwrap().remove(&self.id);
+    }
+}
+
 impl super::BrowserSurface {
     pub(super) fn on_native_event(
         &mut self,
@@ -313,10 +474,60 @@ impl super::BrowserSurface {
         cx: &mut gpui::Context<Self>,
     ) {
         use gpui::Focusable;
+        if matches!(event, NativeEvent::Link(_) | NativeEvent::Message(_)) {
+            if let Some(event) = super::static_document_event(
+                self.fragment.is_some(),
+                self.document.is_some(),
+                self.presentation,
+                &event,
+            ) {
+                cx.emit(event);
+            }
+            return;
+        }
         let Some(native) = &mut self.native else {
             return;
         };
         native.update_frame(window);
+        if self.fragment.is_some() || self.document.is_some() {
+            match event {
+                NativeEvent::Frame | NativeEvent::Changed | NativeEvent::Finished => {
+                    let page = native.state();
+                    self.page.loading = page.loading && page.error.is_none();
+                    if page.error != self.page.error {
+                        self.page.error = page.error;
+                        cx.emit(super::BrowserEvent::Changed);
+                    }
+                    cx.notify();
+                }
+                NativeEvent::NewTab(url) => {
+                    if self.presentation == Presentation::Live {
+                        cx.emit(super::BrowserEvent::NewTab(Some(url)));
+                    }
+                }
+                NativeEvent::Menu(menu) => {
+                    if self.presentation == Presentation::Live {
+                        native.menu_active = menu["items"]
+                            .as_array()
+                            .and_then(|items| {
+                                items
+                                    .iter()
+                                    .position(|item| item["selected"].as_bool().unwrap_or(false))
+                            })
+                            .unwrap_or(0);
+                        native.menu = Some(menu);
+                    } else {
+                        native.command(json!({"cmd":"dismiss-menu"}));
+                    }
+                    cx.notify();
+                }
+                NativeEvent::Clipboard(text) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+                NativeEvent::Link(_) | NativeEvent::Message(_) => unreachable!(),
+            }
+            return;
+        }
         match event {
             NativeEvent::NewTab(url) => {
                 if self.presentation == Presentation::Live {
@@ -341,7 +552,8 @@ impl super::BrowserSurface {
             NativeEvent::Clipboard(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
-            NativeEvent::Frame | NativeEvent::Changed => {
+            NativeEvent::Link(_) | NativeEvent::Message(_) => unreachable!(),
+            NativeEvent::Frame | NativeEvent::Changed | NativeEvent::Finished => {
                 let mut page = native.state();
                 if page.url.is_none() {
                     page.url = self.page.url.clone();

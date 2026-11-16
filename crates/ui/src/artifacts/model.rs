@@ -333,11 +333,11 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                     source: text,
                 },
                 ArtifactKind::Mermaid => {
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                     {
                         ArtifactBody::Markdown(format!("```mermaid\n{text}\n```"))
                     }
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     {
                         ArtifactBody::Web {
                             kind: WebKind::Mermaid,

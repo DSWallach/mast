@@ -323,6 +323,32 @@ impl WorkItemDetails {
         self.accept_with(proposal, text, cx);
     }
 
+    /// Accept all pending instruction proposals for this work item (or Space root).
+    pub(crate) fn accept_all_proposals(&mut self, cx: &mut Context<Self>) {
+        let scope_item = (!self.is_space_root()).then_some(self.item_id.as_str());
+        let pending: Vec<WorkItemInstructionProposalView> = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                required_actions::proposals_for(snapshot, scope_item)
+                    .into_iter()
+                    .filter(|p| required_actions::is_pending(p))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for proposal in pending {
+            let text = proposal.text.clone();
+            let allow_stale = self.snapshot.as_ref().is_some_and(|snapshot| {
+                matches!(
+                    proposal_diff::standing(snapshot, &proposal),
+                    Standing::Stale { .. }
+                )
+            });
+            self.send_approve(proposal.id, text, allow_stale, false, cx);
+        }
+    }
+
     fn accept_with(
         &mut self,
         proposal: WorkItemInstructionProposalView,
@@ -624,6 +650,23 @@ impl WorkItemDetails {
         if pending.is_empty() {
             section = section.child(
                 crate::components::outline_section_message("No pending proposals".into(), theme.text_faint, theme),
+            );
+        } else if pending.len() > 1 {
+            section = section.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .mb(px(4.0))
+                    .child(
+                        crate::work_outline::hints::details_button(
+                            "work-item-proposals-accept-all",
+                            "Accept all updates",
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.accept_all_proposals(cx);
+                        })),
+                    ),
             );
         }
         section = section.children(self.render_pending_proposal_groups(pending, snapshot, theme, cx));

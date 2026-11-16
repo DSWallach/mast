@@ -89,6 +89,7 @@ mod review_ui;
 mod project_icon;
 mod required_actions_ui;
 mod menu_bar_ui;
+mod quota_ui;
 mod running_ui;
 mod side_chat_ui;
 #[cfg(feature = "snapshot")]
@@ -1819,6 +1820,7 @@ pub struct Shell {
     status_light: Option<crate::status_light::LightSummary>,
     dock_sync: crate::status_light::DockSync,
     menu_bar: menu_bar_ui::MenuBarUi,
+    quota: quota_ui::QuotaUi,
     /// Spaces this Shell asked `AppState` to watch (so notifications and
     /// Required Actions work before the Overview exists).
     user_action_watch: Option<Vec<String>>,
@@ -2313,6 +2315,7 @@ impl Shell {
             status_light: None,
             dock_sync: Default::default(),
             menu_bar: Default::default(),
+            quota: Default::default(),
             user_action_watch: None,
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
@@ -4625,6 +4628,7 @@ impl Shell {
             crate::status_light::apply(ops);
         }
         self.sync_menu_bar(false, cx);
+        self.check_quota_and_override(cx);
     }
 
     /// The Mast logo, lit by the status light unless "Live app icon" is off.
@@ -9676,6 +9680,9 @@ impl Shell {
         if let Some(overlay) = self.render_project_action_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
+        if let Some(overlay) = self.render_quota_prompt(viewport, &theme, cx) {
+            overlays.push(overlay);
+        }
 
         if let Some(chat_id) = self.delete_confirm.clone() {
             let title = transcript::single_line(
@@ -12244,7 +12251,13 @@ impl Render for Shell {
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
                 // one extra frame settles it).
-                if window_active {
+                let viewing_selected_chat = matches!(self.route, Route::Chat)
+                    || (matches!(self.route, Route::Overview)
+                        && self
+                            .overview_page
+                            .as_ref()
+                            .is_some_and(|o| o.read(cx).is_chat_panel_open()));
+                if window_active && viewing_selected_chat {
                     let unseen_selected = {
                         let s = self.state.read(cx);
                         s.selected_chat_row()
