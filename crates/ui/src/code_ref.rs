@@ -91,13 +91,13 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             })
             .collect();
         let reference: mast_proto::CodeRef = serde_json::from_slice(&bytes?).ok()?;
-        let (block, rest) = tail.split_once(END)?;
-        let (_, block) = block.split_once('\n')?;
+        let (_, block) = tail.split_once('\n')?;
         let (fence, body) = block.split_once('\n')?;
         if fence.len() < 3 || !fence.bytes().all(|byte| byte == b'`') {
             return None;
         }
-        let snippet = body.strip_suffix(&format!("\n{fence}"))?.to_string();
+        let (snippet, rest) = body.split_once(&format!("\n{fence}{END}"))?;
+        let snippet = snippet.to_string();
         if !result.is_empty() {
             result.push(' ');
         }
