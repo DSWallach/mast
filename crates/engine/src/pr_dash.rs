@@ -30,6 +30,8 @@ use mast_proto::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod review_threads;
+
 /// `classify` as a function pointer so tests can inject a trivial one.
 pub type ClassifyFn = fn(PrDashTab, &PrDashRow) -> (PrDashBucket, Vec<String>);
 
@@ -1212,6 +1214,14 @@ struct Inner {
     cfg: PrDashConfig,
     me: Mutex<Option<String>>,
     store: Store,
+    threads: tokio::sync::Mutex<HashMap<String, ThreadCacheEntry>>,
+}
+
+struct ThreadCacheEntry {
+    result: Result<Vec<mast_proto::ReviewThread>, String>,
+    checked: std::time::Instant,
+    retry_after: Option<Duration>,
+    failures: u32,
 }
 
 /// The PR page's data service. Cheap to clone.
@@ -1247,6 +1257,7 @@ impl PrDash {
                 cfg,
                 me: Mutex::new(None),
                 store,
+                threads: tokio::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1254,6 +1265,32 @@ impl PrDash {
     /// The real service: `gh`, spec defaults, `mast_proto::classify`.
     pub fn with_real_gh() -> Self {
         Self::new(Arc::new(RealGh), PrDashConfig::default())
+    }
+
+    /// Fetch only on demand; concurrent views share a bounded cache.
+    pub async fn review_threads(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<mast_proto::ReviewThread>, String> {
+        let valid = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !valid(owner) || !valid(repo) || number == 0 { return Err("Invalid pull request".into()); }
+        let key = format!("{}/{}#{number}", owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+        let mut cache = self.inner.threads.lock().await;
+        if let Some(entry) = cache.get(&key) {
+            if entry.retry_after.is_none_or(|delay| entry.checked.elapsed() < delay) {
+                return entry.result.clone();
+            }
+        }
+        let failures = cache.get(&key).map_or(0, |entry| entry.failures);
+        let result = review_threads::fetch(self.inner.gh.as_ref(), owner, repo, number).await;
+        let (failures, retry_after) = match &result {
+            Ok(_) => (0, Some(Duration::from_secs(120))),
+            Err(error) if error.to_ascii_lowercase().contains("not found") => (failures.saturating_add(1), None),
+            Err(_) => (failures.saturating_add(1), Some(mast_harness::backoff::delay_for_attempt(Duration::from_secs(30), Duration::from_secs(1800), failures))),
+        };
+        if cache.len() >= 64 && !cache.contains_key(&key)
+            && let Some(oldest) = cache.iter().min_by_key(|(_, entry)| entry.checked).map(|(key, _)| key.clone()) {
+            cache.remove(&oldest);
+        }
+        cache.insert(key, ThreadCacheEntry { result: result.clone(), checked: std::time::Instant::now(), retry_after, failures });
+        result
     }
 
     /// Persist the last good rows of each tab to `path` and load what an

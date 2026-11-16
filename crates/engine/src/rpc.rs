@@ -4049,6 +4049,16 @@ impl RpcService for EngineRpc {
                 let items = cache.my_open_prs();
                 RpcReply::value(&items)
             }
+            methods::GET_REVIEW_THREADS => {
+                let p: mast_proto::PrStatusParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                let threads = dash.review_threads(&p.owner, &p.repo, p.number).await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&threads)
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {
