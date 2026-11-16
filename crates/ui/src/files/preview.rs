@@ -2559,6 +2559,41 @@ impl FilesSurface {
                 state.set_editor_style(super::editor_adapter::editor_style(theme));
             });
             let overlays = self.render_editor_comment_overlays(path, &editor, theme, cx);
+            let selected = {
+                let state = editor.read(cx);
+                let value = state.value().to_string();
+                let selection = state.selected_range();
+                if selection.start < selection.end && selection.end <= value.len()
+                    && value.is_char_boundary(selection.start) && value.is_char_boundary(selection.end) {
+                    let start_line = value[..selection.start].bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
+                    let last = selection.end.saturating_sub(1);
+                    let end_line = value[..last].bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
+                    let range = mast_proto::CodeRefRange { start_line, end_line };
+                    crate::code_ref::snippet(&value, range).map(|snippet| (range, snippet, crate::code_ref::content_hash(&value)))
+                } else { None }
+            };
+            let action_bar = selected.and_then(|(range, snippet, hash)| {
+                let member = self.state.read(cx).selected_execution_member(&self.chat_id)?;
+                let key = self.chat_id.clone();
+                let path = path.to_string();
+                let location = format!("{}:{}-{}", path, range.start_line, range.end_line);
+                let reference = crate::code_ref::StagedCodeRef {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    reference: mast_proto::CodeRef {
+                        version: 1,
+                        location: mast_proto::CodeRefLocation { repo_id: member.repo_id, worktree_id: self.request_context.as_ref().and_then(|context| context.checkout_id.clone()), path },
+                        kind: mast_proto::CodeRefKind::Lines, range: Some(range), symbol: None,
+                        at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: hash },
+                    }, snippet,
+                };
+                Some(super::code_ref_bar::action_bar(theme)
+                    .child(div().id("add-selection-to-chat").cursor_pointer().child("Add to chat")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |state, cx| { state.add_code_ref(&key, reference.clone()); cx.notify(); });
+                        })))
+                    .child(div().id("copy-selection-ref").cursor_pointer().child("Copy ref")
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(location.clone())))))
+            });
             return div()
                 .id("files-editor-body")
                 .flex_1()
@@ -2573,6 +2608,7 @@ impl FilesSurface {
                 ))
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
+                .children(action_bar)
                 .into_any_element();
         }
         let Some(file) = document.file.as_ref() else {

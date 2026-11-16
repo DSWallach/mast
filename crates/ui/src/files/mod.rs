@@ -17,6 +17,7 @@ use crate::{
     state::AppState,
 };
 
+mod code_ref_bar;
 pub mod client;
 pub mod document;
 pub mod editor;
