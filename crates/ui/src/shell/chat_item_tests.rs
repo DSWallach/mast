@@ -1887,3 +1887,33 @@ fn required_action_detail_renders_markdown(cx: &mut TestAppContext) {
     click_selector(vcx, "required-actions-info-toggle-markdown-detail");
     assert!(has(vcx, "required-actions-info-markdown-detail"));
 }
+
+#[gpui::test]
+fn header_and_item_tab_follow_the_selected_checkout(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let before = shell.read_with(vcx, |shell, cx| shell.chat_item_facts(CHAT_API, cx).unwrap());
+    assert_eq!(before.branch.as_deref(), Some("feature/header"));
+    assert_eq!(before.runs_in.as_deref(), Some(format!("/work/{CHAT_API}").as_str()));
+    assert_eq!(before.execution_root, None);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/work/checkout".into(), checkout_id: "checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
+                    repo_name: "checkout".into(), branch: Some("feature/bound".into()), head_sha: None,
+                }], ref_targets: vec![],
+            }]);
+            cx.notify();
+        });
+    });
+    draw(vcx);
+    let after = shell.read_with(vcx, |shell, cx| shell.chat_item_facts(CHAT_API, cx).unwrap());
+    assert_eq!(after.branch.as_deref(), Some("feature/bound"));
+    assert_eq!(after.runs_in.as_deref(), Some("/work/checkout"));
+    assert_eq!(after.execution_root.as_deref(), Some(format!("/work/{CHAT_API}").as_str()));
+    assert!(has(vcx, "chat-item-runs-in"));
+    expand(&shell, vcx, &["runs-in"]);
+    assert!(has(vcx, "chat-item-runs-in"));
+}

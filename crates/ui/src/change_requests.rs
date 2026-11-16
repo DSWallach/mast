@@ -287,6 +287,23 @@ impl ChangeRequestClientState {
         total
     }
 
+    pub(crate) fn change_request_for_key(
+        &self,
+        key: &ChangeRequestWatchKey,
+    ) -> Option<&ChangeRequestSummary> {
+        self.snapshots
+            .values()
+            .find(|snapshot| {
+                snapshot.device_id == key.device_id
+                    && snapshot.cwd == key.cwd
+                    && snapshot.branch == key.branch
+                    && key.checkout_id.as_ref().is_none_or(|id| {
+                        !snapshot.checkout_id.is_empty() && snapshot.checkout_id == *id
+                    })
+            })
+            .and_then(|snapshot| snapshot.change_request.as_ref())
+    }
+
     pub fn change_request_for_chat<'a>(
         &'a self,
         chat: &Chat,
@@ -294,6 +311,59 @@ impl ChangeRequestClientState {
     ) -> Option<&'a ChangeRequestSummary> {
         change_request_for_chat(chat, spaces, self.snapshots.values())
     }
+}
+
+/// The selected checkout used for chat display and PR lookup. A missing
+/// target preserves the conversation's existing source context.
+pub(crate) struct DisplayCheckout<'a> {
+    pub path: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    pub checkout_id: Option<&'a str>,
+    pub bound: bool,
+}
+
+pub(crate) fn display_checkout<'a>(
+    chat: &'a Chat,
+    target: Option<&'a mast_proto::ChatDiffTargetView>,
+) -> DisplayCheckout<'a> {
+    if let Some(target) = target {
+        return DisplayCheckout {
+            path: Some(&target.path),
+            branch: target.branch.as_deref(),
+            checkout_id: Some(&target.checkout_id),
+            bound: true,
+        };
+    }
+    let source = chat.source_context.as_ref();
+    DisplayCheckout {
+        path: source.map(|source| source.repo_root.as_str()),
+        branch: source
+            .map(|source| source.branch.as_str())
+            .or(chat.branch.as_deref()),
+        checkout_id: source.map(|source| source.checkout_id.as_str()),
+        bound: false,
+    }
+}
+
+pub(crate) fn checkout_watch_key(
+    chat: &Chat,
+    target: Option<&mast_proto::ChatDiffTargetView>,
+) -> Option<ChangeRequestWatchKey> {
+    let checkout = display_checkout(chat, target);
+    // Legacy scalar branch metadata does not establish a checkout identity.
+    if !checkout.bound && chat.source_context.is_none() {
+        return None;
+    }
+    let branch = checkout.branch?.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    Some(ChangeRequestWatchKey {
+        device_id: chat.device_id.clone(),
+        cwd: checkout.path?.to_owned(),
+        branch: branch.to_owned(),
+        checkout_id: checkout.checkout_id.map(str::to_owned),
+    })
 }
 
 /// Active, fully identified checkouts that need host-side PR resolution.
@@ -306,23 +376,7 @@ pub(crate) fn desired_watch_targets(
         .iter()
         .filter(|chat| !chat.archived)
         .filter(|chat| !is_unsupported(&chat.device_id))
-        .filter_map(|chat| {
-            let source = chat.source_context.as_ref()?;
-            let (cwd, branch, checkout_id) = (
-                source.repo_root.as_str(),
-                source.branch.as_str(),
-                Some(source.checkout_id.clone()),
-            );
-            if branch.trim().is_empty() {
-                return None;
-            }
-            Some(ChangeRequestWatchKey {
-                device_id: chat.device_id.clone(),
-                cwd: cwd.to_owned(),
-                branch: branch.to_owned(),
-                checkout_id,
-            })
-        })
+        .filter_map(|chat| checkout_watch_key(chat, None))
         .collect()
 }
 
@@ -466,6 +520,26 @@ mod tests {
             observed_at: Utc.timestamp_opt(2, 0).unwrap(),
         });
         chat
+    }
+
+    #[test]
+    fn bound_checkout_selects_its_branch_for_pull_request_lookup() {
+        let chat = with_source(chat("chat", "local", Some("/repo"), None), "superproject");
+        let target = mast_proto::ChatDiffTargetView {
+            path: "/repo/submodule".into(), checkout_id: "submodule".into(),
+            source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
+            repo_name: "submodule".into(), branch: Some("feature/pr".into()), head_sha: None,
+        };
+        let key = checkout_watch_key(&chat, Some(&target)).unwrap();
+        assert_eq!(key.cwd, "/repo/submodule");
+        assert_eq!(key.branch, "feature/pr");
+        let mut state = ChangeRequestClientState::default();
+        state.store(key.clone(), snapshot("local", "/repo/submodule", "submodule"));
+        assert_eq!(state.change_request_for_key(&key).map(|pr| pr.number), Some(90));
+        assert!(state.change_request_for_key(&checkout_watch_key(&chat, None).unwrap()).is_none());
+        let mut detached = target;
+        detached.branch = None;
+        assert!(checkout_watch_key(&chat, Some(&detached)).is_none());
     }
 
     #[test]

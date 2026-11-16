@@ -152,6 +152,7 @@ pub(crate) struct ChatItemFacts {
     /// Where the chat runs (its working directory, else the project folder).
     pub runs_in: Option<String>,
     pub branch: Option<String>,
+    pub execution_root: Option<String>,
     pub prs: Vec<HeaderPr>,
     pub ticket: Option<HeaderTicket>,
     pub reviews: Vec<PlanFacts>,
@@ -161,6 +162,7 @@ pub(crate) struct ChatItemFacts {
 /// Everything [`facts`] reads.
 pub(crate) struct FactsInput<'a> {
     pub chat: &'a Chat,
+    pub checkout_target: Option<&'a mast_proto::ChatDiffTargetView>,
     pub space_path: Option<&'a str>,
     pub account: Option<String>,
     pub links: Option<&'a HeaderLinks>,
@@ -176,21 +178,26 @@ pub(crate) fn facts(input: &FactsInput<'_>) -> ChatItemFacts {
         .map(crate::transcript::single_line)
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".to_owned());
-    let branch = chat
-        .source_context
-        .as_ref()
-        .map(|context| context.branch.as_str())
-        .or(chat.branch.as_deref())
+    let checkout = crate::change_requests::display_checkout(chat, input.checkout_target);
+    let branch = checkout
+        .branch
         .map(str::trim)
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned);
-    let runs_in = chat
+    let execution_root = chat
         .cwd
         .as_deref()
         .or(input.space_path)
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(str::to_owned);
+    let runs_in = if checkout.bound {
+        checkout.path.map(str::to_owned)
+    } else {
+        execution_root.clone()
+    };
+    let execution_root =
+        execution_root.filter(|root| checkout.bound && Some(root.as_str()) != checkout.path);
     let mut prs = input.links.map(|l| l.prs.clone()).unwrap_or_default();
     let mut ticket = input.links.and_then(|l| l.ticket.clone());
     let item = input.snapshot.and_then(|snapshot| {
@@ -226,6 +233,7 @@ pub(crate) fn facts(input: &FactsInput<'_>) -> ChatItemFacts {
         account: input.account.clone(),
         runs_in,
         branch,
+        execution_root,
         prs,
         ticket,
         reviews: input
@@ -467,6 +475,7 @@ mod tests {
     fn sheet(chat: &Chat, snapshot: &WorkOutlineSnapshot) -> ChatItemFacts {
         facts(&FactsInput {
             chat,
+            checkout_target: None,
             space_path: Some("/project"),
             account: Some("Work".into()),
             links: None,
@@ -493,6 +502,7 @@ mod tests {
         let snapshot = crate::artifacts::tests::snapshot(vec![review, other]);
         let facts = facts(&FactsInput {
             chat: &chat,
+            checkout_target: None,
             space_path: None,
             account: None,
             links: None,

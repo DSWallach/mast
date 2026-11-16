@@ -109,6 +109,7 @@ impl Shell {
             .map(crate::chat_metadata::HeaderLinks::from_status);
         let mut facts = facts(&FactsInput {
             chat,
+            checkout_target: state.selected_chat_diff_target(chat_id),
             space_path: space.map(|space| space.path.as_str()),
             account: state.chat_account_badge(chat_id),
             links: links.as_ref(),
@@ -857,6 +858,9 @@ impl Shell {
             if let Some(branch) = &facts.branch {
                 block = block.child(muted(format!("\u{2387} {branch}")));
             }
+            if let Some(root) = &facts.execution_root {
+                block = block.child(muted(format!("Execution root: {root}")));
+            }
             if facts.runs_in.is_none() && facts.branch.is_none() {
                 block = block.child(muted("Not started yet".into()));
             }
@@ -1209,6 +1213,9 @@ impl Shell {
                 }
                 if let Some(branch) = &facts.branch {
                     block = block.child(muted(format!("\u{2387} {branch}")));
+                }
+                if let Some(root) = &facts.execution_root {
+                    block = block.child(muted(format!("Execution root: {root}")));
                 }
                 if facts.runs_in.is_none() && facts.branch.is_none() {
                     block = block.child(muted("Not started yet".into()));
