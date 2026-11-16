@@ -102,9 +102,12 @@ impl Shell {
             .space_id
             .as_deref()
             .and_then(|id| state.artifacts().snapshot(id).cloned());
+        let checkout = state.selected_chat_diff_target(chat_id)
+            .map(|target| (target.path.clone(), target.branch.clone()));
         let links = self
             .chat_header_links
             .get(chat_id)
+            .filter(|entry| entry.checkout == checkout)
             .and_then(|entry| entry.status.as_ref())
             .map(crate::chat_metadata::HeaderLinks::from_status);
         let mut facts = facts(&FactsInput {
