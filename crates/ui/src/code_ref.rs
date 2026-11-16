@@ -100,9 +100,13 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         let start = result.len();
         result.push_str(&staged.label());
         let end = result.len();
+        let path = match staged.reference.range {
+            Some(range) => format!("{}:{}", staged.reference.location.path, range.start_line),
+            None => staged.reference.location.path.clone(),
+        };
         spans.push(crate::composer::SentMentionSpan {
             range: start..end,
-            path: staged.reference.location.path.into(),
+            path: path.into(),
             is_dir: false,
         });
         remaining = rest;
@@ -230,7 +234,7 @@ mod tests {
         let (display, spans) = project_sent_refs(&prompt).unwrap();
         assert_eq!(display, "Review main.rs:2-3");
         assert_eq!(&display[spans[0].range.clone()], "main.rs:2-3");
-        assert_eq!(spans[0].path.as_ref(), "src/main.rs");
+        assert_eq!(spans[0].path.as_ref(), "src/main.rs:2");
         assert!(project_sent_refs("legacy message").is_none());
     }
 

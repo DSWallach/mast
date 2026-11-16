@@ -5587,6 +5587,7 @@ impl Transcript {
                 compact,
                 measured_h.clone(),
                 cx.entity_id(),
+                self.link_ui(),
             ));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
@@ -7446,6 +7447,7 @@ fn user_bubble_text(
     compact: bool,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
+    link_ui: Option<render::LinkUi>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -7522,8 +7524,17 @@ fn user_bubble_text(
     )
     .absolute()
     .size_full();
+    let hit_layout = styled.layout().clone();
+    let hit_mentions = mentions.clone();
     div()
         .relative()
+        .on_mouse_up(gpui::MouseButton::Left, move |event, window, cx| {
+            if !hit_layout.bounds().contains(&event.position) { return; }
+            let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
+            if let Some(span) = hit_mentions.iter().find(|span| span.range.contains(&index) && !span.is_dir) {
+                render::activate_link(crate::markdown::links::LinkTarget::new("", &span.path), crate::markdown::links::LinkAction::Source, link_ui.as_ref(), window, cx);
+            }
+        })
         .child(underlay)
         .child(styled)
         .into_any_element()
