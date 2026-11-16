@@ -132,9 +132,9 @@ Begin reliable collection at rollout. Add a resumable background import of exist
 - Add focused adapter, engine/store/RPC, and page-state tests. Run applicable Cargo checks/tests using the shared `CARGO_TARGET_DIR`; visually inspect the page in light/dark themes and narrow/wide layouts.
 - Before any merge, run the repository’s `pr-review` gate on the implementation branch, address every finding, and rerun until CLEAR at the exact merge SHA.
 
-## Proposed scope decisions
+## Scope decisions
 
-These are recommendations for review, not implementation already performed: device-scoped first release; explicit operational activities rather than guessed task topics; prospective collection with clearly labeled partial journal history; token counts before dollar estimates. Optimization provenance, MCP/CLI comparisons, and expensive-rule diagnostics are required first-release scope. Detailed capture is limited by what each harness exposes, with coverage visible rather than fabricated. No blocking product question is needed to present this plan. David can revise these choices before implementation.
+The first implementation follows these decisions: device-scoped first release; explicit operational activities rather than guessed task topics; prospective collection with clearly labeled partial journal history; token counts before dollar estimates. Optimization provenance, MCP/CLI comparisons, and expensive-rule diagnostics are required first-release scope. Detailed capture is limited by what each harness exposes, with coverage visible rather than fabricated. No blocking product question is needed to present this plan. David can revise these choices before implementation.
 
 ## First implementation coverage
 

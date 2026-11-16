@@ -5,6 +5,7 @@ impl TokenUsage {
     /// another device. Snapshot owners first, then read the live registry: a new
     /// chat created during this pass cannot be mistaken for a deleted owner.
     pub fn reconcile_deletions(&self, workspace: &crate::WorkspaceHost) -> Result<(), EngineError> {
+        self.flush()?;
         let owners: Vec<String> = {
             let inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
             inner

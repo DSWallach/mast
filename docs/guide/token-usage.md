@@ -27,3 +27,8 @@ Useful candidates include large MCP responses, repeated CLI commands, discovery/
 ## Storage
 
 The selected engine keeps a private `token-usage.sqlite3` ledger in its profile store. It retains numeric measurements, local file/item/tool labels, source IDs/revisions, and configuration fingerprints. Normalized command/argument fingerprints use a device-local secret; raw commands, prompts, and results are not copied into this ledger. Existing transcript storage is unchanged. The owning device removes usage when it observes a chat deletion, including deletions synced from another device. Offline devices reconcile when they reconnect. Archiving keeps usage.
+
+Usage collection runs on a bounded background writer. If its queue fills,
+measurements can be dropped and the page reports incomplete coverage. The
+ledger has no automatic age or size limit: it grows with recorded activity
+until the owning chats are deleted.

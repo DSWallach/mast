@@ -13,6 +13,7 @@ mod query;
 mod retention;
 #[cfg(test)]
 mod tests;
+mod writer;
 
 fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(format!("Token usage: {e}"))
@@ -41,7 +42,11 @@ struct Inner {
     capture_failures: u64,
 }
 #[derive(Clone)]
-pub struct TokenUsage(Arc<Mutex<Inner>>, Arc<std::path::PathBuf>);
+pub struct TokenUsage(
+    Arc<Mutex<Inner>>,
+    Arc<std::path::PathBuf>,
+    Option<Arc<writer::Writer>>,
+);
 
 pub struct CaptureGuard {
     usage: TokenUsage,
@@ -50,14 +55,18 @@ pub struct CaptureGuard {
 }
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
-        let mut inner = self.usage.0.lock().unwrap_or_else(|p| p.into_inner());
-        if inner
-            .active
-            .get(&self.chat)
-            .is_some_and(|active| active.run == self.run)
-        {
-            inner.active.remove(&self.chat);
-        }
+        let chat = self.chat.clone();
+        let run = self.run.clone();
+        self.usage.dispatch(move |usage| {
+            let mut inner = usage.0.lock().unwrap_or_else(|p| p.into_inner());
+            if inner
+                .active
+                .get(&chat)
+                .is_some_and(|active| active.run == run)
+            {
+                inner.active.remove(&chat);
+            }
+        });
     }
 }
 
@@ -82,7 +91,7 @@ impl TokenUsage {
                 "ledger belongs to a newer or unreleased development version",
             ));
         }
-        db.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY,chat TEXT NOT NULL,activity TEXT NOT NULL,configuration TEXT NOT NULL,at INTEGER NOT NULL,status TEXT NOT NULL,context TEXT NOT NULL DEFAULT '{}');
             CREATE TABLE IF NOT EXISTS measurements(turn_id TEXT NOT NULL,source TEXT NOT NULL,model TEXT NOT NULL,role TEXT NOT NULL,scope TEXT NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,cache_read INTEGER,cache_write INTEGER,reasoning INTEGER,PRIMARY KEY(turn_id,source));
             CREATE TABLE IF NOT EXISTS diagnostics(turn_id TEXT NOT NULL,source TEXT NOT NULL,category TEXT NOT NULL,label TEXT NOT NULL,revision TEXT,channel TEXT,bytes INTEGER NOT NULL,stage TEXT NOT NULL,method TEXT NOT NULL,is_error INTEGER,signature TEXT,elapsed_ms INTEGER,PRIMARY KEY(turn_id,source,category,stage));
@@ -107,7 +116,7 @@ impl TokenUsage {
                 |r| r.get(0),
             )
             .map_err(fail)?;
-        Ok(Self(
+        let mut usage = Self(
             Arc::new(Mutex::new(Inner {
                 db,
                 active: HashMap::new(),
@@ -115,7 +124,10 @@ impl TokenUsage {
                 capture_failures: 0,
             })),
             Arc::new(path),
-        ))
+            None,
+        );
+        usage.2 = Some(Arc::new(writer::Writer::start(usage.clone())?));
+        Ok(usage)
     }
 
     pub fn begin(&self, chat: &str, run: &str, request: &RunRequest, activity: &str) {
@@ -129,6 +141,19 @@ impl TokenUsage {
         request: &RunRequest,
         activity: &str,
     ) {
+        if self.2.is_some() {
+            let (chat, owner, run, activity) = (
+                chat.to_owned(),
+                owner.to_owned(),
+                run.to_owned(),
+                activity.to_owned(),
+            );
+            let request = request.clone();
+            self.dispatch(move |usage| {
+                usage.begin_with_owner(&chat, &owner, &run, &request, &activity)
+            });
+            return;
+        }
         let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.insert(
@@ -208,6 +233,11 @@ impl TokenUsage {
         item: Option<String>,
         logical_turn: Option<String>,
     ) {
+        if self.2.is_some() {
+            let chat = chat.to_owned();
+            self.dispatch(move |usage| usage.set_context(&chat, space, item, logical_turn));
+            return;
+        }
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let Some(active) = inner.active.get_mut(chat) else {
             return;
@@ -231,6 +261,11 @@ impl TokenUsage {
         key
     }
     pub fn finish_title(&self, key: &str) {
+        if self.2.is_some() {
+            let key = key.to_owned();
+            self.dispatch(move |usage| usage.finish_title(&key));
+            return;
+        }
         self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -239,6 +274,11 @@ impl TokenUsage {
     }
 
     pub fn activate(&self, chat: &str) {
+        if self.2.is_some() {
+            let chat = chat.to_owned();
+            self.dispatch(move |usage| usage.activate(&chat));
+            return;
+        }
         if let Some(active) = self
             .0
             .lock()
@@ -276,6 +316,12 @@ impl TokenUsage {
         ) {
             return;
         }
+        if self.2.is_some() {
+            let chat = chat.to_owned();
+            let event = event.clone();
+            self.dispatch(move |usage| usage.observe(&chat, &event));
+            return;
+        }
         // File metadata is read before entering the collector critical section.
         let file = if let AgentEvent::ToolCall {
             id,
@@ -306,7 +352,17 @@ impl TokenUsage {
         }
     }
 
+    pub fn request_delete_chat(&self, chat: &str) {
+        let chat = chat.to_owned();
+        self.dispatch(move |usage| {
+            if let Err(error) = usage.delete_chat(&chat) {
+                tracing::warn!(%error, "usage deletion failed; registry reconciliation will retry");
+            }
+        });
+    }
+
     pub fn delete_chat(&self, chat: &str) -> Result<(), EngineError> {
+        self.flush()?;
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.retain(|_, active| active.owner != chat);
         let tx = inner.db.transaction().map_err(fail)?;

@@ -418,6 +418,7 @@ fn settled_late_events_do_not_create_phantom_turns_and_guards_release_capture() 
             window: Some(1000),
         },
     );
+    store.flush().unwrap();
     assert_eq!(
         store
             .0
@@ -434,6 +435,7 @@ fn settled_late_events_do_not_create_phantom_turns_and_guards_release_capture() 
     store.begin("a", "new", &request(), "Conversation");
     let stale = store.guard("a", "old");
     drop(stale);
+    store.flush().unwrap();
     assert!(store.0.lock().unwrap().active.contains_key("a"));
 }
 
@@ -643,7 +645,7 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
                 serde_json::json!({"op":"deleteChat","chatId":"local-deleted"})
             )
             .await
-            .is_err()
+            .is_ok()
     );
     assert!(!store.has_snapshot("local-deleted").unwrap());
     core.shutdown().await;
@@ -677,4 +679,62 @@ fn duplicate_claude_results_cannot_replace_a_billed_delta_with_a_resume_baseline
         ),
     );
     assert_eq!(store.snapshot(&Default::default()).unwrap().total, 12);
+}
+
+#[test]
+fn aggregate_replaces_request_even_when_provider_model_labels_differ() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "run", &request(), "Conversation");
+    store.observe(
+        "a",
+        &measurement("request", "model-alias", "request", 10, 2),
+    );
+    store.observe(
+        "a",
+        &measurement("result", "model-version", "turnIncludingChildren", 20, 4),
+    );
+    let result = store.snapshot(&Default::default()).unwrap();
+    assert_eq!(result.total, 24);
+    assert_eq!(
+        store
+            .snapshot(&TokenUsageQuery {
+                model: Some("model-alias".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .total,
+        0
+    );
+}
+
+#[test]
+fn slow_writer_does_not_block_collection_and_queue_overflow_is_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("a", "run", &request(), "Conversation");
+    store.flush().unwrap();
+    let lock = store.0.lock().unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let producer = store.clone();
+    let thread = std::thread::spawn(move || {
+        for n in 0..1000 {
+            producer.observe(
+                "a",
+                &measurement(&format!("m{n}"), "model", "request", 1, 0),
+            );
+        }
+        sent.send(()).unwrap();
+    });
+    let finished = received.recv_timeout(std::time::Duration::from_secs(5));
+    drop(lock);
+    thread.join().unwrap();
+    finished.expect("collector must not wait for the database mutex");
+    let result = store.snapshot(&Default::default()).unwrap();
+    assert!(
+        result
+            .coverage
+            .iter()
+            .any(|line| line.contains("telemetry writes failed"))
+    );
 }

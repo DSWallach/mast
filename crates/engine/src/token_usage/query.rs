@@ -6,7 +6,7 @@ const FILTER:&str="FROM measurements m JOIN turns t ON t.id=m.turn_id
     WHERE m.scope!='resumeBaseline' AND (?1 IS NULL OR m.model=?1) AND (?2 IS NULL OR t.at>=?2)
     AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4)
     AND (m.scope!='legacy' OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.scope NOT IN ('legacy','resumeBaseline')))
-    AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.model=m.model AND x.scope IN ('turn','turnIncludingChildren')))";
+    AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND (x.scope='turnIncludingChildren' OR x.model=m.model) AND x.scope IN ('turn','turnIncludingChildren')))";
 
 fn selection(kind: TokenKind) -> (&'static str, &'static str) {
     match kind {
@@ -29,6 +29,7 @@ fn selection(kind: TokenKind) -> (&'static str, &'static str) {
 
 impl TokenUsage {
     pub fn snapshot(&self, q: &TokenUsageQuery) -> Result<TokenUsageSnapshot, EngineError> {
+        self.flush()?;
         // WAL readers never hold the collector's mutex while querying history.
         let connection = Connection::open_with_flags(
             self.1.as_ref(),
@@ -51,7 +52,8 @@ impl TokenUsage {
             .0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .capture_failures;
+            .capture_failures
+            + self.2.as_ref().map_or(0, |writer| writer.dropped());
         if failures > 0 {
             result.coverage.push(format!("{failures} telemetry writes failed in this engine process. Recorded totals may be incomplete."));
         }

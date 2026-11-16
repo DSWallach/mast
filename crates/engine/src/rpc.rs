@@ -2150,7 +2150,7 @@ impl EngineRpc {
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
-                if let Some(usage) = self.sessions.token_usage() { usage.delete_chat(&chat_id).map_err(failed)?; }
+                if let Some(usage) = self.sessions.token_usage() { usage.request_delete_chat(&chat_id); }
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
