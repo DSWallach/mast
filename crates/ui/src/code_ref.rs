@@ -200,6 +200,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prompt_preserves_reference_and_projects_transcript_chip() {
+        let staged = StagedCodeRef {
+            id: "reference".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation {
+                    repo_id: "repo".into(),
+                    worktree_id: None,
+                    path: "src/main.rs".into(),
+                },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(CodeRefRange {
+                    start_line: 2,
+                    end_line: 3,
+                }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree {
+                    working_tree: true,
+                    content_hash: "hash".into(),
+                },
+            },
+            snippet: "let x = 1;\nlet y = 2;".into(),
+        };
+        let prompt = with_code_refs("Review", &[staged]);
+        assert!(
+            prompt.contains("src/main.rs:2-3 @ working tree\n```\nlet x = 1;\nlet y = 2;\n```")
+        );
+        let (display, spans) = project_sent_refs(&prompt).unwrap();
+        assert_eq!(display, "Review main.rs:2-3");
+        assert_eq!(&display[spans[0].range.clone()], "main.rs:2-3");
+        assert_eq!(spans[0].path.as_ref(), "src/main.rs");
+        assert!(project_sent_refs("legacy message").is_none());
+    }
+
+    #[test]
     fn reads_file_at_commit_after_worktree_changes() {
         let repo = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
