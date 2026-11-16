@@ -143,7 +143,7 @@ out = []
 m = re.search(r"idle budget: (\d+) git spawns .*?budget (\d+)", text)
 if m:
     out.append({"name": "mast-engine::idle_spawn_budget", "result": "pass", "git_spawns": int(m[1]), "budget": int(m[2])})
-for name in re.findall(r"^test (\S+) \.\.\. ok$", text, re.M):
+for name in re.findall(r"^test (\S+::\S+) \.\.\. ok$", text, re.M):
     out.append({"name": "mast-ui::" + name, "result": "pass"})
 print(json.dumps(out))
 PY
