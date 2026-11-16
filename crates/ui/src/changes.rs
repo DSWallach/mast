@@ -65,6 +65,7 @@ mod file_list;
 mod explanation;
 mod ref_picker;
 mod review_state;
+mod word_diff;
 pub(crate) mod walkthrough;
 
 use file_list::*;
