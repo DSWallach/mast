@@ -17,15 +17,16 @@
 //!   cache with a 60 s TTL (single-flight). A lookup miss may refresh it at most
 //!   once per 3 s (`CHECKOUT_SET_MISS_REFRESH`), so those spawns are bounded by
 //!   `SPACES × (ceil(elapsed/3 s) + 1)`, independent of watches × retries.
-//! - Each *accepted* watch pays `checkout_identity` once: 2 × `git rev-parse`
-//!   (`ACCEPT_COST`). A live watch that reconnects pays it again.
+//! - Each *accepted* watch pays `checkout_identity`, which now reads the git dir
+//!   from disk (was 2 × `git rev-parse`; `ACCEPT_COST` is 0). Falls back to git
+//!   only for layouts it cannot read.
 //! - `SLACK = 4` covers scheduling noise.
 //!
-//!   budget = SPACES × (ceil(elapsed/3) + 1) + accepted × 2 + SLACK
-//!          = 1 × 4 + 40 × 2 + 4 = 88 for a ~9 s run.
+//!   budget = SPACES × (ceil(elapsed/3) + 1) + SLACK
+//!          = 1 × 4 + 4 = 8 for a ~9 s run.
 //!
-//!   Observed on the fixed engine: 84–87 (87 when a miss refresh lands in a new
-//!   3 s window; the old 60 s term budgeted 86 and flaked). Release 94 spent ~5 git spawns per Space
+//!   Observed before the spawn-free `checkout_identity`: 84–87 (the old budget
+//!   added 2 per accepted watch). Release 94 spent ~5 git spawns per Space
 //!   per call on every watch and every retry (≈ 5 × 50 × (1 + 8 retries) ≈ 2,250
 //!   here), which blows this budget by more than 25×.
 //! - A rejected watch (path no longer resolves) never reaches git: zero spawns
@@ -56,8 +57,8 @@ const LIVE_WATCHES: usize = 40;
 const DEAD_WATCHES: usize = 10;
 const SPACES: u64 = 1;
 const SLACK: u64 = 4;
-/// `Repos::checkout_identity`: two `git rev-parse` per accepted watch.
-const ACCEPT_COST: u64 = 2;
+/// `Repos::checkout_identity` reads the git dir from disk: no spawn per accepted watch.
+const ACCEPT_COST: u64 = 0;
 /// Simulated minutes of UI retry traffic replayed for rejected watches.
 const SIMULATED_MINUTES: u64 = 5;
 

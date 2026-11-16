@@ -1381,10 +1381,12 @@ async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
 }
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
+    let mut probed_now = false;
     if entry.repair_kick.swap(false, Ordering::Relaxed)
         && lock(&entry.checksum).is_some()
         && let Some(probe) = repair_probe(&entry.identity).await
     {
+        probed_now = true;
         let unchanged = lock(&entry.probe).replace(probe) == Some(probe);
         if unchanged {
             return; // one `git status` said nothing moved: skip the full capture
@@ -1400,6 +1402,14 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
         }
     };
 
+    // Re-baseline the repair probe at this capture. Without it the first repair
+    // tick after every capture (startup included) sees "changed" against a
+    // stale or missing probe and re-runs the full ~8-spawn capture per
+    // checkout. One cheap `git status` here makes an idle repair cost one.
+    if !probed_now {
+        let probe = repair_probe(&entry.identity).await;
+        *lock(&entry.probe) = probe;
+    }
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
     }
@@ -1611,6 +1621,9 @@ fn capture_git<'a>(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // Engine-wide git gate; held until the child is done. Leaf call: no
+        // caller holds another permit while waiting on this one.
+        let _permit = crate::git_gate::acquire("diff_sync").await;
         let mut child = cmd
             .spawn()
             .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
@@ -3031,7 +3044,10 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
         cmd.arg("-C").arg(root).args(args);
         cmd.env("GIT_INDEX_FILE", &index);
         cmd.stdin(std::process::Stdio::null());
-        cmd.output()
+        async move {
+            let _permit = crate::git_gate::acquire("diff_sync").await;
+            cmd.output().await
+        }
     };
     let added = run(&["add", "-A", "--ignore-errors", "."])
         .await

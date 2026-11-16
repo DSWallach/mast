@@ -162,6 +162,28 @@ pub(crate) async fn acquire(default_tag: &'static str) -> SemaphorePermit<'stati
     permit
 }
 
+/// Blocking twin of [`acquire`] for code already running on a blocking
+/// thread (`spawn_blocking`, plain threads). Polls with a short capped backoff
+/// instead of parking in the async queue. Never call from an async task: it
+/// would stall a runtime worker while waiting.
+pub(crate) fn acquire_blocking(default_tag: &'static str) -> SemaphorePermit<'static> {
+    let mut wait = Duration::from_millis(1);
+    loop {
+        match GIT_SPAWNS.try_acquire() {
+            Ok(permit) => {
+                GIT_SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+                record_spawn(default_tag);
+                return permit;
+            }
+            // Only `NoPermits` is reachable: the semaphore is never closed.
+            Err(_) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
 /// Spawn-rate `warn`s logged since process start (tests).
 pub fn spawn_rate_warnings() -> u64 {
     WARNINGS.load(Ordering::Relaxed)

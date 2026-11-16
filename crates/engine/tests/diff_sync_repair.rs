@@ -1,5 +1,5 @@
 //! The repair tick must not re-run the full diff capture for a checkout whose
-//! state has not moved, and a full capture must stay at five git processes.
+//! state has not moved, and a full capture must stay at four git processes.
 //! Own binary: the spawn counter is process-wide.
 
 #![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
@@ -48,7 +48,7 @@ async fn next_checksum(sync: &CheckoutDiffSync, old: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repair_tick_skips_unchanged_checkouts_and_a_capture_is_five_processes() {
+async fn repair_tick_skips_unchanged_checkouts_and_a_capture_is_four_processes() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -70,11 +70,11 @@ async fn repair_tick_skips_unchanged_checkouts_and_a_capture_is_five_processes()
     )
     .unwrap();
 
-    // A full capture: five git processes (HEAD, branch, raw+numstat, patch,
-    // status) where it used to be seven. Renames and numstat still parse.
+    // A full capture: four git processes (HEAD, raw+numstat, patch, status; the
+    // branch is read from the HEAD file) where it used to be seven. Renames and numstat still parse.
     let before = git_spawn_count();
     let snapshot = mast_engine::capture_diff(&core.repos, &repo).await.unwrap();
-    assert_eq!(git_spawn_count() - before, 5, "full capture spawn count");
+    assert_eq!(git_spawn_count() - before, 4, "full capture spawn count");
     let by_path = |p: &str| snapshot.files.iter().find(|f| f.path == p).unwrap().clone();
     assert_eq!(by_path("a.txt").additions, 1);
     let renamed = by_path("renamed.txt");
@@ -92,9 +92,7 @@ async fn repair_tick_skips_unchanged_checkouts_and_a_capture_is_five_processes()
     let first = settled_checksum(&core.diff_sync).await;
     tokio::time::sleep(Duration::from_secs(2)).await; // initial + attach kicks land
 
-    // First repair pass records the probe (full capture); later ones skip.
-    core.diff_sync.repair_now().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The capture baselined the probe, so even the first repair pass skips.
     let before = git_spawn_count();
     for _ in 0..3 {
         core.diff_sync.repair_now().await;
