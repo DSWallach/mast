@@ -20,12 +20,15 @@ impl StagedCodeRef {
             .rsplit('/')
             .next()
             .unwrap_or(&self.reference.location.path);
-        match self.reference.range {
-            Some(range) if range.start_line != range.end_line => {
+        match (self.reference.kind, self.reference.range) {
+            (mast_proto::CodeRefKind::Hunk, Some(range)) => {
+                format!("Hunk · {path}:{}", range.start_line)
+            }
+            (_, Some(range)) if range.start_line != range.end_line => {
                 format!("{path}:{}-{}", range.start_line, range.end_line)
             }
-            Some(range) => format!("{path}:{}", range.start_line),
-            None => path.to_string(),
+            (_, Some(range)) => format!("{path}:{}", range.start_line),
+            (_, None) => path.to_string(),
         }
     }
 }
