@@ -484,6 +484,7 @@ pub(crate) struct OutlineView {
     details_key: Option<String>,
     /// Chat shown in the Overview's chat panel (row highlight).
     panel_chat: Option<String>,
+    pinned_chats: HashSet<String>,
     /// Owner of the drift confirmation and the revision comparison.
     shell: Option<WeakEntity<Shell>>,
     /// The latest direct restructuring (keyboard, palette, drop).
@@ -577,6 +578,7 @@ impl OutlineView {
             glyph_press: false,
             details_key: None,
             panel_chat: None,
+            pinned_chats: HashSet::new(),
             shell: None,
             attempt: None,
             queued_restructure: VecDeque::new(),
@@ -765,6 +767,13 @@ impl OutlineView {
     #[cfg(test)]
     pub(crate) fn optimistic_len(&self) -> usize {
         self.optimistic.len()
+    }
+
+    pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
+        if self.pinned_chats != pins {
+            self.pinned_chats = pins;
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_highlights(
@@ -2865,6 +2874,20 @@ impl OutlineView {
             || row
                 .open_chat()
                 .is_some_and(|chat| self.panel_chat.as_deref() == Some(chat.chat.id.as_str()));
+        let pinned_chat = row
+            .open_chat()
+            .filter(|chat| !chat.dangling && self.pinned_chats.contains(&chat.chat.id));
+        let pinned = pinned_chat.is_some();
+        let pin_mark = pinned_chat.map(|chat| {
+            let selector = format!("outline-pinned-chat-{}", chat.chat.id);
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .flex_none()
+                .text_color(if selected { theme.text } else { theme.accent })
+                .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
+                .hint("Pinned", HintKey::None)
+        });
         let renaming = matches!(
             self.editing.as_ref().map(|edit| &edit.kind),
             Some(EditKind::Rename { key: k, .. }) if *k == key
@@ -3237,6 +3260,9 @@ impl OutlineView {
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
         })
+        .when(pinned && !(selected || in_group), |el| {
+            el.bg(theme.accent_wash)
+        })
         .when((selected || in_group) && focused, |el| {
             el.bg(theme.element_active)
         })
@@ -3397,6 +3423,7 @@ impl OutlineView {
                 .top(px(-self.sidebar_title_offset(cx)))
                 .child(disclosure),
         )
+        .children(pin_mark)
         .child(body)
         .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
         .children(drop_line)

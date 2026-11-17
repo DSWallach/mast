@@ -123,6 +123,10 @@ impl Shell {
         page.update(cx, |page, cx| {
             page.set_sidebar_scope(self.settings.space_filter.clone(), cx)
         });
+        let pins = self.active_sidebar_pins(cx).into_iter().collect();
+        page.read(cx).outline_entity().update(cx, |outline, cx| {
+            outline.set_pinned_chats(pins, cx);
+        });
         self.overview_navigation
             .get_or_insert_with(|| cx.new(|cx| crate::overview::OverviewNavigation::new(page, cx)))
             .clone()
@@ -345,8 +349,46 @@ pub(super) mod tests {
         assert!((f32::from(shortcut.size.height) - f32::from(new_item.size.height)).abs() < 0.5);
     }
 
+    /// Hidden session lists must not rebuild their rows or animation order
+    /// when the persistent Overview navigation invalidates the sidebar.
     #[gpui::test]
-    fn pinned_collections_have_height_beside_the_outline(cx: &mut TestAppContext) {
+    fn overview_repaints_leave_sessions_list_idle(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        let sentinel = vec![("previous-session-order".to_string(), 61.0)];
+        shell.update(vcx, |shell, cx| {
+            shell.sidebar_prev_order = sentinel.clone();
+            shell.state.update(cx, |state, cx| {
+                let mut archived = state.chats[0].clone();
+                archived.id = "archived".into();
+                archived.archived = true;
+                state.chats.push(archived);
+                cx.notify();
+            });
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            *shell.settings.sidebar_pins_mut(key) = vec!["chat".into()];
+            cx.notify();
+        });
+        for _ in 0..3 {
+            redraw_assistant(vcx);
+            shell.read_with(vcx, |shell, _| {
+                assert_eq!(shell.sidebar_prev_order, sentinel);
+                assert_eq!(shell.archived_section_builds, 0);
+            });
+        }
+        let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
+        vcx.simulate_click(sessions, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, _| {
+            assert_ne!(shell.sidebar_prev_order, sentinel);
+            assert!(shell.archived_section_builds > 0);
+        });
+        assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
+    }
+
+    #[gpui::test]
+    fn overview_highlights_pins_in_place_and_sessions_keeps_its_pinned_section(
+        cx: &mut TestAppContext,
+    ) {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
@@ -359,9 +401,57 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        let bounds = vcx.debug_bounds("overview-shortcut-collections").unwrap();
-        assert!(f32::from(bounds.size.height) > 20.0);
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
+        assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
+        assert!(vcx.debug_bounds("pinned-toggle").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         assert!(vcx.debug_bounds("overview-navigation").is_some());
+        let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
+        vcx.simulate_click(sessions, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
+        assert!(vcx.debug_bounds("pinned-toggle").is_some());
+        assert!(vcx.debug_bounds("chat-chat").is_some());
+        let overview = vcx.debug_bounds("sidebar-overview").unwrap().center();
+        vcx.simulate_click(overview, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.active_sidebar_pins(cx), vec!["chat".to_string()])
+        });
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
+        let outline = shell.read_with(vcx, |shell, cx| {
+            shell
+                .overview_page
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .outline_entity()
+        });
+        let order = outline.read_with(vcx, |outline, _| {
+            outline
+                .model()
+                .rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+        });
+        shell.update(vcx, |shell, cx| {
+            shell.set_chat_pinned("chat".into(), false, cx)
+        });
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_none());
+        outline.read_with(vcx, |outline, _| {
+            assert_eq!(
+                outline
+                    .model()
+                    .rows
+                    .iter()
+                    .map(|row| row.key.clone())
+                    .collect::<Vec<_>>(),
+                order
+            )
+        });
     }
 
     #[gpui::test]
@@ -398,9 +488,7 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn overview_search_filters_pins_but_sessions_keeps_its_own_presentation(
-        cx: &mut TestAppContext,
-    ) {
+    fn overview_search_leaves_sessions_pins_unchanged(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
         let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
         shell.update(vcx, |shell, cx| {
@@ -416,15 +504,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        assert_eq!(
-            f32::from(
-                vcx.debug_bounds("overview-shortcut-collections")
-                    .unwrap()
-                    .size
-                    .height
-            ),
-            0.0
-        );
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         shell.update(vcx, |shell, cx| {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
             shell.settings.sidebar_overview = false;
@@ -440,7 +520,7 @@ pub(super) mod tests {
         });
         assert!(
             f32::from(
-                vcx.debug_bounds("overview-shortcut-collections")
+                vcx.debug_bounds("sidebar-session-lists")
                     .unwrap()
                     .size
                     .height
@@ -496,14 +576,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        shell.update(vcx, |shell, cx| {
-            let theme = Theme::of(cx).clone();
-            let rows = shell.render_sidebar_collection_rows(&theme, true, cx);
-            assert_eq!(
-                rows.regular_count, 1,
-                "matching historical run remains in collections"
-            );
-        });
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         let clear = vcx.debug_bounds("overview-clear-filters").unwrap().center();
         vcx.simulate_click(clear, gpui::Modifiers::default());
         vcx.run_until_parked();
@@ -545,9 +618,7 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn overview_collections_keep_custom_membership_without_duplicating_outline_groups(
-        cx: &mut TestAppContext,
-    ) {
+    fn overview_hides_session_collections_and_preserves_custom_membership(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
@@ -568,12 +639,15 @@ pub(super) mod tests {
                 cx.notify();
             });
             shell.settings.sidebar_outline_groups = true;
-            let custom = shell.custom_sidebar_sections(cx);
+        });
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            let custom = shell.settings.sidebar_sections_by_profile.get(&key).unwrap();
             assert_eq!(custom.len(), 1);
             assert_eq!(custom[0].session_ids, vec!["chat"]);
-            let theme = Theme::of(cx).clone();
-            assert_eq!(shell.render_sidebar_collection_rows(&theme, true, cx).custom_count, 1);
         });
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
     }
 
     #[gpui::test]

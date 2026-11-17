@@ -1749,6 +1749,8 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
     overview_navigation: Option<Entity<crate::overview::OverviewNavigation>>,
+    #[cfg(test)]
+    archived_section_builds: usize,
     overview_overlay_dismissed: bool,
     overview_visible_chat_ids: Option<std::collections::HashSet<String>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
@@ -2309,6 +2311,8 @@ impl Shell {
             devices_page: None,
             overview_page: None,
             overview_navigation: None,
+            #[cfg(test)]
+            archived_section_builds: 0,
             overview_overlay_dismissed: true,
             overview_visible_chat_ids: None,
             scheduled_tasks_page: None,
@@ -8425,40 +8429,14 @@ impl Shell {
         ))
     }
 
-    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        #[cfg(feature = "startup-bench")]
-        let _render_span = crate::startup_measurement::MeasurementSpan::new("chat_sidebar");
-        if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
-            !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
-        }) {
-            self.cancel_sidebar_session_transfer(cx);
-        }
-        // A release outside the sidebar ends GPUI's drag without calling the
-        // sidebar drop handler. Heal the ephemeral slide state here.
-        if self.pinned_session_drag.is_some()
-            && (!cx.has_active_drag() || !self.pinned_session_drag_is_valid(cx))
-        {
-            self.cancel_pinned_session_drag(cx);
-        }
-        self.overview_visible_chat_ids = if self.settings.sidebar_overview {
-            let page = self.ensure_overview_page(cx);
-            page.update(cx, |page, cx| {
-                page.set_sidebar_scope(self.settings.space_filter.clone(), cx);
-                page.sidebar_filter_ids(cx)
-            })
-        } else {
-            None
-        };
-        let (user, workspace_scope) = {
-            let state = self.state.read(cx);
-            (state.auth_user().cloned(), state.workspace_scope)
-        };
-
+    /// Build the Sessions surface only when it is mounted. Overview changes
+    /// frequently; preparing hidden session rows and archived chats here would
+    /// clone every chat and advance list animations on each of those frames.
+    fn render_session_sidebar_lists(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
-        let session_rows =
-            self.render_sidebar_collection_rows(theme, self.settings.sidebar_overview, cx);
+        let session_rows = self.render_active_rows(theme, cx);
         let moving_row = session_rows
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
@@ -8467,8 +8445,7 @@ impl Shell {
         let regular_start = pinned_count + custom_count;
         let keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
-        let ungrouped = !self.settings.sidebar_overview
-            && self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
@@ -8502,17 +8479,6 @@ impl Shell {
         // don't reorder) never animate.
         let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
         let show_pinned_section = pinned_count > 0 || self.sidebar_session_transfer.is_some();
-        let shortcut_rows_height = keyed
-            .iter()
-            .enumerate()
-            .filter(|(ix, _)| *ix >= pinned_count || self.pinned_open)
-            .map(|(_, (_, height, _))| *height + SIDEBAR_LIST_GAP)
-            .sum::<f32>()
-            + if show_pinned_section {
-                spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-            } else {
-                0.0
-            };
         if show_pinned_section {
             order.push((
                 "sidebar-pinned-header".to_string(),
@@ -8658,56 +8624,6 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
-        // Percentage-height scroll children need a definite parent height.
-        // Empty collections yield the space to the Outline; populated ones
-        // scroll independently instead of collapsing to zero height.
-        let shortcut_height = (shortcut_rows_height
-            + if archived_section.is_some() {
-                if self.archived_open { 180.0 } else { 32.0 }
-            } else {
-                0.0
-            }
-            + if shortcut_rows_height > 0.0 {
-                12.0
-            } else {
-                0.0
-            })
-        .min(180.0);
-
-        let (user_line, menu_identity): (SharedString, SharedString) = match workspace_scope {
-            Some(WorkspaceScope::Local) => {
-                let line = if matches!(self.sync_flow, SyncFlow::RestartPending { .. }) {
-                    "Sync ready after restart"
-                } else {
-                    "Local only"
-                };
-                (line.into(), "Stored on this device".into())
-            }
-            Some(WorkspaceScope::Development) => {
-                ("Development".into(), "Authentication disabled".into())
-            }
-            Some(WorkspaceScope::Synced) | None => {
-                let line: SharedString = user
-                    .as_ref()
-                    .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
-                    .unwrap_or_else(|| "Not signed in".into());
-                let email = user
-                    .as_ref()
-                    .map(|u| SharedString::from(u.email.clone()))
-                    .unwrap_or_else(|| line.clone());
-                (line, email)
-            }
-        };
-        let user_menu = self.render_user_menu(user_line, menu_identity, theme, cx);
-
-        // The space filter lives ABOVE the scroll region (fixed) so its
-        // dropdown can float without being clipped by the list's overflow.
-        let filter_row = self.render_spaces_filter(theme, cx);
-        let assistant_section = if self.settings.sidebar_overview {
-            None
-        } else {
-            self.render_personal_assistant_section(theme, cx)
-        };
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -8806,11 +8722,7 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from(if self.settings.sidebar_overview {
-                    "No pinned sessions"
-                } else {
-                    "No sessions yet"
-                }))
+                .child("No sessions yet")
                 .into_any_element()
         };
 
@@ -8823,18 +8735,15 @@ impl Shell {
         // rode the previous frame's offset, so the last frame of a content
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
-        let sidebar_lists = crate::edge_fade::edge_faded(
+        crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
             true,
             div()
                 .relative()
-                .debug_selector(|| "overview-shortcut-collections".into())
+                .debug_selector(|| "sidebar-session-lists".into())
                 .min_h_0()
-                .when(self.settings.sidebar_overview, |el| {
-                    el.flex_none().h(px(shortcut_height))
-                })
-                .when(!self.settings.sidebar_overview, |el| el.flex_1())
+                .flex_1()
                 .child(
                     div()
                         .id("sidebar-lists")
@@ -8880,7 +8789,78 @@ impl Shell {
                         .children(moving_row),
                 ),
         )
-        .fade_overflow_y(&self.sidebar_scroll);
+        .fade_overflow_y(&self.sidebar_scroll)
+        .into_any_element()
+    }
+
+    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(feature = "startup-bench")]
+        let _render_span = crate::startup_measurement::MeasurementSpan::new("chat_sidebar");
+        if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
+            !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
+        }) {
+            self.cancel_sidebar_session_transfer(cx);
+        }
+        // A release outside the sidebar ends GPUI's drag without calling the
+        // sidebar drop handler. Heal the ephemeral slide state here.
+        if self.pinned_session_drag.is_some()
+            && (!cx.has_active_drag() || !self.pinned_session_drag_is_valid(cx))
+        {
+            self.cancel_pinned_session_drag(cx);
+        }
+        self.overview_visible_chat_ids = if self.settings.sidebar_overview {
+            let page = self.ensure_overview_page(cx);
+            page.update(cx, |page, cx| {
+                page.set_sidebar_scope(self.settings.space_filter.clone(), cx);
+                page.sidebar_filter_ids(cx)
+            })
+        } else {
+            None
+        };
+        let (user, workspace_scope) = {
+            let state = self.state.read(cx);
+            (state.auth_user().cloned(), state.workspace_scope)
+        };
+
+        let (user_line, menu_identity): (SharedString, SharedString) = match workspace_scope {
+            Some(WorkspaceScope::Local) => {
+                let line = if matches!(self.sync_flow, SyncFlow::RestartPending { .. }) {
+                    "Sync ready after restart"
+                } else {
+                    "Local only"
+                };
+                (line.into(), "Stored on this device".into())
+            }
+            Some(WorkspaceScope::Development) => {
+                ("Development".into(), "Authentication disabled".into())
+            }
+            Some(WorkspaceScope::Synced) | None => {
+                let line: SharedString = user
+                    .as_ref()
+                    .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
+                    .unwrap_or_else(|| "Not signed in".into());
+                let email = user
+                    .as_ref()
+                    .map(|u| SharedString::from(u.email.clone()))
+                    .unwrap_or_else(|| line.clone());
+                (line, email)
+            }
+        };
+        let user_menu = self.render_user_menu(user_line, menu_identity, theme, cx);
+
+        // The space filter lives ABOVE the scroll region (fixed) so its
+        // dropdown can float without being clipped by the list's overflow.
+        let filter_row = self.render_spaces_filter(theme, cx);
+        let assistant_section = if self.settings.sidebar_overview {
+            None
+        } else {
+            self.render_personal_assistant_section(theme, cx)
+        };
+        let sidebar_lists = if self.settings.sidebar_overview {
+            None
+        } else {
+            Some(self.render_session_sidebar_lists(theme, cx))
+        };
 
         div()
             .w(px(self.sidebar_shown_width()))
@@ -8899,7 +8879,7 @@ impl Shell {
                 theme,
                 cx,
             ))
-            .child(sidebar_lists)
+            .children(sidebar_lists)
             .when(self.settings.sidebar_overview, |el| {
                 el.child(
                     div()
@@ -16527,6 +16507,14 @@ impl Shell {
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
+        if let Ok(view) = std::env::var("MAST_PREVIEW_PINNED")
+            && matches!(view.as_str(), "overview" | "sessions")
+        {
+            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
+            }
+            self.settings.sidebar_overview = view == "overview";
+        }
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
             self.ensure_overview_page(cx)
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));

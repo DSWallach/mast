@@ -15,7 +15,7 @@ get one as part of the handoff.
 ## Overview and Sessions
 
 Overview now occupies the left column beside your chat. Search, repository and
-attention filters apply to the outline and its shortcut collections. The open
+attention filters apply to the outline. The open
 chat remains reachable above the filter, even when it falls outside the scope.
 Click a chat or press Enter to open it in the main workspace; arrows only move
 the navigation selection. Work Item Details, Required Actions and Inbox open in
@@ -23,10 +23,12 @@ the workspace without mounting a second live chat.
 
 Choose **Sessions** for the previous session list, grouping, sorting, and metadata
 controls. Its presentation is independent of Overview's search and filters;
-both use the Space selector. Pins, custom sections, archived sessions and
-scheduled-task groups remain available. On a narrow window the column floats
-over the workspace; choosing a destination or clicking outside closes it.
-Expanding the window restores the saved sidebar width and collapsed preference.
+both use the Space selector. Overview highlights pinned chats in their normal
+outline positions; Sessions shows them in its Pinned section. Custom sections,
+archived sessions and scheduled-task collections are also available in Sessions.
+On a narrow window the column floats over the workspace; choosing a destination
+or clicking outside closes it. Expanding the window restores the saved sidebar
+width and collapsed preference.
 
 ## Sections in the Sessions presentation
 
