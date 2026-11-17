@@ -93,7 +93,9 @@ impl LinearSettingsPage {
 
     #[cfg(feature = "snapshot")]
     pub(crate) fn offline_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::with_status_refresh(state, false, cx)
+        let mut page = Self::with_status_refresh(state, false, cx);
+        page.open_account_form(AccountForm::Add, "", cx);
+        page
     }
 
     fn with_status_refresh(state: Entity<AppState>, refresh: bool, cx: &mut Context<Self>) -> Self {
@@ -445,8 +447,17 @@ impl Render for LinearSettingsPage {
             let label_needed = matches!(form, AccountForm::Add | AccountForm::Rename(_));
             let key_needed = matches!(form, AccountForm::Add | AccountForm::ReplaceKey(_));
             let mut row = widgets::card_row(&theme, false).flex_col().items_start();
-            if label_needed { row = row.child(self.account_label.clone()); }
-            if key_needed { row = row.child(self.account_key.clone()); }
+            if label_needed {
+                row = row.child(crate::popover::dialog_field(&theme, self.account_label.clone().into_any_element()));
+            }
+            if key_needed {
+                row = row.child(
+                    crate::components::linear_parts::settings_key_row(&theme)
+                        .child(self.account_key.clone())
+                        .child(Self::button("linear-account-paste", "Paste", false, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.account_key.update(cx, |input, cx| input.paste(cx)))))
+                );
+            }
             row = row.child(Self::button("linear-account-save", if self.account_busy { "Saving…" } else { "Save account" }, true, &theme)
                 .on_click(cx.listener(|this, _, _, cx| this.save_account(cx))))
                 .child(Self::button("linear-account-cancel", "Cancel", false, &theme)
