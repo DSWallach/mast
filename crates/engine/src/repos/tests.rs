@@ -1,4 +1,5 @@
 use super::*;
+use super::git_history::*;
 
 #[tokio::test]
 #[allow(clippy::disallowed_methods)]
