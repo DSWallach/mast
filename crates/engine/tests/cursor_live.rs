@@ -1,5 +1,5 @@
 //! Opt-in production engine + Cursor SDK checks. Uses real account quota.
-//! MAST_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p mast-engine --test cursor_live -- --ignored --nocapture --test-threads=1
+//! MAST_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p mast-engine --test engine cursor_live:: -- --ignored --nocapture --test-threads=1
 use mast_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };

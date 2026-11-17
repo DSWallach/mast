@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 import re
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit("check_test_isolation.py requires Python 3.11 or newer")
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts/test_isolation_allowlist.jsonl"

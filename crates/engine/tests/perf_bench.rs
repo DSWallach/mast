@@ -1,7 +1,7 @@
 //! Engine benchmarks (`#[ignore]`): cold start on an empty and a busy data
 //! dir (250 chats, 40 work items with PR + Linear children), and the SWR
 //! cache cold-load / persist cost. Run:
-//! `cargo test -p mast-engine --profile installed --test perf_bench -- --ignored --nocapture --test-threads=1`
+//! `cargo test -p mast-engine --profile installed --test engine perf_bench:: -- --ignored --nocapture --test-threads=1`
 
 use std::sync::Arc;
 use std::time::Instant;
