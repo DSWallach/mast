@@ -36,6 +36,11 @@ pub(super) struct TrackerState {
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
     stalled: std::collections::HashMap<String, (String, bool)>,
+    todos: std::collections::HashMap<String, mast_proto::TodoProgress>,
+    review_progress: std::collections::HashMap<(String, Option<String>), (usize, usize)>,
+    review_targets: std::collections::HashMap<String, (String, Option<String>)>,
+    review_generation: u64,
+    review_task: Option<Task<()>>,
     filter: TrackerFilter,
     wake_settings_open: bool,
     #[cfg(test)]
@@ -62,6 +67,20 @@ fn tracker_counts(workers: &[&WorkerFacts], tickets_done: usize) -> [usize; 6] {
         .map(|pr| (pr.number, &pr.url)).collect::<std::collections::HashSet<_>>().len();
     [count(TrackerFilter::Working), count(TrackerFilter::NeedsYou), count(TrackerFilter::Ready),
         pr_count("open"), pr_count("merged"), tickets_done]
+}
+
+fn tracker_ticket_label(ticket: &crate::chat_metadata::HeaderTicket) -> String {
+    ticket.title.as_deref().filter(|title| !title.is_empty())
+        .map(|title| format!("{} · {title}", ticket.identifier)).unwrap_or_else(|| ticket.identifier.clone())
+}
+
+fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
+    format!("{}/{}", progress.done, progress.total)
+}
+
+fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Option<&str>) -> usize {
+    state.filter(|state| head.is_some_and(|head| state.head_sha.as_deref().is_some_and(|saved| saved.eq_ignore_ascii_case(head))))
+        .map_or(0, |state| state.viewed_files.len())
 }
 
 fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
@@ -93,20 +112,81 @@ mod tracker_tests {
     fn tracker_rollup_counts_unique_pull_requests() {
         let mut first = worker("first", WorkerState::Working);
         let mut second = worker("second", WorkerState::Waiting);
-        let pr = WorkerPr { number: 1, url: "https://example.com/1".into(), checks: None,
+        let pr = WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 1, url: "https://example.com/1".into(), checks: None,
             review: None, draft: false, state: "OPEN".into() };
         first.prs.push(pr.clone());
         second.prs.push(pr);
-        second.prs.push(WorkerPr { number: 2, url: "https://example.com/2".into(), checks: None,
+        second.prs.push(WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 2, url: "https://example.com/2".into(), checks: None,
             review: None, draft: false, state: "MERGED".into() });
         assert_eq!(tracker_counts(&[&first, &second], 3), [1, 1, 0, 1, 1, 3]);
         assert!(tracker_matches(&first, TrackerFilter::OpenPrs));
         assert!(!tracker_matches(&first, TrackerFilter::NeedsYou));
         assert!(tracker_matches(&second, TrackerFilter::MergedPrs));
     }
+
+    #[test]
+    fn tracker_ticket_label_includes_available_title() {
+        let mut ticket = crate::chat_metadata::HeaderTicket { identifier: "ENG-42".into(), title: Some("Review changes".into()), ..Default::default() };
+        assert_eq!(tracker_ticket_label(&ticket), "ENG-42 · Review changes");
+        ticket.title = None;
+        assert_eq!(tracker_ticket_label(&ticket), "ENG-42");
+    }
+
+    #[test]
+    fn tracker_todo_label_is_a_count() {
+        assert_eq!(tracker_todo_label(mast_proto::TodoProgress { done: 3, total: 7 }), "3/7");
+    }
+
+    #[test]
+    fn tracker_review_marks_require_the_current_head() {
+        let mut state = mast_proto::DiffReviewState { target: "pr:example/project#1".into(), head_sha: Some("abc".into()), ..Default::default() };
+        state.viewed_files.insert("file.rs".into());
+        assert_eq!(reviewed_files_at_head(Some(state.clone()), Some("ABC")), 1);
+        assert_eq!(reviewed_files_at_head(Some(state.clone()), Some("def")), 0);
+        assert_eq!(reviewed_files_at_head(Some(state), None), 0);
+    }
 }
 
 impl Shell {
+    pub(super) fn invalidate_tracker_review(&mut self) {
+        self.tracker.key = None;
+    }
+
+    fn open_tracker_review(&mut self, chat_id: String, branch: Option<String>, pr_url: String, head_sha: Option<String>, cx: &mut Context<Self>) {
+        self.open_request_diff(chat_id.clone(), branch.clone(), cx);
+        let Some(pr) = crate::chat_work_context::parse_pr_url(&pr_url) else { return; };
+        let Some(artifact) = self.review_artifact(cx) else { return; };
+        let state = self.state.read(cx);
+        let target_device_id = (state.local_device_id.as_deref() != Some(artifact.device_id.as_str()))
+            .then(|| artifact.device_id.clone());
+        let call = state.artifact_actions().content(mast_proto::ArtifactContentParams {
+            artifact_id: artifact.id.clone(), revision: None, companion: None, target_device_id,
+        });
+        let expected_pr = format!("pr:{}", pr.external_id().to_lowercase());
+        let expected_branch = branch.map(|branch| format!("branch:{}/{}#{branch}", pr.owner.to_lowercase(), pr.repo.to_lowercase()));
+        cx.spawn(async move |shell, cx| {
+            let Ok(reply) = call.await else { return; };
+            if reply.encoding != mast_proto::ArtifactContentEncoding::Utf8 { return; }
+            let Ok(document) = serde_json::from_str::<serde_json::Value>(&reply.content) else { return; };
+            let target = document.get("target").cloned().or_else(|| {
+                let mut pr = document.get("pr")?.clone();
+                pr.as_object_mut()?.insert("kind".into(), "pr".into());
+                Some(pr)
+            });
+            let Some(target) = target.and_then(|value| serde_json::from_value::<mast_proto::ReviewTarget>(value).ok()) else { return; };
+            let target_head = match &target { mast_proto::ReviewTarget::PullRequest { head_sha, .. } | mast_proto::ReviewTarget::Branch { head_sha, .. } => head_sha };
+            if !head_sha.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(target_head)) { return; }
+            let key = target.state_key();
+            if key != expected_pr && expected_branch.as_deref() != Some(key.as_str()) { return; }
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.active_chat == chat_id && matches!(shell.resolved_right_active(cx), RightSurface::Diff(_)) && shell.review_artifact(cx).as_ref().is_some_and(|current| current.id == artifact.id && current.current_revision == artifact.current_revision) {
+                    shell.set_right_active(RightSurface::Review, cx);
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
     pub(crate) fn board_links_revision(&self) -> u64 { self.board_links_revision }
 
     pub(crate) fn board_link_versions(&self, ids: &[String]) -> Vec<u64> {
@@ -163,7 +243,7 @@ impl Shell {
                         chat_id: id, device_id: "local".into(),
                         status: if index == 5 { mast_proto::SessionStatus::AwaitingInput } else { mast_proto::SessionStatus::Errored },
                         started_at: Some(now), updated_at: now, last_completed_turn: None,
-                        awaiting_input: None, last_turn_tool_failures: None,
+                        awaiting_input: None, last_turn_tool_failures: None, todo_progress: Some(mast_proto::TodoProgress { done: 3, total: 7 }),
                     });
                 }
             }
@@ -189,10 +269,11 @@ impl Shell {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
             let pr = (index < 4).then(|| PrStatus {
+                additions: None, deletions: None,
                 number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
-                title: None, branch: None, head_sha: None, mergeable: String::new(),
+                title: None, branch: Some(format!("tracker/task-{index}")), head_sha: Some("fixture-head".into()), mergeable: String::new(),
                 has_reviewer_requested: false, merged_at: None,
             });
             let status = ChatLinkStatus {
@@ -263,6 +344,7 @@ impl Shell {
             metadata.insert(chat.id.clone(), (chat.title.clone().unwrap_or_else(|| "New session".into()), harness, model));
         }
         let mut requests = std::collections::HashMap::new();
+        let todos = state.sessions.iter().filter_map(|session| session.todo_progress.map(|progress| (session.chat_id.clone(), progress))).collect();
         let stalled = state.sessions.iter().filter_map(|session| {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
                 Some((session.chat_id.clone(), ("waiting for input".to_owned(), false)))
@@ -296,6 +378,33 @@ impl Shell {
         let not_started = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
         let completed_items = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
+        let review_targets: std::collections::HashMap<_, _> = facts.live().filter_map(|worker| {
+            if let Some(pr) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")
+                && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch)) {
+                let target = crate::chat_work_context::parse_pr_url(&pr.url)?;
+                return Some((worker.chat_id.clone(), (format!("pr:{}", target.external_id().to_lowercase()), pr.head_sha.clone())));
+            }
+            if !worker.prs.is_empty() { return None; }
+            let member = state.selected_execution_member(&worker.chat_id)?;
+            if !member.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(member_branch, worker_branch)| member_branch == worker_branch) { return None; }
+            let target = self.branch_review_targets.get(&worker.chat_id).filter(|target| {
+                matches!(target, mast_proto::ReviewTarget::Branch { checkout_path: Some(path), branch: Some(branch), .. }
+                    if *path == member.checkout_path && Some(branch.as_str()) == member.branch.as_deref())
+            }).map(mast_proto::ReviewTarget::state_key).or_else(|| {
+                let chat = state.chats.iter().find(|chat| chat.id == worker.chat_id)?;
+                Some(format!("diff:{}:{}", chat.device_id, member.checkout_path))
+            })?;
+            Some((worker.chat_id.clone(), (target, member.head_sha)))
+        }).collect();
+        let visible_targets: std::collections::HashSet<_> = review_targets.values().cloned().collect();
+        self.tracker.review_targets = review_targets;
+        // Review marks may have changed on another surface or device since the
+        // previous board revision. Re-read them once for this revision.
+        self.tracker.review_progress.clear();
+        let review_targets: Vec<_> = visible_targets.into_iter().collect();
+        self.tracker.review_generation = self.tracker.review_generation.wrapping_add(1);
+        let generation = self.tracker.review_generation;
+        self.tracker.review_task = None;
         self.tracker.key = Some(key);
         self.tracker.facts = facts.clone();
         self.tracker.not_started = not_started;
@@ -304,11 +413,39 @@ impl Shell {
         self.tracker.metadata = metadata;
         self.tracker.requests = requests;
         self.tracker.stalled = stalled;
+        self.tracker.todos = todos;
         #[cfg(test)] { self.tracker.rebuilds += 1; }
         let shell = cx.weak_entity();
         cx.defer(move |cx| {
             let _ = shell.update(cx, |shell, cx| {
                 for id in shell.board_links_due(&ids, cx) { shell.ensure_chat_header_links(id, cx); }
+                if shell.tracker.review_generation != generation { return; }
+                shell.tracker.review_task = Some(cx.spawn(async move |shell, cx| {
+                    for (target, head) in review_targets {
+                        let tasks = shell.update(cx, |shell, cx| {
+                            if shell.tracker.review_generation != generation { return None; }
+                            Some(shell.state.update(cx, |state, cx| {
+                                let review = state.chat_diff_rpc(mast_rpc::methods::GET_DIFF_REVIEW_STATE, serde_json::json!({"target": target, "readOnly": true}), cx);
+                                let drafts = state.chat_diff_rpc(mast_rpc::methods::GET_REVIEW_DRAFTS, serde_json::json!({"target": target}), cx);
+                                (review, drafts)
+                            }))
+                        }).ok().flatten();
+                        let Some((review, drafts)) = tasks else { return; };
+                        let review = review.await.ok().and_then(|value| serde_json::from_value::<mast_proto::DiffReviewStateReply>(value).ok());
+                        let drafts = drafts.await.ok().and_then(|value| serde_json::from_value::<Vec<mast_proto::ReviewDraft>>(value).ok());
+                        if let (Some(review), Some(drafts)) = (review, drafts) {
+                            let viewed = reviewed_files_at_head(review.state, head.as_deref());
+                            let _ = shell.update(cx, |shell, cx| {
+                                if shell.tracker.review_generation == generation {
+                                    if viewed > 0 || !drafts.is_empty() {
+                                        shell.tracker.review_progress.insert((target, head), (viewed, drafts.len()));
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }));
             });
         });
         facts
@@ -474,9 +611,11 @@ impl Shell {
         let (title, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
         let identity = [Some(harness).filter(|s| !s.is_empty()), model].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let mut references = div().flex().flex_wrap().gap(px(Theme::SPACE_SM));
+        let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
+            && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
         if let Some(ticket) = &worker.ticket {
             let url = ticket.url.clone();
-            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), ticket.identifier.clone(), ChipTone::Link)
+            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), tracker_ticket_label(ticket), ChipTone::Link)
                 .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(url) = &url { this.open_web_reference(url, window.modifiers().secondary(), window, cx); }
@@ -495,6 +634,9 @@ impl Shell {
                     if !url.is_empty() { this.open_web_reference(&url, window.modifiers().secondary(), window, cx); }
                 })));
         }
+        if let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
+            references = references.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
+        }
         let activity = self.tracker.requests.get(&id).or(worker.activity.as_ref()).cloned().unwrap_or_default();
         let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
         let status = if worker.tracker_group() == crate::team::TrackerGroup::ReadyToMerge {
@@ -503,6 +645,7 @@ impl Shell {
         let status_color = crate::status_style::status_style(status, theme.appearance).color;
         let stages = worker.tracker_stages();
         let track = tracker_stage_track(&id, [stages.chat_started, stages.changes, stages.pr_open, stages.checks, stages.review, stages.merged], theme);
+        let todo = self.tracker.todos.get(&id).copied().map(tracker_todo_label);
         let stalled = self.tracker.stalled.get(&id).cloned();
         let unseen = unseen.cloned().unwrap_or_default();
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("team-worker-{id}"))
@@ -529,7 +672,8 @@ impl Shell {
                     .id(SharedString::from(format!("team-worker-changes-{id}")))
                     .debug_selector({ let id = id.clone(); move || format!("team-worker-changes-{id}") })
                     .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx); }))))
-            .child(track)
+            .child(div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
+                .children(todo.map(|count| crate::components::shell_parts::worker_metadata(theme, count, theme.text_faint))))
             .child(references);
         if let Some(report) = report {
             let expanded = self.wakes.expanded_reports.contains(&id);
@@ -542,6 +686,30 @@ impl Shell {
             }
         } else {
             row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), [age, activity].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "), false));
+        }
+        if let Some(pr) = open_pr {
+            let review_id = id.clone();
+            let review_branch = worker.branch.clone();
+            let review_url = pr.url.clone();
+            let review_head = pr.head_sha.clone();
+            let merge_url = pr.url.clone();
+            row = row.child(div().flex().gap(px(Theme::SPACE_SM))
+                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Review PR")
+                    .id(SharedString::from(format!("tracker-review-{id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.tracker.key = None;
+                        this.tracker.review_progress.clear();
+                        this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
+                        this.tracker.review_task = None;
+                        this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), review_head.clone(), cx);
+                    })))
+                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Merge…")
+                    .id(SharedString::from(format!("tracker-merge-{id}")))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx);
+                    }))));
         }
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));

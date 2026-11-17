@@ -876,6 +876,10 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_sessions())?)
     }
 
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.read(|doc| doc.session(chat_id))
+    }
+
     pub fn change_sidebar_pin(
         &self,
         change: &mast_proto::SidebarPinChange,

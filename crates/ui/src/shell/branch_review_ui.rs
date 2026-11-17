@@ -111,6 +111,7 @@ impl Shell {
                     }
                     this.branch_review_range_ids.insert(chat_id.clone(), id);
                     this.branch_review_targets.insert(chat_id, target);
+                    this.invalidate_tracker_review();
                 }
                 cx.notify();
             })

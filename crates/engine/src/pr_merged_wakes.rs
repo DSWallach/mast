@@ -412,6 +412,7 @@ mod tests {
         let path = directory.path().join("cache/pr-merged-wakes.json");
         let tracker = PrMergedWakes::new(path.clone(), workspace.clone(), wakes.clone());
         let mut status = PrStatus {
+            additions: None, deletions: None,
             merged_at: None,
             number: 42,
             url: Some(url.into()),

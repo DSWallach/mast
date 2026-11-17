@@ -324,6 +324,7 @@ mod tests {
         let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({"spaceId":"s","items":[{"id":"i","spaceId":"s","title":"Item","effectiveStatus":"active","chatIds":["older","newer"]}]})).unwrap();
         let chats: Vec<mast_proto::Chat> = [("older", "2026-01-01T00:00:00Z"), ("newer", "2026-02-01T00:00:00Z")].into_iter().map(|(id, date)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"s","archived":false,"createdAt":date})).unwrap()).collect();
         let pr = PrStatus {
+            additions: None, deletions: None,
             number: 41,
             url: None,
             state: "OPEN".into(),
