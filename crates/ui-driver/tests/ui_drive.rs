@@ -48,6 +48,7 @@ fn drive_launcher() {
         preset,
         seed,
         render,
+        mock: std::env::var("MAST_DRIVE_MOCK").ok(),
     };
     std::fs::write(ctl.join("config.json"), config.to_json().to_string()).unwrap();
     std::fs::write(session.join("root"), scratch.root().to_string_lossy().as_bytes()).unwrap();
@@ -85,6 +86,10 @@ struct Driver {
 
 impl Driver {
     fn start(seed: u64, render: bool) -> Self {
+        Self::start_with(seed, render, None)
+    }
+
+    fn start_with(seed: u64, render: bool, mock: Option<&str>) -> Self {
         let session = tempfile::tempdir().unwrap().keep();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
@@ -95,6 +100,9 @@ impl Driver {
             .stderr(Stdio::null());
         if render {
             command.env("MAST_DRIVE_RENDER", "1");
+        }
+        if let Some(mock) = mock {
+            command.env("MAST_DRIVE_MOCK", mock);
         }
         let launcher = command.spawn().unwrap();
         let mut driver = Self {
@@ -249,4 +257,132 @@ fn png_is_written_and_same_seed_same_tree() {
     let refused = b.call(json!({"cmd": "png"}));
     assert_eq!(refused["ok"], json!(false), "png without --render must fail closed");
     b.stop();
+}
+
+/// `[x,y WxH]` of the first node or loose selector named `name`, from a step
+/// response's tree and selector listing.
+fn bounds_of(response: &Value, name: &str) -> Option<[f32; 4]> {
+    let needle = format!("sel={name} [");
+    let text = format!(
+        "{}\n{}",
+        response["tree"].as_str().unwrap_or(""),
+        response["selectors"].as_str().unwrap_or("")
+    );
+    let rest = &text[text.find(&needle)? + needle.len()..];
+    let inner = &rest[..rest.find(']')?];
+    let (xy, wh) = inner.split_once(' ')?;
+    let (x, y) = xy.split_once(',')?;
+    let (w, h) = wh.split_once('x')?;
+    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+}
+
+/// Excerpt of the tree lines that matter to a step, for the flow transcript.
+fn excerpt(response: &Value, needles: &[&str]) -> String {
+    tree_of(response)
+        .lines()
+        .filter(|l| needles.iter().any(|n| l.contains(n)))
+        .map(|l| l.trim_start_matches(['│', '├', '└', ' ']))
+        .collect::<Vec<_>>()
+        .join("\n    ")
+}
+
+/// Loose per-step budget: a step settles in a bounded number of draws and the
+/// summed draw time stays far under what a human would notice as a stall. Not
+/// a benchmark (the driver forces full uncached draws); it catches a runaway
+/// redraw loop or a per-frame cost that scales with the transcript.
+const STEP_MAX_DRAWS: u64 = 24;
+const STEP_MAX_DRAW_MS: f64 = 4000.0;
+
+fn step(name: &str, response: &Value, log: &mut Vec<String>, needles: &[&str]) {
+    assert_eq!(response["ok"], json!(true), "{name}: {response}");
+    let t = &response["timing"];
+    let (draws, draw_ms) = (t["draws"].as_u64().unwrap_or(0), t["draw_ms"].as_f64().unwrap_or(0.0));
+    log.push(format!(
+        "{name}: draws={draws} draw_ms={draw_ms} wall_ms={} nodes={}\n    {}",
+        t["wall_ms"], t["nodes"], excerpt(response, needles)
+    ));
+    println!("{}", log.last().unwrap());
+    assert!(draws <= STEP_MAX_DRAWS, "{name}: {draws} draws");
+    assert!(draw_ms <= STEP_MAX_DRAW_MS, "{name}: {draw_ms}ms of draw time");
+}
+
+/// B5, the first flow: open a chat, send a message, approve the agent's
+/// command, watch it finish, and keep the composer pinned to the bottom.
+/// Set `MAST_FLOW_LOG=<file>` to write the step transcript there.
+#[test]
+#[ignore = "requires permission to apply a macOS sandbox"]
+fn first_flow_send_approve_finish() {
+    let mut d = Driver::start_with(1, false, Some("approval"));
+    let mut log = Vec::new();
+    let start = d.tree();
+    step("start", &start, &mut log, &["Fresh chat", "composer-input"]);
+    let resting = bounds_of(&start, "composer-input").expect("composer-input bounds");
+
+    // 1. Open a chat from the sidebar.
+    let opened = d.click("button[name=\"Fresh chat\"]");
+    step("open chat", &opened, &mut log, &["Fresh chat", "composer-input", "transcript-region"]);
+    assert!(bounds_of(&opened, "transcript-region").is_some(), "transcript region missing");
+
+    // 2. Type into the composer and press Enter.
+    let typed = d.call(json!({"cmd": "type", "locator": "#composer-input", "text": "run the tests"}));
+    step("type", &typed, &mut log, &["composer-input"]);
+    assert!(tree_of(&typed).contains("value=\"run the tests\""), "{}", tree_of(&typed));
+    assert!(tree_of(&typed).lines().any(|l| l.contains("composer-input") && l.contains("focused")));
+    let sent = d.call(json!({"cmd": "key", "chord": "enter"}));
+    step("enter", &sent, &mut log, &["run the tests"]);
+
+    // 3. The user message appears; 4. the approval card follows (the mock
+    // agent answers after a short pause, so poll).
+    let mut card = sent;
+    for _ in 0..40 {
+        if tree_of(&card).contains("run the tests") && tree_of(&card).contains("question-panel") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        card = d.tree();
+    }
+    step("approval card", &card, &mut log, &["run the tests", "question-panel", "Approve", "Deny"]);
+    assert!(
+        tree_of(&card).lines().any(|l| l.contains("paragraph \"run the tests\"")),
+        "user message not in the transcript:\n{}",
+        tree_of(&card)
+    );
+    assert!(tree_of(&card).contains("sel=question-panel"), "{}", tree_of(&card));
+    assert!(tree_of(&card).contains("\"Approve command\""));
+
+    // 5. Approve. 6. The agent finishes.
+    let approved = d.click("button[name=\"Approve\"]");
+    step("approve", &approved, &mut log, &["Approve", "composer-send", "composer-stop"]);
+    let mut done = approved;
+    for _ in 0..60 {
+        if tree_of(&done).contains("sel=composer-send") && !tree_of(&done).contains("question-panel") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        done = d.tree();
+    }
+    step("finished", &done, &mut log, &["run the tests", "composer-send", "composer-input"]);
+    // Idle again: Send is back and Stop is gone. (The agent's own reply text
+    // does not reach the a11y tree in the headless run yet; see the PR note.)
+    assert!(tree_of(&done).contains("sel=composer-send") && !tree_of(&done).contains("sel=composer-stop"), "{}", tree_of(&done));
+    assert!(!tree_of(&done).contains("sel=question-panel"), "approval card still showing");
+
+    // 7. The composer is pinned to the bottom of the window.
+    let surface = bounds_of(&done, "composer-surface").expect("composer-surface bounds");
+    let viewport_h = 800.0;
+    let bottom_gap = viewport_h - (surface[1] + surface[3]);
+    assert!((0.0..=60.0).contains(&bottom_gap), "composer is {bottom_gap}px from the bottom: {surface:?}");
+    let input = bounds_of(&done, "composer-input").expect("composer-input bounds");
+    assert!(
+        (input[1] + input[3] - resting[1] - resting[3]).abs() <= 2.0,
+        "composer moved: before {resting:?}, after {input:?}"
+    );
+    log.push(format!("composer-surface {surface:?} bottom gap {bottom_gap}px"));
+
+    let transcript = log.join("\n");
+    println!("{transcript}");
+    if let Some(path) = std::env::var_os("MAST_FLOW_LOG") {
+        std::fs::write(path, transcript).unwrap();
+    }
+    d.stop();
 }

@@ -7901,7 +7901,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &gpui::Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -7920,7 +7920,7 @@ impl Composer {
             // (typed answers win — zeron question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
             div()
-                .id(("wizard-option", ix))
+                .id(SharedString::from(format!("wizard-option-{ix}")))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -7947,6 +7947,10 @@ impl Composer {
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(label.clone()))
+                .aria_selected(picked)
+                .debug_selector(move || format!("wizard-option-{ix}"))
                 .child(
                     div()
                         .flex_1()
@@ -7988,6 +7992,11 @@ impl Composer {
 
         crate::components::conversation_wizard_surface(div()
             .id("question-panel")
+            .debug_selector(|| "question-panel".into())
+            .role(gpui::Role::Group)
+            .when(window.is_a11y_active(), |el| {
+                el.aria_label(SharedString::from(question.header.clone()))
+            })
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
@@ -8091,6 +8100,9 @@ impl Composer {
                     .child(
                         crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                             .id("wizard-submit")
+                            .role(gpui::Role::Button)
+                            .aria_label(if last { "Submit" } else { "Next" })
+                            .debug_selector(|| "wizard-submit".into())
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
@@ -8444,7 +8456,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 

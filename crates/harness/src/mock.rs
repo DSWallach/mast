@@ -15,6 +15,21 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+/// The scripted single-question approval for `MAST_MOCK_APPROVAL=1`: one
+/// single-select page, so picking an option answers it (the headless UI
+/// driver's first flow clicks Approve).
+fn approval_script() -> Vec<UserInputQuestion> {
+    vec![UserInputQuestion {
+        command_approval: None,
+        allow_custom: false,
+        id: "q-approve".into(),
+        header: "Approve command".into(),
+        question: "Run `cargo test` in the workspace?".into(),
+        options: vec!["Approve".into(), "Deny".into()],
+        multi_select: false,
+    }]
+}
+
 /// The scripted question set for the `MAST_MOCK_QUESTION` variant (exercises
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
@@ -124,9 +139,14 @@ impl Harness for MockHarness {
         // engine mints the request id, emits `InputRequested`, and resolves it
         // from the `RespondInput` doc command) — the only data-side way to put
         // the QuestionPanel on screen.
-        let question_mode = mast_proto::env::var("MAST_MOCK_QUESTION")
+        // `MAST_MOCK_APPROVAL=1` is the same run with one approve/deny page.
+        let approval_mode = mast_proto::env::var("MAST_MOCK_APPROVAL")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
+        let question_mode = approval_mode
+            || mast_proto::env::var("MAST_MOCK_QUESTION")
+                .ok()
+                .is_some_and(|v| !v.is_empty() && v != "0");
         if question_mode {
             let request_input = controls.request_input;
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -143,7 +163,8 @@ impl Harness for MockHarness {
                             .into(),
                 });
                 tokio::time::sleep(pause).await;
-                let answers = request_input(question_script()).await.unwrap_or_default();
+                let script = if approval_mode { approval_script() } else { question_script() };
+                let answers = request_input(script).await.unwrap_or_default();
                 let picked: Vec<String> = answers
                     .iter()
                     .flat_map(|a| a.labels.iter().cloned())

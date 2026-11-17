@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Agent-only headless UI driver CLI. Test tooling: never part of the app.
 
-  scripts/ui-drive start [--preset small --seed N] [--render]
+  scripts/ui-drive start [--preset small --seed N] [--render] [--mock approval|question|error]
   scripts/ui-drive tree
   scripts/ui-drive click <locator>
   scripts/ui-drive type <locator> <text>
@@ -135,7 +135,7 @@ def show(response, tree=True, selectors=False):
 
 
 def start(args):
-    preset, seed, render = "small", "1", False
+    preset, seed, render, mock = "small", "1", False, None
     while args:
         flag = args.pop(0)
         if flag == "--preset" and args:
@@ -144,6 +144,8 @@ def start(args):
             seed = args.pop(0)
         elif flag == "--render":
             render = True
+        elif flag == "--mock" and args:
+            mock = args.pop(0)
         else:
             die(f"unknown start option {flag}", 2)
     if not seed.isdigit():
@@ -163,6 +165,8 @@ def start(args):
     }
     if render:
         environment["MAST_DRIVE_RENDER"] = "1"
+    if mock:
+        environment["MAST_DRIVE_MOCK"] = mock
     launcher = subprocess.Popen(
         [executable, "--ignored", "--exact", "drive_launcher", "--test-threads=1"],
         env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,
