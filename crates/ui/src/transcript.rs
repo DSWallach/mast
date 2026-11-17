@@ -1551,6 +1551,19 @@ fn row_code_fence_keys(row: &Row) -> Vec<SharedString> {
 }
 
 impl Transcript {
+    /// Test hook: the (row, entry) pair the pointer currently hovers.
+    #[cfg(test)]
+    pub(crate) fn test_hovered_entry(&self) -> Option<(SharedString, SharedString)> {
+        self.hovered_entry.clone()
+    }
+
+    /// Test hook: centre of the measured row `offset` rows below the top one.
+    #[cfg(test)]
+    pub(crate) fn test_visible_row_center(&self, offset: usize) -> Option<Point<Pixels>> {
+        let top = self.list.logical_scroll_top().item_ix;
+        self.list.bounds_for_item(top + offset).map(|b| b.center())
+    }
+
     /// Test hook: jump to the first row.
     #[cfg(test)]
     pub(crate) fn test_scroll_to_top(&mut self, cx: &mut Context<Self>) {

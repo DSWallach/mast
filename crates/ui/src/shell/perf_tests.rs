@@ -1273,3 +1273,92 @@ fn streaming_deltas_do_not_rescan_every_row(cx: &mut TestAppContext) {
     assert!(map_builds_before > 0, "the rail never rendered; the budget is vacuous");
     assert!(map_builds <= 2, "rail rebuilt its row map on {map_builds} of {DELTAS} deltas");
 }
+
+// The transcript is a cached view: every input that changes its pixels must
+// notify it (or refresh the window). These drive real pointer events.
+
+fn settle(vcx: &mut gpui::VisualTestContext) {
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+#[gpui::test]
+fn hovering_a_row_repaints_the_cached_transcript(cx: &mut TestAppContext) {
+    let (shell, _state, vcx, counters, _input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    transcript.update(vcx, |t, cx| t.test_scroll_to_top(cx));
+    settle(vcx);
+    let near = transcript.read_with(vcx, |t, _| t.test_visible_row_center(1)).expect("visible row");
+    let far = transcript.read_with(vcx, |t, _| t.test_visible_row_center(6)).expect("visible row");
+    assert!(transcript.read_with(vcx, |t, _| t.test_hovered_entry()).is_none());
+    let (_, spent) = measure_long_chat(&counters, || {
+        vcx.simulate_mouse_move(near, None, gpui::Modifiers::default());
+        settle(vcx);
+    });
+    let first = transcript.read_with(vcx, |t, _| t.test_hovered_entry());
+    assert!(first.is_some(), "pointer move did not set the hovered entry");
+    assert!(spent.rows_rendered > 0, "hover did not repaint the cached transcript");
+    // Moving to a row of a different entry changes it again and repaints.
+    let (_, spent) = measure_long_chat(&counters, || {
+        vcx.simulate_mouse_move(far, None, gpui::Modifiers::default());
+        settle(vcx);
+    });
+    let second = transcript.read_with(vcx, |t, _| t.test_hovered_entry());
+    assert!(second.is_some());
+    if first.as_ref().map(|f| &f.1) != second.as_ref().map(|f| &f.1) {
+        assert!(spent.rows_rendered > 0, "hover change did not repaint");
+    }
+}
+
+#[gpui::test]
+fn selection_drag_repaints_the_cached_transcript(cx: &mut TestAppContext) {
+    let (shell, _state, vcx, counters, _input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    transcript.update(vcx, |t, cx| t.test_scroll_to_top(cx));
+    settle(vcx);
+    let mut started = None;
+    for offset in 0..8 {
+        let Some(start) = transcript.read_with(vcx, |t, _| t.test_visible_row_center(offset)) else { continue };
+        vcx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        if crate::markdown::selection::is_dragging() {
+            started = Some(start);
+            break;
+        }
+        vcx.simulate_mouse_up(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(vcx);
+    }
+    let start = started.expect("no visible row started a text selection");
+    settle(vcx);
+    let (_, spent) = measure_long_chat(&counters, || {
+        for step in 1..=4 {
+            vcx.simulate_mouse_move(
+                start + gpui::point(px(30.0 * step as f32), px(12.0 * step as f32)),
+                Some(gpui::MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            settle(vcx);
+        }
+    });
+    vcx.simulate_mouse_up(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    settle(vcx);
+    assert!(spent.rows_rendered > 0, "dragging a selection did not repaint the cached transcript");
+}
+
+#[gpui::test]
+fn streamed_text_repaints_the_cached_transcript_without_other_notifies(cx: &mut TestAppContext) {
+    const DELTAS: usize = 8;
+    let (shell, state, vcx, counters, _input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    let base = crate::transcript::perf_bench::long_chat(LONG_CHAT_BUDGET_ENTRIES);
+    let stream = prepare_stream(&base, DELTAS);
+    start_streaming(&state, vcx, base);
+    transcript.update(vcx, |t, cx| t.test_scroll_to_bottom(cx));
+    settle(vcx);
+    for (frame, prepared) in stream {
+        let version_before = transcript.read_with(vcx, |t, _| t.rows().last().map(|r| r.version));
+        let (_, spent) = measure_long_chat(&counters, || apply_delta(&state, vcx, frame, prepared));
+        let version_after = transcript.read_with(vcx, |t, _| t.rows().last().map(|r| r.version));
+        assert_ne!(version_before, version_after, "the delta did not reach the transcript rows");
+        assert!(spent.rows_rendered > 0, "a streamed delta did not repaint the transcript");
+    }
+}
