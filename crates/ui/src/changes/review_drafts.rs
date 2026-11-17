@@ -133,6 +133,11 @@ impl Changes {
         let accept_id = comment.id.clone();
         let edit_id = comment.id.clone();
         let dismiss_id = comment.id.clone();
+        let label = self
+            .review_suggestions
+            .get(&comment.id)
+            .map(|suggestion| format!("Draft · agent suggestion · {}", suggestion.severity))
+            .unwrap_or_else(|| "Draft · agent suggestion".into());
         let button = |id: String, text: &'static str| {
             div()
                 .id(SharedString::from(id))
@@ -160,7 +165,7 @@ impl Changes {
                             .flex_1()
                             .text_size(px(11.0))
                             .text_color(theme.text_faint)
-                            .child("Draft · agent suggestion"),
+                            .child(label),
                     )
                     .child(
                         button(format!("suggestion-accept-{}", comment.id), "Accept").on_click(
@@ -200,6 +205,9 @@ impl Changes {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
+        if self.suggestion_accept_task.is_some() {
+            return;
+        }
         let Some(suggestion) = self.review_suggestions.get(id).cloned() else {
             return;
         };
@@ -233,13 +241,46 @@ impl Changes {
             source: mast_proto::ReviewDraftSource::Agent,
             created_at: chrono::Utc::now().timestamp_millis(),
         };
-        let draft_id = draft.id.clone();
-        self.put_local_draft(draft, true, cx);
-        self.dismiss_suggestion(id, cx);
-        self.rebuild_draft_index(cx);
-        if edit {
-            self.edit_comment(&draft_id, window, cx);
-        }
+        let stable = suggestion.stable_id();
+        let task = self.state.update(cx, |state, cx| {
+            state.chat_diff_rpc(
+                methods::ACCEPT_REVIEW_SUGGESTION,
+                serde_json::json!({"draft": draft, "id": stable}),
+                cx,
+            )
+        });
+        self.suggestion_accept_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                this.suggestion_accept_task = None;
+                match result {
+                    Ok(_) => {
+                        let target = draft.target.clone();
+                        let draft_id = draft.id.clone();
+                        this.local_review_drafts
+                            .entry(target.clone())
+                            .or_default()
+                            .push(draft.clone());
+                        this.local_draft_acknowledged
+                            .entry(target.clone())
+                            .or_default()
+                            .push(draft);
+                        if this.review_target.as_deref() == Some(&target) {
+                            this.dismissed_suggestions.insert(stable);
+                            this.rebuild_draft_index(cx);
+                            if edit {
+                                this.edit_comment(&draft_id, window, cx);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.local_draft_error = Some(error);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
     }
 
     fn dismiss_suggestion(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -397,6 +438,8 @@ impl Changes {
                 this.local_draft_load_task = None;
                 match result {
                     Ok(drafts) => {
+                        this.local_draft_acknowledged
+                            .insert(target.clone(), drafts.clone());
                         this.local_review_drafts.entry(target).or_insert(drafts);
                         this.rebuild_draft_index(cx);
                     }
@@ -679,10 +722,15 @@ impl Changes {
         else {
             return;
         };
+        let before = self
+            .local_draft_acknowledged
+            .get(&target)
+            .cloned()
+            .unwrap_or_default();
         let task = self.state.update(cx, |state, cx| {
             state.chat_diff_rpc(
                 methods::SET_REVIEW_DRAFTS,
-                serde_json::json!({"target": target, "drafts": snapshot}),
+                serde_json::json!({"target": target, "before": before, "drafts": snapshot}),
                 cx,
             )
         });
@@ -692,6 +740,8 @@ impl Changes {
                 this.local_draft_save_task = None;
                 match result {
                     Ok(_) => {
+                        this.local_draft_acknowledged
+                            .insert(target.clone(), snapshot.clone());
                         if this.local_draft_pending.get(&target) == Some(&snapshot) {
                             this.local_draft_pending.remove(&target);
                         }
@@ -753,6 +803,7 @@ impl Changes {
     }
 
     pub(super) fn refresh_thread_rows(&mut self, cx: &mut Context<Self>) {
+        self.comment_sync_key = None;
         self.comment_key = self.comment_key.wrapping_add(1);
         self.sync_comment_rows(cx);
     }
@@ -1027,6 +1078,146 @@ impl ThreadIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install_diff(changes: &mut Changes) -> String {
+        use super::super::*;
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+        let identities = hunk_identities(&files);
+        let identity = identities[0][0].clone();
+        changes.draft_anchor_index = DraftAnchorIndex::default();
+        changes.parsed = Some(ParsedDiff {
+            key: "test".into(),
+            truncated: false,
+            additions: 1,
+            deletions: 1,
+            file_count: 1,
+            horizontal: files.iter().map(FileHorizontalState::new).collect(),
+            hunk_identities: Arc::new(identities),
+            files: Arc::new(files),
+            origins: Arc::new(origins),
+            submodules: Arc::new(submodules),
+            layout: Arc::new(layout),
+        });
+        identity
+    }
+
+    #[gpui::test]
+    fn thread_card_is_inserted_below_its_line(cx: &mut gpui::TestAppContext) {
+        use super::super::*;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        changes.update(vcx, |changes, cx| {
+            install_diff(changes);
+            changes.review_threads = vec![ReviewThread {
+                id: "thread".into(),
+                path: "a".into(),
+                line: Some(1),
+                side: Some(ReviewSide::Right),
+                outdated: false,
+                resolved: true,
+                comments: vec![mast_proto::ReviewThreadComment {
+                    id: "comment".into(),
+                    author: "reviewer".into(),
+                    body: "Check".into(),
+                }],
+            }];
+            changes.review_thread_index = ThreadIndex::new(&changes.review_threads);
+            let file = &changes.parsed.as_ref().unwrap().files[0];
+            let rows = changes.add_thread_rows(0, body_rows(0, file, &[], None, DiffMode::Unified));
+            let row = rows
+                .iter()
+                .position(|row| matches!(row, DiffRow::ReviewThread { thread: 0, .. }))
+                .unwrap();
+            assert!(matches!(rows[row - 1], DiffRow::Line { .. }));
+            let _card = changes.render_review_thread(0, 100, Theme::of(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn suggestion_actions_record_disposition_and_create_a_draft(cx: &mut gpui::TestAppContext) {
+        use super::super::*;
+        use std::sync::{Arc, Mutex};
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let mut state = AppState::new();
+            state.chat_diff_rpc_override = Some(Arc::new(move |method, _| {
+                captured.lock().unwrap().push(method.to_owned());
+                Ok(serde_json::json!(true))
+            }));
+            let state = cx.new(|_| state);
+            Changes::new(state, cx)
+        });
+        changes.update(vcx, |changes, cx| {
+            let hash = install_diff(changes);
+            let target = "pr:o/r#1";
+            changes.review_target = Some(target.into());
+            changes.scope = DiffScope::Branch;
+            changes.suggestion_dispositions_target = Some(target.into());
+            changes
+                .local_review_drafts
+                .insert(target.into(), Vec::new());
+            let suggestion = |id: &str| mast_proto::ReviewSuggestedComment {
+                id: Some(id.into()),
+                anchor: mast_proto::ReviewAnchor {
+                    file: "a".into(),
+                    side: ReviewSide::Right,
+                    start_line: 1,
+                    end_line: 1,
+                    hunk_hash: Some(hash.clone()),
+                },
+                body: "Check".into(),
+                severity: "low".into(),
+                suggestion: None,
+            };
+            changes.set_review_suggestions(target, &[suggestion("one"), suggestion("two")], cx);
+            assert_eq!(changes.suggestion_comments.len(), 2);
+            changes.dismiss_suggestion("suggestion:one", cx);
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            changes.update(cx, |changes, cx| {
+                changes.accept_suggestion("suggestion:two", true, window, cx)
+            })
+        });
+        vcx.run_until_parked();
+        changes.read_with(vcx, |changes, _| {
+            assert_eq!(changes.suggestion_comments.len(), 0);
+            assert_eq!(changes.local_review_drafts["pr:o/r#1"].len(), 1);
+            assert_eq!(
+                changes.local_review_drafts["pr:o/r#1"][0].source,
+                mast_proto::ReviewDraftSource::Agent
+            );
+            assert!(
+                changes
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.local.is_some())
+            );
+        });
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|method| method == methods::DISMISS_REVIEW_SUGGESTION)
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|method| method == methods::ACCEPT_REVIEW_SUGGESTION)
+        );
+    }
     #[gpui::test]
     fn typing_coalesces_registry_writes(cx: &mut gpui::TestAppContext) {
         use std::sync::{
@@ -1051,27 +1242,44 @@ mod tests {
             Changes::new(state, cx)
         });
         changes.update(vcx, |changes, cx| {
+            let input = cx.new(|cx| super::super::ComposerInput::new("Draft", cx));
+            let events = cx.subscribe(&input, |this: &mut Changes, _, event, cx| {
+                if matches!(event, super::super::ComposerInputEvent::Edited) {
+                    this.local_draft_edited(cx);
+                }
+            });
+            let draft = ReviewDraft {
+                id: "one".into(),
+                target: "pr:o/r#1".into(),
+                body: String::new(),
+                source: mast_proto::ReviewDraftSource::User,
+                created_at: 1,
+                anchor: mast_proto::ReviewAnchor {
+                    file: "a".into(),
+                    side: ReviewSide::Right,
+                    start_line: 1,
+                    end_line: 1,
+                    hunk_hash: Some("h".into()),
+                },
+                line_hash: Some("l".into()),
+                end_line_hash: None,
+            };
+            changes.draft = Some(super::super::CommentDraft {
+                editing_id: None,
+                local: Some(LocalDraftEdit {
+                    draft,
+                    original: None,
+                }),
+                key: "chat".into(),
+                path: "a".into(),
+                old_path: None,
+                side: CommentSide::New,
+                line: 1,
+                input: input.clone(),
+                _events: events,
+            });
             for n in 0..100 {
-                changes.put_local_draft(
-                    ReviewDraft {
-                        id: "one".into(),
-                        target: "pr:o/r#1".into(),
-                        body: format!("typed {n}"),
-                        source: mast_proto::ReviewDraftSource::User,
-                        created_at: 1,
-                        anchor: mast_proto::ReviewAnchor {
-                            file: "a".into(),
-                            side: ReviewSide::Right,
-                            start_line: 1,
-                            end_line: 1,
-                            hunk_hash: Some("h".into()),
-                        },
-                        line_hash: Some("l".into()),
-                        end_line_hash: None,
-                    },
-                    false,
-                    cx,
-                );
+                input.update(cx, |input, cx| input.set_text(format!("typed {n}"), cx));
             }
         });
         vcx.run_until_parked();

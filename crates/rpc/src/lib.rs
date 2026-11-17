@@ -221,6 +221,7 @@ pub mod methods {
     pub const GET_REVIEW_THREADS: &str = "GetReviewThreads";
     pub const GET_DISMISSED_REVIEW_SUGGESTIONS: &str = "GetDismissedReviewSuggestions";
     pub const DISMISS_REVIEW_SUGGESTION: &str = "DismissReviewSuggestion";
+    pub const ACCEPT_REVIEW_SUGGESTION: &str = "AcceptReviewSuggestion";
     /// Stream of every chat's resolved diff targets on this device:
     /// `Vec<mast_proto::ChatDiffTargetsView>`, current value first, then each
     /// change (a bind, a selection, a worktree appearing or vanishing, a

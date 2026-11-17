@@ -828,8 +828,16 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.dismiss_review_suggestion(target, suggestion))?)
     }
 
+    pub fn accept_review_suggestion(&self, draft: &mast_proto::ReviewDraft, suggestion: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
+    }
+
     pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.put_review_drafts(target, drafts))?)
+    }
+
+    pub fn update_review_drafts(&self, target: &str, before: &[mast_proto::ReviewDraft], drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_review_drafts(target, before, drafts))?)
     }
 
     /// Initialize PR marks from a branch once, under the workspace lock.

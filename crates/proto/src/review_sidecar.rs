@@ -206,11 +206,9 @@ impl ReviewSuggestedComment {
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| {
                 let seed = format!(
-                    "{}\n{:?}\n{}\n{}\n{}\n{}",
+                    "{}\n{:?}\n{}\n{}",
                     self.anchor.file,
                     self.anchor.side,
-                    self.anchor.start_line,
-                    self.anchor.end_line,
                     self.anchor.hunk_hash.as_deref().unwrap_or_default(),
                     self.body
                 );

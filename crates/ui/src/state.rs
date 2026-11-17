@@ -751,6 +751,7 @@ pub struct AppState {
     transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
     review_comments: HashMap<String, Vec<ReviewComment>>,
+    pub(crate) review_comments_revision: u64,
     code_refs: HashMap<String, Vec<crate::code_ref::StagedCodeRef>>,
     code_ref_pending: HashMap<String, usize>,
     /// File surfaces whose editor-backed comments currently cite a buffer
@@ -890,6 +891,7 @@ impl AppState {
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
+            review_comments_revision: 0,
             code_refs: HashMap::new(),
             code_ref_pending: HashMap::new(),
             review_comment_flushes: HashMap::new(),
@@ -981,6 +983,7 @@ impl AppState {
     }
 
     pub fn add_review_comment(&mut self, key: &str, comment: ReviewComment) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comments
             .entry(key.to_string())
             .or_default()
@@ -988,6 +991,7 @@ impl AppState {
     }
 
     pub fn remove_review_comment(&mut self, key: &str, id: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(list) = self.review_comments.get_mut(key) {
             list.retain(|c| c.id != id);
             if list.is_empty() {
@@ -1000,6 +1004,7 @@ impl AppState {
     /// Update only a staged comment's body. A stale editor must never recreate
     /// a comment that has already been removed or sent to the agent.
     pub fn update_review_comment_body(&mut self, key: &str, id: &str, body: String) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comment) = self
             .review_comments
             .get_mut(key)
@@ -1010,6 +1015,7 @@ impl AppState {
     }
 
     pub fn update_review_comment_line(&mut self, key: &str, id: &str, line: u32) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comment) = self
             .review_comments
             .get_mut(key)
@@ -1020,6 +1026,7 @@ impl AppState {
     }
 
     pub fn rename_review_comment_path(&mut self, key: &str, old_path: &str, new_path: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comments) = self.review_comments.get_mut(key) {
             for comment in comments
                 .iter_mut()
@@ -1031,11 +1038,13 @@ impl AppState {
     }
 
     pub fn take_review_comments(&mut self, key: &str) -> Vec<ReviewComment> {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key).unwrap_or_default()
     }
 
     pub fn purge_review_comments(&mut self, key: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key);
     }

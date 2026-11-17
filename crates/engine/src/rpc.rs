@@ -4319,6 +4319,15 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
             }
+            methods::ACCEPT_REVIEW_SUGGESTION => {
+                let draft: mast_proto::ReviewDraft = serde_json::from_value(params.get("draft").cloned()
+                    .ok_or_else(|| RpcError::Failed("draft is required".into()))?)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let id = params.get("id").and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty()).ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                RpcReply::value(&self.workspace.accept_review_suggestion(&draft, id)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
             methods::GET_DISMISSED_REVIEW_SUGGESTIONS | methods::DISMISS_REVIEW_SUGGESTION => {
                 let target = params.get("target").and_then(serde_json::Value::as_str)
                     .filter(|target| !target.trim().is_empty())
@@ -4346,7 +4355,10 @@ impl RpcService for EngineRpc {
                 let drafts: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
                     params.get("drafts").cloned().ok_or_else(|| RpcError::Failed("drafts is required".into()))?
                 ).map_err(|error| RpcError::Failed(error.to_string()))?;
-                RpcReply::value(&self.workspace.put_review_drafts(target, &drafts)
+                let before: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params.get("before").cloned().ok_or_else(|| RpcError::Failed("before is required".into()))?
+                ).map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&self.workspace.update_review_drafts(target, &before, &drafts)
                     .map_err(|error| RpcError::Failed(error.to_string()))?)
             }
             methods::GET_DIFF_REVIEW_STATE => {

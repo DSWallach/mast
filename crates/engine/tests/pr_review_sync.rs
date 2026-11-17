@@ -1260,7 +1260,7 @@ async fn local_review_drafts_round_trip_through_rpc() {
     let drafts = json!([{ "id": "one", "target": target,
         "anchor": {"file": "src/a.rs", "side": "right", "startLine": 4, "endLine": 4, "hunkHash": "hash"},
         "body": "Check this", "source": "user", "createdAt": 1 }]);
-    rig.call(methods::SET_REVIEW_DRAFTS, json!({"target": target, "drafts": drafts})).await.unwrap();
+    rig.call(methods::SET_REVIEW_DRAFTS, json!({"target": target, "before": [], "drafts": drafts})).await.unwrap();
     assert_eq!(rig.call(methods::GET_REVIEW_DRAFTS, json!({"target": target})).await.unwrap(), drafts);
 }
 

@@ -32,6 +32,13 @@ pub(super) async fn fetch(
             vars.push(("after", after));
         }
         let body = gh.graphql(QUERY, &vars).await?;
+        if body
+            .pointer("/data/repository/pullRequest")
+            .is_some_and(Value::is_null)
+            || body.pointer("/data/repository").is_some_and(Value::is_null)
+        {
+            return Err("Pull request not found".into());
+        }
         let connection = body
             .pointer("/data/repository/pullRequest/reviewThreads")
             .filter(|value| value.is_object())

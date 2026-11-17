@@ -1970,6 +1970,15 @@ struct CommentDraft {
     _events: Subscription,
 }
 
+#[derive(PartialEq, Eq)]
+struct CommentSyncKey {
+    revision: u64,
+    owner: Option<String>,
+    target: Option<String>,
+    pinned: bool,
+    editor: Option<(String, CommentSide, u32, Option<String>)>,
+}
+
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
@@ -2042,8 +2051,10 @@ pub struct Changes {
     local_draft_ids: std::collections::HashSet<String>,
     local_outdated_drafts: Vec<mast_proto::ReviewDraft>,
     comment_index: HashMap<String, Vec<ReviewComment>>,
+    comment_sync_key: Option<CommentSyncKey>,
     draft_anchor_index: review_drafts::DraftAnchorIndex,
     local_draft_pending: HashMap<String, Vec<mast_proto::ReviewDraft>>,
+    local_draft_acknowledged: HashMap<String, Vec<mast_proto::ReviewDraft>>,
     local_draft_load_task: Option<Task<()>>,
     local_draft_save_task: Option<Task<()>>,
     local_draft_debounce_task: Option<Task<()>>,
@@ -2055,6 +2066,7 @@ pub struct Changes {
     dismissed_suggestions: std::collections::HashSet<String>,
     suggestion_dispositions_target: Option<String>,
     suggestion_load_task: Option<Task<()>>,
+    suggestion_accept_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
     review_acknowledged: HashMap<String, mast_proto::DiffReviewState>,
@@ -2320,8 +2332,10 @@ impl Changes {
             local_draft_ids: std::collections::HashSet::new(),
             local_outdated_drafts: Vec::new(),
             comment_index: HashMap::new(),
+            comment_sync_key: None,
             draft_anchor_index: review_drafts::DraftAnchorIndex::default(),
             local_draft_pending: HashMap::new(),
+            local_draft_acknowledged: HashMap::new(),
             local_draft_load_task: None,
             local_draft_save_task: None,
             local_draft_debounce_task: None,
@@ -2333,6 +2347,7 @@ impl Changes {
             dismissed_suggestions: std::collections::HashSet::new(),
             suggestion_dispositions_target: None,
             suggestion_load_task: None,
+            suggestion_accept_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
             review_acknowledged: HashMap::new(),
@@ -3754,6 +3769,13 @@ impl Changes {
         if self.parsed.is_none() {
             return;
         }
+        let sync_key = CommentSyncKey {
+            revision: self.state.read(cx).review_comments_revision,
+            owner: self.owner_chat_id_owned(), target: self.review_target.clone(), pinned: self.pinned_cwd.is_some(),
+            editor: self.draft.as_ref().map(|draft| (draft.path.clone(), draft.side, draft.line, draft.editing_id.clone())),
+        };
+        if self.comment_sync_key.as_ref() == Some(&sync_key) { return; }
+        self.comment_sync_key = Some(sync_key);
         let staged = self.staged_comments(cx);
         let draft = self.draft_anchor();
         let key = comment_state_key(&staged, draft.as_ref());
@@ -4840,8 +4862,8 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let comments = self.comments_for(&file_diff.path, cx);
-                match comments.get(card as usize) {
+                let comment = self.comment_index.get(&file_diff.path).and_then(|comments| comments.get(card as usize)).cloned();
+                match comment.as_ref() {
                     Some(comment) if self.review_suggestions.contains_key(&comment.id) => self.render_suggestion_card(comment, &theme, cx),
                     Some(comment) if self.is_local_draft(&comment.id) => self.render_local_draft_card(comment, &theme, cx),
                     Some(comment) => crate::comment_ui::render_comment_card(
