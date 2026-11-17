@@ -5467,6 +5467,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "mast-harness",
  "mast-theme",
  "mast-ui",
  "serde_json",
