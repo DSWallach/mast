@@ -5019,14 +5019,6 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
-        self.render_sidebar_collection_rows(theme, cx)
-    }
-
-    pub(super) fn render_sidebar_collection_rows(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> SidebarSessionRows {
         #[cfg(test)]
         let measurement_started = std::time::Instant::now();
         let now = Utc::now();

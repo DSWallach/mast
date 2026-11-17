@@ -622,7 +622,7 @@ pub(super) mod tests {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            shell.settings.sidebar_sections_by_profile.insert(key.clone(), vec![crate::settings::SidebarSection {
+            shell.settings.sidebar_sections_by_profile.insert(key, vec![crate::settings::SidebarSection {
                 id: "custom".into(), name: "Custom".into(), collapsed: false, session_ids: vec!["chat".into()],
             }]);
             let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
@@ -639,11 +639,14 @@ pub(super) mod tests {
                 cx.notify();
             });
             shell.settings.sidebar_outline_groups = true;
+        });
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
             let custom = shell.settings.sidebar_sections_by_profile.get(&key).unwrap();
             assert_eq!(custom.len(), 1);
             assert_eq!(custom[0].session_ids, vec!["chat"]);
         });
-        redraw_assistant(vcx);
         assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
     }
 
