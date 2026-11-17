@@ -1219,6 +1219,27 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 18:00; coordinator 544369c6)
+
+- **Installed: release 105** (9a07243be; = 104 + changes-polish, code-ref-moved-state, tracker-review-and-data
+  [ticket-first Tracker rows per the mockup, Review PR/Merge, head-checked review progress, PR +/−, ticket titles,
+  engine-side checklist counts on Session.todo_progress]). Installed with `--skip-perf-gate` (Mikey's OK): release
+  tests failed only on environment load (a VM at ~290 % CPU, fseventsd ~100 %). Three diff_sync startup-settle tests
+  (watch attach for 50 checkouts: 46–48 s alone at 104, 54–56 s at 105) and a 2 s harness read timeout; each passes
+  alone. Soak vs 104 passed. Override logged in docs/internal/perf-gate-overrides.md. Hang guard widened in
+  diff_sync_repair_backoff (566b877ed) + 5-min nextest limit (9a07243be).
+- **Follow-up:** watch attach ≈1 s per checkout at startup is slow in itself (and ~15 % slower at 105 in the A/B,
+  cause not found: 105's engine diff is session todo_progress + PR size only). Worth a look on real data.
+- **Ready, held for 106:** linear-accounts (6be5f727c): named Linear accounts (Keychain, existing `api-key` = Default
+  read in place), per-Space `linearAccountId` (absent = Default, no migration), account-scoped sync/queries/lookups,
+  Settings → Linear accounts + per-Space picker.
+- **Next (item 865a0a53):** Tracker as ticket lifecycle. Rows from the linked Linear project (read-only, Space's
+  account) or, without Linear, the item's child work items; stages derived from facts: Not started → Building →
+  Code review → PR review → Ready to merge → Done; Needs-you as a badge. Waiting on Mikey's OK of the stages.
+  No local ticket IDs at first.
+- Mikey's Mast restarted 15:27 onto 104. Post-restart sample at ~4 min: CPU 14–31 % settling, footprint ~2.2 GB.
+  perf-sample.py now counts `semaphore_timedwait_trap` as idle (the freeze watchdog showed as busy).
+
 ## In flight (snapshot 2026-11-17 evening; coordinator 544369c6)
 
 - **Installed: release 104** (4bbb92ba0; = 103 + code-block-and-chips + tracker-surface + crash fix). Perf gate:
