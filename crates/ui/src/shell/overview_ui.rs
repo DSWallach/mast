@@ -349,6 +349,33 @@ pub(super) mod tests {
         assert!((f32::from(shortcut.size.height) - f32::from(new_item.size.height)).abs() < 0.5);
     }
 
+    /// Hidden session lists must not rebuild their rows or animation order
+    /// when the persistent Overview navigation invalidates the sidebar.
+    #[gpui::test]
+    fn overview_repaints_leave_sessions_list_idle(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        let sentinel = vec![("previous-session-order".to_string(), 61.0)];
+        shell.update(vcx, |shell, cx| {
+            shell.sidebar_prev_order = sentinel.clone();
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            *shell.settings.sidebar_pins_mut(key) = vec!["chat".into()];
+            cx.notify();
+        });
+        for _ in 0..3 {
+            redraw_assistant(vcx);
+            shell.read_with(vcx, |shell, _| {
+                assert_eq!(shell.sidebar_prev_order, sentinel);
+            });
+        }
+        let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
+        vcx.simulate_click(sessions, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, _| {
+            assert_ne!(shell.sidebar_prev_order, sentinel);
+        });
+        assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
+    }
+
     #[gpui::test]
     fn overview_highlights_pins_in_place_and_sessions_keeps_its_pinned_section(
         cx: &mut TestAppContext,
