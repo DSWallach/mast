@@ -3225,6 +3225,8 @@ impl SavedViewportCache {
 pub struct Transcript {
     state: Entity<AppState>,
     code_ref_hover: Option<code_refs::ReferenceHover>,
+    code_ref_focus: HashMap<(SharedString, usize), code_refs::ReferenceFocusState>,
+    code_ref_focus_pending: Option<(SharedString, usize)>,
     code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     code_ref_inflight: usize,
     code_ref_generation: u64,
@@ -3587,6 +3589,8 @@ impl Transcript {
         let mut this = Self {
             state,
             code_ref_hover: None,
+            code_ref_focus: HashMap::new(),
+            code_ref_focus_pending: None,
             code_ref_resolutions: HashMap::new(),
             code_ref_inflight: 0,
             code_ref_generation: 0,
@@ -4751,6 +4755,8 @@ impl Transcript {
             self.code_ref_context = code_ref_context;
             self.code_ref_resolutions.clear();
             self.code_ref_hover = None;
+            self.code_ref_focus.clear();
+            self.code_ref_focus_pending = None;
             self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             cx.notify();
         }
@@ -4793,6 +4799,8 @@ impl Transcript {
             self.chat_id = selected;
             self.code_ref_resolutions.clear();
             self.code_ref_hover = None;
+            self.code_ref_focus.clear();
+            self.code_ref_focus_pending = None;
             self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             self.rows.clear();
             self.rows_generation = self.rows_generation.wrapping_add(1);
@@ -5760,6 +5768,7 @@ impl Transcript {
         let hold_key = row_id.clone();
         let hold_height = measured_h.clone();
         let hold_selection: Arc<str> = format!("{row_id}:u").into();
+        let focus_targets = self.reference_focus_targets(row_id, &mentions, window, cx);
         let body = div()
             .id(SharedString::from(format!("{row_id}-body")))
             // A long press toggles instead of double-click. A normal release
@@ -5808,6 +5817,7 @@ impl Transcript {
                 cx.entity_id(),
                 cx.weak_entity(),
                 self.code_ref_hover.clone(),
+                focus_targets,
                 self.link_ui(),
                 self.state.clone(),
                 self.chat_id.clone(),
@@ -7675,6 +7685,7 @@ fn user_bubble_text(
     entity_id: gpui::EntityId,
     transcript: gpui::WeakEntity<Transcript>,
     reference_hover: Option<code_refs::ReferenceHover>,
+    focus_targets: Vec<code_refs::ReferenceFocus>,
     link_ui: Option<render::LinkUi>,
     state: Entity<AppState>,
     chat_id: Option<String>,
@@ -7730,9 +7741,19 @@ fn user_bubble_text(
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let hit_mentions = mentions.clone();
+    let focus_label_text = text.clone();
+    let focus_geometry = focus_targets.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
+            let mut focus_geometry_changed = false;
+            for target in &focus_geometry {
+                let bounds = render::range_rects(&layout, &target.span.range, 0.0, 2.0).first().map(|rect| {
+                    Bounds::new(point(rect.origin.x - layout.bounds().origin.x, rect.origin.y - layout.bounds().origin.y), rect.size)
+                });
+                if target.bounds.get() != bounds { target.bounds.set(bounds); focus_geometry_changed = true; }
+            }
+            if focus_geometry_changed { cx.notify(entity_id); }
             for span in mentions.iter() {
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
@@ -7787,6 +7808,10 @@ fn user_bubble_text(
     let hover_transcript = transcript.clone();
     let hover_row = row_id.clone();
     let tooltip_row = row_id.clone();
+    let keyboard_state = state.clone();
+    let keyboard_chat = chat_id.clone();
+    let keyboard_link = link_ui.clone();
+    let focused_reference = reference_hover.as_ref().and_then(|hover| hover.focus.clone());
     let tooltip = canvas(
         move |_, window, _| {
             let Some(hover) = reference_hover.as_ref().filter(|hover| hover.row == tooltip_row) else { return; };
@@ -7797,12 +7822,13 @@ fn user_bubble_text(
             let row = hover.row.clone();
             let range = hover.range.clone();
             let key = hover.key.clone();
+            let focus = hover.focus.clone();
             window.set_tooltip(gpui::AnyTooltip {
                 view: hover.view.clone().into(),
                 mouse_position: anchor,
                 check_visible_and_update: Rc::new(move |popup, window, cx| {
                     let pointer = window.mouse_position();
-                    if rects.iter().any(|rect| rect.contains(&pointer)) || popup.contains(&pointer) { return true; }
+                    if focus.as_ref().is_some_and(|focus| focus.is_focused(window)) || rects.iter().any(|rect| rect.contains(&pointer)) || popup.contains(&pointer) { return true; }
                     let _ = owner.update(cx, |this, cx| {
                         if this.code_ref_hover.as_ref().is_some_and(|hover| hover.row == row && hover.range == range && hover.key == key) {
                             this.code_ref_hover = None;
@@ -7817,13 +7843,15 @@ fn user_bubble_text(
     ).absolute().size_full();
     div()
         .relative()
-        .when(has_code_references, |element| element.on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+        .when(has_code_references, |element| element.tab_group())
+        .when(has_code_references, |element| element.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
             if event.pressed_button.is_some() { return; }
+            if focused_reference.as_ref().is_some_and(|focus| focus.is_focused(window)) { return; }
             let span = if hover_layout.bounds().contains(&event.position) {
                 let index = match hover_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
                 hover_mentions.iter().find(|span| span.code_ref.is_some() && (span.range.contains(&index) || span.badge_range.as_ref().is_some_and(|range| range.contains(&index)))).cloned()
             } else { None };
-            let _ = hover_transcript.update(cx, |this, cx| this.set_reference_hover(hover_row.clone(), span, cx));
+            let _ = hover_transcript.update(cx, |this, cx| this.set_reference_hover(hover_row.clone(), span, None, cx));
         }))
         .on_mouse_up(gpui::MouseButton::Left, move |event, window, cx| {
             if !hit_layout.bounds().contains(&event.position) { return; }
@@ -7838,6 +7866,40 @@ fn user_bubble_text(
         })
         .child(underlay)
         .child(styled)
+        .children(focus_targets.into_iter().enumerate().filter_map(|(index, target)| {
+            let bounds = target.bounds.get()?;
+            let reference = target.span.code_ref.as_ref()?.clone();
+            let label = focus_label_text.get(target.span.range.clone()).unwrap_or_default();
+            let label = match target.span.resolution {
+                Some(crate::code_ref::Resolution::Moved(_)) => format!("{label}, moved"),
+                Some(crate::code_ref::Resolution::Changed) => format!("{label}, changed"),
+                _ => label.to_owned(),
+            };
+            let focus_state = keyboard_state.clone();
+            let focus_chat = keyboard_chat.clone();
+            let focus_link = keyboard_link.clone();
+            let accessible_reference = reference.clone();
+            let accessible_state = focus_state.clone();
+            let accessible_chat = focus_chat.clone();
+            let accessible_link = focus_link.clone();
+            Some(div().id(("sent-reference-focus", index)).absolute().left(bounds.left()).top(bounds.top())
+                .w(bounds.size.width).h(bounds.size.height).track_focus(&target.handle).tab_index(0)
+                .role(gpui::Role::Button).aria_label(label)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        if let Some(chat_id) = focus_chat.clone() {
+                            code_refs::activate(reference.as_ref().clone(), focus_state.clone(), chat_id, focus_link.clone(), window, cx);
+                            cx.stop_propagation();
+                        }
+                    }
+                })
+                .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                    if let Some(chat_id) = accessible_chat.clone() {
+                        code_refs::activate(accessible_reference.as_ref().clone(), accessible_state.clone(), chat_id, accessible_link.clone(), window, cx);
+                    }
+                }))
+        }))
         .when(has_code_references, |element| element.child(tooltip))
         .into_any_element()
 }

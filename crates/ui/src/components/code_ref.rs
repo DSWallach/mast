@@ -6,6 +6,26 @@ use gpui::{div, prelude::*, px};
 struct ReferenceHighlightCache(crate::syntax_cache::SyntaxHighlightCache);
 impl gpui::Global for ReferenceHighlightCache {}
 
+pub(crate) fn try_queue_highlight() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    static QUEUE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    QUEUE.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(32))).clone().try_acquire_owned().ok()
+}
+
+pub(crate) async fn acquire_highlight() -> tokio::sync::OwnedSemaphorePermit {
+    static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2))).clone().acquire_owned().await.expect("highlight semaphore remains open")
+}
+
+pub(crate) fn cached_highlight(key: &crate::syntax_cache::DocumentHighlightKey, cx: &mut gpui::App) -> Option<std::sync::Arc<mast_syntax::HighlightedDocument>> {
+    if cx.try_global::<ReferenceHighlightCache>().is_none() { cx.set_global(ReferenceHighlightCache::default()); }
+    cx.global_mut::<ReferenceHighlightCache>().0.get(key)
+}
+
+pub(crate) fn cache_highlight(key: crate::syntax_cache::DocumentHighlightKey, document: std::sync::Arc<mast_syntax::HighlightedDocument>, cx: &mut gpui::App) {
+    if cx.try_global::<ReferenceHighlightCache>().is_none() { cx.set_global(ReferenceHighlightCache::default()); }
+    cx.global_mut::<ReferenceHighlightCache>().0.insert(key, document);
+}
+
 pub(crate) struct ReferenceCard {
     label: String,
     source: String,
@@ -17,17 +37,16 @@ pub(crate) struct ReferenceCard {
 
 impl ReferenceCard {
     pub(crate) fn new(reference: crate::code_ref::StagedCodeRef, resolution: Option<crate::code_ref::Resolution>, cx: &mut gpui::Context<Self>) -> Self {
-        if cx.try_global::<ReferenceHighlightCache>().is_none() {
-            cx.set_global(ReferenceHighlightCache::default());
-        }
         let (source, remaining_lines) = reference_card_source(&reference);
         let path = reference.reference.location.path.clone();
         let key = mast_syntax::language_for_path(&path)
             .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
-        let highlight = key.as_ref().and_then(|key| cx.global_mut::<ReferenceHighlightCache>().0.get(key));
-        if highlight.is_none() && let Some(key) = key {
+        let highlight = key.as_ref().and_then(|key| cached_highlight(key, cx));
+        if highlight.is_none() && let Some(key) = key && let Some(queue_permit) = try_queue_highlight() {
             let task_source = source.clone();
             cx.spawn(async move |this, cx| {
+                let _queue_permit = queue_permit;
+                let _permit = acquire_highlight().await;
                 let document = cx.background_executor().spawn(async move {
                     mast_syntax::highlight_with_limits(
                         mast_syntax::HighlightRequest { source: &task_source, path: Some(&path), fence_tag: None },
@@ -36,14 +55,19 @@ impl ReferenceCard {
                 }).await;
                 if let Some(document) = document {
                     let _ = this.update(cx, |this, cx| {
-                        cx.global_mut::<ReferenceHighlightCache>().0.insert(key, document.clone());
+                        cache_highlight(key, document.clone(), cx);
                         this.highlight = Some(document);
                         cx.notify();
                     });
                 }
             }).detach();
         }
-        Self { label: reference.label(), source, first_line: reference.reference.range.map_or(1, |range| range.start_line), remaining_lines, resolution, highlight }
+        let path = reference.reference.location.workspace_path();
+        let label = match reference.reference.range {
+            Some(range) => format!("{path} · L{}–{}", range.start_line, range.end_line),
+            None => path,
+        };
+        Self { label, source, first_line: reference.reference.range.map_or(1, |range| range.start_line), remaining_lines, resolution, highlight }
     }
 }
 
@@ -66,8 +90,8 @@ impl gpui::Render for ReferenceCard {
             .border_1().border_color(theme.border).bg(theme.surface_raised).text_color(theme.text)
             .child(div().flex().gap(px(Theme::SPACE_SM)).text_color(theme.text_muted).child(self.label.clone())
                 .children(match self.resolution {
-                    Some(crate::code_ref::Resolution::Moved(range)) => Some(div().text_color(theme.accent).child(format!("Moved to L{}–{}", range.start_line, range.end_line))),
-                    Some(crate::code_ref::Resolution::Changed) => Some(div().text_color(theme.warning_muted).child("Changed")),
+                    Some(crate::code_ref::Resolution::Moved(range)) => Some(div().px(px(Theme::SPACE_SM)).rounded(px(Theme::SPACE_XS)).bg(theme.accent.opacity(0.12)).text_color(theme.accent).child(format!("Moved to L{}–{}", range.start_line, range.end_line))),
+                    Some(crate::code_ref::Resolution::Changed) => Some(div().px(px(Theme::SPACE_SM)).rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12)).text_color(theme.warning_muted).child("Changed")),
                     _ => None,
                 }))
             .child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme, crate::typography::ui_rems(12.0).into()))

@@ -5,6 +5,22 @@ use super::*;
 // rechecks its own reference, including ones outside this cache.
 const MAX_RESOLUTIONS: usize = 256;
 const MAX_INFLIGHT: usize = 4;
+const MAX_FOCUS_TARGETS: usize = 256;
+
+#[derive(Clone)]
+pub(super) struct ReferenceFocus {
+    pub key: (SharedString, usize),
+    pub span: crate::composer::SentMentionSpan,
+    pub handle: gpui::FocusHandle,
+    pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+pub(super) struct ReferenceFocusState {
+    range: std::ops::Range<usize>,
+    reference_key: Option<SharedString>,
+    handle: gpui::FocusHandle,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
 
 #[derive(Clone)]
 pub(super) struct ReferenceHover {
@@ -14,20 +30,61 @@ pub(super) struct ReferenceHover {
     pub key: Option<SharedString>,
     pub resolution: Option<crate::code_ref::Resolution>,
     pub view: Entity<crate::components::code_ref::ReferenceCard>,
+    pub focus: Option<gpui::FocusHandle>,
 }
 
 impl Transcript {
-    pub(super) fn set_reference_hover(&mut self, row: SharedString, span: Option<crate::composer::SentMentionSpan>, cx: &mut Context<Self>) {
+    pub(super) fn set_reference_hover(&mut self, row: SharedString, span: Option<crate::composer::SentMentionSpan>, focus: Option<gpui::FocusHandle>, cx: &mut Context<Self>) {
         let Some(span) = span.filter(|span| span.code_ref.is_some()) else {
             if self.code_ref_hover.take().is_some() { cx.notify(); }
             return;
         };
-        if self.code_ref_hover.as_ref().is_some_and(|hover| hover.row == row && hover.range == span.range && hover.key == span.resolution_key && hover.resolution == span.resolution) { return; }
+        if let Some(hover) = self.code_ref_hover.as_mut().filter(|hover| hover.row == row && hover.range == span.range && hover.key == span.resolution_key && hover.resolution == span.resolution) {
+            if focus.is_some() { hover.focus = focus; cx.notify(); }
+            return;
+        }
         let reference = span.code_ref.as_ref().unwrap().as_ref().clone();
         let resolution = span.resolution;
         let view = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference, resolution, cx));
-        self.code_ref_hover = Some(ReferenceHover { row, range: span.range, badge_range: span.badge_range, key: span.resolution_key, resolution, view });
+        self.code_ref_hover = Some(ReferenceHover { row, range: span.range, badge_range: span.badge_range, key: span.resolution_key, resolution, view, focus });
         cx.notify();
+    }
+
+    pub(super) fn reference_focus_targets(&mut self, row: &SharedString, spans: &[crate::composer::SentMentionSpan], window: &Window, cx: &mut Context<Self>) -> Vec<ReferenceFocus> {
+        let mut targets = Vec::new();
+        for (index, span) in spans.iter().enumerate().filter(|(_, span)| span.code_ref.is_some()) {
+            let key = (row.clone(), index);
+            if !self.code_ref_focus.contains_key(&key) {
+                if self.code_ref_focus.len() >= MAX_FOCUS_TARGETS {
+                    if let Some(evict) = self.code_ref_focus.iter().find(|((cached_row, _), target)| cached_row != row && !target.handle.is_focused(window)).map(|(key, _)| key.clone()) {
+                        self.code_ref_focus.remove(&evict);
+                    } else { continue; }
+                }
+                self.code_ref_focus.insert(key.clone(), ReferenceFocusState { range: span.range.clone(), reference_key: span.resolution_key.clone(), handle: cx.focus_handle().tab_stop(true).tab_index(0), bounds: Rc::new(Cell::new(None)) });
+            }
+            let target = self.code_ref_focus.get_mut(&key).unwrap();
+            if target.range != span.range || target.reference_key != span.resolution_key { target.bounds.set(None); }
+            target.range = span.range.clone();
+            target.reference_key = span.resolution_key.clone();
+            targets.push(ReferenceFocus { key, span: span.clone(), handle: target.handle.clone(), bounds: target.bounds.clone() });
+        }
+        for target in &targets {
+            let key = target.key.clone();
+            let already_visible = self.code_ref_hover.as_ref().is_some_and(|hover| hover.row == *row && hover.range == target.span.range && hover.resolution == target.span.resolution && hover.focus.as_ref().is_some_and(|focus| focus.is_focused(window)));
+            if target.handle.is_focused(window) && !already_visible && self.code_ref_focus_pending.as_ref() != Some(&key) {
+                self.code_ref_focus_pending = Some(key.clone());
+                let focus = target.handle.clone();
+                let span = target.span.clone();
+                cx.defer_in(window, move |this, window, cx| {
+                    if this.code_ref_focus_pending.as_ref() != Some(&key) { return; }
+                    this.code_ref_focus_pending = None;
+                    if focus.is_focused(window) && this.code_ref_focus.get(&key).is_some_and(|current| current.range == span.range && current.reference_key == span.resolution_key) {
+                        this.set_reference_hover(key.0, Some(span), Some(focus), cx);
+                    }
+                });
+            }
+        }
+        targets
     }
     pub(super) fn resolve_code_refs(
         &mut self,
@@ -326,11 +383,11 @@ mod tests {
                 code_ref: Some(Arc::new(reference)), resolution_key: None, resolution: None,
             };
             transcript.update(cx, |transcript, cx| {
-                transcript.set_reference_hover("row".into(), Some(span.clone()), cx);
+                transcript.set_reference_hover("row".into(), Some(span.clone()), None, cx);
                 let first = transcript.code_ref_hover.as_ref().unwrap().view.entity_id();
-                transcript.set_reference_hover("row".into(), Some(span), cx);
+                transcript.set_reference_hover("row".into(), Some(span), None, cx);
                 assert_eq!(first, transcript.code_ref_hover.as_ref().unwrap().view.entity_id());
-                transcript.set_reference_hover("row".into(), None, cx);
+                transcript.set_reference_hover("row".into(), None, None, cx);
                 assert!(transcript.code_ref_hover.is_none());
             });
         });
@@ -364,24 +421,52 @@ mod tests {
         };
         struct Fixture(Entity<Transcript>, Entity<AppState>, Arc<Vec<crate::composer::SentMentionSpan>>);
         impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let theme = Theme::of(cx).clone();
                 let state = self.1.clone();
                 let spans = self.2.clone();
-                let body = self.0.update(cx, |transcript, cx| super::super::user_bubble_text(
-                    &"reference".into(), "file.rs:1".into(), spans, &theme, false,
-                    Rc::new(Cell::new(0.0)), cx.entity_id(), cx.weak_entity(),
-                    transcript.code_ref_hover.clone(), None, state, None,
-                ));
+                let body = self.0.update(cx, |transcript, cx| {
+                    let row = "reference".into();
+                    let targets = transcript.reference_focus_targets(&row, &spans, window, cx);
+                    super::super::user_bubble_text(
+                        &row, "file.rs:1".into(), spans, &theme, false,
+                        Rc::new(Cell::new(0.0)), cx.entity_id(), cx.weak_entity(),
+                        transcript.code_ref_hover.clone(), targets, None, state, None,
+                    )
+                });
                 div().id("reference-hover-fixture").debug_selector(|| "reference-hover-fixture".into()).child(body)
             }
         }
-        let (_, vcx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), state, Arc::new(vec![span])));
+        let (fixture, vcx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), state, Arc::new(vec![span])));
         vcx.run_until_parked();
         let bounds = vcx.debug_bounds("reference-hover-fixture").unwrap();
         vcx.simulate_mouse_move(bounds.origin + point(px(5.0), px(5.0)), None, gpui::Modifiers::default());
         vcx.run_until_parked();
         transcript.read_with(vcx, |transcript, _| assert!(transcript.code_ref_hover.is_some()));
+        transcript.update(vcx, |transcript, cx| transcript.set_reference_hover("reference".into(), None, None, cx));
+        fixture.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        let focus = transcript.read_with(vcx, |transcript, _| {
+            let target = transcript.code_ref_focus.get(&("reference".into(), 0)).unwrap();
+            assert!(target.bounds.get().is_some(), "reference has a shaped focus target");
+            target.handle.clone()
+        });
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.update(|window, _| assert!(focus.is_focused(window), "keyboard navigation reaches the reference"));
+        fixture.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.run_until_parked();
+        transcript.read_with(vcx, |transcript, _| assert!(transcript.code_ref_hover.as_ref().is_some_and(|hover| hover.focus.is_some())));
+        let start = bounds.origin + point(px(2.0), px(5.0));
+        let end = bounds.origin + point(px(35.0), px(5.0));
+        let modifiers = gpui::Modifiers::default();
+        crate::markdown::selection::clear_if_owner("reference:u");
+        vcx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        vcx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+        vcx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+        assert!(crate::markdown::selection::selected_text().is_some_and(|text| !text.is_empty() && "file.rs:1".contains(&text)), "focus target must not block text selection");
+        crate::markdown::selection::clear_if_owner("reference:u");
     }
 
     #[test]

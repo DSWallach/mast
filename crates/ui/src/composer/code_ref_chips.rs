@@ -34,6 +34,7 @@ impl Composer {
             .flex()
             .flex_row()
             .items_center()
+            .tab_group()
             .gap(px(6.0))
             .overflow_hidden()
             .px(px(STRIP_PAD_X))
@@ -42,7 +43,7 @@ impl Composer {
             let id = reference.id.clone();
             let label: SharedString = reference.label().into();
             if !self.code_ref_focus.contains_key(&id) {
-                let handle = cx.focus_handle();
+                let handle = cx.focus_handle().tab_stop(true).tab_index(0);
                 self.code_ref_focus.insert(id.clone(), ReferenceChipFocus { handle });
             }
             let focus = self.code_ref_focus[&id].handle.clone();
@@ -241,7 +242,7 @@ mod tests {
         vcx.update(|window, cx| window.draw(cx).clear());
         vcx.run_until_parked();
         let focus = composer.read_with(vcx, |composer, _| composer.code_ref_focus["ref"].handle.clone());
-        vcx.update(|window, cx| window.focus(&focus, cx));
+        vcx.update(|window, cx| window.focus_next(cx));
         vcx.update(|window, _| assert!(focus.is_focused(window)));
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());

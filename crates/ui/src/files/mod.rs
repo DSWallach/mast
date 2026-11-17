@@ -182,7 +182,6 @@ pub struct FilesSurface {
     pinned_highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
     pinned_diff: Option<PinnedDiff>,
     pinned_diff_generation: u64,
-    pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
     selected_editor_path: Option<String>,
@@ -512,7 +511,6 @@ impl FilesSurface {
             pinned_highlight: None,
             pinned_diff: None,
             pinned_diff_generation: 0,
-            pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache::default(),
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -723,13 +721,15 @@ impl FilesSurface {
         let path = reference.reference.location.path.clone();
         let key = mast_syntax::language_for_path(&path)
             .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
-        self.pinned_highlight = key.as_ref().and_then(|key| self.pinned_syntax_cache.get(key));
+        self.pinned_highlight = key.as_ref().and_then(|key| crate::components::code_ref::cached_highlight(key, cx));
         self.pinned_source = source.clone();
         self.pinned_diff = None;
         self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
         self.pinned_reference = Some(reference);
-        if self.pinned_highlight.is_none() && let Some(key) = key {
+        if self.pinned_highlight.is_none() && let Some(key) = key && let Some(queue_permit) = crate::components::code_ref::try_queue_highlight() {
             cx.spawn(async move |this, cx| {
+                let _queue_permit = queue_permit;
+                let _permit = crate::components::code_ref::acquire_highlight().await;
                 let task_source = source.clone();
                 let highlighted = cx.background_executor().spawn(async move {
                     mast_syntax::highlight_with_limits(
@@ -740,7 +740,7 @@ impl FilesSurface {
                 }).await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(document) = highlighted {
-                        this.pinned_syntax_cache.insert(key, document.clone());
+                        crate::components::code_ref::cache_highlight(key, document.clone(), cx);
                         if this.pinned_source == source && this.pinned_reference.as_ref().is_some_and(|reference| {
                             mast_syntax::language_for_path(&reference.reference.location.path) == Some(key.language)
                         }) {

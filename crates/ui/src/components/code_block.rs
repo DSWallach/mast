@@ -43,23 +43,41 @@ pub(crate) fn code_block(
 pub(crate) fn inline_code(source: &str, theme: &Theme, color: gpui::Hsla) -> StyledText {
     let mut text = String::new();
     let mut runs = Vec::new();
-    let mut remaining = source;
-    while let Some(open) = remaining.find('`') {
-        let rest = &remaining[open..];
-        let count = rest.bytes().take_while(|byte| *byte == b'`').count();
-        let delimiter = &rest[..count];
-        let Some(close) = rest[count..].find(delimiter) else { break };
-        let plain = &remaining[..open];
-        text.push_str(plain);
-        if !plain.is_empty() { runs.push(inline_run(plain.len(), false, theme, color)); }
-        let code = &rest[count..count + close];
-        text.push_str(code);
-        if !code.is_empty() { runs.push(inline_run(code.len(), true, theme, color)); }
-        remaining = &rest[count + close + count..];
+    for (part, code) in inline_code_parts(source) {
+        text.push_str(part);
+        if !part.is_empty() { runs.push(inline_run(part.len(), code, theme, color)); }
     }
-    text.push_str(remaining);
-    if !remaining.is_empty() { runs.push(inline_run(remaining.len(), false, theme, color)); }
     StyledText::new(text).with_runs(runs)
+}
+
+fn inline_code_parts(source: &str) -> Vec<(&str, bool)> {
+    let bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    let mut plain_start = 0;
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'`' { cursor += 1; continue; }
+        let open = cursor;
+        while cursor < bytes.len() && bytes[cursor] == b'`' { cursor += 1; }
+        let count = cursor - open;
+        let escapes = bytes[..open].iter().rev().take_while(|&&byte| byte == b'\\').count();
+        if escapes % 2 != 0 { continue; }
+        let mut end = cursor;
+        let mut close = None;
+        while end < bytes.len() {
+            if bytes[end] != b'`' { end += 1; continue; }
+            let start = end;
+            while end < bytes.len() && bytes[end] == b'`' { end += 1; }
+            if end - start == count { close = Some((start, end)); break; }
+        }
+        let Some((close_start, close_end)) = close else { break; };
+        parts.push((&source[plain_start..open], false));
+        parts.push((&source[cursor..close_start], true));
+        cursor = close_end;
+        plain_start = cursor;
+    }
+    parts.push((&source[plain_start..], false));
+    parts
 }
 
 fn inline_run(len: usize, code: bool, theme: &Theme, color: gpui::Hsla) -> gpui::TextRun {
@@ -84,5 +102,11 @@ mod tests {
         assert!(bounded.len() <= MAX_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
         assert_eq!(bounded_source(&"x\n".repeat(MAX_LINES + 10)).lines().count(), MAX_LINES);
+    }
+
+    #[test]
+    fn inline_code_preserves_escaped_and_unmatched_delimiters() {
+        assert_eq!(inline_code_parts("text `é` and ``a`b``"), vec![("text ", false), ("é", true), (" and ", false), ("a`b", true), ("", false)]);
+        assert_eq!(inline_code_parts("escaped \\` tick and `open"), vec![("escaped \\` tick and `open", false)]);
     }
 }
