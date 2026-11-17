@@ -7,3 +7,12 @@ publish = false
 
 [dependencies]
 mast-ui = { workspace = true, features = ["snapshot"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+gpui-base.workspace = true
+mast-theme.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

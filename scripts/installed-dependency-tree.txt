@@ -29,7 +29,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │           ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
 │           ├── quote v1.0.47 [default,proc-macro] (*)
 │           └── unicode-ident v1.0.24 []
-├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11]
+├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11]
 │   ├── accesskit v0.24.1 [enumn]
 │   │   ├── enumn v0.1.14 (proc-macro) []
 │   │   │   ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
@@ -180,8 +180,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   └── objc v0.2.7 [] (*)
 │   ├── cocoa-foundation v0.2.0 [default,link] (*)
-│   ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
-│   │   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
+│   │   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   │   ├── anyhow v1.0.104 [default,std]
 │   │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   │   └── which v6.0.3 []
@@ -305,12 +305,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── wasip2 v1.0.4+wasi-0.2.12 []
 │   │   │   └── wit-bindgen v0.57.1 []
 │   │   └── wasm-bindgen v0.2.127 [default,std] (*)
-│   ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── heck v0.5.0 []
 │   │   ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
 │   │   ├── quote v1.0.47 [default,proc-macro] (*)
 │   │   └── syn v2.0.119 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit,visit-mut] (*)
-│   ├── gpui_shared_string v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── gpui_shared_string v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── schemars v1.2.2 [default,derive,indexmap2,schemars_derive,std]
 │   │   │   ├── dyn-clone v1.0.20 []
 │   │   │   ├── indexmap v2.14.0 [default,serde,std] (*)
@@ -337,12 +337,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       └── zmij v1.0.23 []
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   └── smol_str v0.3.6 [default,std]
-│   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   ├── heapless v0.9.3 []
 │   │   ├── hash32 v0.3.1 []
 │   │   │   └── byteorder v1.5.0 [default,std]
 │   │   └── stable_deref_trait v1.2.1 [alloc,default,std]
-│   ├── http_client v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── http_client v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── async-compression v0.4.43 [bzip2,futures-io,gzip]
 │   │   │   ├── compression-codecs v0.4.38 [bzip2,flate2,gzip,memchr]
@@ -554,7 +554,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       └── num-traits v0.2.19 [default,i128,libm,std] (*)
 │   ├── mach2 v0.5.0 [default]
 │   │   └── libc v0.2.189 [default,extra_traits,std]
-│   ├── media v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── media v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── core-foundation v0.10.1 [default,link] (*)
 │   │   ├── core-video v0.5.2 [default,display-link,link,metal] (*)
@@ -638,8 +638,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       └── getrandom v0.3.4 [std,wasm_js] (*)
 │   │   └── rand_core v0.9.5 [os_rng,std] (*)
 │   ├── raw-window-handle v0.6.2 [alloc,std]
-│   ├── refineable v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
-│   │   └── derive_refineable v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── refineable v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
+│   │   └── derive_refineable v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │       ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
 │   │       ├── quote v1.0.47 [default,proc-macro] (*)
 │   │       └── syn v2.0.119 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit,visit-mut] (*)
@@ -721,7 +721,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── unicode-vo v0.1.0 []
 │   │   │   └── xmlwriter v0.1.0 []
 │   │   └── zune-jpeg v0.5.15 [default,neon,std,x86] (*)
-│   ├── scheduler v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── scheduler v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── async-task v4.7.1 [default,std]
 │   │   ├── backtrace v0.3.76 [default,std]
 │   │   │   ├── addr2line v0.25.1 []
@@ -783,7 +783,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       ├── proc-macro2 v1.0.107 [default,proc-macro] (*)
 │   │       ├── quote v1.0.47 [default,proc-macro] (*)
 │   │       └── syn v2.0.119 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit,visit-mut] (*)
-│   ├── sum_tree v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── sum_tree v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── heapless v0.9.3 [] (*)
 │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   └── rayon v1.12.0 [] (*)
@@ -799,9 +799,9 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── ttf-parser v0.25.1 [apple-layout,core_maths,default,glyph-names,no-std-float,opentype-layout,std,variable-fonts] (*)
 │   ├── url v2.5.8 [default,std] (*)
 │   ├── usvg v0.46.0 [default,fontdb,memmap-fonts,rustybuzz,system-fonts,text,unicode-bidi,unicode-script,unicode-vo] (*)
-│   ├── util_macros v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
-│   │   ├── perf v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
-│   │   │   ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   ├── util_macros v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
+│   │   ├── perf v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
+│   │   │   ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   │   └── serde_json v1.0.151 [alloc,default,indexmap,preserve_order,raw_value,std]
 │   │   │       ├── indexmap v2.14.0 [default,serde,std] (*)
@@ -2308,14 +2308,14 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── fontdb v0.23.0 [default,fontconfig,fontconfig-parser,fs,memmap,memmap2,std] (*)
 │   ├── foreign-types v0.5.0 [default,std] (*)
 │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
 │   ├── gpui-base v0.5.2 (https://github.com/zeronsh/gpui-component?rev=03cd9947a6aa07921cb284ad66c87fd6735e55b0#03cd9947) []
 │   │   ├── aho-corasick v1.1.5 [default,perf-literal,std] (*)
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── async-channel v2.5.0 [default,std] (*)
 │   │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
-│   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   ├── instant v0.1.13 [js-sys,wasm-bindgen,wasm-bindgen_rs,web-sys] (*)
 │   │   ├── lsp-types v0.97.0 [default,proposed]
 │   │   │   ├── bitflags v1.3.2 [default]
@@ -2405,12 +2405,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │       ├── rayon v1.12.0 [] (*)
 │   │       └── workspace-hack v0.1.0 []
-│   ├── gpui_platform v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,runtime_shaders,wayland,x11]
+│   ├── gpui_platform v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,runtime_shaders,wayland,x11]
 │   │   ├── console_error_panic_hook v0.1.7 []
 │   │   │   ├── cfg-if v1.0.4 []
 │   │   │   └── wasm-bindgen v0.2.127 [default,std] (*)
-│   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   ├── gpui_linux v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [as-raw-xcb-connection,ashpd,bitflags,calloop-wayland-source,filedescriptor,gpui_wgpu,open,wayland,wayland-backend,wayland-client,wayland-cursor,wayland-protocols,wayland-protocols-plasma,wayland-protocols-wlr,x11,x11-clipboard,x11rb,xim,xkbcommon]
+│   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   ├── gpui_linux v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [as-raw-xcb-connection,ashpd,bitflags,calloop-wayland-source,filedescriptor,gpui_wgpu,open,wayland,wayland-backend,wayland-client,wayland-cursor,wayland-protocols,wayland-protocols-plasma,wayland-protocols-wlr,x11,x11-clipboard,x11rb,xim,xkbcommon]
 │   │   │   ├── accesskit v0.24.1 [enumn] (*)
 │   │   │   ├── accesskit_unix v0.21.1 [async-io,default]
 │   │   │   │   ├── accesskit v0.24.1 [enumn] (*)
@@ -2470,15 +2470,15 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
 │   │   │   │   ├── wayland-backend v0.3.16 [client_system,dlopen] (*)
 │   │   │   │   └── wayland-client v0.31.15 [] (*)
-│   │   │   ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── filedescriptor v0.8.3 [] (*)
 │   │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   │   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
-│   │   │   ├── gpui_wgpu v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit]
+│   │   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   │   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
+│   │   │   ├── gpui_wgpu v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit]
 │   │   │   │   ├── anyhow v1.0.104 [default,std]
 │   │   │   │   ├── bytemuck v1.25.2 [aarch64_simd,bytemuck_derive,derive,extern_crate_alloc,min_const_generics,wasm_simd] (*)
-│   │   │   │   ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   │   ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   │   ├── cosmic-text v0.19.0 [default,fontconfig,std,swash,sys-locale]
 │   │   │   │   │   ├── bitflags v2.13.1 [serde,serde_core,std] (*)
 │   │   │   │   │   ├── fontdb v0.23.0 [default,fontconfig,fontconfig-parser,fs,memmap,memmap2,std] (*)
@@ -2518,8 +2518,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   ├── unicode-script v0.5.8 []
 │   │   │   │   │   └── unicode-segmentation v1.13.3 []
 │   │   │   │   ├── etagere v0.2.15 [] (*)
-│   │   │   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   │   │   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   │   │   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   │   ├── itertools v0.14.0 [default,use_alloc,use_std] (*)
 │   │   │   │   ├── js-sys v0.3.104 [default,std,unsafe-eval] (*)
 │   │   │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
@@ -2711,7 +2711,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   [build-dependencies]
 │   │   │   │   │   └── cfg_aliases v0.2.2 []
 │   │   │   │   └── zed-font-kit v0.14.1-zed (https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f281) [default,source] (*)
-│   │   │   ├── http_client v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── http_client v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   │   │   ├── itertools v0.14.0 [default,use_alloc,use_std] (*)
 │   │   │   ├── libc v0.2.189 [default,extra_traits,std]
@@ -2833,7 +2833,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       │   └── encoding_rs v0.8.35 [alloc,default] (*)
 │   │   │       └── xim-parser v0.2.1 (https://github.com/zed-industries/xim-rs.git?rev=16f35a2c881b815a2b6cdfd6687988e84f8447d8#16f35a2c) [std]
 │   │   │           └── bitflags v2.13.1 [serde,serde_core,std] (*)
-│   │   ├── gpui_macos v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [font-kit,runtime_shaders]
+│   │   ├── gpui_macos v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [font-kit,runtime_shaders]
 │   │   │   ├── accesskit v0.24.1 [enumn] (*)
 │   │   │   ├── accesskit_macos v0.26.3 []
 │   │   │   │   ├── accesskit v0.24.1 [enumn] (*)
@@ -2856,7 +2856,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── block v0.1.6 []
 │   │   │   ├── block2 v0.6.2 [alloc,default,std] (*)
 │   │   │   ├── cocoa v0.26.0 [default,link] (*)
-│   │   │   ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── core-foundation v0.10.1 [default,link] (*)
 │   │   │   ├── core-foundation-sys v0.8.7 [default,link]
 │   │   │   ├── core-graphics v0.24.0 [default,elcapitan,highsierra,link] (*)
@@ -2872,14 +2872,14 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── etagere v0.2.15 [] (*)
 │   │   │   ├── foreign-types v0.5.0 [default,std] (*)
 │   │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   │   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   │   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   │   │   ├── itertools v0.14.0 [default,use_alloc,use_std] (*)
 │   │   │   ├── libc v0.2.189 [default,extra_traits,std]
 │   │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   │   ├── mach2 v0.5.0 [default] (*)
-│   │   │   ├── media v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── media v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── metal v0.33.0 [default,link] (*)
 │   │   │   ├── objc v0.2.7 [] (*)
 │   │   │   ├── objc2 v0.6.4 [alloc,default,disable-encoding-assertions,exception,std] (*)
@@ -2903,7 +2903,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   └── zed-font-kit v0.14.1-zed (https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f281) [default,source] (*)
 │   │   │   [build-dependencies]
 │   │   │   ├── cbindgen v0.28.0 [] (*)
-│   │   │   └── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   │   │   └── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   │       ├── accesskit v0.24.1 [enumn] (*)
 │   │   │       ├── anyhow v1.0.104 [default,std]
 │   │   │       ├── async-channel v2.5.0 [default,std] (*)
@@ -2913,7 +2913,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
 │   │   │       ├── cocoa v0.26.0 [default,link] (*)
 │   │   │       ├── cocoa-foundation v0.2.0 [default,link] (*)
-│   │   │       ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── core-foundation v0.10.1 [default,link] (*)
 │   │   │       ├── core-foundation-sys v0.8.7 [default,link]
 │   │   │       ├── core-graphics v0.24.0 [default,link]
@@ -2931,18 +2931,18 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
 │   │   │       ├── futures-concurrency v7.7.1 [alloc,default,std] (*)
 │   │   │       ├── getrandom v0.3.4 [std,wasm_js] (*)
-│   │   │       ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
-│   │   │       ├── gpui_shared_string v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
-│   │   │       ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── gpui_macros v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
+│   │   │       ├── gpui_shared_string v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
+│   │   │       ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── heapless v0.9.3 [] (*)
-│   │   │       ├── http_client v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── http_client v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   │   │       ├── inventory v0.3.24 [] (*)
 │   │   │       ├── itertools v0.14.0 [default,use_alloc,use_std] (*)
 │   │   │       ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   │       ├── lyon v1.0.19 [] (*)
 │   │   │       ├── mach2 v0.5.0 [default] (*)
-│   │   │       ├── media v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── media v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── metal v0.33.0 [default,link] (*)
 │   │   │       ├── num_cpus v1.17.0 [] (*)
 │   │   │       ├── objc v0.2.7 [] (*)
@@ -2963,10 +2963,10 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       ├── profiling v1.0.18 [default,procmacros,profiling-procmacros] (*)
 │   │   │       ├── rand v0.9.5 [alloc,default,os_rng,small_rng,std,std_rng,thread_rng] (*)
 │   │   │       ├── raw-window-handle v0.6.2 []
-│   │   │       ├── refineable v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── refineable v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── regex v1.13.1 [default,perf,perf-backtrack,perf-cache,perf-dfa,perf-inline,perf-literal,perf-onepass,std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment] (*)
 │   │   │       ├── resvg v0.46.0 [gif,image-webp,memmap-fonts,raster-images,system-fonts,text] (*)
-│   │   │       ├── scheduler v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── scheduler v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── schemars v1.2.2 [default,derive,indexmap2,schemars_derive,std] (*)
 │   │   │       ├── seahash v4.1.0 [default]
 │   │   │       ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
@@ -2976,7 +2976,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       ├── spin v0.10.1 [barrier,default,lazy,lock_api,mutex,once,rwlock,spin_mutex] (*)
 │   │   │       ├── stacksafe v0.1.4 [] (*)
 │   │   │       ├── strum v0.27.2 [default,derive,std,strum_macros] (*)
-│   │   │       ├── sum_tree v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── sum_tree v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── taffy v0.12.2 [alloc,block_layout,calc,content_size,default,detailed_layout_info,flexbox,float_layout,grid,std,taffy_tree] (*)
 │   │   │       ├── thiserror v2.0.20 [default,std] (*)
 │   │   │       ├── ttf-parser v0.25.1 [apple-layout,core_maths,default,glyph-names,no-std-float,opentype-layout,std,variable-fonts] (*)
@@ -3009,7 +3009,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       │   ├── unicode-script v0.5.8 []
 │   │   │       │   ├── unicode-vo v0.1.0 []
 │   │   │       │   └── xmlwriter v0.1.0 []
-│   │   │       ├── util_macros v0.1.0 (proc-macro) (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │       ├── util_macros v0.1.0 (proc-macro) (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │       ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
 │   │   │       ├── waker-fn v1.2.0 []
 │   │   │       ├── web-time v1.1.0 [] (*)
@@ -3029,13 +3029,13 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │       [build-dependencies]
 │   │   │       ├── bindgen v0.71.1 [default,logging,prettyplease,runtime] (*)
 │   │   │       └── cbindgen v0.28.0 [] (*)
-│   │   ├── gpui_web v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,multithreaded]
+│   │   ├── gpui_web v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,multithreaded]
 │   │   │   ├── anyhow v1.0.104 [default,std]
 │   │   │   ├── console_error_panic_hook v0.1.7 [] (*)
 │   │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   │   ├── gpui_wgpu v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit] (*)
-│   │   │   ├── http_client v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   │   ├── gpui_wgpu v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit] (*)
+│   │   │   ├── http_client v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   │   ├── js-sys v0.3.104 [default,std,unsafe-eval] (*)
 │   │   │   ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
 │   │   │   ├── parking_lot v0.12.5 [default,nightly] (*)
@@ -3051,7 +3051,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   └── web-sys v0.3.104 [AbortController,AbortSignal,AngleInstancedArrays,Blob,BlobPropertyBag,Clipboard,ClipboardEvent,CompositionEvent,CssStyleDeclaration,DataTransfer,DedicatedWorkerGlobalScope,Document,DomRect,DomRectReadOnly,DragEvent,Element,Event,EventTarget,ExtBlendMinmax,ExtColorBufferFloat,ExtColorBufferHalfFloat,ExtDisjointTimerQuery,ExtFragDepth,ExtSRgb,ExtShaderTextureLod,ExtTextureFilterAnisotropic,File,FileList,FormData,Headers,HtmlCanvasElement,HtmlElement,HtmlImageElement,HtmlInputElement,HtmlMediaElement,HtmlVideoElement,ImageBitmap,ImageData,KeyboardEvent,MediaQueryList,MediaQueryListEvent,MessageEvent,MouseEvent,Navigator,Node,NodeList,OesElementIndexUint,OesStandardDerivatives,OesTextureFloat,OesTextureFloatLinear,OesTextureHalfFloat,OesTextureHalfFloatLinear,OesVertexArrayObject,OffscreenCanvas,OvrMultiview2,Performance,PerformanceTiming,PointerEvent,QueuingStrategy,ReadableByteStreamController,ReadableStream,ReadableStreamByobReader,ReadableStreamByobRequest,ReadableStreamDefaultController,ReadableStreamDefaultReader,ReadableStreamGetReaderOptions,ReadableStreamReadResult,ReadableStreamReaderMode,ReadableStreamType,ReadableWritablePair,Request,RequestCache,RequestCredentials,RequestInit,RequestMode,RequestRedirect,ResizeObserver,ResizeObserverBoxOptions,ResizeObserverEntry,ResizeObserverOptions,ResizeObserverSize,Response,Screen,ServiceWorkerGlobalScope,Storage,StreamPipeOptions,TransformStream,TransformStreamDefaultController,Transformer,UiEvent,UnderlyingSink,UnderlyingSource,Url,VideoFrame,VisualViewport,WebGl2RenderingContext,WebGlActiveInfo,WebGlBuffer,WebGlFramebuffer,WebGlProgram,WebGlQuery,WebGlRenderbuffer,WebGlRenderingContext,WebGlSampler,WebGlShader,WebGlShaderPrecisionFormat,WebGlSync,WebGlTexture,WebGlTransformFeedback,WebGlUniformLocation,WebGlVertexArrayObject,WebglColorBufferFloat,WebglCompressedTextureAstc,WebglCompressedTextureEtc,WebglCompressedTextureEtc1,WebglCompressedTexturePvrtc,WebglCompressedTextureS3tc,WebglCompressedTextureS3tcSrgb,WebglDebugRendererInfo,WebglDebugShaders,WebglDepthTexture,WebglDrawBuffers,WebglLoseContext,WheelEvent,Window,Worker,WorkerGlobalScope,WorkerNavigator,WorkerOptions,WorkerType,WritableStream,WritableStreamDefaultController,WritableStreamDefaultWriter,console,default,std] (*)
 │   │   │   ├── web-sys v0.3.104 [AbortController,AbortSignal,AngleInstancedArrays,Blob,BlobPropertyBag,Clipboard,ClipboardEvent,CompositionEvent,CssStyleDeclaration,DataTransfer,DedicatedWorkerGlobalScope,Document,DomRect,DomRectReadOnly,DragEvent,Element,Event,EventTarget,ExtBlendMinmax,ExtColorBufferFloat,ExtColorBufferHalfFloat,ExtDisjointTimerQuery,ExtFragDepth,ExtSRgb,ExtShaderTextureLod,ExtTextureFilterAnisotropic,File,FileList,FormData,Headers,HtmlCanvasElement,HtmlElement,HtmlImageElement,HtmlInputElement,HtmlMediaElement,HtmlVideoElement,ImageBitmap,ImageData,KeyboardEvent,MediaQueryList,MediaQueryListEvent,MessageEvent,MouseEvent,Navigator,Node,NodeList,OesElementIndexUint,OesStandardDerivatives,OesTextureFloat,OesTextureFloatLinear,OesTextureHalfFloat,OesTextureHalfFloatLinear,OesVertexArrayObject,OffscreenCanvas,OvrMultiview2,Performance,PerformanceTiming,PointerEvent,QueuingStrategy,ReadableByteStreamController,ReadableStream,ReadableStreamByobReader,ReadableStreamByobRequest,ReadableStreamDefaultController,ReadableStreamDefaultReader,ReadableStreamGetReaderOptions,ReadableStreamReadResult,ReadableStreamReaderMode,ReadableStreamType,ReadableWritablePair,Request,RequestCache,RequestCredentials,RequestInit,RequestMode,RequestRedirect,ResizeObserver,ResizeObserverBoxOptions,ResizeObserverEntry,ResizeObserverOptions,ResizeObserverSize,Response,Screen,ServiceWorkerGlobalScope,Storage,StreamPipeOptions,TransformStream,TransformStreamDefaultController,Transformer,UiEvent,UnderlyingSink,UnderlyingSource,Url,VideoFrame,VisualViewport,WebGl2RenderingContext,WebGlActiveInfo,WebGlBuffer,WebGlFramebuffer,WebGlProgram,WebGlQuery,WebGlRenderbuffer,WebGlRenderingContext,WebGlSampler,WebGlShader,WebGlShaderPrecisionFormat,WebGlSync,WebGlTexture,WebGlTransformFeedback,WebGlUniformLocation,WebGlVertexArrayObject,WebglColorBufferFloat,WebglCompressedTextureAstc,WebglCompressedTextureEtc,WebglCompressedTextureEtc1,WebglCompressedTexturePvrtc,WebglCompressedTextureS3tc,WebglCompressedTextureS3tcSrgb,WebglDebugRendererInfo,WebglDebugShaders,WebglDepthTexture,WebglDrawBuffers,WebglLoseContext,WheelEvent,Window,Worker,WorkerGlobalScope,WorkerNavigator,WorkerOptions,WorkerType,WritableStream,WritableStreamDefaultController,WritableStreamDefaultWriter,console,default,std] (*)
 │   │   │   └── web-time v1.1.0 [] (*)
-│   │   └── gpui_windows v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   │   └── gpui_windows v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │       ├── accesskit v0.24.1 [enumn] (*)
 │   │       ├── accesskit_windows v0.33.1 []
 │   │       │   ├── accesskit v0.24.1 [enumn] (*)
@@ -3063,12 +3063,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       │   ├── windows v0.62.2 [Win32,Win32_Devices,Win32_Devices_DeviceAndDriverInstallation,Win32_Foundation,Win32_Globalization,Win32_Graphics,Win32_Graphics_Direct3D,Win32_Graphics_Direct3D12,Win32_Graphics_Direct3D_Dxc,Win32_Graphics_Direct3D_Fxc,Win32_Graphics_DirectComposition,Win32_Graphics_Dxgi,Win32_Graphics_Dxgi_Common,Win32_Graphics_Gdi,Win32_Graphics_OpenGL,Win32_Security,Win32_System,Win32_System_Com,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_Kernel,Win32_System_LibraryLoader,Win32_System_Ole,Win32_System_Performance,Win32_System_Threading,Win32_System_Variant,Win32_UI,Win32_UI_Accessibility,Win32_UI_Input,Win32_UI_Input_KeyboardAndMouse,Win32_UI_WindowsAndMessaging,default,std] (*)
 │   │       │   └── windows-core v0.62.2 [default,std] (*)
 │   │       ├── anyhow v1.0.104 [default,std]
-│   │       ├── collections v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │       ├── collections v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │       ├── dunce v1.0.5 []
 │   │       ├── etagere v0.2.15 [] (*)
 │   │       ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
-│   │       ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │       ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │       ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │       ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │       ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   │       ├── itertools v0.14.0 [default,use_alloc,use_std] (*)
 │   │       ├── log v0.4.33 [kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] (*)
@@ -3086,10 +3086,10 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │           └── windows-strings v0.4.2 [std] (*)
 │   │       [build-dependencies]
 │   │       └── windows-registry v0.5.3 [default,std] (*)
-│   ├── gpui_tokio v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) []
+│   ├── gpui_tokio v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) []
 │   │   ├── anyhow v1.0.104 [default,std]
-│   │   ├── gpui v0.2.2 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [default,font-kit,wayland,windows-manifest,x11] (*)
-│   │   ├── gpui_util v0.1.0 (https://github.com/gaelcado/zui?rev=53869c204efb866d19af292cab8b1773898eeedd#53869c20) [] (*)
+│   │   ├── gpui v0.2.2 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [default,font-kit,wayland,windows-manifest,x11] (*)
+│   │   ├── gpui_util v0.1.0 (https://github.com/Pluto8195/zui?rev=690b8349778c3202a00b28d3dc0a99be9ec84c90#690b8349) [] (*)
 │   │   └── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   ├── libc v0.2.189 [default,extra_traits,std]
