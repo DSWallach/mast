@@ -362,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn template_copy_rejects_symlinks() {
+        let output = std::process::Command::new("/usr/bin/mktemp")
+            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        let template = ScratchDirectories::create(&account).unwrap();
+        let run = ScratchDirectories::create(&account).unwrap();
+        fs::write(account.join("private"), "secret").unwrap();
+        symlink(account.join("private"), template.paths.data.join("alias")).unwrap();
+        assert!(run.copy_template_data(&template).is_err());
+        assert!(!run.paths.data.join("alias").exists());
+        fs::remove_dir_all(&template.paths.root).unwrap();
+        fs::remove_dir_all(&run.paths.root).unwrap();
+        fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
     fn rejects_account_paths_and_symlink_aliases() {
         let output = std::process::Command::new("/usr/bin/mktemp")
             .args(["-d", "/private/tmp/mast-driver-guard-test.XXXXXX"])
