@@ -137,7 +137,7 @@ fn bench_transcript_long_chat(cx: &mut gpui::TestAppContext) {
     measure_n(
         "transcript",
         "stream tick (revision bump + sync + draw)",
-        30,
+        std::env::var("BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
         |i| {
             transcript.update(vcx, |this, cx| {
                 this.state.update(cx, |state, _| {
@@ -303,7 +303,7 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         state.prepared_transcripts["chat"].rows["m0"].clone()
     });
     let mut updates = Vec::new();
-    for _ in 0..30 {
+    for _ in 0..std::env::var("BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(30) {
         let before = entries.clone();
         if let Some(MessagePart::Text { text, .. }) = entries.last_mut().unwrap().parts.last_mut() {
             text.push_str(" chunk");

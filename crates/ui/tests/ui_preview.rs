@@ -103,12 +103,16 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
     let all_screens = [
         "chat",
         "overview",
+        "board",
+        "board-table",
+        "board-empty",
         "linear",
         "linear-settings",
         "workflow-pack",
         "team",
         "side-chat",
         "question",
+        "code-reference",
         "changes-expanded",
         "changes-collapsed",
         "changes-focus-resize",
@@ -119,6 +123,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "controls",
         "components",
         "browser",
+        "diagram-card",
     ];
     anyhow::ensure!(
         !screens.is_empty() && screens.iter().all(|s| all_screens.contains(&s.as_str())),
@@ -314,7 +319,10 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
     let screens = std::env::var("MAST_PREVIEW_COMPARE_SCREENS")
         .unwrap_or_else(|_| "controls,details".to_owned());
     let rows: u32 = std::env::var("MAST_PREVIEW_COMPARE_ROWS")
-        .ok().map(|value| value.parse()).transpose()?.unwrap_or(1);
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(1);
     anyhow::ensure!(rows > 0, "comparison row count must be positive");
     for screen in screens.split(',').filter(|screen| !screen.is_empty()) {
         let expected = image::open(baseline.join(format!("{screen}.png")))?.into_rgba8();
@@ -324,7 +332,10 @@ fn compare_minimal_preview() -> anyhow::Result<()> {
             "{screen} dimensions differ"
         );
         let (width, sheet_height) = expected.dimensions();
-        anyhow::ensure!(sheet_height % rows == 0, "{screen} rows do not divide the sheet");
+        anyhow::ensure!(
+            sheet_height % rows == 0,
+            "{screen} rows do not divide the sheet"
+        );
         let height = sheet_height / rows;
         let expected = image::imageops::crop_imm(&expected, 0, 30, width, height - 30).to_image();
         let actual = image::imageops::crop_imm(&actual, 0, 30, width, height - 30).to_image();

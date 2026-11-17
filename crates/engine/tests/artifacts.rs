@@ -5,6 +5,7 @@
 //! and preview pairs, options manifests, the marker fallback, the watcher,
 //! promote, register, render-check routing, and agent scoping.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -196,7 +197,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         "summary": "Changes the readme.", "steps": [], "questions": [],
         "highlights": [{"kind": "risk", "severity": "low", "text": "Check the change",
             "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}],
-        "suggestedComments": []
+        "suggestedComments": [{"id": "suggestion-1", "body": "Check this", "severity": "low",
+            "suggestion": "changed", "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}]
     });
     let url = "https://github.com/owner/repo/pull/42";
     let reply = tool(
@@ -216,6 +218,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         .unwrap();
     assert_eq!(read["artifactId"], id);
     assert_eq!(read["review"]["summary"], "Changes the readme.");
+    assert_eq!(read["review"]["suggestedComments"][0]["id"], "suggestion-1");
+    assert_eq!(read["review"]["suggestedComments"][0]["suggestion"], "changed");
     assert_eq!(
         read["review"]["highlights"][0]["anchor"]["hunkHash"]
             .as_str()
@@ -298,6 +302,11 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         error.contains("Valid hunks per file") && error.contains("README.md"),
         "{error}"
     );
+    let mut bad_suggestion = review.clone();
+    bad_suggestion["suggestedComments"][0]["anchor"]["startLine"] = json!(999);
+    bad_suggestion["suggestedComments"][0]["anchor"]["endLine"] = json!(999);
+    let error = tool(&rig, &rig.token, "review_publish", json!({"prUrl":url, "headSha":head, "review":bad_suggestion})).await.unwrap_err();
+    assert!(error.contains("Valid hunks per file") && error.contains("README.md"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -991,6 +1000,28 @@ async fn external_edits_become_revisions_without_a_note() {
         mast_proto::WorkOutlineActorKind::System
     );
     assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+}
+
+/// Perf pass 2026-11-17: the 2 s watcher decoded every artifact row on every poll. With
+/// nothing changed it must decode them once, not once per poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_watcher_polls_do_not_re_decode_every_artifact() {
+    let rig = rig().await;
+    std::fs::write(rig.worktree.join("plan.md"), "v1\n").unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": "plan.md", "title": "Plan", "note": "n", "idempotencyKey": "k" }),
+    )
+    .await;
+    for _ in 0..50 {
+        assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+    }
+    assert!(
+        rig.core.artifacts.watch_index_builds() <= 2,
+        "50 idle polls rebuilt the artifact index {} times",
+        rig.core.artifacts.watch_index_builds()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

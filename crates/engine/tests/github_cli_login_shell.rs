@@ -6,6 +6,7 @@
 
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 

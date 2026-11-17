@@ -1,0 +1,323 @@
+//! Deterministic description of the small fixture world.
+//!
+//! This is a pure description: no host clock, random source, account or
+//! filesystem. `materialize` turns it into repos and engine stores. One seed
+//! drives every generated identifier and content choice; every timestamp is
+//! relative to [`EPOCH_MS`].
+
+use serde_json::{Value, json};
+
+/// Fixed epoch for every timestamp in the world (same instant as the UI
+/// snapshot fixture).
+pub const EPOCH_MS: i64 = 1_788_900_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeState {
+    Clean,
+    /// Has an uncommitted change and an untracked file.
+    Dirty,
+    /// Created, then its directory removed (git still lists it as prunable).
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceFixture {
+    pub id: String,
+    pub name: String,
+    pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeFixture {
+    pub space_id: String,
+    pub path: String,
+    pub branch: String,
+    pub state: WorktreeState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFixture {
+    pub id: String,
+    pub title: String,
+    pub space_id: String,
+    pub worktree: String,
+    /// Transcript entries in `SessionMessageEntry` wire shape.
+    pub entries: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemFixture {
+    pub id: String,
+    /// Operation id the engine derives `id` from.
+    pub operation_id: String,
+    pub space_id: String,
+    pub title: String,
+    pub parent: Option<usize>,
+    /// `pending`, `active` or `completed`.
+    pub status: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestFixture {
+    pub item: usize,
+    pub chat: usize,
+    pub text: String,
+    pub detail: String,
+    pub answered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmallWorld {
+    pub seed: u64,
+    pub clock_ms: i64,
+    pub spaces: Vec<SpaceFixture>,
+    pub worktrees: Vec<WorktreeFixture>,
+    pub chats: Vec<ChatFixture>,
+    pub items: Vec<ItemFixture>,
+    pub requests: Vec<RequestFixture>,
+}
+
+impl SmallWorld {
+    pub const PRESET: &'static str = "small";
+
+    /// Small preset at the fixed epoch.
+    pub fn small(seed: u64) -> Self {
+        Self::new(seed, EPOCH_MS)
+    }
+
+    /// Construct fixture identities and content from `seed` and `clock_ms`.
+    pub fn new(seed: u64, clock_ms: i64) -> Self {
+        let mut state = seed;
+        let mut next = move || {
+            // SplitMix64 makes the sequence independent of platform hashers.
+            state = state.wrapping_add(0x9e3779b97f4a7c15);
+            let mut value = state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+            value ^ (value >> 31)
+        };
+        let mut id = |kind: &str| format!("{kind}-{:016x}", next());
+        let space_id = id("space");
+        let spaces = vec![SpaceFixture {
+            id: space_id.clone(),
+            name: "Fixture project".into(),
+            repository: "space-0".into(),
+        }];
+        let states = [
+            WorktreeState::Clean,
+            WorktreeState::Dirty,
+            WorktreeState::Deleted,
+        ];
+        let worktrees: Vec<_> = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| WorktreeFixture {
+                space_id: space_id.clone(),
+                path: format!("worktree-{index}"),
+                branch: format!("feature/fixture-{index}"),
+                state: *state,
+            })
+            .collect();
+        let titles = [
+            "Review the workspace",
+            "Design review",
+            "Verify the changes",
+            "Retry after failure",
+            "Fresh chat",
+        ];
+        let chats: Vec<_> = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| ChatFixture {
+                id: id("chat"),
+                title: (*title).into(),
+                space_id: space_id.clone(),
+                worktree: worktrees[index % worktrees.len()].path.clone(),
+                entries: transcript(index, clock_ms),
+            })
+            .collect();
+        // Outline: a root, Features and Bugs containers, nested items.
+        // (title, parent index, status)
+        let outline: [(&str, Option<usize>, &'static str); 12] = [
+            ("Fixture project", None, "active"),
+            ("Features", Some(0), "active"),
+            ("Bugs", Some(0), "active"),
+            ("Add search to the sidebar", Some(1), "active"),
+            ("Keyboard navigation", Some(3), "active"),
+            ("Search results grouping", Some(3), "pending"),
+            ("Export transcript", Some(1), "completed"),
+            ("Dark theme polish", Some(1), "pending"),
+            ("Crash when a worktree is deleted", Some(2), "active"),
+            ("Stale chat after restart", Some(2), "completed"),
+            ("Scroll jumps on long diffs", Some(2), "active"),
+            ("Tooltip clipped at window edge", Some(2), "pending"),
+        ];
+        let items: Vec<_> = outline
+            .iter()
+            .enumerate()
+            .map(|(index, (title, parent, status))| {
+                let operation_id = format!("{}-item-{index}", id("op"));
+                ItemFixture {
+                    id: mast_proto::derive_id(&operation_id, mast_proto::roles::ITEM),
+                    operation_id,
+                    space_id: space_id.clone(),
+                    title: (*title).into(),
+                    parent: *parent,
+                    status,
+                }
+            })
+            .collect();
+        let requests = vec![
+            RequestFixture {
+                item: 3,
+                chat: 0,
+                text: "Approve the search plan?".into(),
+                detail: "Two options: a sidebar filter or a command palette.".into(),
+                answered: false,
+            },
+            RequestFixture {
+                item: 8,
+                chat: 2,
+                text: "Which worktree should the fix land in?".into(),
+                detail: "The original worktree was deleted.".into(),
+                answered: true,
+            },
+        ];
+        Self {
+            seed,
+            clock_ms,
+            spaces,
+            worktrees,
+            chats,
+            items,
+            requests,
+        }
+    }
+}
+
+fn user(id: &str, text: &str, at: i64) -> Value {
+    json!({"id":id,"role":"user","parts":[{"id":"t0","kind":"text","text":text}],"createdAt":at,"deviceId":"local"})
+}
+
+fn assistant(id: &str, parts: Vec<Value>, at: i64) -> Value {
+    json!({"id":id,"role":"assistant","parts":parts,"createdAt":at,"deviceId":"local","status":"complete"})
+}
+
+fn text(id: &str, text: &str) -> Value {
+    json!({"id":id,"kind":"text","text":text})
+}
+
+fn tool(id: &str, call: Value, output: &str) -> Value {
+    json!({"id":id,"kind":"tool","call":call,"resolved":true,"output":output})
+}
+
+/// Transcript for chat `index`, with timestamps relative to `clock_ms`.
+fn transcript(index: usize, clock_ms: i64) -> Vec<Value> {
+    let at = clock_ms + index as i64 * 600_000;
+    let long = "The layout is built from three regions. The sidebar owns navigation and never \
+                scrolls with the transcript. The transcript keeps a comfortable reading width \
+                even when the window becomes narrow, and long lines wrap inside it.\n\n\
+                - The first list item has enough text to wrap onto another line while its \
+                continuation stays aligned with the start of the item.\n\
+                - The second item shares the same indentation.\n\n\
+                ```rust\nfn validate_layout() {\n    assert!(controls_align());\n}\n```";
+    match index {
+        0 => vec![
+            user("user-0", "Review the workspace layout.", at),
+            assistant(
+                "assistant-0",
+                vec![
+                    text("a0", long),
+                    tool(
+                        "tool-0",
+                        json!({"kind":"exec","command":"cargo test"}),
+                        "test result: ok. 41 passed",
+                    ),
+                    tool(
+                        "tool-1",
+                        json!({"kind":"editFile","path":"src/layout.rs","old_string":"width: 400","new_string":"width: 480"}),
+                        "Edited src/layout.rs",
+                    ),
+                    text(
+                        "a1",
+                        "I widened the transcript column and re-ran the tests.",
+                    ),
+                ],
+                at + 1_000,
+            ),
+        ],
+        1 => vec![
+            user("user-0", "Walk me through the design.", at),
+            assistant("assistant-0", vec![text("a0", long)], at + 1_000),
+            user("user-1", "Can the sidebar collapse?", at + 2_000),
+            assistant(
+                "assistant-1",
+                vec![text("a0", "Yes. It collapses to the icon rail.")],
+                at + 3_000,
+            ),
+        ],
+        2 => vec![
+            user("user-0", "Verify the changes.", at),
+            assistant(
+                "assistant-0",
+                vec![
+                    tool(
+                        "tool-0",
+                        json!({"kind":"exec","command":"git diff --stat"}),
+                        " src/layout.rs | 2 +-",
+                    ),
+                    tool(
+                        "tool-1",
+                        json!({"kind":"exec","command":"cargo check"}),
+                        "error[E0425]: cannot find value `width`",
+                    ),
+                    text(
+                        "a0",
+                        "The check failed on an unresolved name; I fixed it and re-ran.",
+                    ),
+                ],
+                at + 1_000,
+            ),
+        ],
+        3 => vec![
+            user("user-0", "Review the sidebar spacing.", at),
+            assistant(
+                "assistant-0",
+                vec![
+                    json!({"id":"error","kind":"error","message":"The service is overloaded. Please try again."}),
+                ],
+                at + 1_000,
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_and_clock_determine_the_world_description() {
+        let first = SmallWorld::new(42, 946_684_800_000);
+        assert_eq!(first, SmallWorld::new(42, 946_684_800_000));
+        assert_ne!(first, SmallWorld::new(43, 946_684_800_000));
+        assert_eq!(
+            (
+                first.spaces.len(),
+                first.worktrees.len(),
+                first.chats.len(),
+                first.items.len(),
+                first.requests.len()
+            ),
+            (1, 3, 5, 12, 2)
+        );
+        for request in &first.requests {
+            assert!(request.item < first.items.len() && request.chat < first.chats.len());
+        }
+        assert_eq!(first.requests.iter().filter(|r| r.answered).count(), 1);
+        for (index, item) in first.items.iter().enumerate() {
+            assert!(item.parent.is_none_or(|parent| parent < index));
+        }
+    }
+}

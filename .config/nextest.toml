@@ -75,6 +75,9 @@ not (
   | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
   | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)
   | test(~titling_e2e_names_chat_and_renames_worktree_branch)
+  | test(~remote_preview_churn_does_not_accumulate_tasks_or_memory)
+  | test(~actual_webrtc_pair_streams_in_both_directions)
+  | test(~same_seed_same_hash_different_seed_different_hash)
 )
 '''
 
@@ -111,4 +114,7 @@ default-filter = '''
   | test(~sync_picks_up_a_closed_message_but_defers_the_new_open_reply)
   | test(~online_runtime_shutdown_stops_edge_workers_and_retires_the_graph)
   | test(~titling_e2e_names_chat_and_renames_worktree_branch)
+  | test(~remote_preview_churn_does_not_accumulate_tasks_or_memory)
+  | test(~actual_webrtc_pair_streams_in_both_directions)
+  | test(~same_seed_same_hash_different_seed_different_hash)
 '''

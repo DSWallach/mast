@@ -37,7 +37,58 @@ pub(super) struct ExternalRow {
     pub pr_slots: Option<AnyElement>,
 }
 
+/// The PR link index per Space, keyed by the snapshot it was built from (the
+/// `Arc` itself, so a pointer match means the same snapshot).
+#[derive(Default)]
+pub(super) struct PrLinkCache {
+    spaces: std::cell::RefCell<
+        std::collections::HashMap<
+            String,
+            (
+                std::sync::Arc<mast_proto::WorkOutlineSnapshot>,
+                std::rc::Rc<crate::github::PrLinkIndex>,
+            ),
+        >,
+    >,
+    builds: std::cell::Cell<usize>,
+}
+
+impl PrLinkCache {
+    pub(super) fn get(
+        &self,
+        space_id: &str,
+        snapshot: &std::sync::Arc<mast_proto::WorkOutlineSnapshot>,
+    ) -> std::rc::Rc<crate::github::PrLinkIndex> {
+        let mut spaces = self.spaces.borrow_mut();
+        if let Some((cached, index)) = spaces.get(space_id)
+            && std::sync::Arc::ptr_eq(cached, snapshot)
+        {
+            return index.clone();
+        }
+        self.builds.set(self.builds.get() + 1);
+        let index = std::rc::Rc::new(crate::github::PrLinkIndex::build(snapshot));
+        spaces.insert(space_id.to_owned(), (snapshot.clone(), index.clone()));
+        index
+    }
+
+    #[cfg(test)]
+    pub(super) fn builds(&self) -> usize {
+        self.builds.get()
+    }
+}
+
 impl OutlineView {
+    /// The PR link index of `space_id`'s current snapshot (built once per
+    /// snapshot).
+    pub(super) fn pr_link_index(
+        &self,
+        space_id: &str,
+    ) -> Option<std::rc::Rc<crate::github::PrLinkIndex>> {
+        let space = self.inputs.spaces.iter().find(|space| space.id == space_id)?;
+        let snapshot = space.load.snapshot()?;
+        Some(self.pr_links.get(space_id, snapshot))
+    }
+
     /// Whether the GitHub surfaces apply to `space_id` here.
     fn github_available(&self, space_id: &str, cx: &gpui::App) -> bool {
         self.snapshot(space_id).is_some_and(|snapshot| {
@@ -206,7 +257,10 @@ impl OutlineView {
         let destination = (snapshot.pr_review_sync_destination() == Some(item.item_id.as_str()))
             .then(|| destination_marker(format!("outline-pr-destination-{key}"), theme));
         let mut other_width = other_width + if destination.is_some() { 28.0 } else { 0.0 };
-        let prs = crate::github::item_pull_requests(snapshot, &item.item_id);
+        let Some(index) = self.pr_link_index(&item.space_id) else {
+            return (destination, None);
+        };
+        let prs = index.item_pull_requests(&item.item_id);
         if prs.is_empty() {
             return (destination, None);
         }
@@ -215,9 +269,12 @@ impl OutlineView {
         let review_label = {
             let state = self.state.read(cx);
             prs.iter().find_map(|pr| {
-                let chats = review_chats::for_pr(cx, Some(snapshot), pr, &[], |id| {
-                    review_chats::fact_from_state(state, id)
-                });
+                let chats = review_chats::for_pr_indexed(
+                    cx,
+                    index.assigned_chat_ids(pr),
+                    pr,
+                    |id| review_chats::fact_from_state(state, id),
+                );
                 review_chats::marker_label(&chats)
             })
         };
@@ -358,4 +415,76 @@ pub(crate) fn destination_marker(id: String, theme: &Theme) -> AnyElement {
                 .into()
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod pr_link_cache_tests {
+    use super::PrLinkCache;
+    use std::sync::Arc;
+
+    #[test]
+    fn the_index_is_built_once_per_snapshot() {
+        let cache = PrLinkCache::default();
+        let a = Arc::new(mast_proto::WorkOutlineSnapshot::default());
+        for _ in 0..50 {
+            cache.get("s1", &a);
+        }
+        assert_eq!(cache.builds(), 1);
+        let mut changed = (*a).clone();
+        changed.revision += 1;
+        let b = Arc::new(changed);
+        cache.get("s1", &b);
+        cache.get("s1", &b);
+        assert_eq!(cache.builds(), 2);
+        cache.get("s2", &b);
+        assert_eq!(cache.builds(), 3);
+    }
+
+    /// Post-mortem 2026-11-16 (P1): each PR row used to rescan the whole
+    /// outline per frame. At Mikey's scale (hundreds of items, dozens of PR
+    /// rows) every row of every frame must hit the one index built for the
+    /// snapshot.
+    #[test]
+    fn a_large_outline_is_indexed_once_across_all_pr_rows_and_frames() {
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("s1");
+        let template = snapshot.items[0].clone();
+        snapshot.items = (0..500)
+            .map(|i| {
+                let mut item = template.clone();
+                item.id = format!("item-{i}");
+                item
+            })
+            .collect();
+        snapshot.external_references = (0..50)
+            .map(|i| {
+                crate::github::fixture::reference(
+                    &format!("ref-{i}"),
+                    "s1",
+                    &format!("item-{}", i * 10),
+                    "app",
+                    i as u64 + 1,
+                )
+            })
+            .collect();
+        let snapshot = Arc::new(snapshot);
+        let cache = PrLinkCache::default();
+        for _frame in 0..20 {
+            for row in 0..50 {
+                let index = cache.get("s1", &snapshot);
+                assert_eq!(
+                    index.item_pull_requests(&format!("item-{}", row * 10)).len(),
+                    1
+                );
+            }
+        }
+        assert_eq!(cache.builds(), 1, "1,000 row lookups rebuilt the index");
+        // A new snapshot revision costs exactly one more build.
+        let mut next = (*snapshot).clone();
+        next.revision += 1;
+        let next = Arc::new(next);
+        for _ in 0..50 {
+            cache.get("s1", &next);
+        }
+        assert_eq!(cache.builds(), 2);
+    }
 }

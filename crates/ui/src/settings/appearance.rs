@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use mast_theme::vscode::{ImportReport, SourceCompilation};
 use mast_theme::{
@@ -1213,7 +1212,6 @@ fn format_px(size: f32) -> String {
     }
 }
 
-
 fn accent_helper(accent: AccentSelection) -> String {
     match accent {
         AccentSelection::ThemeDefault => {
@@ -1256,7 +1254,10 @@ fn surface_choice(
     let label = surface_label(surface);
     crate::components::settings_choice(
         theme,
-        SharedString::from(format!("appearance-surface-{}", label.to_lowercase().replace(' ', "-"))),
+        SharedString::from(format!(
+            "appearance-surface-{}",
+            label.to_lowercase().replace(' ', "-")
+        )),
         label,
         selected,
         false,
@@ -1270,13 +1271,15 @@ fn background_effect_choice(
 ) -> gpui::Stateful<gpui::Div> {
     crate::components::settings_choice(
         theme,
-        SharedString::from(format!("new-thread-background-effect-{}", effect.label().to_lowercase())),
+        SharedString::from(format!(
+            "new-thread-background-effect-{}",
+            effect.label().to_lowercase()
+        )),
         effect.label(),
         selected,
         true,
     )
 }
-
 
 fn model_appearance(appearance: Appearance) -> mast_theme::Appearance {
     match appearance {
@@ -1564,41 +1567,45 @@ impl AppearancePage {
         let open = self.font_menu(kind).is_open();
         let closing = self.font_menu(kind).closing_since();
         crate::components::settings_picker(
-            theme, SharedString::from(format!("{slug}-font-dropdown")), 220.0, open, false,
+            theme,
+            SharedString::from(format!("{slug}-font-dropdown")),
+            220.0,
+            open,
+            false,
         )
-            .track_focus(self.font_focus(kind))
-            // Only the closed state: once open, the card above owns these keys
-            // and stops their propagation before they reach us.
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if !this.font_menu(kind).is_open() {
-                    this.on_font_key_down(kind, event, window, cx);
-                }
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                window.focus(&this.font_focus(kind).clone(), cx);
-                this.toggle_font_menu(kind, window, cx);
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(effective.label().to_owned())),
-            )
-            .child(
-                icons::icon(icons::ALT_ARROW_DOWN)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
-            .when_some(self.font_menu(kind).get(), |trigger, _| {
-                trigger.child(popover::anchored_menu_below(
-                    SharedString::from(format!("{slug}-font-menu")),
-                    menu,
-                    closing,
-                ))
-            })
-            .into_any_element()
+        .track_focus(self.font_focus(kind))
+        // Only the closed state: once open, the card above owns these keys
+        // and stops their propagation before they reach us.
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            if !this.font_menu(kind).is_open() {
+                this.on_font_key_down(kind, event, window, cx);
+            }
+        }))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            window.focus(&this.font_focus(kind).clone(), cx);
+            this.toggle_font_menu(kind, window, cx);
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(effective.label().to_owned())),
+        )
+        .child(
+            icons::icon(icons::ALT_ARROW_DOWN)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .when_some(self.font_menu(kind).get(), |trigger, _| {
+            trigger.child(popover::anchored_menu_below(
+                SharedString::from(format!("{slug}-font-menu")),
+                menu,
+                closing,
+            ))
+        })
+        .into_any_element()
     }
 
     /// The size dropdown, identical in shape to the family picker beside it.
@@ -1655,31 +1662,35 @@ impl AppearancePage {
         let open = self.size_menu(kind).is_open();
         let closing = self.size_menu(kind).closing_since();
         crate::components::settings_picker(
-            theme, SharedString::from(format!("{slug}-font-size-dropdown")), 128.0, open, false,
+            theme,
+            SharedString::from(format!("{slug}-font-size-dropdown")),
+            128.0,
+            open,
+            false,
         )
-            .track_focus(self.size_focus(kind))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                this.on_size_key_down(kind, event, window, cx)
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                window.focus(&this.size_focus(kind).clone(), cx);
-                this.toggle_size_menu(kind, cx);
-            }))
-            .child(div().flex_1().child(labels[current].clone()))
-            .child(
-                icons::icon(icons::ALT_ARROW_DOWN)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
-            .when_some(self.size_menu(kind).get(), |trigger, _| {
-                trigger.child(popover::anchored_menu_below(
-                    SharedString::from(format!("{slug}-font-size-menu")),
-                    menu,
-                    closing,
-                ))
-            })
-            .into_any_element()
+        .track_focus(self.size_focus(kind))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            this.on_size_key_down(kind, event, window, cx)
+        }))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            window.focus(&this.size_focus(kind).clone(), cx);
+            this.toggle_size_menu(kind, cx);
+        }))
+        .child(div().flex_1().child(labels[current].clone()))
+        .child(
+            icons::icon(icons::ALT_ARROW_DOWN)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .when_some(self.size_menu(kind).get(), |trigger, _| {
+            trigger.child(popover::anchored_menu_below(
+                SharedString::from(format!("{slug}-font-size-menu")),
+                menu,
+                closing,
+            ))
+        })
+        .into_any_element()
     }
 
     fn render_theme_selector(
@@ -1711,52 +1722,67 @@ impl AppearancePage {
 
         let mut trigger = crate::components::settings_picker(
             theme,
-            SharedString::from(format!("{}-theme-selector", if appearance_kind.is_light() { "light" } else { "dark" })),
-            218.0, open, true,
-        )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, _, _| {
-                    this.theme_menu_mut(appearance_kind).note_trigger_press();
-                }),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.theme_menu_mut(appearance_kind).take_press_was_open() {
-                    this.close_theme_menu(appearance_kind, cx);
+            SharedString::from(format!(
+                "{}-theme-selector",
+                if appearance_kind.is_light() {
+                    "light"
                 } else {
-                    let other = if appearance_kind.is_light() {
-                        Appearance::Dark
-                    } else {
-                        Appearance::Light
-                    };
-                    this.close_theme_menu(other, cx);
-                    this.theme_menu_mut(appearance_kind).open(());
+                    "dark"
                 }
-                cx.notify();
-            }))
-            .child(palette_preview(&selected_theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(SharedString::from(selected_variant.name.clone())),
-            )
-            .child(
-                icons::icon(icons::SORT_VERTICAL)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.45 })),
-            );
+            )),
+            218.0,
+            open,
+            true,
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, _, _, _| {
+                this.theme_menu_mut(appearance_kind).note_trigger_press();
+            }),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if this.theme_menu_mut(appearance_kind).take_press_was_open() {
+                this.close_theme_menu(appearance_kind, cx);
+            } else {
+                let other = if appearance_kind.is_light() {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                };
+                this.close_theme_menu(other, cx);
+                this.theme_menu_mut(appearance_kind).open(());
+            }
+            cx.notify();
+        }))
+        .child(palette_preview(&selected_theme))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(12.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(selected_variant.name.clone())),
+        )
+        .child(
+            icons::icon(icons::SORT_VERTICAL)
+                .size(px(14.0))
+                .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.45 })),
+        );
 
         if self.theme_menu(appearance_kind).get().is_some() {
             let closing = self.theme_menu(appearance_kind).closing_since();
             let style = crate::settings::current(cx).ui_style;
             let pair = style.recommended_themes();
-            let recommended = if appearance_kind.is_light() { pair.0 } else { pair.1 };
-            let mut variants = registry.variants_for(model_appearance(appearance_kind)).collect::<Vec<_>>();
+            let recommended = if appearance_kind.is_light() {
+                pair.0
+            } else {
+                pair.1
+            };
+            let mut variants = registry
+                .variants_for(model_appearance(appearance_kind))
+                .collect::<Vec<_>>();
             variants.sort_by_key(|variant| variant.id != recommended);
             let menu = popover::popover_card(theme)
                 .w(px(260.0))
@@ -1767,53 +1793,55 @@ impl AppearancePage {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(popover::menu_heading(theme, &format!("Recommended for {}", style.label())))
-                .children(
-                    variants.into_iter()
-                        .enumerate()
-                        .map(|(index, variant)| {
-                            let id = variant.id.clone();
-                            let name = variant.name.clone();
-                            let active = id == selected_id;
-                            let sample = Theme::for_selection(
-                                appearance_kind,
-                                &id,
-                                AccentSelection::ThemeDefault,
-                                theme.surface_preference,
-                            );
-                            let row = popover::menu_row(
-                                theme,
-                                active,
-                                SharedString::from(format!(
-                                    "appearance-theme-menu-{appearance_kind:?}-{index}"
-                                )),
-                            )
-                            .id(SharedString::from(format!(
-                                "appearance-theme-row-{appearance_kind:?}-{index}"
-                            )))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                appearance::set_theme(appearance_kind, id.clone(), cx);
-                                this.close_theme_menu(appearance_kind, cx);
-                                cx.notify();
-                            }))
-                            .child(palette_preview(&sample))
-                            .child(div().flex_1().min_w_0().truncate().child(name))
-                            .when(active, |row| {
-                                row.child(
-                                    icons::icon(icons::CHECK)
-                                        .size(px(14.0))
-                                        .text_color(theme.accent),
-                                )
-                            });
-                            if index == 1 {
-                                div().flex().flex_col()
-                                    .child(popover::menu_heading(theme, "Other themes"))
-                                    .child(row).into_any_element()
-                            } else {
-                                row.into_any_element()
-                            }
-                        }),
-                )
+                .child(popover::menu_heading(
+                    theme,
+                    &format!("Recommended for {}", style.label()),
+                ))
+                .children(variants.into_iter().enumerate().map(|(index, variant)| {
+                    let id = variant.id.clone();
+                    let name = variant.name.clone();
+                    let active = id == selected_id;
+                    let sample = Theme::for_selection(
+                        appearance_kind,
+                        &id,
+                        AccentSelection::ThemeDefault,
+                        theme.surface_preference,
+                    );
+                    let row = popover::menu_row(
+                        theme,
+                        active,
+                        SharedString::from(format!(
+                            "appearance-theme-menu-{appearance_kind:?}-{index}"
+                        )),
+                    )
+                    .id(SharedString::from(format!(
+                        "appearance-theme-row-{appearance_kind:?}-{index}"
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        appearance::set_theme(appearance_kind, id.clone(), cx);
+                        this.close_theme_menu(appearance_kind, cx);
+                        cx.notify();
+                    }))
+                    .child(palette_preview(&sample))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .when(active, |row| {
+                        row.child(
+                            icons::icon(icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                    });
+                    if index == 1 {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(popover::menu_heading(theme, "Other themes"))
+                            .child(row)
+                            .into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
+                }))
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_below(
                 SharedString::from(format!(
@@ -1860,14 +1888,18 @@ impl AppearancePage {
         let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
             crate::components::settings_import_mode(
-                theme, SharedString::from(format!("theme-import-mode-{}", slug(label))), label, description, active,
+                theme,
+                SharedString::from(format!("theme-import-mode-{}", slug(label))),
+                label,
+                description,
+                active,
             )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(dialog) = this.import_dialog.as_mut() {
-                        dialog.mode = value;
-                    }
-                    cx.notify();
-                }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(dialog) = this.import_dialog.as_mut() {
+                    dialog.mode = value;
+                }
+                cx.notify();
+            }))
         };
 
         let section_label = |label: &'static str| {
@@ -1894,7 +1926,7 @@ impl AppearancePage {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        popover::dialog_field(&theme, input.into_any_element())
+                        popover::dialog_field(theme, input.into_any_element())
                             .flex_1()
                             .min_w_0()
                             .h(px(36.0))
@@ -1973,94 +2005,101 @@ impl AppearancePage {
                     SurfacePreference::ThemeDefault,
                 );
                 main = main.child(
-                    crate::components::settings_theme_import_row(theme, SharedString::from(format!("theme-import-row-{variant_id}")), selected_now)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(9.0))
-                                .child(
-                                    crate::components::settings_theme_import_checkbox(theme, SharedString::from(format!("theme-import-select-{variant_id}")), selected_now)
-                                        .on_click(cx.listener({
-                                            let variant_id = variant_id.clone();
-                                            move |this, _, _, cx| {
-                                                if let Some(dialog) = this.import_dialog.as_mut()
-                                                    && !dialog.selected.remove(&variant_id)
-                                                {
-                                                    dialog.selected.insert(variant_id.clone());
-                                                }
-                                                cx.notify();
-                                            }
-                                        })),
+                    crate::components::settings_theme_import_row(
+                        theme,
+                        SharedString::from(format!("theme-import-row-{variant_id}")),
+                        selected_now,
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .child(
+                                crate::components::settings_theme_import_checkbox(
+                                    theme,
+                                    SharedString::from(format!("theme-import-select-{variant_id}")),
+                                    selected_now,
                                 )
-                                .child(palette_preview(&sample))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_size(crate::typography::ui_rems(12.5))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(theme.text)
-                                                .child(SharedString::from(variant.name.clone())),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(crate::typography::ui_rems(11.0))
-                                                .text_color(theme.text_muted)
-                                                .child(appearance),
-                                        ),
-                                )
-                                .child(
-                                    compact_action(
-                                        theme,
-                                        if review_open {
-                                            "Hide details"
-                                        } else {
-                                            "Details"
-                                        },
-                                        format!("theme-import-review-{variant_id}"),
-                                    )
-                                    .on_click(cx.listener({
-                                        let variant_id = variant_id.clone();
-                                        move |this, _, _, cx| {
-                                            if let Some(dialog) = this.import_dialog.as_mut() {
-                                                dialog.review_variant =
-                                                    if dialog.review_variant.as_deref()
-                                                        == Some(variant_id.as_str())
-                                                    {
-                                                        None
-                                                    } else {
-                                                        Some(variant_id.clone())
-                                                    };
-                                            }
-                                            cx.notify();
+                                .on_click(cx.listener({
+                                    let variant_id = variant_id.clone();
+                                    move |this, _, _, cx| {
+                                        if let Some(dialog) = this.import_dialog.as_mut()
+                                            && !dialog.selected.remove(&variant_id)
+                                        {
+                                            dialog.selected.insert(variant_id.clone());
                                         }
-                                    })),
-                                ),
-                        )
-                        .when(review_open, |row| {
-                            row.child(
-                                div()
-                                    .mt(px(10.0))
-                                    .pt(px(10.0))
-                                    .border_t_1()
-                                    .border_color(hairline)
-                                    .child(import_scene_preview(variant)),
+                                        cx.notify();
+                                    }
+                                })),
                             )
-                            .when_some(report, |row, report| row.child(report_panel(theme, report)))
-                        }),
+                            .child(palette_preview(&sample))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(crate::typography::ui_rems(12.5))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(variant.name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(crate::typography::ui_rems(11.0))
+                                            .text_color(theme.text_muted)
+                                            .child(appearance),
+                                    ),
+                            )
+                            .child(
+                                compact_action(
+                                    theme,
+                                    if review_open {
+                                        "Hide details"
+                                    } else {
+                                        "Details"
+                                    },
+                                    format!("theme-import-review-{variant_id}"),
+                                )
+                                .on_click(cx.listener({
+                                    let variant_id = variant_id.clone();
+                                    move |this, _, _, cx| {
+                                        if let Some(dialog) = this.import_dialog.as_mut() {
+                                            dialog.review_variant =
+                                                if dialog.review_variant.as_deref()
+                                                    == Some(variant_id.as_str())
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(variant_id.clone())
+                                                };
+                                        }
+                                        cx.notify();
+                                    }
+                                })),
+                            ),
+                    )
+                    .when(review_open, |row| {
+                        row.child(
+                            div()
+                                .mt(px(10.0))
+                                .pt(px(10.0))
+                                .border_t_1()
+                                .border_color(hairline)
+                                .child(import_scene_preview(variant)),
+                        )
+                        .when_some(report, |row, report| row.child(report_panel(theme, report)))
+                    }),
                 );
             }
             for failure in &compilation.failures {
-                main = main.child(
-                    crate::components::settings_import_warning(theme)
-                        .child(SharedString::from(format!(
-                            "{} could not be compiled · {}",
-                            failure.name, failure.message
-                        ))),
-                );
+                main = main.child(crate::components::settings_import_warning(theme).child(
+                    SharedString::from(format!(
+                        "{} could not be compiled · {}",
+                        failure.name, failure.message
+                    )),
+                ));
             }
         } else {
             main = main.child(
@@ -2512,7 +2551,13 @@ impl Render for AppearancePage {
                     mode.icon(),
                     mode.label(),
                     mode == current_mode,
-                    crate::components::settings_appearance_preview(&theme, mode, &current_themes, current_accent, current_surface),
+                    crate::components::settings_appearance_preview(
+                        &theme,
+                        mode,
+                        &current_themes,
+                        current_accent,
+                        current_surface,
+                    ),
                 )
                 .id(SharedString::from(format!("appearance-{}", mode.label())))
                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -2543,20 +2588,31 @@ impl Render for AppearancePage {
             })
             .collect::<Vec<_>>();
 
-        let layout_cards = crate::ui_style::UiLayout::ALL.iter().copied().map(|layout| {
-            let label = layout.label();
-            let preview = crate::components::settings_layout_preview(&theme, layout);
-            widgets::option_card(&theme, icons::MONITOR, label, ui_settings.ui_layout == layout, preview)
+        let layout_cards = crate::ui_style::UiLayout::ALL
+            .iter()
+            .copied()
+            .map(|layout| {
+                let label = layout.label();
+                let preview = crate::components::settings_layout_preview(&theme, layout);
+                widgets::option_card(
+                    &theme,
+                    icons::MONITOR,
+                    label,
+                    ui_settings.ui_layout == layout,
+                    preview,
+                )
                 .id(SharedString::from(format!("layout-{label}")))
                 .on_click(cx.listener(move |_, _, window, cx| {
                     crate::ui_style::set_layout(layout, window, cx);
                     cx.notify();
                 }))
-        }).collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
         let style = ui_settings.ui_style;
         let recommended = style.recommended_themes();
-        let show_recommended_action = theme.variant_id.as_ref() != recommended.0 && theme.variant_id.as_ref() != recommended.1;
+        let show_recommended_action = theme.variant_id.as_ref() != recommended.0
+            && theme.variant_id.as_ref() != recommended.1;
         let mut theme_rows = Vec::new();
         for (index, appearance_kind) in [Appearance::Light, Appearance::Dark]
             .into_iter()
@@ -2625,11 +2681,12 @@ impl Render for AppearancePage {
         .into_iter()
         .map(|(value, label)| {
             let active = ui_settings.team_tab_visibility == value;
-            crate::components::settings_team_visibility(&theme, label, active)
-                .on_click(cx.listener(move |_, _, _, cx| {
+            crate::components::settings_team_visibility(&theme, label, active).on_click(
+                cx.listener(move |_, _, _, cx| {
                     cx.emit(AppearanceSettingsEvent::TeamTabVisibilityChanged(value));
                     cx.notify();
-                }))
+                }),
+            )
         })
         .collect::<Vec<_>>();
         let mut settings_rows = Vec::new();
@@ -2672,6 +2729,11 @@ impl Render for AppearancePage {
                     cx.emit(AppearanceSettingsEvent::CompactSingleChatChanged(!ui_settings.compact_single_chat));
                     cx.notify();
                 }))).into_any_element());
+        settings_rows.push(crate::artifacts::preview_thumb::settings_row(
+            &theme,
+            ui_settings.open_diagrams_automatically,
+            cx,
+        ));
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))
@@ -2737,7 +2799,11 @@ impl Render for AppearancePage {
         let background_tile: AnyElement = if let Some(background) =
             current_background.as_ref().filter(|_| background_available)
         {
-            crate::components::settings_background_thumbnail(&theme, PathBuf::from(background.path.clone())).into_any_element()
+            crate::components::settings_background_thumbnail(
+                &theme,
+                PathBuf::from(background.path.clone()),
+            )
+            .into_any_element()
         } else {
             widgets::row_tile(&theme, icons::FILE_IMAGE).into_any_element()
         };
@@ -3058,362 +3124,4 @@ impl Render for AppearancePage {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn industrial_variants_are_available_in_theme_menus() {
-        let registry = ThemeRegistry::builtin();
-        for (appearance, id) in [(mast_theme::Appearance::Light, "industrial-light"), (mast_theme::Appearance::Dark, "industrial-dark")] {
-            assert!(registry.variants_for(appearance).any(|variant| variant.id == id));
-        }
-    }
-
-    #[test]
-    fn every_mode_gets_a_card() {
-        assert_eq!(AppearanceMode::ALL.len(), 3);
-        for mode in AppearanceMode::ALL {
-            assert!(!mode.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn registry_offers_both_appearances_and_keeps_single_dark_families_valid() {
-        let registry = ThemeRegistry::builtin();
-        assert_eq!(
-            registry.variants_for(mast_theme::Appearance::Light).count(),
-            13
-        );
-        assert_eq!(
-            registry.variants_for(mast_theme::Appearance::Dark).count(),
-            23
-        );
-    }
-
-    #[test]
-    fn accent_helper_explains_default_and_override_scope() {
-        assert!(accent_helper(AccentSelection::ThemeDefault).contains("intended"));
-        let copy = accent_helper(AccentSelection::Preset(AccentPreset::Pink));
-        assert!(copy.starts_with("Pink ·"));
-        assert!(copy.contains("glyphs"));
-    }
-
-    #[test]
-    fn surface_helper_explains_theme_default_and_global_overrides() {
-        let default = surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Opaque);
-        assert!(default.contains("opaque default"));
-        assert!(
-            surface_helper(SurfacePreference::Frosted, SurfaceTreatment::Opaque)
-                .contains("where supported")
-        );
-        assert!(
-            surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted)
-                .contains("every theme")
-        );
-    }
-
-    #[test]
-    fn font_options_appear_once_in_stable_order() {
-        let catalog = FontAvailability::all();
-        let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
-        assert_eq!(labels.len(), 5);
-        assert_eq!(
-            labels,
-            ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]
-        );
-        let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), 5);
-    }
-
-    #[test]
-    fn only_the_terminal_catalog_is_narrowed_to_fixed_width() {
-        let all = FontAvailability::all();
-        let terminal: Vec<_> = FontKind::Terminal
-            .choices_for(&all)
-            .iter()
-            .map(UiFontFamily::label)
-            .collect();
-        assert_eq!(terminal, ["Geist Mono", "Menlo"]);
-
-        for kind in [FontKind::Ui, FontKind::Code] {
-            assert_eq!(kind.choices_for(&all), all.choices());
-            assert!(kind.is_available_for(&all, &UiFontFamily::System));
-            assert!(kind.is_available_for(&all, &UiFontFamily::Installed("Arial".into())));
-        }
-        for proportional in [
-            UiFontFamily::System,
-            UiFontFamily::Geist,
-            UiFontFamily::Installed("Arial".into()),
-        ] {
-            assert!(!FontKind::Terminal.is_available_for(&all, &proportional));
-        }
-        assert!(FontKind::Terminal.is_available_for(&all, &UiFontFamily::GeistMono));
-        // A query that only matches proportional families leaves the terminal
-        // highlight on the bundled mono face rather than on System UI.
-        assert_eq!(
-            first_available(&[], FontKind::Terminal, &all),
-            UiFontFamily::GeistMono
-        );
-    }
-
-    #[test]
-    fn font_keyboard_navigation_stops_at_edges_and_skips_unavailable() {
-        let all = FontAvailability::all();
-        let choices = all.choices().to_vec();
-        assert_eq!(
-            step_font(&UiFontFamily::Geist, -1, &choices, FontKind::Ui, &all),
-            UiFontFamily::Geist
-        );
-        assert_eq!(
-            step_font(
-                &UiFontFamily::Installed("Menlo".into()),
-                1,
-                &choices,
-                FontKind::Ui,
-                &all
-            ),
-            UiFontFamily::Installed("Menlo".into())
-        );
-        let without_arial = all.without(&UiFontFamily::Installed("Arial".into()));
-        assert_eq!(
-            step_font(
-                &UiFontFamily::System,
-                1,
-                &choices,
-                FontKind::Ui,
-                &without_arial
-            ),
-            UiFontFamily::Installed("Menlo".into())
-        );
-    }
-
-    #[test]
-    fn filtering_narrows_to_matches_and_navigation_stays_inside_them() {
-        let all = FontAvailability::all();
-        let catalog = all.choices().to_vec();
-
-        assert_eq!(filter_families("", &catalog), catalog);
-        assert_eq!(filter_families("   ", &catalog), catalog);
-        assert!(filter_families("helvetica", &catalog).is_empty());
-        // Case-insensitive, and the bundled entries still lead when they match.
-        assert_eq!(
-            filter_families("GEIST", &catalog),
-            vec![UiFontFamily::Geist, UiFontFamily::GeistMono]
-        );
-
-        // "Menlo" prefix-matches, so it outranks the "System UI" substring hit.
-        let matches = filter_families("m", &catalog);
-        assert_eq!(
-            matches,
-            vec![
-                UiFontFamily::Installed("Menlo".into()),
-                UiFontFamily::GeistMono,
-                UiFontFamily::System,
-            ]
-        );
-        // Stepping never escapes the filtered list.
-        assert_eq!(
-            step_font(&UiFontFamily::System, 1, &matches, FontKind::Ui, &all),
-            UiFontFamily::System
-        );
-        assert_eq!(
-            first_available(&matches, FontKind::Ui, &all),
-            UiFontFamily::Installed("Menlo".into())
-        );
-        assert_eq!(
-            last_available(&matches, FontKind::Ui, &all),
-            UiFontFamily::System
-        );
-    }
-
-    #[test]
-    fn each_font_kind_gets_distinct_labels_and_element_ids() {
-        let slugs: Vec<_> = FontKind::ALL.iter().map(|kind| kind.slug()).collect();
-        let labels: Vec<_> = FontKind::ALL.iter().map(|kind| kind.label()).collect();
-        assert_eq!(
-            slugs.iter().collect::<std::collections::HashSet<_>>().len(),
-            3
-        );
-        assert_eq!(
-            labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            3
-        );
-    }
-
-    #[test]
-    fn pixel_sizes_render_whole_and_fractional_values() {
-        assert_eq!(format_px(13.0), "13 px");
-        assert_eq!(format_px(typography::CODE_FONT_SIZE_DEFAULT), "12.5 px");
-        assert_eq!(
-            typography::clamp_font_size(typography::FONT_SIZE_MAX + 1.0),
-            typography::FONT_SIZE_MAX
-        );
-        assert_eq!(
-            typography::clamp_font_size(typography::FONT_SIZE_MIN - 1.0),
-            typography::FONT_SIZE_MIN
-        );
-    }
-
-    #[test]
-    fn font_size_options_are_ordered_and_include_the_default() {
-        let values = UiFontSize::ALL.map(UiFontSize::pixels);
-        assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(UiFontSize::ALL.contains(&UiFontSize::default()));
-    }
-
-    #[test]
-    fn mono_size_ladder_keeps_both_defaults_exactly_reachable() {
-        assert!(MONO_FONT_SIZES.windows(2).all(|pair| pair[0] < pair[1]));
-        for default in [
-            typography::TERMINAL_FONT_SIZE_DEFAULT,
-            typography::CODE_FONT_SIZE_DEFAULT,
-        ] {
-            assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(default)], default);
-        }
-        // Off-ladder values (older settings, hand-edited files) snap, never drop.
-        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(0.0)], MONO_FONT_SIZES[0]);
-        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(99.0)], 20.0);
-        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(12.4)], 12.5);
-    }
-
-    #[test]
-    fn every_size_dropdown_labels_its_whole_ladder_in_pixels() {
-        for kind in FontKind::ALL {
-            let labels = kind.size_labels();
-            assert_eq!(labels.len(), kind.size_count());
-            assert!(labels.iter().all(|label| label.ends_with(" px")));
-        }
-        assert!(FontKind::Terminal.size_labels().contains(&"13 px".into()));
-        assert!(FontKind::Code.size_labels().contains(&"12.5 px".into()));
-    }
-
-    #[gpui::test]
-    fn conversation_width_drag_coalesces_and_persists_the_last_value(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(Default::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
-        window
-            .update(cx, |page, window, cx| {
-                page.width_bounds.set(Some(gpui::Bounds::new(
-                    gpui::point(px(100.0), px(0.0)),
-                    gpui::size(px(240.0), px(28.0)),
-                )));
-                page.drag_width(px(0.0), window, cx);
-                assert_eq!(page.pending_width, Some(560.0));
-                page.drag_width(px(1000.0), window, cx);
-                assert_eq!(page.pending_width, Some(1200.0));
-                page.drag_width(px(220.0), window, cx);
-                assert_eq!(page.pending_width, Some(880.0));
-                assert_eq!(
-                    crate::settings::transcript_width(cx),
-                    736.0,
-                    "pointer events must coalesce before publishing"
-                );
-                page.apply_pending_width(cx);
-                assert_eq!(crate::settings::transcript_width(cx), 880.0);
-                crate::settings::flush(cx);
-                assert_eq!(
-                    crate::settings::UiSettings::load(dir.path()).transcript_width,
-                    880.0
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn size_dropdowns_commit_from_the_ladder_and_enter_leaves_menus_closed(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            typography::init(
-                UiFontFamily::Geist,
-                UiFontSize::default(),
-                UiFontFamily::GeistMono,
-                typography::TERMINAL_FONT_SIZE_DEFAULT,
-                UiFontFamily::GeistMono,
-                typography::CODE_FONT_SIZE_DEFAULT,
-                FontAvailability::all(),
-                cx,
-            );
-        });
-        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
-        window
-            .update(cx, |page, window, cx| {
-                for kind in [FontKind::Terminal, FontKind::Code] {
-                    page.toggle_size_menu(kind, cx);
-                    assert!(page.size_menu(kind).is_open());
-                    assert_eq!(page.selected_size_ix(kind), kind.size_ix(cx));
-                    let target = kind.size_ix(cx) + 1;
-                    page.set_selected_size_ix(kind, target);
-                    page.commit_size(kind, window, cx);
-                    assert_eq!(kind.pixel_size(cx), MONO_FONT_SIZES[target]);
-                    assert!(!page.size_menu(kind).is_open());
-                }
-
-                // Opening a family menu closes a size menu left open elsewhere.
-                page.toggle_size_menu(FontKind::Ui, cx);
-                assert!(page.size_menu(FontKind::Ui).is_open());
-                page.toggle_font_menu(FontKind::Code, window, cx);
-                assert!(!page.size_menu(FontKind::Ui).is_open());
-                assert!(page.font_menu(FontKind::Code).is_open());
-
-                // Enter commits and reports the key consumed — without that the
-                // trigger's `is_open` guard reads the just-closed menu and
-                // reopens it on the very same event.
-                let enter = KeyDownEvent {
-                    keystroke: gpui::Keystroke::parse("enter").expect("valid keystroke"),
-                    is_held: false,
-                    prefer_character_input: false,
-                };
-                assert!(page.on_font_key_down(FontKind::Code, &enter, window, cx));
-                assert!(!page.font_menu(FontKind::Code).is_open());
-            })
-            .expect("window is open");
-    }
-
-    /// A settings file written before the terminal picker was constrained can
-    /// still name a proportional family; startup must not hand it to the grid.
-    #[gpui::test]
-    fn persisted_proportional_terminal_family_resolves_to_geist_mono(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            typography::init(
-                UiFontFamily::Geist,
-                UiFontSize::default(),
-                UiFontFamily::Installed("Arial".into()),
-                typography::TERMINAL_FONT_SIZE_DEFAULT,
-                UiFontFamily::Installed("Arial".into()),
-                typography::CODE_FONT_SIZE_DEFAULT,
-                FontAvailability::all(),
-                cx,
-            );
-            assert_eq!(
-                typography::terminal_effective(cx),
-                UiFontFamily::GeistMono,
-                "proportional terminal family must fall back"
-            );
-            assert_eq!(
-                typography::code_effective(cx),
-                UiFontFamily::Installed("Arial".into()),
-                "code and diffs keep proportional picks"
-            );
-            // The setter path rejects the same family too.
-            assert!(!typography::set_terminal_family(UiFontFamily::System, cx));
-            assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
-        });
-    }
-}
+mod tests;

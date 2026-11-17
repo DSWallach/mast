@@ -187,6 +187,10 @@ pub enum ReviewSide {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSuggestedComment {
+    /// Stable across republishes so a dismissed suggestion stays dismissed.
+    /// Older sidecars did not include an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub anchor: ReviewAnchor,
     pub body: String,
     pub severity: String,
@@ -194,9 +198,106 @@ pub struct ReviewSuggestedComment {
     pub suggestion: Option<String>,
 }
 
+impl ReviewSuggestedComment {
+    /// Older sidecars have no id; derive one without requiring the checkout.
+    pub fn stable_id(&self) -> String {
+        self.id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| {
+                let seed = format!(
+                    "{}\n{:?}\n{}\n{}",
+                    self.anchor.file,
+                    self.anchor.side,
+                    self.anchor.hunk_hash.as_deref().unwrap_or_default(),
+                    self.body
+                );
+                crate::derive_id(&seed, "review-suggestion")
+            })
+    }
+}
+
+/// A local review comment, keyed by the review target rather than its head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDraft {
+    pub id: String,
+    pub target: String,
+    pub anchor: ReviewAnchor,
+    /// Hash of the anchored line, used to locate it within an unchanged hunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line_hash: Option<String>,
+    pub body: String,
+    pub source: ReviewDraftSource,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewDraftSource {
+    User,
+    Agent,
+}
+
+/// A GitHub review thread as a read-only snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    pub line: Option<u32>,
+    pub side: Option<ReviewSide>,
+    pub outdated: bool,
+    pub resolved: bool,
+    pub comments: Vec<ReviewThreadComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewThreadComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReviewTarget;
+
+    #[test]
+    fn legacy_suggestion_without_id_still_decodes() {
+        let comment: super::ReviewSuggestedComment = serde_json::from_value(serde_json::json!({
+            "anchor": {"file":"a.rs", "side":"right", "startLine":1, "endLine":1},
+            "body":"Check this", "severity":"low"
+        }))
+        .unwrap();
+        assert_eq!(comment.id, None);
+        assert!(serde_json::to_value(comment).unwrap().get("id").is_none());
+    }
+
+    #[test]
+    fn review_thread_round_trips() {
+        let thread = super::ReviewThread {
+            id: "thread".into(),
+            path: "a.rs".into(),
+            line: Some(4),
+            side: Some(super::ReviewSide::Right),
+            outdated: false,
+            resolved: true,
+            comments: vec![super::ReviewThreadComment {
+                id: "comment".into(),
+                author: "reviewer".into(),
+                body: "Why?".into(),
+            }],
+        };
+        let json = serde_json::to_value(&thread).unwrap();
+        assert_eq!(
+            serde_json::from_value::<super::ReviewThread>(json).unwrap(),
+            thread
+        );
+    }
 
     #[test]
     fn review_target_state_keys_survive_head_changes() {

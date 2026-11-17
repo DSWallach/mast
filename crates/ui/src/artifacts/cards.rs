@@ -21,6 +21,7 @@ pub(crate) struct CardModel {
     /// The link the card activates (`mast-artifact:<target>`).
     pub(crate) url: String,
     pub(crate) registered: bool,
+    pub(crate) preview: Option<super::preview_thumb::PreviewSpec>,
 }
 
 pub(crate) fn card_model(
@@ -53,6 +54,7 @@ pub(crate) fn card_model(
                 detail,
                 url: format!("{ARTIFACT_URL_SCHEME}{}", artifact.id),
                 registered: true,
+                preview: super::preview_thumb::PreviewSpec::from_artifact(artifact),
             }
         }
         None => {
@@ -72,6 +74,7 @@ pub(crate) fn card_model(
                 detail,
                 url,
                 registered: false,
+                preview: None,
             }
         }
     }
@@ -82,6 +85,7 @@ pub(crate) fn artifact_card(
     card: CardModel,
     link_ui: Option<render::LinkUi>,
     theme: &Theme,
+    thumbnail: Option<std::sync::Arc<gpui::Image>>,
 ) -> AnyElement {
     let selector = format!("{row_id}#artifact");
     let title: SharedString = card.title.clone().into();
@@ -103,41 +107,71 @@ pub(crate) fn artifact_card(
         .w_full()
         .child(
             crate::components::browser_parts::artifact_card_frame(
-                SharedString::from(selector), format!("Open artifact {title}"), theme,
+                SharedString::from(selector),
+                format!("Open artifact {title}"),
+                theme,
             )
-                .child(crate::components::browser_parts::artifact_card_icon(card.icon, theme))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text)
-                                .child(title.clone()),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(card.detail.clone())),
-                        ),
-                )
-                .child(
-                    crate::components::browser_parts::artifact_card_open(
-                        SharedString::from(format!("{row_id}#artifact-open")), theme,
+            .flex_col()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(crate::components::browser_parts::artifact_card_icon(
+                        card.icon, theme,
+                    ))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .text_color(theme.text)
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(card.detail.clone())),
+                            ),
                     )
+                    .child(
+                        crate::components::browser_parts::artifact_card_open(
+                            SharedString::from(format!("{row_id}#artifact-open")),
+                            theme,
+                        )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             open_button(window, cx)
                         }),
+                    ),
+            )
+            .when_some(thumbnail, |card, image| {
+                card.child(
+                    div()
+                        .w_full()
+                        .h(px(200.0))
+                        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
+                        .border_1()
+                        .border_color(theme.border)
+                        .overflow_hidden()
+                        .child(
+                            gpui::img(image)
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
                 )
-                .on_click(move |_, window, cx| open(window, cx)),
+            })
+            .on_click(move |_, window, cx| open(window, cx)),
         )
         .into_any_element()
 }

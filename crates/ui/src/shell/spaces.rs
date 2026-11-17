@@ -101,38 +101,8 @@ impl gpui::Element for VisibleSidebarRow {
 }
 
 #[cfg(test)]
-mod visible_row_tests {
-    use super::*;
-
-    #[gpui::test]
-    fn rows_follow_the_scroll_clip(cx: &mut gpui::TestAppContext) {
-        struct Host(gpui::ScrollHandle);
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().id("visible-row-test").w(px(200.0)).h(px(100.0))
-                    .overflow_y_scroll().track_scroll(&self.0).flex().flex_col()
-                    .children((0..20).map(|index| {
-                        let selector = format!("visible-row-{index}");
-                        VisibleSidebarRow {
-                            height: 25.0,
-                            child: div().w_full().h(px(25.0))
-                                .debug_selector(move || selector.clone()).into_any_element(),
-                            on_slot: None,
-                        }
-                    }))
-            }
-        }
-        let scroll = gpui::ScrollHandle::new();
-        let (_, vcx) = cx.add_window_view(|_, _| Host(scroll.clone()));
-        vcx.update(|window, cx| window.draw(cx).clear());
-        assert!(vcx.debug_bounds("visible-row-0").is_some());
-        assert!(vcx.debug_bounds("visible-row-19").is_none());
-        scroll.set_offset(gpui::point(px(0.0), px(-400.0)));
-        vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
-        assert!(vcx.debug_bounds("visible-row-0").is_none());
-        assert!(vcx.debug_bounds("visible-row-19").is_some());
-    }
-}
+#[path = "spaces_tests/visible_row_tests.rs"]
+mod visible_row_tests;
 
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
@@ -328,2171 +298,8 @@ pub(super) fn pinned_drag_scroll_delta(
 }
 
 #[cfg(test)]
-mod pinned_session_tests {
-    fn pin_change(id: &str) -> mast_proto::SidebarPinChange {
-        mast_proto::SidebarPinChange::Pin {
-            session_id: id.into(),
-            after: None,
-            before: None,
-        }
-    }
-    use super::{
-        pinned_drag_scroll_delta, pinned_drag_scroll_step, pinned_drag_snapshot_is_valid,
-        pinned_session_clamped_index, pinned_session_drop_index, project_pinned_first,
-        reorder_visible_pins, retain_known_pins,
-    };
-    use std::collections::HashSet;
-
-    fn ids(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_string()).collect()
-    }
-
-    fn pin_test_shell(
-        cx: &mut gpui::TestAppContext,
-        path: &std::path::Path,
-    ) -> gpui::WindowHandle<super::Shell> {
-        use super::*;
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-        });
-        cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: path.into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        })
-    }
-
-    #[gpui::test]
-    fn automatic_group_menus_do_not_toggle_disclosures(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        struct GroupHost(Entity<Shell>);
-        impl Render for GroupHost {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    let rows = shell.render_active_rows(&Theme::default(), cx);
-                    div()
-                        .w(px(280.0))
-                        .h(px(600.0))
-                        .flex()
-                        .flex_col()
-                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
-                        .children(shell.render_space_overlays(
-                            gpui::size(px(800.0), px(600.0)),
-                            window,
-                            cx,
-                        ))
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        let shell = window.update(cx, |_, _, cx| cx.entity()).unwrap();
-        shell.update(cx, |shell, cx| {
-            shell.settings.space_filter = None;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.devices = vec![serde_json::from_value(serde_json::json!({
-                    "id": "local", "name": "Laptop", "platform": "macos", "lastSeenAt": null,
-                })).unwrap()];
-                state.spaces = vec![serde_json::from_value(serde_json::json!({
-                    "id": "project", "deviceId": "local", "path": "/project", "createdAt": Utc::now(),
-                })).unwrap()];
-                state.chats = vec![pin_test_chat("chat")];
-            });
-        });
-        let (_, cx) = cx.add_window_view(|_, _| GroupHost(shell.clone()));
-        for (organization, project, key, selector) in [
-            (
-                SidebarOrganization::ByProject,
-                true,
-                "project:project",
-                "sidebar-group-menu-project:project",
-            ),
-            (
-                SidebarOrganization::ByDevice,
-                true,
-                "device:local",
-                "sidebar-group-menu-device:local",
-            ),
-            (
-                SidebarOrganization::ByProject,
-                false,
-                "project:home:local",
-                "sidebar-group-menu-project:home:local",
-            ),
-        ] {
-            for collapsed in [false, true] {
-                shell.update(cx, |shell, cx| {
-                    shell.space_menu = popover::Popup::default();
-                    shell.group_menu = None;
-                    shell.settings.sidebar_organization = organization;
-                    shell.state.update(cx, |state, _| {
-                        state.chats[0].space_id = project.then(|| "project".into());
-                    });
-                    shell.sidebar_collapsed_groups.clear();
-                    if collapsed {
-                        shell.sidebar_collapsed_groups.insert(key.into());
-                    }
-                    cx.notify();
-                });
-                let button = cx.debug_bounds(selector).unwrap().center();
-                cx.simulate_mouse_move(button, None, gpui::Modifiers::default());
-                cx.simulate_mouse_down(button, MouseButton::Left, gpui::Modifiers::default());
-                cx.simulate_mouse_up(button, MouseButton::Left, gpui::Modifiers::default());
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.sidebar_collapsed_groups.contains(key), collapsed);
-                    if key == "project:project" {
-                        assert_eq!(
-                            shell.space_menu.get().map(|(id, _)| id.as_str()),
-                            Some("project")
-                        );
-                        assert!(shell.group_menu.is_none());
-                    } else {
-                        assert_eq!(
-                            shell.group_menu.as_ref().map(|(target, _)| target),
-                            Some(&SidebarGroupTarget::Device {
-                                device_id: "local".into(),
-                                key: if project { "local" } else { "home:local" }.into(),
-                            })
-                        );
-                        assert!(!shell.space_menu.is_open());
-                    }
-                });
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn current_session_beneath_assistant_follows_selection_and_filters(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use super::*;
-        struct SidebarHost(Entity<Shell>);
-        impl Render for SidebarHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    let assistant = shell.render_personal_assistant_section(&Theme::default(), cx);
-                    let rows = shell.render_active_rows(&Theme::default(), cx);
-                    div()
-                        .w(px(300.0))
-                        .h(px(700.0))
-                        .flex()
-                        .flex_col()
-                        .children(assistant)
-                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        let shell = window
-            .update(cx, |shell, _, cx| {
-                shell.settings.space_filter = None;
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.chats_synced = true;
-                    let assistant = pin_test_chat("assistant");
-                    state
-                        .personal_assistant
-                        .apply(mast_proto::PersonalAssistantReply {
-                            assistant: Some(mast_proto::PersonalAssistant::for_chat(&assistant, 1)),
-                        });
-                    state.chats = vec![assistant, pin_test_chat("open"), pin_test_chat("next")];
-                    state.selected_chat = Some("open".into());
-                });
-                cx.entity()
-            })
-            .unwrap();
-        let (_, cx) = cx.add_window_view(|_, _| SidebarHost(shell.clone()));
-        let assistant = cx.debug_bounds("chat-assistant").unwrap();
-        let current = cx.debug_bounds("current-session-chat-open").unwrap();
-        assert!(current.top() >= assistant.bottom());
-        assert!(
-            cx.debug_bounds("chat-open").is_some(),
-            "the ordinary list copy remains available"
-        );
-        cx.simulate_mouse_move(current.center(), None, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(
-                shell.chat_status_hover.as_deref(),
-                Some("current-session-chat-open")
-            );
-        });
-        shell.update(cx, |shell, cx| {
-            shell.settings.space_filter = Some("elsewhere".into());
-            shell.settings.sidebar_compact = true;
-            cx.notify();
-        });
-        assert!(
-            cx.debug_bounds("current-session-chat-open").is_some(),
-            "the current session ignores the space filter"
-        );
-        assert!(cx.debug_bounds("chat-open").is_none());
-        shell.update(cx, |shell, cx| {
-            shell
-                .state
-                .update(cx, |state, _| state.selected_chat = Some("next".into()));
-            cx.notify();
-        });
-        assert!(cx.debug_bounds("current-session-chat-open").is_none());
-        assert!(cx.debug_bounds("current-session-chat-next").is_some());
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.selected_chat = Some("assistant".into())
-            });
-            cx.notify();
-        });
-        assert!(
-            cx.debug_bounds("sidebar-current-session").is_none(),
-            "opening the assistant does not duplicate its own row"
-        );
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.selected_chat = Some("open".into());
-                state
-                    .personal_assistant
-                    .apply(mast_proto::PersonalAssistantReply::default());
-            });
-            cx.notify();
-        });
-        assert!(cx.debug_bounds("sidebar-personal-assistant").is_none());
-    }
-
-    fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
-        state.workspace_scope = Some(mast_proto::WorkspaceScope::Synced);
-        state.auth = Some(mast_proto::AuthState::SignedIn {
-            user: mast_proto::UserProfile {
-                id: "user".into(),
-                email: "test@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org".into()),
-        });
-        state.sidebar_preferences.synced = synced;
-        state.sidebar_preferences.initialized = initialized;
-    }
-
-    #[gpui::test]
-    fn deleting_a_derived_group_archives_only_its_unpinned_sessions(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = runtime.enter();
-        let (out, mut requests) = tokio::sync::mpsc::channel(16);
-        let (replies, inbound) = tokio::sync::mpsc::channel(16);
-        let engine =
-            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell
-                    .settings
-                    .sidebar_pins_mut("local".into())
-                    .push("run-pinned".into());
-                shell.settings.space_filter = None;
-                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.chats = [
-                        ("run-new", Some("briefing")),
-                        ("a-chat", None),
-                        ("run-pinned", Some("briefing")),
-                        ("other-run", Some("other")),
-                        ("run-old", Some("briefing")),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, (id, task))| {
-                        let mut chat = pin_test_chat(id);
-                        chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
-                        chat.scheduled_task = task.map(Into::into);
-                        chat
-                    })
-                    .collect();
-                    state.set_test_engine(engine);
-                });
-                let sorted = |mut ids: Vec<String>| {
-                    ids.sort();
-                    ids
-                };
-                assert_eq!(
-                    sorted(shell.sidebar_group_chat_ids(SCHEDULED_GROUP_KEY, None, cx)),
-                    ["other-run", "run-new", "run-old"]
-                );
-                assert_eq!(
-                    sorted(shell.sidebar_group_chat_ids("local", None, cx)),
-                    ["a-chat"]
-                );
-                shell.group_menu = Some((
-                    SidebarGroupTarget::Scheduled {
-                        task: Some("briefing".into()),
-                    },
-                    gpui::point(px(0.0), px(0.0)),
-                ));
-                shell.delete_sidebar_group(
-                    &SidebarGroupTarget::Scheduled {
-                        task: Some("briefing".into()),
-                    },
-                    cx,
-                );
-                assert!(shell.group_menu.is_none());
-            })
-            .unwrap();
-        let mut archived = Vec::new();
-        for _ in 0..2 {
-            cx.run_until_parked();
-            let request: serde_json::Value =
-                serde_json::from_str(&requests.try_recv().expect("each run is archived")).unwrap();
-            assert_eq!(request["params"]["op"], "setChatArchived");
-            assert_eq!(request["params"]["archived"], true);
-            archived.push(request["params"]["chatId"].as_str().unwrap().to_owned());
-            let reply = serde_json::json!({"id":request["id"],"ok":{"ok":true}});
-            runtime.block_on(async {
-                replies.send(reply.to_string()).await.unwrap();
-                while replies.capacity() < replies.max_capacity() {
-                    tokio::task::yield_now().await;
-                }
-            });
-        }
-        cx.run_until_parked();
-        archived.sort();
-        assert_eq!(archived, ["run-new", "run-old"]);
-        assert!(requests.try_recv().is_err(), "the pinned run is untouched");
-    }
-
-    fn pin_test_chat(id: &str) -> mast_proto::Chat {
-        serde_json::from_value(serde_json::json!({
-            "id": id, "title": id, "deviceId": "local", "archived": false,
-            "createdAt": chrono::Utc::now(),
-        }))
-        .unwrap()
-    }
-
-    fn pin_test_engine() -> (
-        crate::state::EngineHandle,
-        tokio::sync::mpsc::Receiver<String>,
-        tokio::sync::mpsc::Sender<String>,
-    ) {
-        let (out, requests) = tokio::sync::mpsc::channel(16);
-        let (replies, inbound) = tokio::sync::mpsc::channel(16);
-        (
-            crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)),
-            requests,
-            replies,
-        )
-    }
-
-    fn pin_snapshot(revision: u64, pins: &[&str]) -> mast_proto::SidebarPreferencesState {
-        mast_proto::SidebarPreferencesState {
-            sections: vec![],
-            revision,
-            synced: true,
-            initialized: true,
-            pinned_session_ids: ids(pins),
-        }
-    }
-
-    fn deliver_pin_rpc_reply(
-        runtime: &tokio::runtime::Runtime,
-        replies: &tokio::sync::mpsc::Sender<String>,
-        reply: serde_json::Value,
-    ) {
-        // The current-thread reactor drains the actual RpcClient reader before
-        // GPUI resumes. No wall-clock sleeps or hand-invoked completion handlers.
-        runtime.block_on(async {
-            replies.send(reply.to_string()).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while replies.capacity() < replies.max_capacity() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-        });
-    }
-
-    #[gpui::test]
-    fn sidebar_rpc_replies_dispatch_each_queued_drop_once_and_recover_rejection(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = runtime.enter();
-        let (engine, mut requests, replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, true, true);
-                    state.set_test_engine(engine);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx);
-                shell.apply_sidebar_pin_change(key, pin_change("second"), cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            first["params"]["change"],
-            serde_json::to_value(pin_change("first")).unwrap()
-        );
-        assert!(requests.try_recv().is_err());
-        deliver_pin_rpc_reply(
-            &runtime,
-            &replies,
-            serde_json::json!({"id": first["id"], "ok": {"ok": true, "sidebarPreferences": pin_snapshot(1, &["first"])}}),
-        );
-        cx.run_until_parked();
-        let second: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            second["params"]["change"],
-            serde_json::to_value(pin_change("second")).unwrap()
-        );
-        assert!(requests.try_recv().is_err());
-        window
-            .update(cx, |shell, _, cx| {
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["first", "second"]));
-                assert_eq!(
-                    shell.state.read(cx).sidebar_preferences.pinned_session_ids,
-                    ids(&["first"])
-                );
-                shell.state.update(cx, |state, _| {
-                    state.apply_sidebar_preferences(pin_snapshot(3, &["remote"]));
-                });
-            })
-            .unwrap();
-        deliver_pin_rpc_reply(
-            &runtime,
-            &replies,
-            serde_json::json!({"id": second["id"], "err": "rejected by test registry"}),
-        );
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["remote"]));
-                assert!(shell.sidebar_pin_write.is_none());
-                assert!(
-                    shell
-                        .sidebar_notice
-                        .as_deref()
-                        .unwrap()
-                        .contains("rejected by test registry")
-                );
-            })
-            .unwrap();
-        assert!(requests.try_recv().is_err());
-    }
-
-    #[gpui::test]
-    fn sidebar_rpc_timeout_blocks_overtaking_until_the_late_reply_arrives(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = runtime.enter();
-        let (engine, mut requests, replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, true, true);
-                    state.set_test_engine(engine);
-                    state.sidebar_preferences = pin_snapshot(1, &["confirmed"]);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.apply_sidebar_pin_change(key.clone(), pin_change("slow"), cx);
-                shell.apply_sidebar_pin_change(key, pin_change("queued"), cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let request: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(21));
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(!shell.apply_sidebar_pin_change(key, pin_change("overtaking"), cx));
-            })
-            .unwrap();
-        assert!(
-            requests.try_recv().is_err(),
-            "queued and fresh drops must not overtake the slow write"
-        );
-        deliver_pin_rpc_reply(
-            &runtime,
-            &replies,
-            serde_json::json!({"id": request["id"], "ok": {"ok": true, "sidebarPreferences": pin_snapshot(2, &["slow"])}}),
-        );
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert!(shell.sidebar_pin_write.is_none());
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["slow"]));
-                assert!(
-                    shell.sidebar_notice.is_none(),
-                    "late success must clear the waiting notice"
-                );
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(shell.apply_sidebar_pin_change(key, pin_change("after-confirmation"), cx));
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let next: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            next["params"]["change"],
-            serde_json::to_value(pin_change("after-confirmation")).unwrap()
-        );
-        assert!(requests.try_recv().is_err());
-    }
-
-    #[gpui::test]
-    fn sidebar_unconfirmed_write_stops_the_queue_without_overwriting_observed_pins(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let (engine, _requests, _replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, true, true);
-                    state.set_test_engine(engine);
-                    state.sidebar_preferences = pin_snapshot(2, &["confirmed"]);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx);
-                shell.apply_sidebar_pin_change(key, pin_change("second"), cx);
-                let id = shell.sidebar_pin_write.as_ref().unwrap().id;
-                shell.mark_pin_write_unconfirmed(id, cx);
-                assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(!shell.apply_sidebar_pin_change(key, pin_change("third"), cx));
-                assert_eq!(
-                    shell.finish_sidebar_pin_write(id, Err("late error".into()), cx),
-                    None
-                );
-                assert!(shell.sidebar_pin_write.is_none());
-                shell.state.update(cx, |state, _| {
-                    state.apply_sidebar_preferences(pin_snapshot(3, &["first"]));
-                });
-                assert_eq!(
-                    shell.active_sidebar_pins(cx),
-                    ids(&["first"]),
-                    "a timed-out request may still commit and must be reconciled via its watch"
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_optimistic_writes_preserve_newer_edits_and_watch_state_on_failure(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let (engine, mut requests, _replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        let write_id = window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, false, true);
-                    state.sidebar_preferences = pin_snapshot(1, &["original"]);
-                    state.set_test_engine(engine);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx));
-                assert!(shell.apply_sidebar_pin_change(key, pin_change("second"), cx));
-                assert_eq!(
-                    shell.active_sidebar_pins(cx),
-                    ids(&["original", "first", "second"])
-                );
-                assert_eq!(
-                    shell.state.read(cx).sidebar_preferences.pinned_session_ids,
-                    ids(&["original"])
-                );
-                assert!(
-                    shell.mutate_task.is_none(),
-                    "pin writes cannot be cancelled by generic sidebar mutations"
-                );
-                shell.sidebar_pin_write.as_ref().unwrap().id
-            })
-            .unwrap();
-        cx.run_until_parked();
-        let request: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            request["params"]["change"],
-            serde_json::to_value(pin_change("first")).unwrap()
-        );
-        assert!(
-            requests.try_recv().is_err(),
-            "only one write may be in flight"
-        );
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_sidebar_preferences(pin_snapshot(7, &["remote"]));
-                });
-                assert_eq!(
-                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
-                    Some(pin_change("second"))
-                );
-                assert_eq!(
-                    shell.active_sidebar_pins(cx),
-                    ids(&["remote", "second"]),
-                    "an older failure must not roll back a newer drop"
-                );
-                assert_eq!(
-                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
-                    None
-                );
-                assert_eq!(
-                    shell.active_sidebar_pins(cx),
-                    ids(&["remote"]),
-                    "failure restores latest observed state, not the old backup"
-                );
-                assert!(
-                    shell
-                        .sidebar_notice
-                        .as_deref()
-                        .unwrap()
-                        .contains("Couldn't save sidebar changes")
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_write_acknowledgements_ignore_older_watches_and_previous_operations(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let (engine, _requests, _replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, true, true);
-                    state.set_test_engine(engine);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.apply_sidebar_pin_change(key.clone(), pin_change("saved"), cx);
-                let first = shell.sidebar_pin_write.as_ref().unwrap().id;
-                shell.finish_sidebar_pin_write(first, Ok(pin_snapshot(5, &["saved"])), cx);
-                shell.state.update(cx, |state, _| {
-                    assert!(!state.apply_sidebar_preferences(pin_snapshot(4, &["stale"])));
-                });
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved"]));
-                shell.apply_sidebar_pin_change(key, pin_change("new-drop"), cx);
-                let second = shell.sidebar_pin_write.as_ref().unwrap().id;
-                shell.finish_sidebar_pin_write(first, Err("late failure".into()), cx);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved", "new-drop"]));
-                shell.state.update(cx, |state, _| {
-                    state.apply_sidebar_preferences(pin_snapshot(8, &["newer-remote"]));
-                });
-                shell.sidebar_notice = Some("Unrelated archive error".into());
-                shell.finish_sidebar_pin_write(second, Ok(pin_snapshot(6, &["new-drop"])), cx);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer-remote"]));
-                assert_eq!(
-                    shell.sidebar_notice.as_deref(),
-                    Some("Unrelated archive error")
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_write_replies_cannot_cross_profile_or_engine_boundaries(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        for change_profile in [true, false] {
-            let (engine, _requests, _replies) = pin_test_engine();
-            let (replacement, _other_requests, _other_replies) = pin_test_engine();
-            window
-                .update(cx, |shell, _, cx| {
-                    shell.state.update(cx, |state, _| {
-                        remote_pin_state(state, true, true);
-                        state.set_test_engine(engine);
-                    });
-                    let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                    shell.apply_sidebar_pin_change(key, pin_change("pending"), cx);
-                    let id = shell.sidebar_pin_write.as_ref().unwrap().id;
-                    shell.state.update(cx, |state, _| {
-                        if change_profile {
-                            state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
-                        } else {
-                            state.set_test_engine(replacement);
-                        }
-                        state.sidebar_preferences = pin_snapshot(0, &["new-runtime"]);
-                    });
-                    shell.finish_sidebar_pin_write(id, Ok(pin_snapshot(99, &["old-runtime"])), cx);
-                    assert_eq!(
-                        shell.state.read(cx).sidebar_preferences.pinned_session_ids,
-                        ids(&["new-runtime"])
-                    );
-                    assert!(shell.sidebar_pin_write.is_none());
-                })
-                .unwrap();
-        }
-    }
-
-    #[gpui::test]
-    fn sidebar_drop_without_engine_returns_without_an_optimistic_pin(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, false, true);
-                    state.chats = vec![pin_test_chat("normal")];
-                });
-                shell.settings.space_filter = None;
-                let payload = SidebarSessionDrag {
-                    chat_id: "normal".into(),
-                    visible_ids: std::sync::Arc::new(vec![]),
-                    filter: None,
-                    profile_key: shell.active_sidebar_pin_profile_key(cx).unwrap(),
-                };
-                shell.begin_sidebar_session_transfer(
-                    &payload,
-                    gpui::point(px(0.0), px(0.0)),
-                    window,
-                    cx,
-                );
-                shell.finish_sidebar_session_transfer(&payload, SidebarSessionDrop::Pinned(0), cx);
-                assert!(shell.active_sidebar_pins(cx).is_empty());
-                assert!(shell.sidebar_session_return.is_some());
-                assert!(shell.sidebar_pin_write.is_none());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_menu_and_drop_both_reject_unknown_remote_preferences(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, false, false);
-                    state.chats = vec![pin_test_chat("normal")];
-                });
-                shell.settings.space_filter = None;
-                shell.set_chat_pinned("normal".into(), true, cx);
-                assert_eq!(
-                    shell.sidebar_notice.as_deref(),
-                    Some("Pins are still syncing")
-                );
-                let payload = SidebarSessionDrag {
-                    chat_id: "normal".into(),
-                    visible_ids: std::sync::Arc::new(vec![]),
-                    filter: None,
-                    profile_key: shell.active_sidebar_pin_profile_key(cx).unwrap(),
-                };
-                shell.begin_sidebar_session_transfer(
-                    &payload,
-                    gpui::point(px(0.0), px(0.0)),
-                    window,
-                    cx,
-                );
-                shell.finish_sidebar_session_transfer(&payload, SidebarSessionDrop::Pinned(0), cx);
-                assert!(shell.active_sidebar_pins(cx).is_empty());
-                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
-                assert_eq!(
-                    shell.sidebar_notice.as_deref(),
-                    Some("Pins are still syncing")
-                );
-                assert!(
-                    shell.sidebar_session_return.is_some(),
-                    "rejected drop returns to its origin"
-                );
-                assert!(shell.mutate_task.is_none());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_full_capacity_drop_returns_without_mutating_local_or_remote_pins(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, window, cx| {
-                let saved: Vec<String> = (0..mast_proto::MAX_SIDEBAR_PINS)
-                    .map(|n| format!("hidden-{n}"))
-                    .collect();
-                for remote in [false, true] {
-                    shell.state.update(cx, |state, _| {
-                        if remote {
-                            remote_pin_state(state, true, true);
-                            state.sidebar_preferences.pinned_session_ids = saved.clone();
-                        } else {
-                            state.workspace_scope = Some(WorkspaceScope::Local);
-                        }
-                        state.chats = vec![pin_test_chat("normal")];
-                    });
-                    let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                    if !remote {
-                        shell
-                            .settings
-                            .sidebar_pinned_session_ids_by_profile
-                            .insert(key.clone(), saved.clone());
-                    }
-                    shell.settings.space_filter = None;
-                    let payload = SidebarSessionDrag {
-                        chat_id: "normal".into(),
-                        visible_ids: std::sync::Arc::new(vec![]),
-                        filter: None,
-                        profile_key: key,
-                    };
-                    shell.begin_sidebar_session_transfer(
-                        &payload,
-                        gpui::point(px(0.0), px(0.0)),
-                        window,
-                        cx,
-                    );
-                    shell.finish_sidebar_session_transfer(
-                        &payload,
-                        SidebarSessionDrop::Pinned(0),
-                        cx,
-                    );
-                    assert_eq!(shell.active_sidebar_pins(cx), saved);
-                    assert_eq!(
-                        shell.sidebar_notice.as_deref(),
-                        Some("You can pin up to 200 sessions")
-                    );
-                    assert!(shell.sidebar_session_return.is_some());
-                }
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_validation_preserves_offline_edits_and_rejects_stale_profiles(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell
-                    .state
-                    .update(cx, |state, _| remote_pin_state(state, false, true));
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(shell.validate_sidebar_pin_change(&key, &ids(&["cached"]), cx));
-                assert!(!shell.validate_sidebar_pin_change(
-                    "another-profile",
-                    &ids(&["cached"]),
-                    cx
-                ));
-                assert!(!shell.validate_sidebar_pin_change(
-                    &key,
-                    &ids(&["duplicate", "duplicate"]),
-                    cx
-                ));
-                assert!(!shell.validate_sidebar_pin_change(&key, &ids(&[""]), cx));
-                let saved: Vec<_> = (0..mast_proto::MAX_SIDEBAR_PINS)
-                    .map(|n| format!("pin-{n}"))
-                    .collect();
-                let reordered = super::sidebar_session_drop_pins(
-                    &saved,
-                    &saved,
-                    &saved[0],
-                    super::SidebarSessionDrop::Pinned(199),
-                );
-                assert!(shell.validate_sidebar_pin_change(&key, &reordered, cx));
-                let unpinned = super::sidebar_session_drop_pins(
-                    &saved,
-                    &saved,
-                    &saved[0],
-                    super::SidebarSessionDrop::Regular,
-                );
-                assert!(shell.validate_sidebar_pin_change(&key, &unpinned, cx));
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_preferences_arriving_before_chats_never_prune_live_pins(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![]);
-                    remote_pin_state(state, true, true);
-                    state.sidebar_preferences.pinned_session_ids = ids(&["live-remote"]);
-                });
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["live-remote"]));
-                assert!(shell.mutate_task.is_none());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn sidebar_project_groups_preserve_pin_order_and_keyboard_order(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
-                shell
-                    .settings
-                    .sidebar_pins_mut("local".into())
-                    .push("pin".into());
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
-                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": Utc::now()
-                    })).unwrap()).collect();
-                    state.chats = [("pin", "a"), ("b-new", "b"), ("a-new", "a"), ("b-old", "b")]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, (id, project))| {
-                            let mut chat = pin_test_chat(id);
-                            chat.space_id = Some(project.into());
-                            chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
-                            chat
-                        })
-                        .collect();
-                });
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    ids(&["pin", "b-new", "b-old", "a-new"])
-                );
-                shell.settings.space_filter = Some("a".into());
-                assert_eq!(shell.sidebar_visible_order(cx), ids(&["pin", "a-new"]));
-            })
-            .unwrap();
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn scheduled_task_runs_group_last_unless_pinned(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell
-                    .settings
-                    .sidebar_pins_mut("local".into())
-                    .push("run-pinned".into());
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
-                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": Utc::now()
-                    })).unwrap()).collect();
-                    state.chats = [
-                        ("run-new", "a", Some("briefing")),
-                        ("a-chat", "a", None),
-                        ("run-pinned", "b", Some("briefing")),
-                        ("other-run", "a", Some("other")),
-                        ("b-chat", "b", None),
-                        ("run-old", "b", Some("briefing")),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, (id, project, task))| {
-                        let mut chat = pin_test_chat(id);
-                        chat.space_id = Some(project.into());
-                        chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
-                        chat.scheduled_task = task.map(Into::into);
-                        chat
-                    })
-                    .collect();
-                });
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    ids(&["run-pinned", "a-chat", "b-chat"]),
-                    "the group starts closed"
-                );
-                shell.scheduled_tasks_open = true;
-                let open = ids(&["run-pinned", "a-chat", "b-chat", "run-new", "run-old", "other-run"]);
-                assert_eq!(shell.sidebar_visible_order(cx), open);
-                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
-                assert_eq!(shell.sidebar_visible_order(cx), open);
-                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
-                assert_eq!(shell.sidebar_visible_order(cx), open);
-                shell
-                    .sidebar_collapsed_groups
-                    .insert(scheduled_subgroup_key("briefing"));
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    ids(&["run-pinned", "a-chat", "b-chat", "other-run"])
-                );
-            })
-            .unwrap();
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn sidebar_remote_pins_ignore_old_local_preferences(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![]);
-                    remote_pin_state(state, true, false);
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell
-                    .settings
-                    .sidebar_pinned_session_ids_by_profile
-                    .insert(key.clone(), ids(&["live-remote"]));
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert_eq!(shell.settings.sidebar_pins(&key), ids(&["live-remote"]));
-                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn pins_lead_without_changing_unpinned_recency() {
-        let recency = ids(&["newest", "p2", "middle", "p1", "oldest"]);
-        assert_eq!(
-            project_pinned_first(&recency, &ids(&["p1", "p2"])),
-            ids(&["p1", "p2", "newest", "middle", "oldest"])
-        );
-    }
-
-    #[test]
-    fn inline_session_slide_retargets_and_returns_without_a_ghost() {
-        use super::*;
-        let mut slide = SidebarSessionSlide {
-            from: 0.0,
-            to: SIDEBAR_SESSION_SLOT,
-            epoch: 1,
-            started: std::time::Instant::now() - TAB_SLIDE.total(),
-        };
-        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT);
-        assert_eq!(slide.from, SIDEBAR_SESSION_SLOT);
-        assert_eq!(slide.to, 2.0 * SIDEBAR_SESSION_SLOT);
-        assert_eq!(slide.epoch, 2);
-        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT);
-        assert_eq!(slide.epoch, 2);
-        slide.started -= TAB_SLIDE.total();
-        slide.retarget(0.0);
-        assert_eq!(slide.from, 2.0 * SIDEBAR_SESSION_SLOT);
-        assert_eq!(slide.to, 0.0);
-    }
-
-    #[test]
-    fn session_layout_reverses_from_its_current_height() {
-        use super::*;
-        let mut slide = SidebarSessionSlide {
-            from: 0.0,
-            to: SIDEBAR_SESSION_SLOT,
-            epoch: 0,
-            started: std::time::Instant::now() - TAB_SLIDE.total() / 2,
-        };
-        let halfway = slide.current();
-        assert!(halfway > 0.0 && halfway < SIDEBAR_SESSION_SLOT);
-        slide.retarget(0.0);
-        assert!((slide.from - halfway).abs() < 0.5);
-        assert_eq!(slide.to, 0.0);
-        slide.started -= TAB_SLIDE.total();
-        assert_eq!(slide.current(), 0.0);
-    }
-
-    #[test]
-    fn transfer_gaps_shift_neighbors_without_reordering_data() {
-        use super::sidebar_gap_offset;
-        // Entering from another section opens a full slot at the destination.
-        assert_eq!(sidebar_gap_offset(0, None, 1, 63.0), 0.0);
-        assert_eq!(sidebar_gap_offset(1, None, 1, 63.0), 63.0);
-        assert_eq!(sidebar_gap_offset(2, None, 1, 63.0), 63.0);
-        // Within a normal group, its original vacant slot is reused.
-        assert_eq!(sidebar_gap_offset(0, Some(2), 0, 63.0), 63.0);
-        assert_eq!(sidebar_gap_offset(1, Some(2), 0, 63.0), 63.0);
-        assert_eq!(sidebar_gap_offset(2, Some(2), 0, 63.0), 0.0);
-        assert_eq!(sidebar_gap_offset(1, Some(0), 3, 63.0), -63.0);
-        assert_eq!(sidebar_gap_offset(3, Some(0), 3, 63.0), 0.0);
-    }
-
-    #[gpui::test]
-    fn pinned_disclosure_click_collapses_and_restores_rows(cx: &mut gpui::TestAppContext) {
-        use super::*;
-
-        struct PinnedHost(Entity<Shell>);
-        impl Render for PinnedHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    let items = (0..2)
-                        .map(|_| div().h(px(61.0)).into_any_element())
-                        .collect();
-                    div()
-                        .w(px(280.0))
-                        .flex()
-                        .flex_col()
-                        .child(shell.render_pinned_section(items, 128.0, &Theme::default(), cx))
-                })
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            PinnedHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Development);
-                    state.sidebar_preferences.pinned_session_ids = vec!["pin".into()];
-                    state.chats = ["pin", "regular"]
-                        .into_iter()
-                        .map(|id| {
-                            serde_json::from_value(serde_json::json!({
-                                "id": id, "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now(),
-                            }))
-                            .unwrap()
-                        })
-                        .collect();
-                });
-                shell
-            }))
-        });
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-        for open in [true, false, true] {
-            if !open || !shell.read_with(cx, |shell, _| shell.pinned_open) {
-                let toggle = cx.debug_bounds("pinned-toggle").unwrap().center();
-                cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
-                cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
-            }
-            shell.update(cx, |shell, cx| {
-                assert_eq!(shell.pinned_open, open);
-                let expected = if open {
-                    vec!["pin", "regular"]
-                } else {
-                    vec!["regular"]
-                };
-                assert_eq!(shell.sidebar_visible_order(cx), expected);
-                assert_eq!(shell.active_sidebar_pins(cx), ["pin"]);
-                // Finish the tween to assert settled layout without wall-clock sleeps.
-                shell.sidebar_disclosure_motion.clear();
-                cx.notify();
-            });
-            cx.update(|window, cx| {
-                window.refresh();
-                window.draw(cx).clear();
-            });
-            let bounds = cx.debug_bounds("sidebar-pinned-section").unwrap();
-            assert_eq!(
-                f32::from(bounds.size.height),
-                if open { 156.0 } else { 28.0 }
-            );
-            assert!(cx.debug_bounds("sidebar-pinned-divider").is_none());
-        }
-    }
-
-    #[gpui::test]
-    fn session_section_drops_preserve_live_activity_order(cx: &mut gpui::TestAppContext) {
-        exercise_session_section_drops(cx, false, true);
-    }
-
-    #[gpui::test]
-    fn compact_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
-        exercise_session_section_drops(cx, true, false);
-    }
-
-    #[gpui::test]
-    fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
-        exercise_session_section_drops(cx, false, false);
-    }
-
-    #[test]
-    fn sidebar_rows_cull_only_beyond_one_viewport_of_overscan() {
-        use super::sidebar_row_offscreen;
-        assert!(!sidebar_row_offscreen(None, 0.0, 800.0), "unmeasured rows render");
-        assert!(!sidebar_row_offscreen(Some((1590.0, 1620.0)), 0.0, 800.0));
-        assert!(sidebar_row_offscreen(Some((1610.0, 1640.0)), 0.0, 800.0));
-        assert!(!sidebar_row_offscreen(Some((1000.0, 1030.0)), 1800.0, 800.0));
-        assert!(sidebar_row_offscreen(Some((960.0, 990.0)), 1800.0, 800.0));
-        assert!(!sidebar_row_offscreen(Some((5000.0, 5030.0)), 0.0, 0.0), "unmeasured viewport");
-    }
-
-    /// Off-screen sessions keep their slot height but build no row content, and
-    /// scrolling to them fills them in.
-    #[gpui::test]
-    fn sidebar_culls_offscreen_session_rows(cx: &mut gpui::TestAppContext) {
-        use super::*;
-
-        struct SidebarHost(Entity<Shell>);
-        impl Render for SidebarHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    div()
-                        .w(px(280.0))
-                        .h(px(800.0))
-                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-        });
-        const COUNT: usize = 200;
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            SidebarHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                shell.settings.sidebar_compact = true;
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.chats = (0..COUNT)
-                        .map(|ix| {
-                            serde_json::from_value(serde_json::json!({
-                                "id": format!("s{ix}"), "title": format!("s{ix}"),
-                                "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
-                            }))
-                            .unwrap()
-                        })
-                        .collect();
-                });
-                shell
-            }))
-        });
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-        cx.run_until_parked();
-        // The first frame measures every row; the next one culls.
-        shell.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-
-        assert_eq!(COUNT, 200, "ids below name the last row");
-        assert!(cx.debug_bounds("chat-s0").is_some(), "visible rows render");
-        assert!(cx.debug_bounds("chat-s199").is_none(), "far rows are culled");
-        // Unlaid-out slots still report where they sit, so far rows are not built.
-        shell.read_with(cx, |shell, _| {
-            let (_, top, bottom) = shell.sidebar_row_extents.borrow()["s199"];
-            assert!(super::sidebar_row_offscreen(
-                Some((top, bottom)),
-                -f32::from(shell.sidebar_scroll.offset().y),
-                f32::from(shell.sidebar_scroll.bounds().size.height),
-            ));
-        });
-
-        shell.update(cx, |shell, cx| {
-            let bottom = shell.sidebar_scroll.max_offset().y;
-            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), -bottom));
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-s199").is_some(), "scrolled-to rows render");
-        assert!(cx.debug_bounds("chat-s0").is_none(), "rows scrolled far away are culled");
-
-        // A far row that re-sorts to the top fills in without another prompt.
-        // Reduced motion lands the re-sort glide at once on the frozen test clock.
-        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-        shell.update(cx, |shell, cx| {
-            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-            shell.state.update(cx, |state, _| {
-                let chat = state.chats.iter_mut().find(|chat| chat.id == "s150").unwrap();
-                chat.created_at = Utc::now() + chrono::Duration::minutes(5);
-            });
-            cx.notify();
-        });
-        cx.run_until_parked();
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.sidebar_visible_order(cx).first().map(String::as_str), Some("s150"));
-        });
-        assert!(cx.debug_bounds("chat-s150").is_some(), "re-sorted row renders");
-    }
-
-    /// The sidebar chat row wears the account pill only for a chat pinned to
-    /// a managed account (not Default, not unpinned).
-    #[gpui::test]
-    fn sidebar_chat_row_shows_account_pill_only_for_managed_pins(cx: &mut gpui::TestAppContext) {
-        use super::*;
-
-        struct SidebarHost(Entity<Shell>);
-        impl Render for SidebarHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    div()
-                        .w(px(280.0))
-                        .h(px(800.0))
-                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            SidebarHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.chats = ["pinned", "plain", "unpinned"]
-                        .into_iter()
-                        .map(|id| {
-                            serde_json::from_value(serde_json::json!({
-                                "id": id, "title": id, "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now(),
-                            }))
-                            .unwrap()
-                        })
-                        .collect();
-                    state.managed_accounts.insert(
-                        "local".into(),
-                        serde_json::from_value(serde_json::json!({
-                            "accounts": [{ "id": "a1", "harness": "claude-code", "label": "Work" }],
-                            "projectDefaults": [],
-                            "chatPins": [
-                                { "chatId": "pinned", "harness": "claude-code", "accountId": "a1" },
-                                { "chatId": "plain", "harness": "claude-code" }
-                            ]
-                        }))
-                        .unwrap(),
-                    );
-                });
-                shell
-            }))
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-pinned").is_some(), "rows render");
-        assert!(cx.debug_bounds("chat-plain").is_some());
-        assert!(cx.debug_bounds("chat-account-pinned").is_some());
-        assert!(cx.debug_bounds("chat-account-plain").is_none());
-        assert!(cx.debug_bounds("chat-account-unpinned").is_none());
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-        shell.update(cx, |shell, cx| {
-            shell.sessions_open = false;
-            cx.notify();
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear();
-        });
-        assert!(cx.debug_bounds("chat-pinned").is_none());
-        shell.update(cx, |shell, cx| {
-            shell.sessions_open = true;
-            cx.notify();
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear();
-        });
-        assert!(cx.debug_bounds("chat-pinned").is_some());
-    }
-
-    fn exercise_session_section_drops(
-        cx: &mut gpui::TestAppContext,
-        compact: bool,
-        show_label: bool,
-    ) {
-        use super::*;
-
-        struct SidebarHost(Entity<Shell>);
-        impl Render for SidebarHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    div()
-                        .w(px(280.0))
-                        .h(px(800.0))
-                        .on_drag_move::<SidebarSessionDrag>(
-                            cx.listener(Shell::contain_pinned_session_drag),
-                        )
-                        .on_drop::<SidebarSessionDrag>(
-                            cx.listener(|shell, _, _, cx| {
-                                shell.cancel_sidebar_session_transfer(cx)
-                            }),
-                        )
-                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            SidebarHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                shell.settings.sidebar_show_branch = true;
-                shell.settings.sidebar_compact = compact;
-                shell.settings.sidebar_show_project_label = show_label;
-                shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.chats = ["older", "newer"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, id)| {
-                            serde_json::from_value(serde_json::json!({
-                                "id": id, "title": id, "deviceId": "local", "archived": false,
-                                "sourceContext": {
-                                    "checkoutId": "checkout", "repoRoot": "/project", "cwd": "/project",
-                                    "branch": "feature/sidebar-drag", "observedAt": Utc::now(),
-                                },
-                                "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
-                            }))
-                            .unwrap()
-                        })
-                        .collect();
-                    let mut archived = state.chats[0].clone();
-                    archived.id = "archived".into();
-                    archived.archived = true;
-                    state.chats.push(archived);
-                });
-                shell
-            }))
-        });
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-
-        // Archived rows share geometry and metadata in every sidebar layout.
-        let active = cx.debug_bounds("chat-older").unwrap();
-        let archived = cx.debug_bounds("chat-archived").unwrap();
-        assert_eq!(active.size, archived.size);
-        assert_eq!(cx.debug_bounds("chat-branch-archived").is_some(), !compact);
-        assert_eq!(
-            cx.debug_bounds("chat-device-archived").is_some(),
-            !compact && show_label
-        );
-        if compact {
-            assert!(cx.debug_bounds("chat-status-archived").is_some());
-            let time = cx.debug_bounds("chat-time-archived").unwrap();
-            cx.simulate_mouse_move(archived.center(), None, gpui::Modifiers::default());
-            assert_eq!(cx.debug_bounds("chat-time-archived").unwrap(), time);
-        }
-
-        // Sessions owns all unpinned rows, including their keyboard traversal.
-        for open in [false, true] {
-            let toggle = cx.debug_bounds("sessions-toggle").unwrap().center();
-            cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
-            cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
-            shell.update(cx, |shell, cx| {
-                assert_eq!(shell.sessions_open, open);
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    if open {
-                        ids(&["newer", "older"])
-                    } else {
-                        Vec::new()
-                    }
-                );
-                shell.sidebar_disclosure_motion.clear();
-                cx.notify();
-            });
-        }
-        if compact {
-            let status = cx.debug_bounds("chat-status-older").unwrap();
-            let time = cx.debug_bounds("chat-time-older").unwrap();
-            assert!(status.right() < time.left());
-            let row = cx.debug_bounds("chat-older").unwrap();
-            let title = cx.debug_bounds("chat-title-older").unwrap();
-            cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-            assert!(cx.debug_bounds("chat-title-older").unwrap().size.width < title.size.width);
-            assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), status);
-            assert_eq!(cx.debug_bounds("chat-time-older").unwrap(), time);
-        }
-
-        // Dragging a regular session over another regular session is a no-op.
-        let source_bounds = cx.debug_bounds("chat-older").unwrap();
-        let from = source_bounds.center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let dragged_card = cx.debug_bounds("chat-older").unwrap();
-        assert!(cx.debug_bounds("drag-chat-older").is_none());
-        assert_eq!(dragged_card.size, source_bounds.size);
-        assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
-        assert_eq!(
-            f32::from(dragged_card.size.height),
-            super::super::sidebar_row_height(compact, show_label, true, false, crate::ui_style::UiStyle::MINIMAL.tokens)
-        );
-        // Even a sub-row move follows the pointer immediately, before a drop slot changes.
-        let pointer = from + gpui::point(px(8.0), px(7.0));
-        cx.simulate_mouse_move(pointer, Some(MouseButton::Left), gpui::Modifiers::default());
-        let moving = cx.debug_bounds("chat-older").unwrap();
-        assert!((f32::from(moving.origin.y - source_bounds.origin.y) - 7.0).abs() < 1.0);
-        let slot = cx.debug_bounds("session-slot-newer").unwrap();
-        let target = gpui::point(slot.center().x, slot.top() + px(3.0));
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            let drag = shell.sidebar_session_transfer.as_ref().unwrap();
-            assert_eq!(drag.preview.as_ref().unwrap().group, "regular");
-            assert!(drag.siblings["newer"].to > 0.0);
-            assert!(shell.active_sidebar_pins(cx).is_empty());
-        });
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        let returning_card = cx.debug_bounds("chat-older").unwrap();
-        assert_eq!(returning_card.size, source_bounds.size);
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), Vec::<String>::new());
-            assert!(shell.sidebar_session_return.is_some());
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
-            shell.sidebar_session_return = None;
-            cx.notify();
-        });
-
-        // The transient empty Pinned header accepts the first pin.
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let target = cx.debug_bounds("pinned-toggle").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            let drag = shell.sidebar_session_transfer.as_mut().unwrap();
-            assert_eq!(drag.source_collapse.to, drag.row_height + SIDEBAR_LIST_GAP);
-            drag.source_collapse.started -= TAB_SLIDE.total();
-            for gap in drag.section_gaps.values_mut() {
-                gap.started -= TAB_SLIDE.total();
-            }
-            cx.notify();
-        });
-        assert_eq!(
-            cx.debug_bounds("session-slot-older").unwrap().size.height,
-            px(0.0)
-        );
-        // Only the surviving row (and minimum list spacing) remains, not a
-        // second card-sized vacancy at the source.
-        assert!(
-            cx.debug_bounds("sidebar-regular-sessions")
-                .unwrap()
-                .size
-                .height
-                <= cx.debug_bounds("session-slot-newer").unwrap().size.height
-                    + px(SIDEBAR_LIST_GAP)
-        );
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            assert!(
-                shell.sidebar_resort.is_empty(),
-                "successful pin must not replay the movement"
-            );
-            assert!(shell.sidebar_new_keys.is_empty());
-            cx.notify();
-        });
-
-        // A single pin can leave Pinned and returns to its activity position.
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let slot = cx.debug_bounds("session-slot-newer").unwrap();
-        let target = gpui::point(slot.center().x, slot.top() + px(3.0));
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.sidebar_transfer_extra_gap("regular") > 0.0);
-            assert!(shell.sidebar_session_transfer.as_ref().unwrap().siblings["newer"].to > 0.0);
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
-        });
-        shell.update(cx, |shell, cx| {
-            let drag = shell.sidebar_session_transfer.as_mut().unwrap();
-            assert_eq!(drag.source_collapse.to, drag.row_height);
-            drag.source_collapse.started -= TAB_SLIDE.total();
-            for gap in drag.section_gaps.values_mut() {
-                gap.started -= TAB_SLIDE.total();
-            }
-            cx.notify();
-        });
-        assert_eq!(
-            cx.debug_bounds("session-slot-older").unwrap().size.height,
-            px(0.0)
-        );
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert!(shell.active_sidebar_pins(cx).is_empty());
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
-            assert!(
-                shell.sidebar_resort.is_empty(),
-                "successful unpin must not replay the movement"
-            );
-            assert!(shell.sidebar_new_keys.is_empty());
-            cx.notify();
-        });
-
-        // A live activity update still wins while the normal session is dragged.
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state
-                    .chats
-                    .iter_mut()
-                    .find(|chat| chat.id == "older")
-                    .unwrap()
-                    .last_message_at = Some(Utc::now());
-            });
-            cx.notify();
-        });
-        let target = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert!(shell.active_sidebar_pins(cx).is_empty());
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            assert!(shell.sidebar_session_return.is_some());
-        });
-
-        // A closed Pinned header remains a valid target and opens on success.
-        shell.update(cx, |shell, cx| {
-            shell.pinned_open = false;
-            cx.notify();
-        });
-        let from = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let target = cx.debug_bounds("pinned-toggle").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert!(shell.pinned_open);
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer"]));
-            assert!(shell.sidebar_resort.is_empty());
-            assert!(shell.sidebar_new_keys.is_empty());
-            cx.notify();
-        });
-
-        // Dropping outside the sections cancels; it must not unpin the source.
-        let from = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let regular = cx.debug_bounds("session-slot-older").unwrap().center();
-        cx.simulate_mouse_move(regular, Some(MouseButton::Left), gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            let drag = shell.sidebar_session_transfer.as_mut().unwrap();
-            assert!(drag.source_collapse.to > 0.0);
-            drag.source_collapse.started -= TAB_SLIDE.total() / 2;
-            for gap in drag.section_gaps.values_mut() {
-                gap.started -= TAB_SLIDE.total() / 2;
-            }
-            cx.notify();
-        });
-        let outside = gpui::point(px(275.0), px(790.0));
-        cx.simulate_mouse_move(outside, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(outside, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer"]));
-            assert!(shell.sidebar_session_transfer.is_none());
-            let returning = shell.sidebar_session_return.as_ref().unwrap();
-            assert!(returning.transfer.source_collapse.from > 0.0);
-            assert_eq!(returning.transfer.source_collapse.to, 0.0);
-            assert!(
-                returning
-                    .transfer
-                    .section_gaps
-                    .values()
-                    .all(|gap| gap.to == 0.0)
-            );
-        });
-
-        // Remote pin changes invalidate an in-flight snapshot instead of being overwritten.
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        shell.update(cx, |shell, cx| {
-            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            shell
-                .settings
-                .sidebar_pinned_session_ids_by_profile
-                .insert(key, ids(&["older", "newer"]));
-            cx.notify();
-        });
-        let target = cx.debug_bounds("pinned-toggle").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older", "newer"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
-            shell.reduced_motion = true;
-            cx.notify();
-        });
-
-        // Even with no regular rows, a temporary destination can unpin one.
-        let from = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let target = cx
-            .debug_bounds("sidebar-regular-sessions")
-            .unwrap()
-            .center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            assert!(shell.sidebar_resort.is_empty());
-            assert!(shell.sidebar_new_keys.is_empty());
-            cx.notify();
-        });
-
-        // Dropping in the lower half of a pinned row inserts after that row.
-        let from = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let row = cx.debug_bounds("chat-older").unwrap();
-        let target = gpui::point(row.center().x, row.bottom() - px(3.0));
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.sidebar_transfer_extra_gap("pinned") > 0.0);
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
-        });
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older", "newer"]));
-            assert!(shell.sidebar_resort.is_empty());
-            assert!(shell.sidebar_new_keys.is_empty());
-            cx.notify();
-        });
-
-        // Existing pin-to-pin reordering still works with the shared payload.
-        shell.update(cx, |shell, cx| {
-            shell.reduced_motion = false;
-            cx.notify();
-        });
-        let from = cx.debug_bounds("chat-newer").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let row = cx.debug_bounds("chat-older").unwrap();
-        let target = gpui::point(row.center().x, row.top() + px(3.0));
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer", "older"]));
-            assert!(
-                shell.sidebar_resort.is_empty(),
-                "successful reorder must not replay the movement"
-            );
-            assert!(shell.sidebar_new_keys.is_empty());
-            assert!(shell.sidebar_session_transfer.is_none());
-            assert!(shell.sidebar_session_return.is_none());
-        });
-
-        // Suppressing a completed drag must not disable later activity-driven glides.
-        shell.update(cx, |shell, cx| {
-            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            for id in shell.active_sidebar_pins(cx) {
-                shell.apply_sidebar_pin_change(
-                    key.clone(),
-                    mast_proto::SidebarPinChange::Unpin { session_id: id },
-                    cx,
-                );
-            }
-            cx.notify();
-        });
-        let epoch = shell.update(cx, |shell, cx| {
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            shell.resort_epoch
-        });
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state
-                    .chats
-                    .iter_mut()
-                    .find(|chat| chat.id == "newer")
-                    .unwrap()
-                    .last_message_at = Some(Utc::now() + chrono::Duration::seconds(1));
-            });
-            cx.notify();
-        });
-        shell.update(cx, |shell, cx| {
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
-            assert!(shell.resort_epoch > epoch);
-            assert!(!shell.sidebar_resort.is_empty());
-        });
-        // A collapsed Sessions header remains an unpin target and opens on drop.
-        shell.update(cx, |shell, cx| {
-            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            *shell.settings.sidebar_pins_mut(key) = ids(&["older"]);
-            shell.sidebar_session_return = None;
-            shell.sidebar_resort.clear();
-            shell.sidebar_disclosure_motion.clear();
-            cx.notify();
-        });
-        let toggle = cx.debug_bounds("sessions-toggle").unwrap().center();
-        cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert!(!shell.sessions_open);
-            shell.sidebar_disclosure_motion.clear();
-            cx.notify();
-        });
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let target = cx.debug_bounds("sessions-toggle").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.sessions_open);
-            assert!(shell.active_sidebar_pins(cx).is_empty());
-        });
-    }
-
-    #[test]
-    fn missing_duplicate_and_archived_pins_do_not_disturb_regular_rows() {
-        let recency = ids(&["b", "a", "c"]);
-        assert_eq!(
-            project_pinned_first(&recency, &ids(&["archived", "a", "a"])),
-            ids(&["a", "b", "c"])
-        );
-    }
-
-    #[test]
-    fn filtered_pin_reorder_preserves_every_other_pins_relative_order() {
-        let saved = ids(&["a1", "b1", "a2", "archived", "b2"]);
-        let visible = ids(&["a1", "a2"]);
-        assert_eq!(
-            reorder_visible_pins(&saved, &visible, 0, 1),
-            ids(&["b1", "a2", "a1", "archived", "b2"])
-        );
-    }
-
-    #[test]
-    fn pin_reorder_rejects_invalid_or_noop_moves() {
-        let saved = ids(&["a", "b"]);
-        assert_eq!(reorder_visible_pins(&saved, &saved, 0, 0), saved);
-        assert_eq!(reorder_visible_pins(&saved, &saved, 8, 0), saved);
-    }
-
-    #[test]
-    fn pin_cleanup_retains_archived_and_prunes_deleted() {
-        let mut saved = ids(&["active", "archived", "deleted", "active"]);
-        let known = HashSet::from(["active".to_string(), "archived".to_string()]);
-        assert!(retain_known_pins(&mut saved, &known));
-        assert_eq!(saved, ids(&["active", "archived"]));
-        assert!(!retain_known_pins(&mut saved, &known));
-    }
-
-    #[test]
-    fn pin_cleanup_for_one_profile_leaves_other_profiles_untouched() {
-        let mut settings = crate::settings::UiSettings::default();
-        settings
-            .sidebar_pins_mut("local".to_string())
-            .extend(ids(&["local-active", "local-deleted"]));
-        settings
-            .sidebar_pins_mut("synced:org-1:user-1".to_string())
-            .push("synced-pin".to_string());
-
-        let known = HashSet::from(["local-active".to_string()]);
-        assert!(retain_known_pins(
-            settings.sidebar_pins_mut("local".to_string()),
-            &known,
-        ));
-        assert_eq!(settings.sidebar_pins("local"), ["local-active"]);
-        assert_eq!(settings.sidebar_pins("synced:org-1:user-1"), ["synced-pin"]);
-    }
-
-    #[test]
-    fn sidebar_hit_testing_uses_compact_and_mixed_row_heights() {
-        assert_eq!(super::row_drop_index(31.0, &[29.0, 29.0], false), Some(1));
-        assert_eq!(super::row_drop_index(61.0, &[29.0, 29.0], false), None);
-        assert_eq!(super::row_drop_index(48.0, &[45.0, 63.0], false), Some(1));
-        assert_eq!(super::row_drop_index(-1.0, &[29.0], false), None);
-        assert_eq!(super::row_drop_index(-1.0, &[29.0], true), Some(0));
-        assert_eq!(super::row_drop_index(500.0, &[29.0, 45.0], true), Some(1));
-    }
-
-    #[test]
-    fn pinned_drop_index_quantizes_clamps_and_rejects_outside() {
-        assert_eq!(pinned_session_drop_index(-1.0, 3), None);
-        assert_eq!(pinned_session_drop_index(0.0, 3), Some(0));
-        assert_eq!(
-            pinned_session_drop_index(super::super::SIDEBAR_SESSION_SLOT, 3),
-            Some(1)
-        );
-        assert_eq!(pinned_session_drop_index(500.0, 3), None);
-        assert_eq!(pinned_session_drop_index(0.0, 0), None);
-    }
-
-    #[test]
-    fn pinned_drag_accounts_for_disclosure_header_and_scroll() {
-        // The first row starts 36px below the scroll viewport: 4px list
-        // padding, 28px header, and 4px body inset.
-        let viewport_top = 100.0;
-        let row_top = 136.0;
-        assert_eq!(
-            super::pinned_session_pointer_y(row_top, viewport_top, 0.0),
-            0.0
-        );
-        assert_eq!(
-            pinned_session_drop_index(super::pinned_session_pointer_y(125.0, viewport_top, 0.0), 3),
-            None,
-        );
-        assert_eq!(
-            pinned_session_drop_index(
-                super::pinned_session_pointer_y(row_top, viewport_top, 63.0),
-                3
-            ),
-            Some(1),
-        );
-    }
-
-    #[test]
-    fn sidebar_wide_pin_drag_clamps_to_the_nearest_pinned_slot() {
-        assert_eq!(pinned_session_clamped_index(-50.0, 3), Some(0));
-        assert_eq!(
-            pinned_session_clamped_index(super::super::SIDEBAR_SESSION_SLOT, 3),
-            Some(1)
-        );
-        assert_eq!(pinned_session_clamped_index(500.0, 3), Some(2));
-        assert_eq!(pinned_session_clamped_index(0.0, 0), None);
-    }
-
-    #[test]
-    fn session_transfers_only_change_pin_membership_and_order() {
-        use super::{SidebarSessionDrop, sidebar_session_drop_pins};
-        let saved = ids(&["hidden", "a", "b", "hidden-tail"]);
-        let visible = ids(&["a", "b"]);
-        assert_eq!(
-            sidebar_session_drop_pins(&saved, &visible, "normal", SidebarSessionDrop::Regular),
-            saved
-        );
-        assert_eq!(
-            sidebar_session_drop_pins(&saved, &visible, "normal", SidebarSessionDrop::Pinned(1)),
-            ids(&["hidden", "a", "normal", "b", "hidden-tail"])
-        );
-        assert_eq!(
-            sidebar_session_drop_pins(&saved, &visible, "normal", SidebarSessionDrop::Pinned(2)),
-            ids(&["hidden", "a", "b", "normal", "hidden-tail"])
-        );
-        assert_eq!(
-            sidebar_session_drop_pins(&saved, &visible, "a", SidebarSessionDrop::Regular),
-            ids(&["hidden", "b", "hidden-tail"])
-        );
-        assert_eq!(
-            sidebar_session_drop_pins(&saved, &visible, "a", SidebarSessionDrop::Pinned(1)),
-            ids(&["hidden", "b", "a", "hidden-tail"])
-        );
-        assert_eq!(
-            sidebar_session_drop_pins(&[], &[], "first", SidebarSessionDrop::Pinned(0)),
-            ids(&["first"])
-        );
-        assert!(
-            sidebar_session_drop_pins(
-                &ids(&["only"]),
-                &ids(&["only"]),
-                "only",
-                SidebarSessionDrop::Regular
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn pinned_edge_scroll_is_proportional_and_lifecycle_bound() {
-        let top = 100.0;
-        let bottom = 300.0;
-        assert_eq!(pinned_drag_scroll_delta(200.0, top, bottom), 0.0);
-        assert_eq!(pinned_drag_scroll_delta(124.0, top, bottom), -6.0);
-        assert_eq!(pinned_drag_scroll_delta(276.0, top, bottom), 6.0);
-        assert_eq!(
-            pinned_drag_scroll_step(true, 4, 4, 20.0, 100.0, 6.0),
-            Some(26.0)
-        );
-        assert_eq!(pinned_drag_scroll_step(false, 4, 4, 20.0, 100.0, 6.0), None);
-        assert_eq!(pinned_drag_scroll_step(true, 3, 4, 20.0, 100.0, 6.0), None);
-    }
-
-    #[test]
-    fn pinned_drag_snapshot_requires_the_same_remote_order() {
-        let snapshot = ids(&["a", "b"]);
-        assert!(pinned_drag_snapshot_is_valid("a", &snapshot, &snapshot));
-        assert!(!pinned_drag_snapshot_is_valid(
-            "a",
-            &snapshot,
-            &ids(&["b", "a"])
-        ));
-        assert!(!pinned_drag_snapshot_is_valid("a", &snapshot, &ids(&["a"])));
-    }
-}
+#[path = "spaces_tests/pinned_session_tests.rs"]
+mod pinned_session_tests;
 
 pub(super) fn pinned_drag_scroll_step(
     drag_active: bool,
@@ -3394,7 +1201,9 @@ impl Shell {
         }
         let sections = self.active_sidebar_sections(cx);
         let managed_source = sections.iter().any(|section| {
-            section.id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
+            section
+                .id
+                .starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
                 && section.session_ids.contains(&payload.chat_id)
         });
         let managed_target = matches!(&target, SidebarSessionDrop::Section(id)
@@ -4124,7 +1933,7 @@ impl Shell {
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
             if group == 2 {
-                groups.push(popover::menu_separator(&theme).into_any_element());
+                groups.push(popover::menu_separator(theme).into_any_element());
             }
             let open = submenu == Some(group);
             let entity = cx.entity().downgrade();
@@ -4298,7 +2107,7 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        groups.push(popover::menu_separator(&theme).into_any_element());
+        groups.push(popover::menu_separator(theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-view-compact-hover")
@@ -4345,7 +2154,7 @@ impl Shell {
                 )
                 .into_any_element(),
         );
-        groups.push(popover::menu_separator(&theme).into_any_element());
+        groups.push(popover::menu_separator(theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-create-section-hover")
@@ -4513,61 +2322,70 @@ impl Shell {
         let view_open = self.sidebar_view_menu.is_open();
         let sidebar_width = self.sidebar_shown_width();
         let view_focus = self.sidebar_view_trigger_focus.clone();
-        let view_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-view-options", theme, sidebar_width)
-            .role(gpui::Role::Button)
-            .aria_label("Sidebar view options")
-            .aria_expanded(view_open)
-            .track_focus(&view_focus)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border.opacity(0.0))
-            .focus_visible(|el| el.border_color(theme.border_strong))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .bg(if view_open {
-                theme.glass_hover()
+        let view_trigger = crate::components::shell_parts::sidebar_action_frame(
+            "sidebar-view-options",
+            theme,
+            sidebar_width,
+        )
+        .role(gpui::Role::Button)
+        .aria_label("Sidebar view options")
+        .aria_expanded(view_open)
+        .track_focus(&view_focus)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.border.opacity(0.0))
+        .focus_visible(|el| el.border_color(theme.border_strong))
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .bg(if view_open {
+            theme.glass_hover()
+        } else {
+            theme.glass_hover().opacity(0.0)
+        })
+        .hover(|el| el.bg(theme.glass_hover()))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, _| this.sidebar_view_menu.note_trigger_press()),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this.sidebar_view_menu.take_press_was_open() {
+                this.close_sidebar_view_menu(cx);
             } else {
-                theme.glass_hover().opacity(0.0)
-            })
-            .hover(|el| el.bg(theme.glass_hover()))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.sidebar_view_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                if this.sidebar_view_menu.take_press_was_open() {
+                this.open_sidebar_view_menu(window, cx);
+            }
+        }))
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(
+                event.keystroke.key.to_ascii_lowercase().as_str(),
+                "enter" | "space" | "arrowdown"
+            ) {
+                cx.stop_propagation();
+                if this.sidebar_view_menu.is_open()
+                    && !event.keystroke.key.eq_ignore_ascii_case("arrowdown")
+                {
                     this.close_sidebar_view_menu(cx);
-                } else {
+                } else if !this.sidebar_view_menu.is_open() {
                     this.open_sidebar_view_menu(window, cx);
                 }
-            }))
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if matches!(
-                    event.keystroke.key.to_ascii_lowercase().as_str(),
-                    "enter" | "space" | "arrowdown"
-                ) {
-                    cx.stop_propagation();
-                    if this.sidebar_view_menu.is_open()
-                        && !event.keystroke.key.eq_ignore_ascii_case("arrowdown")
-                    {
-                        this.close_sidebar_view_menu(cx);
-                    } else if !this.sidebar_view_menu.is_open() {
-                        this.open_sidebar_view_menu(window, cx);
-                    }
-                }
-            }))
-            .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(
-                icon(icons::MORE_HORIZONTAL)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.6)),
-            )
-            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "View options", None));
+            }
+        }))
+        .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .child(
+            icon(icons::MORE_HORIZONTAL)
+                .size(px(16.0))
+                .text_color(theme.text_muted.opacity(0.6)),
+        )
+        .children(crate::components::shell_parts::sidebar_action_label(
+            theme,
+            sidebar_width,
+            "View options",
+            None,
+        ));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -4585,34 +2403,43 @@ impl Shell {
         // Same 29px glass-hover button idiom; lit while the overview is the
         // current route.
         let overview_active = self.is_overview_route();
-        let overview_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-open-overview", theme, sidebar_width)
-            .role(gpui::Role::Button)
-            .aria_label("Open overview")
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .bg(if overview_active {
-                theme.glass_hover()
-            } else {
-                theme.glass_hover().opacity(0.0)
-            })
-            .hover(|el| el.bg(theme.glass_hover()))
-            .on_click(cx.listener(|this, _, _, cx| this.open_overview(cx)))
-            .tooltip(|_, cx| cx.new(|_| SidebarOverviewTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(
-                icon(icons::WIDGET)
-                    .size(px(15.0))
-                    .text_color(if overview_active {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.6)
-                    }),
-            )
-            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "Overview", Some(theme.text_muted)));
+        let overview_trigger = crate::components::shell_parts::sidebar_action_frame(
+            "sidebar-open-overview",
+            theme,
+            sidebar_width,
+        )
+        .role(gpui::Role::Button)
+        .aria_label("Open overview")
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .bg(if overview_active {
+            theme.glass_hover()
+        } else {
+            theme.glass_hover().opacity(0.0)
+        })
+        .hover(|el| el.bg(theme.glass_hover()))
+        .on_click(cx.listener(|this, _, _, cx| this.open_overview(cx)))
+        .tooltip(|_, cx| cx.new(|_| SidebarOverviewTooltip).into())
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .child(
+            icon(icons::WIDGET)
+                .size(px(15.0))
+                .text_color(if overview_active {
+                    theme.text
+                } else {
+                    theme.text_muted.opacity(0.6)
+                }),
+        )
+        .children(crate::components::shell_parts::sidebar_action_label(
+            theme,
+            sidebar_width,
+            "Overview",
+            Some(theme.text_muted),
+        ));
 
         div()
             .flex_none()
@@ -4964,7 +2791,8 @@ impl Shell {
         }
         // The branch shows whenever the engine has stamped one —
         // main-checkout sessions included, not just worktrees.
-        let branch = crate::change_requests::conversation_branch(&chat, &state.spaces)
+        let branch = state
+            .display_chat_branch(&chat)
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .map(str::to_string)
@@ -5252,7 +3080,9 @@ impl Shell {
                 Some("pinned".to_owned())
             } else if let Some((key, _)) = &group {
                 if let Some(id) = key.strip_prefix("section:") {
-                    custom_sections.iter().find(|section| section.id == id)
+                    custom_sections
+                        .iter()
+                        .find(|section| section.id == id)
                         .filter(|section| section.collapsed)
                         .map(|_| format!("custom:{id}"))
                 } else {
@@ -5262,7 +3092,8 @@ impl Shell {
                         SidebarOrganization::InOneList => "list",
                     };
                     let collapse_key = format!("{organization}:{key}");
-                    self.sidebar_collapsed_groups.contains(&collapse_key)
+                    self.sidebar_collapsed_groups
+                        .contains(&collapse_key)
                         .then(|| format!("group:{collapse_key}"))
                 }
             } else if !pinned_group
@@ -5277,7 +3108,10 @@ impl Shell {
                 && self.sidebar_session_return.is_none()
                 && self.pinned_session_drag.is_none()
                 && closed_motion_key.as_ref().is_some_and(|key| {
-                    !self.sidebar_disclosure_motion.get(key).is_some_and(|motion| motion.animating())
+                    !self
+                        .sidebar_disclosure_motion
+                        .get(key)
+                        .is_some_and(|motion| motion.animating())
                 });
             let drag_group = if pinned_group {
                 "pinned".to_owned()
@@ -5389,28 +3223,49 @@ impl Shell {
                 let element = if offscreen {
                     div().h(px(slot_height.max(0.0))).into_any_element()
                 } else {
-                    self.render_chat_row(
-                        chat.id.clone(),
-                        None,
-                        transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )
-                        .into(),
-                        time_ago,
-                        folder.into(),
-                        branch.map(SharedString::from),
-                        change_request,
-                        harness,
-                        status,
-                        is_selected,
-                        false,
-                        is_moving,
-                        if is_moving { None } else { drag },
-                        jump_label,
-                        None,
-                        theme,
-                        cx,
+                    let title: SharedString = transcript::single_line(
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
+                    .into();
+                    if is_moving {
+                        self.render_chat_row(
+                            chat.id.clone(),
+                            None,
+                            title,
+                            time_ago,
+                            folder.into(),
+                            branch.map(SharedString::from),
+                            change_request,
+                            harness,
+                            status,
+                            is_selected,
+                            false,
+                            true,
+                            None,
+                            jump_label,
+                            None,
+                            theme,
+                            cx,
+                        )
+                    } else {
+                        self.cached_chat_row(
+                            ChatRowArgs {
+                                id: chat.id.clone(),
+                                title,
+                                time_ago,
+                                space_name: folder.into(),
+                                branch: branch.map(SharedString::from),
+                                change_request,
+                                harness,
+                                status,
+                                selected: is_selected,
+                                drag,
+                                jump_label,
+                            },
+                            slot_height,
+                            cx,
+                        )
+                    }
                 };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
@@ -5492,7 +3347,9 @@ impl Shell {
                             let top =
                                 f32::from(bounds.top() - scroll.bounds().top() - scroll.offset().y);
                             let extent = (top, top + f32::from(bounds.size.height));
-                            extents.borrow_mut().insert(id, (ordinal, extent.0, extent.1));
+                            extents
+                                .borrow_mut()
+                                .insert(id, (ordinal, extent.0, extent.1));
                             // A re-sort can move a culled row into view; fill it next frame.
                             if offscreen
                                 && !sidebar_row_offscreen(
@@ -5695,28 +3552,28 @@ impl Shell {
             theme,
             menu_open,
         )
-            .debug_selector(move || format!("sidebar-group-menu-{selector}"))
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    this.section_menu = None;
-                    this.close_sidebar_view_menu(cx);
-                    if let Some(id) = &space_id {
-                        this.group_menu = None;
-                        this.space_menu.open((id.clone(), event.position()));
-                    } else {
-                        this.close_space_menu(cx);
-                        this.group_menu = Some((target.clone(), event.position()));
-                        window.focus(&this.group_menu_focus, cx);
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(
-                icon(icons::MORE_HORIZONTAL)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
+        .debug_selector(move || format!("sidebar-group-menu-{selector}"))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                this.section_menu = None;
+                this.close_sidebar_view_menu(cx);
+                if let Some(id) = &space_id {
+                    this.group_menu = None;
+                    this.space_menu.open((id.clone(), event.position()));
+                } else {
+                    this.close_space_menu(cx);
+                    this.group_menu = Some((target.clone(), event.position()));
+                    window.focus(&this.group_menu_focus, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(
+            icon(icons::MORE_HORIZONTAL)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
     }
 
     /// Scheduled-task runs: one disclosure, closed by default, holding a nested
@@ -5972,11 +3829,7 @@ impl Shell {
                 .selected_chat_row()
                 .filter(|open| open.id != chat.id)
                 .map(|open| {
-                    self.sidebar_chat_data(
-                        state.display_status_for(open, now),
-                        open.clone(),
-                        state,
-                    )
+                    self.sidebar_chat_data(state.display_status_for(open, now), open.clone(), state)
                 });
             let selected = state
                 .selected_chat_row()
@@ -6199,7 +4052,13 @@ impl Shell {
         // "Show more" matches the row slot: compact rows are 29px, so the
         // button shrinks with them instead of towering over the list.
         let more_height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false, crate::ui_style::current(cx).tokens)
+            super::sidebar_row_height(
+                true,
+                true,
+                false,
+                false,
+                crate::ui_style::current(cx).tokens,
+            )
         } else {
             36.0
         };
@@ -7952,98 +5811,8 @@ pub(crate) fn delete_space_copy(name: &str, device: &str, sessions: usize) -> St
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{TimeZone as _, Utc};
-
-    use super::{compare_sidebar_chats, delete_space_copy, promote_local_device_group};
-
-    #[test]
-    fn delete_space_copy_names_the_index_the_outline_and_hide() {
-        let one = delete_space_copy("Alpha", "Laptop", 1);
-        assert!(one.contains("its 1 session on Laptop"), "{one}");
-        let many = delete_space_copy("Alpha", "Laptop", 3);
-        assert!(many.contains("its 3 sessions on Laptop"), "{many}");
-        assert!(many.contains("leave Mast’s index"), "{many}");
-        assert!(many.contains("whole Work Outline"), "{many}");
-        assert!(many.contains("can’t be undone"), "{many}");
-        assert!(
-            many.contains("To just declutter the Outline, use Hide from Outline"),
-            "{many}"
-        );
-    }
-    use crate::settings::SidebarSort;
-
-    fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
-        (Some((device.into(), device.into())), vec![value])
-    }
-
-    fn chat(id: &str) -> mast_proto::Chat {
-        mast_proto::Chat {
-            id: id.into(),
-            device_id: "device".into(),
-            title: None,
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            source_context: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: Some(Utc.timestamp_opt(10, 0).unwrap()),
-            created_at: Utc.timestamp_opt(5, 0).unwrap(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            actual_model: None,
-            scheduled_task: None,
-            scheduled_task_info: None,
-            parent_chat_id: None,
-            side_of: None,
-            side_absorbed_through: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
-            linked_pr_url: None,
-            linked_pr_source: None,
-            linked_ticket_id: None,
-            linked_ticket_source: None,
-        }
-    }
-
-    #[test]
-    fn equal_sidebar_timestamps_sort_by_stable_chat_id() {
-        let alpha = chat("alpha");
-        let beta = chat("beta");
-        assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
-        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
-    }
-
-    #[test]
-    fn current_device_is_promoted_without_resorting_remote_groups() {
-        let mut groups = vec![
-            group("recent-remote", 1),
-            group("local", 2),
-            group("older-remote", 3),
-        ];
-
-        promote_local_device_group(&mut groups, Some("local"));
-
-        let order: Vec<_> = groups
-            .iter()
-            .map(|(group, _)| group.as_ref().unwrap().0.as_str())
-            .collect();
-        assert_eq!(order, ["local", "recent-remote", "older-remote"]);
-    }
-
-    #[test]
-    fn missing_current_device_leaves_group_order_untouched() {
-        let mut groups = vec![group("first", 1), group("second", 2)];
-        let before = groups.clone();
-
-        promote_local_device_group(&mut groups, Some("not-present"));
-
-        assert_eq!(groups, before);
-    }
-}
+#[path = "spaces_tests/tests.rs"]
+mod tests;
 
 /// Synthetic responses for the isolated native screenshot fixture only.
 #[cfg(feature = "project-palette-fixture")]
@@ -8097,230 +5866,5 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod project_flow_tests {
-    use super::*;
-
-    #[gpui::test]
-    fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
-        let data = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let shell = cx.new(|cx| {
-            let state = cx.new(|_| {
-                let mut state = AppState::new();
-                state.devices = serde_json::from_value(serde_json::json!([
-                    {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
-                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
-                ]))
-                .unwrap();
-                state
-            });
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: data.path().into(),
-                    ipc_port: 0,
-                    edge_url: String::new(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        shell.update(cx, |shell, cx| {
-            shell.open_add_space(cx);
-            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
-            assert!(shell.add_space.as_ref().unwrap().device.is_none());
-            let search = shell.add_space.as_ref().unwrap().search.clone();
-            search.update(cx, |input, cx| input.set_text("server", cx));
-            assert_eq!(shell.add_space_devices(cx).len(), 1);
-            shell.add_space_open_active(cx);
-            let flow = shell.add_space.as_mut().unwrap();
-            assert_eq!(flow.step, ProjectStep::Locations);
-            assert_eq!(flow.device.as_ref().unwrap().id, "remote");
-            assert!(flow.search.read(cx).is_empty());
-            flow.drives = Loadable::Ready(vec![DriveEntry {
-                name: "Projects".into(),
-                path: "/projects".into(),
-            }]);
-            search.update(cx, |input, cx| input.set_text("projects", cx));
-            shell.add_space_open_active(cx);
-            let flow = shell.add_space.as_mut().unwrap();
-            assert_eq!(flow.step, ProjectStep::Folders);
-            assert_eq!(flow.browser_path.as_deref(), Some("/projects"));
-            flow.browser = Loadable::Ready(FolderListing {
-                path: "/projects".into(),
-                entries: Vec::new(),
-                truncated: false,
-            });
-            shell.add_space_go_up(cx);
-            assert_eq!(
-                shell.add_space.as_ref().unwrap().step,
-                ProjectStep::Locations
-            );
-            assert!(shell.add_space.as_ref().unwrap().browser.ready().is_none());
-            shell.add_space_go_up(cx);
-            let flow = shell.add_space.as_ref().unwrap();
-            assert_eq!(flow.step, ProjectStep::Devices);
-            assert!(flow.device.is_none());
-            assert!(flow.drives.ready().is_none());
-            assert!(flow.search.read(cx).is_empty());
-            // Slash navigation only applies to folders, never device search.
-            search.update(cx, |input, cx| input.set_text("/projects/", cx));
-            assert!(!shell.add_space_slash_descend(cx));
-        });
-    }
-
-    /// Folder-pick mode: the same browser on a fixed device; submit hands
-    /// the open folder to the requester instead of creating a Space, and
-    /// the device can't be changed.
-    #[gpui::test]
-    fn folder_pick_hands_the_open_folder_to_the_requester(cx: &mut gpui::TestAppContext) {
-        let data = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let shell = cx.new(|cx| {
-            let state = cx.new(|_| {
-                let mut state = AppState::new();
-                state.devices = serde_json::from_value(serde_json::json!([
-                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
-                ]))
-                .unwrap();
-                state
-            });
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: data.path().into(),
-                    ipc_port: 0,
-                    edge_url: String::new(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let picked = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
-        let sink = picked.clone();
-        shell.update(cx, |shell, cx| {
-            shell.open_folder_pick(
-                crate::work_outline::execution::ExecutionFolderPick {
-                    title: "Add repository".into(),
-                    confirm_label: "Add repository".into(),
-                    device_id: "remote".into(),
-                    start_path: Some("/srv/work".into()),
-                    reject_home_directory: false,
-                    on_pick: Box::new(move |path, _| *sink.borrow_mut() = Some(path)),
-                },
-                cx,
-            );
-            let flow = shell.add_space.as_mut().unwrap();
-            assert_eq!(flow.step, ProjectStep::Folders);
-            assert_eq!(flow.device.as_ref().unwrap().id, "remote");
-            assert_eq!(flow.browser_path.as_deref(), Some("/srv/work"));
-            flow.browser = Loadable::Ready(FolderListing {
-                path: "/srv/work/ui".into(),
-                entries: Vec::new(),
-                truncated: false,
-            });
-            // The device is fixed.
-            shell.add_space_back_to(ProjectStep::Devices, cx);
-            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Folders);
-            let spaces_before = shell.state.read(cx).spaces.len();
-            shell.submit_add_space(cx);
-            assert!(shell.add_space.is_none());
-            assert_eq!(
-                shell.state.read(cx).spaces.len(),
-                spaces_before,
-                "no Space created"
-            );
-        });
-        assert_eq!(picked.borrow().as_deref(), Some("/srv/work/ui"));
-    }
-
-    /// An execution-root pick never confirms the device's home directory
-    /// (validation would reject it with `homeDirectoryRoot`); a project
-    /// folder inside it is fine.
-    #[gpui::test]
-    fn execution_root_pick_refuses_the_home_directory(cx: &mut gpui::TestAppContext) {
-        let data = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let shell = cx.new(|cx| {
-            let state = cx.new(|_| {
-                let mut state = AppState::new();
-                state.devices = serde_json::from_value(serde_json::json!([
-                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
-                ]))
-                .unwrap();
-                state
-            });
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: data.path().into(),
-                    ipc_port: 0,
-                    edge_url: String::new(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let picked = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
-        let sink = picked.clone();
-        shell.update(cx, |shell, cx| {
-            shell.open_folder_pick(
-                crate::work_outline::execution::ExecutionFolderPick {
-                    title: "Execution root".into(),
-                    confirm_label: "Use this folder".into(),
-                    device_id: "remote".into(),
-                    start_path: None,
-                    reject_home_directory: true,
-                    on_pick: Box::new(move |path, _| *sink.borrow_mut() = Some(path)),
-                },
-                cx,
-            );
-            let flow = shell.add_space.as_mut().unwrap();
-            // The browser resolved the device's home.
-            flow.home = Some("/srv/me".into());
-            flow.browser = Loadable::Ready(FolderListing {
-                path: "/srv/me".into(),
-                entries: Vec::new(),
-                truncated: false,
-            });
-            assert!(flow.pick_refusal().is_some());
-            shell.submit_add_space(cx);
-            let flow = shell.add_space.as_mut().expect("the picker stays open");
-            assert_eq!(
-                flow.error.as_deref(),
-                Some(crate::work_outline::execution::HOME_ROOT_REFUSAL)
-            );
-            // A project folder inside home is accepted.
-            flow.browser = Loadable::Ready(FolderListing {
-                path: "/srv/me/app".into(),
-                entries: Vec::new(),
-                truncated: false,
-            });
-            assert!(flow.pick_refusal().is_none());
-        });
-        assert!(picked.borrow().is_none());
-        shell.update(cx, |shell, cx| shell.submit_add_space(cx));
-        assert_eq!(picked.borrow().as_deref(), Some("/srv/me/app"));
-    }
-}
+#[path = "spaces_tests/project_flow_tests.rs"]
+mod project_flow_tests;

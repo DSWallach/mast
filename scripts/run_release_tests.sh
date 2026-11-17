@@ -17,6 +17,11 @@
 #                       directory (target/release-build), so it cannot block the tests
 #   --quarantine        additionally run the quarantine profile (failures are reported, not fatal)
 #   --dry-run           print the selection and exit
+# The UI driver scenarios (crates/ui-driver/scenarios/*.yaml) run after the suites whenever the
+# selection includes mast-ui-driver. They need the macOS sandbox, so they run outside nextest like
+# the ignored driver tests, and are report-only: results print, the run's status never changes.
+# On RESULT: pass (clean tree) it also runs the budget tests and writes the perf-gate stamp
+# target/perf-gate/<HEAD>.json (scripts/perf-gate.py); the install script requires it.
 #   --timeout SECONDS   wall-clock limit per suite group (default 5400)
 #   -h, --help
 set -euo pipefail
@@ -30,7 +35,7 @@ while [ $# -gt 0 ]; do
     --quarantine) run_quarantine=1 ;;
     --dry-run) dry_run=1 ;;
     --timeout) suite_timeout="$2"; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) base_ref="$1" ;;
   esac
@@ -90,6 +95,8 @@ else
     case "$p" in mast-ui) run_ui=1 ;; mast) ;; *) non_ui_packages+=(-p "$p") ;; esac
   done
 fi
+run_scenarios=0
+case " $selection " in *" all "*|*" mast-ui-driver "*) run_scenarios=1 ;; esac
 echo "nextest packages: ${non_ui_packages[*]:-<none>}   ui suite: $run_ui   installed build: $run_build"
 [ "$dry_run" = 1 ] && exit 0
 
@@ -117,10 +124,56 @@ if [ "$run_ui" = 1 ]; then
   with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 || status=1
 fi
 echo "test wall time: $(( $(date +%s) - started )) s"
+if [ "$run_scenarios" = 1 ]; then
+  echo "== ui-driver scenarios (report only)"
+  with_time_limit cargo test -p mast-ui-driver --test scenarios -- --ignored run_all_scenarios \
+    --test-threads=1 --nocapture 2>&1 | grep -E '^ *(ok|FAIL) +step|^(PASS|FAIL) |^ {8}|note:|artifact:|^scenarios:|panicked|error' \
+    || true
+  echo "scenarios: report only, not part of RESULT"
+fi
 
 if [ -n "$build_pid" ]; then
   if wait "$build_pid"; then echo "installed build ok: target/release-build/installed/zeron"
   else echo "installed build FAILED, see target/release-build.log" >&2; status=1; fi
 fi
-[ $status = 0 ] && echo "RESULT: pass" || echo "RESULT: FAIL"
+# The clean check builds and inspects the installed binary before any stamp is written.
+if [ "$status" = 0 ]; then
+  echo "== installed build containment"
+  scripts/check-installed-clean.sh || status=1
+fi
+# Budget tests (post-mortem 2026-11-16, P1) always run here, whatever the diff selected, so the
+# perf-gate stamp can name them. Any failure is a new failure and blocks the stamp.
+budget_json="[]"
+if [ $status = 0 ]; then
+  echo "== budget tests"
+  budget_log="$(mktemp "${TMPDIR:-/tmp}/budget-tests.XXXXXX")"
+  {
+    with_time_limit cargo nextest run --profile release -p mast-engine --test idle_spawn_budget --no-capture 2>&1 || echo "BUDGET-FAIL engine"
+    with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 \
+      change_request_retries_stay_within_a_budget the_index_is_built_once_per_snapshot 2>&1 || echo "BUDGET-FAIL ui"
+  } | tee "$budget_log"
+  if grep -q '^BUDGET-FAIL' "$budget_log"; then status=1; else
+    budget_json="$(python3 -I - "$budget_log" <<'PY'
+import json, re, sys
+text = open(sys.argv[1]).read()
+out = []
+m = re.search(r"idle budget: (\d+) git spawns .*?budget (\d+)", text)
+if m:
+    out.append({"name": "mast-engine::idle_spawn_budget", "result": "pass", "git_spawns": int(m[1]), "budget": int(m[2])})
+for name in re.findall(r"^test (\S+::\S+) \.\.\. ok$", text, re.M):
+    out.append({"name": "mast-ui::" + name, "result": "pass"})
+print(json.dumps(out))
+PY
+)"
+    case "$budget_json" in *idle_spawn_budget*change_request*the_index*|*idle_spawn_budget*the_index*change_request*) ;; *) echo "budget tests did not all report a pass: $budget_json" >&2; status=1 ;; esac
+  fi
+  rm -f "$budget_log"
+fi
+if [ $status = 0 ]; then
+  echo "RESULT: pass"
+  python3 -I "$(dirname "$0")/perf-gate.py" write --section release_tests --json \
+    "$(python3 -I -c 'import json,sys; print(json.dumps({"result":"pass","selection":sys.argv[1],"budget_tests":json.loads(sys.argv[2])}))' "${selection:-none} (base $base_ref)" "$budget_json")" || true
+else
+  echo "RESULT: FAIL"
+fi
 exit $status

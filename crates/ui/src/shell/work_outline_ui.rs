@@ -165,6 +165,7 @@ pub(super) fn reference_open(
 
 /// Key contexts that hold a text input. Outline navigation keys must never
 /// fire while one of these owns focus.
+#[cfg(test)]
 pub(crate) const TEXT_INPUT_CONTEXTS: [&str; 3] = ["Composer", "MessageComposer", "PaletteSearch"];
 
 /// The context predicate every bare-key outline binding uses.
@@ -858,7 +859,7 @@ impl Shell {
                 |id| crate::review_chats::fact_from_state(state, id),
             ));
         }
-        chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.updated));
         crate::review_chats::primary(&chats).map(|chat| chat.chat_id.clone())
     }
 

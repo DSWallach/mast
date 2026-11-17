@@ -109,8 +109,8 @@ impl KeychainKeyStore {
     const TIMEOUT: Duration = Duration::from_secs(15);
 
     fn run(args: &[&str]) -> Result<(bool, String, String), String> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("security")
+        use std::process::Stdio;
+        let mut child = mast_harness::command("security")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

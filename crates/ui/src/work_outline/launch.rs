@@ -90,7 +90,7 @@ pub(crate) fn worktree_target(configuration: &ExecutionConfiguration) -> Worktre
         .bindings
         .iter()
         .find(|binding| binding.primary)
-        .or_else(|| match configuration.bindings.as_slice() {
+        .or(match configuration.bindings.as_slice() {
             [only] => Some(only),
             _ => None,
         });

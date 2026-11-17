@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::time::Duration;
 

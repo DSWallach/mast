@@ -66,33 +66,35 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
-pub(crate) mod artifacts_ui;
-#[cfg(test)]
-mod chat_item_tests;
 #[cfg(test)]
 mod admin_tests;
+pub(crate) mod artifacts_ui;
+mod branch_review_ui;
+#[cfg(test)]
+mod chat_item_tests;
 mod chat_item_ui;
 mod closeout_ui;
+mod code_ref;
 mod command_palette;
-mod workspace_search;
 mod files_panel;
 mod github_ui;
 mod hand_off_ui;
 mod instructions_ui;
 mod linear_ui;
+mod menu_bar_ui;
 mod outside_file_ui;
 #[cfg(test)]
 mod perf_tests;
 mod pr_review_ui;
-mod branch_review_ui;
-mod review_ui;
 mod project_icon;
 mod required_actions_ui;
-mod menu_bar_ui;
+mod review_ui;
 mod running_ui;
 mod side_chat_ui;
+mod workspace_search;
 #[cfg(feature = "snapshot")]
 pub(crate) use side_chat_ui::fixture_side_chat_state;
+mod admin_ui;
 mod sidebar_pins;
 mod sidebar_sections;
 pub(crate) mod spaces;
@@ -100,7 +102,6 @@ mod start_chat_ui;
 mod tabs;
 mod team_ui;
 mod wake_ui;
-mod admin_ui;
 mod work_outline_menu_ui;
 pub(crate) mod work_outline_ui;
 pub(crate) use tabs::chat_identity_for;
@@ -111,6 +112,7 @@ const CHAT_HEADER_LINK_REFRESH: Duration = Duration::from_secs(15);
 const CHAT_HEADER_METADATA_CLEARANCE: f32 = 52.0;
 
 struct ChatHeaderLinkCache {
+    checkout: Option<(String, String, Option<String>)>,
     status: Option<ChatLinkStatus>,
     fetched_at: Instant,
 }
@@ -124,6 +126,7 @@ actions!(
         ToggleFiles,
         OpenMyPrs,
         QuickOpen,
+        AddCodeToChat,
         SearchWorkspaceContent,
         GoToLine,
         AddSpacePalette,
@@ -155,6 +158,7 @@ pub(crate) const OPEN_PR_REVIEW_CHATS_COMBO: &str = "mod-shift-p";
 pub(crate) const OPEN_ITEM_TAB_COMBO: &str = "mod-alt-;";
 /// Open the side panel's Team tab. ⌘T is the browser's New tab inside the side
 /// panel (`Browser` context), so the Team tab takes ⌥⌘T, next to ⌥⌘; for Item.
+#[cfg(test)]
 pub(crate) const OPEN_TEAM_TAB_COMBO: &str = "mod-alt-t";
 /// Pin the header's context card open / release it.
 pub(crate) const TOGGLE_ITEM_CARD_COMBO: &str = "mod-alt-i";
@@ -162,6 +166,7 @@ pub(crate) const TOGGLE_ITEM_CARD_COMBO: &str = "mod-alt-i";
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
 /// focus from controls that are mounting in response to the same input event.
+#[cfg(test)]
 pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
     focus: FocusHandle,
     window: &mut Window,
@@ -413,20 +418,55 @@ pub fn apply_keymap(
     // gpui-base binds Replace to Cmd+Shift+F in every Input. Remove that
     // binding before installing the user-configured search and replace keys.
     #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-shift-f", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    cx.bind_keys([KeyBinding::new(
+        "cmd-shift-f",
+        gpui::Unbind("input::Replace".into()),
+        Some("Input"),
+    )]);
     #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-h",
+        gpui::Unbind("input::Replace".into()),
+        Some("Input"),
+    )]);
     for (id, action) in [
-        (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
-        (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
+        (
+            ShortcutId::QuickOpen,
+            Box::new(QuickOpen) as Box<dyn Action>,
+        ),
+        (
+            ShortcutId::AddCodeToChat,
+            Box::new(AddCodeToChat) as Box<dyn Action>,
+        ),
+        (
+            ShortcutId::SearchWorkspaceContent,
+            Box::new(SearchWorkspaceContent) as Box<dyn Action>,
+        ),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
-        (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),
+        (
+            ShortcutId::ReplaceFile,
+            Box::new(gpui_base::input::Replace) as Box<dyn Action>,
+        ),
     ] {
         let combo = keymap.get(id);
-        if combo.is_empty() { continue; }
-        let context = (id == ShortcutId::ReplaceFile).then_some("Input");
-        let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
-        if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
+        if combo.is_empty() {
+            continue;
+        }
+        let context = if id == ShortcutId::AddCodeToChat {
+            Some("Files")
+        } else {
+            (id == ShortcutId::ReplaceFile).then_some("Input")
+        };
+        let predicate = context
+            .map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
+        if let Ok(binding) = KeyBinding::load(
+            &valid_or_default(combo, id.default_combo()),
+            action,
+            predicate,
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        ) {
             cx.bind_keys([binding]);
         }
     }
@@ -529,14 +569,20 @@ pub fn apply_keymap(
     ]);
     if !keymap.open_team_tab.is_empty() {
         cx.bind_keys([KeyBinding::new(
-            &valid_or_default(&keymap.open_team_tab, ShortcutId::OpenTeamTab.default_combo()),
+            &valid_or_default(
+                &keymap.open_team_tab,
+                ShortcutId::OpenTeamTab.default_combo(),
+            ),
             OpenTeamTab,
             None,
         )]);
     }
     if !keymap.open_team_tab_from_panel.is_empty() {
         cx.bind_keys([KeyBinding::new(
-            &valid_or_default(&keymap.open_team_tab_from_panel, ShortcutId::OpenTeamTabFromPanel.default_combo()),
+            &valid_or_default(
+                &keymap.open_team_tab_from_panel,
+                ShortcutId::OpenTeamTabFromPanel.default_combo(),
+            ),
             OpenTeamTabFromPanel,
             Some("TeamPanel && !Composer && !MessageComposer && !PaletteSearch"),
         )]);
@@ -955,7 +1001,7 @@ struct RightTabDragState {
 }
 
 /// Sidebar-only drag payload. Regular sessions never acquire a manual order.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct SidebarSessionDrag {
     chat_id: String,
     visible_ids: std::sync::Arc<Vec<String>>,
@@ -1566,6 +1612,121 @@ struct SubagentTab {
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
+/// Test-only render counters for the sidebar perf budgets (thread-local: gpui
+/// tests run on one thread).
+#[cfg(test)]
+pub(crate) mod perf_counts {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static SHELL_RENDERS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_BUILDS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_BY_ID: std::cell::RefCell<std::collections::HashMap<String, u64>> = std::cell::RefCell::new(Default::default());
+    }
+}
+
+/// Everything `render_chat_row` needs that the sidebar computes per row.
+#[derive(Clone, PartialEq)]
+struct ChatRowArgs {
+    id: String,
+    title: SharedString,
+    time_ago: SharedString,
+    space_name: SharedString,
+    branch: Option<SharedString>,
+    change_request: Option<mast_proto::ChangeRequestSummary>,
+    harness: Option<mast_proto::HarnessId>,
+    status: mast_proto::ChatIndicator,
+    selected: bool,
+    drag: Option<SidebarSessionDrag>,
+    jump_label: Option<SharedString>,
+}
+
+/// One sidebar chat row as its own cached view. The pane rebuilds the args each
+/// pass and only notifies this view when they changed, so a working row's
+/// spinner tick re-renders just that row instead of every row in the list.
+struct ChatRowView {
+    shell: gpui::WeakEntity<Shell>,
+    args: ChatRowArgs,
+    _observation: Subscription,
+}
+
+impl Render for ChatRowView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(shell) = self.shell.upgrade() else {
+            return div().into_any_element();
+        };
+        let args = self.args.clone();
+        // A view root is laid out against its bounds but sizes to its content, so
+        // restore the full-width stretch the row had as a direct flex child.
+        let row = shell.update(cx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            shell.render_chat_row(
+                args.id,
+                None,
+                args.title,
+                args.time_ago,
+                args.space_name,
+                args.branch,
+                args.change_request,
+                args.harness,
+                args.status,
+                args.selected,
+                false,
+                false,
+                args.drag,
+                args.jump_label,
+                None,
+                &theme,
+                cx,
+            )
+        });
+        div().w_full().child(row).into_any_element()
+    }
+}
+
+impl Shell {
+    /// The cached row view for one live sidebar row. `height` is the slot height.
+    fn cached_chat_row(
+        &mut self,
+        args: ChatRowArgs,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.sidebar_row_views_seen.insert(args.id.clone());
+        let view = match self.sidebar_row_views.get(&args.id) {
+            Some(view) => {
+                let view = view.clone();
+                view.update(cx, |row, cx| {
+                    if row.args != args {
+                        row.args = args;
+                        cx.notify();
+                    }
+                });
+                view
+            }
+            None => {
+                let shell = cx.entity();
+                let id = args.id.clone();
+                let view = cx.new(|cx| ChatRowView {
+                    shell: shell.downgrade(),
+                    args,
+                    _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
+                });
+                self.sidebar_row_views.insert(id, view.clone());
+                view
+            }
+        };
+        // Width stays auto so the row stretches like the uncached row did.
+        view.cached(gpui::StyleRefinement::default().h(px(height.max(0.0))))
+            .into_any_element()
+    }
+
+    /// Drop row views for chats that left the list; called once per sidebar pass.
+    fn prune_sidebar_row_views(&mut self) {
+        let seen = std::mem::take(&mut self.sidebar_row_views_seen);
+        self.sidebar_row_views.retain(|id, _| seen.contains(id));
+    }
+}
+
 struct SidebarPane {
     #[cfg(test)]
     renders: usize,
@@ -1576,7 +1737,9 @@ struct SidebarPane {
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
-        { self.renders += 1; }
+        {
+            self.renders += 1;
+        }
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("sidebar");
         crate::transcript::record_view_frame("sidebar");
@@ -1588,9 +1751,11 @@ impl Render for SidebarPane {
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
                 // Overview keeps the normal chat sidebar.
-                Route::Chat | Route::Overview | Route::ScheduledTasks | Route::PrReviewChats | Route::Review => {
-                    shell.render_chat_sidebar(&theme, cx)
-                }
+                Route::Chat
+                | Route::Overview
+                | Route::ScheduledTasks
+                | Route::PrReviewChats
+                | Route::Review => shell.render_chat_sidebar(&theme, cx),
             }
         });
         div().size_full().child(inner).into_any_element()
@@ -1656,7 +1821,10 @@ pub struct Shell {
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
-    review_hosts: std::collections::HashMap<String, (String, u32, Entity<crate::changes::walkthrough::ReviewHost>)>,
+    review_hosts: std::collections::HashMap<
+        String,
+        (String, u32, Entity<crate::changes::walkthrough::ReviewHost>),
+    >,
     /// One workspace browser per chat/panel key. Dropping the entity closes
     /// its file watcher and every in-flight workspace request.
     files: std::collections::HashMap<String, Entity<FilesSurface>>,
@@ -1803,6 +1971,10 @@ pub struct Shell {
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_row_extents: spaces::SidebarRowExtents,
+    /// One cached view per visible sidebar chat row, so a spinner tick (or any
+    /// change confined to one row) re-renders that row alone.
+    sidebar_row_views: std::collections::HashMap<String, Entity<ChatRowView>>,
+    sidebar_row_views_seen: std::collections::HashSet<String>,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -1850,6 +2022,9 @@ pub struct Shell {
     /// values remain owned by the workspace doc and are read through the
     /// existing multi-PR `CHAT_LINK_STATUS` endpoint.
     chat_header_links: std::collections::HashMap<String, ChatHeaderLinkCache>,
+    board_links_revision: u64,
+    board_links_generation: u64,
+    board_link_versions: std::collections::HashMap<String, u64>,
     chat_header_links_pending: std::collections::HashSet<String>,
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
@@ -2038,14 +2213,31 @@ impl Shell {
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::SignIn { device, harness, account, snapshot } => {
-                    let label = account.as_ref().and_then(|id| snapshot.accounts.iter().find(|a| &a.id == id)).map(|a| a.label.clone());
+                ComposerEvent::SignIn {
+                    device,
+                    harness,
+                    account,
+                    snapshot,
+                } => {
+                    let label = account
+                        .as_ref()
+                        .and_then(|id| snapshot.accounts.iter().find(|a| &a.id == id))
+                        .map(|a| a.label.clone());
                     this.open_settings(SettingsSection::Agents, cx);
                     if this.accounts_page.is_none() {
                         let state = this.state.clone();
                         this.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
                     }
-                    this.accounts_page.as_ref().unwrap().update(cx, |page, cx| page.sign_in_for_chat(device.clone(), *harness, account.clone(), label, snapshot.clone(), cx));
+                    this.accounts_page.as_ref().unwrap().update(cx, |page, cx| {
+                        page.sign_in_for_chat(
+                            device.clone(),
+                            *harness,
+                            account.clone(),
+                            label,
+                            snapshot.clone(),
+                            cx,
+                        )
+                    });
                 }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
@@ -2110,7 +2302,9 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
-        state.update(cx, |state, cx| state.set_sidebar_outline_sections(settings.sidebar_outline_groups, cx));
+        state.update(cx, |state, cx| {
+            state.set_sidebar_outline_sections(settings.sidebar_outline_groups, cx)
+        });
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
@@ -2307,6 +2501,8 @@ impl Shell {
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_row_extents: Default::default(),
+            sidebar_row_views: Default::default(),
+            sidebar_row_views_seen: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -2331,6 +2527,9 @@ impl Shell {
             copied_chat_identity: None,
             copied_chat_identity_clear: None,
             chat_header_links: Default::default(),
+            board_links_revision: 0,
+            board_links_generation: 0,
+            board_link_versions: Default::default(),
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
             session_activity_menu: Default::default(),
@@ -2415,16 +2614,23 @@ impl Shell {
         }
     }
 
-    fn refresh_heartbeat(&mut self, now: chrono::DateTime<Utc>, minute_changed: bool, cx: &mut Context<Self>) {
+    fn refresh_heartbeat(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+        minute_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let (live, degraded, fingerprint) = {
             let state = self.state.read(cx);
             (
-                state.selected_chat.as_deref().is_some_and(|id| {
-                    state.indicator_for(id, now) != Indicator::None
-                }),
+                state
+                    .selected_chat
+                    .as_deref()
+                    .is_some_and(|id| state.indicator_for(id, now) != Indicator::None),
                 matches!(
                     state.connectivity.state,
-                    mast_proto::ConnectivityState::Offline | mast_proto::ConnectivityState::Reconnecting
+                    mast_proto::ConnectivityState::Offline
+                        | mast_proto::ConnectivityState::Reconnecting
                 ),
                 state.shell_fingerprint(now),
             )
@@ -3067,7 +3273,10 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
-                RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => None,
+                RightSurface::Picker
+                | RightSurface::Item
+                | RightSurface::Team
+                | RightSurface::Review => None,
             })
             .collect();
         if self.review_artifact(cx).is_some() {
@@ -3196,7 +3405,10 @@ impl Shell {
             | RightSurface::Browser(_)
             | RightSurface::Artifact(_)
             | RightSurface::SideChat(_) => {}
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
+            RightSurface::Picker
+            | RightSurface::Item
+            | RightSurface::Team
+            | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();
@@ -3313,6 +3525,9 @@ impl Shell {
             || self.state.read(cx).selected_chat.as_deref() != Some(self.active_chat.as_str())
         {
             return LinkOutcome::Rejected;
+        }
+        if let Some(outcome) = self.activate_pinned_code_ref(activation, window, cx) {
+            return outcome;
         }
         // Session references always stay in Mast, independent of web-link settings.
         if activation.target.is_session() {
@@ -3532,7 +3747,8 @@ impl Shell {
             .chats
             .iter()
             .find(|chat| chat.id == self.active_chat)?;
-        let root = crate::files::client::FilesRequestContext::for_chat(state, &self.active_chat)?.cwd;
+        let root =
+            crate::files::client::FilesRequestContext::for_chat(state, &self.active_chat)?.cwd;
         let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
         Some((root, local))
     }
@@ -3710,25 +3926,6 @@ impl Shell {
         });
     }
 
-    /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
-    /// FRESH diff tab with its own scope/base selection (multiple diff
-    /// panels, user request).
-    pub(crate) fn open_chat_changes(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        self.open_chat(chat_id, cx);
-        // `open_chat` changes AppState selection immediately, while the
-        // Shell's `active_chat`/panel key follows through its state observer.
-        // Wait until that observer has reconciled so the new diff belongs to
-        // the destination chat instead of the previously active one.
-        let this = cx.weak_entity();
-        cx.defer(move |cx| {
-            this.update(cx, |this, cx| {
-                this.set_surfaces_open(true, cx);
-                this.add_diff_surface(cx);
-            })
-            .ok();
-        });
-    }
-
     pub(crate) fn open_request_file(
         &mut self,
         chat_id: String,
@@ -3758,8 +3955,13 @@ impl Shell {
         let checkout = {
             let state = self.state.read(cx);
             let targets = state.chat_diff_targets(&chat_id);
-            targets.iter()
-                .find(|target| branch.as_ref().is_some_and(|branch| target.branch.as_ref() == Some(branch)))
+            targets
+                .iter()
+                .find(|target| {
+                    branch
+                        .as_ref()
+                        .is_some_and(|branch| target.branch.as_ref() == Some(branch))
+                })
                 .or_else(|| targets.iter().find(|target| target.selected))
                 .or_else(|| targets.first())
                 .map(|target| target.path.clone())
@@ -3767,7 +3969,12 @@ impl Shell {
         if let Some(path) = checkout {
             let task = self.state.update(cx, |state, cx| {
                 state.clear_chat_diff_member_pick(&chat_id);
-                state.set_chat_diff_target(&chat_id, mast_proto::SetChatDiffTargetAction::Select, Some(path), cx)
+                state.set_chat_diff_target(
+                    &chat_id,
+                    mast_proto::SetChatDiffTargetAction::Select,
+                    Some(path),
+                    cx,
+                )
             });
             task.detach();
         } else if let Some(branch) = branch {
@@ -3783,9 +3990,12 @@ impl Shell {
             this.update(cx, |this, cx| {
                 this.set_surfaces_open(true, cx);
                 let changes = cx.new(|cx| Changes::for_chat(this.state.clone(), chat_id, cx));
-                changes.update(cx, |changes, cx| changes.set_scope(crate::changes::DiffScope::Branch, cx));
+                changes.update(cx, |changes, cx| {
+                    changes.set_scope(crate::changes::DiffScope::Branch, cx)
+                });
                 this.register_diff_surface(changes, cx);
-            }).ok();
+            })
+            .ok();
         });
     }
 
@@ -3821,6 +4031,9 @@ impl Shell {
         let lookup = (panel_key.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
             let surface = RightSurface::File(id);
+            if let Some(file) = self.file_surfaces.get(&id) {
+                file.update(cx, |file, cx| file.clear_pinned_reference(cx));
+            }
             self.set_right_active(surface, cx);
             if let Some(line) = line
                 && let Some(file) = self.file_surfaces.get(&id).cloned()
@@ -3852,7 +4065,7 @@ impl Shell {
             window,
             move |this: &mut Self, source, event, window, cx| {
                 if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                    && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
                     return;
                 }
@@ -4030,9 +4243,20 @@ impl Shell {
         match event {
             TranscriptEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::SignInAgain(chat_id) => self.sign_in_for_chat(chat_id.clone(), cx),
-            TranscriptEvent::RetryErroredTurn { chat_id, error_entry_id } => {
-                let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
-                let device = self.state.read(cx).chats.iter().find(|chat| chat.id == *chat_id).map(|chat| chat.device_id.clone());
+            TranscriptEvent::RetryErroredTurn {
+                chat_id,
+                error_entry_id,
+            } => {
+                let Some(engine) = self.state.read(cx).engine().cloned() else {
+                    return;
+                };
+                let device = self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == *chat_id)
+                    .map(|chat| chat.device_id.clone());
                 let chat_id = chat_id.clone();
                 let error_entry_id = error_entry_id.clone();
                 cx.spawn(async move |this, cx| {
@@ -4065,33 +4289,66 @@ impl Shell {
     }
 
     fn sign_in_for_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let Some((device, harness)) = self.state.read(cx).chats.iter()
+        let Some((device, harness)) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
             .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.config.as_ref().map(|config| (chat.device_id.clone(), config.harness))) else { return; };
+            .and_then(|chat| {
+                chat.config
+                    .as_ref()
+                    .map(|config| (chat.device_id.clone(), config.harness))
+            })
+        else {
+            return;
+        };
         let rpc = self.state.read(cx).accounts_rpc(Some(&device));
         self.open_settings(SettingsSection::Agents, cx);
         if self.accounts_page.is_none() {
             let state = self.state.clone();
             self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
         }
-        let page = self.accounts_page.clone().expect("accounts page initialized");
+        let page = self
+            .accounts_page
+            .clone()
+            .expect("accounts page initialized");
         cx.spawn(async move |_, cx| {
-            let snapshot = rpc.call(methods::LIST_MANAGED_ACCOUNTS, crate::managed_accounts::list_params(false)).await
-                .and_then(|value| serde_json::from_value::<mast_proto::ManagedAccountsSnapshot>(value).map_err(|error| error.to_string()));
+            let snapshot = rpc
+                .call(
+                    methods::LIST_MANAGED_ACCOUNTS,
+                    crate::managed_accounts::list_params(false),
+                )
+                .await
+                .and_then(|value| {
+                    serde_json::from_value::<mast_proto::ManagedAccountsSnapshot>(value)
+                        .map_err(|error| error.to_string())
+                });
             let result = snapshot.and_then(|snapshot| {
-                snapshot.chat_pins.iter().find(|pin| pin.chat_id == chat_id && pin.harness == harness)
+                snapshot
+                    .chat_pins
+                    .iter()
+                    .find(|pin| pin.chat_id == chat_id && pin.harness == harness)
                     .map(|pin| {
                         let account_id = pin.account_id.clone();
-                        let label = account_id.as_ref().and_then(|id| snapshot.accounts.iter().find(|account| &account.id == id)).map(|account| account.label.clone());
+                        let label = account_id
+                            .as_ref()
+                            .and_then(|id| {
+                                snapshot.accounts.iter().find(|account| &account.id == id)
+                            })
+                            .map(|account| account.label.clone());
                         (account_id, label, snapshot.clone())
                     })
                     .ok_or_else(|| "Could not find the account pinned to this chat.".to_string())
             });
             page.update(cx, |page, cx| match result {
-                Ok((account_id, label, snapshot)) => page.sign_in_for_chat(device, harness, account_id, label, snapshot, cx),
+                Ok((account_id, label, snapshot)) => {
+                    page.sign_in_for_chat(device, harness, account_id, label, snapshot, cx)
+                }
                 Err(error) => page.sign_in_error(error, cx),
             });
-        }).detach();
+        })
+        .detach();
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -4273,7 +4530,10 @@ impl Shell {
             }
             RightSurface::Artifact(id) => self.close_artifact_tab(id, cx),
             RightSurface::SideChat(id) => self.drop_side_chat(id, cx),
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
+            RightSurface::Picker
+            | RightSurface::Item
+            | RightSurface::Team
+            | RightSurface::Review => {}
         }
         self.panels.update(&key, |p| {
             if p.right_active == surface {
@@ -4335,7 +4595,10 @@ impl Shell {
             return None;
         }
         match self.resolved_right_active(cx) {
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => None,
+            RightSurface::Picker
+            | RightSurface::Item
+            | RightSurface::Team
+            | RightSurface::Review => None,
             surface => Some(surface),
         }
     }
@@ -4801,11 +5064,10 @@ impl Shell {
     }
 
     fn ensure_chat_header_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self
-            .chat_header_links
-            .get(&chat_id)
-            .is_some_and(|entry| entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
-            || self.chat_header_links_pending.contains(&chat_id)
+        let checkout = self.state.read(cx).selected_checkout_key(&chat_id);
+        if self.chat_header_links.get(&chat_id).is_some_and(|entry| {
+            entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH
+        }) || self.chat_header_links_pending.contains(&chat_id)
         {
             return;
         }
@@ -4823,23 +5085,31 @@ impl Shell {
                 .await;
             this.update(cx, |this, cx| {
                 this.chat_header_links_pending.remove(&chat_id);
-                let status = result
+                if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    cx.notify();
+                    return;
+                }
+                if let Some(status) = result
                     .ok()
-                    .and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok());
-                if let Some(status) = &status {
+                    .and_then(|value| serde_json::from_value::<ChatLinkStatus>(value).ok())
+                {
                     crate::review_chats::note_chat_links(
                         cx,
                         &chat_id,
-                        &crate::review_chats::links_of_status(status),
+                        &crate::review_chats::links_of_status(&status),
+                    );
+                    this.board_links_revision = this.board_links_revision.wrapping_add(1);
+                    this.board_link_versions
+                        .insert(chat_id.clone(), this.board_links_revision);
+                    this.chat_header_links.insert(
+                        chat_id,
+                        ChatHeaderLinkCache {
+                            checkout,
+                            status: Some(status),
+                            fetched_at: Instant::now(),
+                        },
                     );
                 }
-                this.chat_header_links.insert(
-                    chat_id,
-                    ChatHeaderLinkCache {
-                        status,
-                        fetched_at: Instant::now(),
-                    },
-                );
                 cx.notify();
             })
             .ok();
@@ -4848,13 +5118,20 @@ impl Shell {
     }
 
     /// Read an already cached PR head; never starts a request.
-    pub(crate) fn cached_review_head(&self, chat_id: &str, pr: &mast_proto::ReviewPullRequest) -> Option<String> {
+    pub(crate) fn cached_review_head(
+        &self,
+        chat_id: &str,
+        pr: &mast_proto::ReviewPullRequest,
+    ) -> Option<String> {
         let status = self.chat_header_links.get(chat_id)?.status.as_ref()?;
         crate::artifacts::model::cached_review_head(status, pr).map(str::to_owned)
     }
 
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {
         self.chat_header_links.remove(chat_id);
+        self.board_links_revision = self.board_links_revision.wrapping_add(1);
+        self.board_link_versions
+            .insert(chat_id.to_owned(), self.board_links_revision);
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
@@ -4864,10 +5141,10 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
-        if section == SettingsSection::Agents {
-            if let Some(page) = &self.accounts_page {
-                page.update(cx, |page, cx| page.refresh_managed_accounts(cx));
-            }
+        if section == SettingsSection::Agents
+            && let Some(page) = &self.accounts_page
+        {
+            page.update(cx, |page, cx| page.refresh_managed_accounts(cx));
         }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
@@ -4952,7 +5229,16 @@ impl Shell {
         self.nav.push(NavEntry::ScheduledTasks);
         let page = self.ensure_scheduled_tasks_page(cx);
         if let Some(id) = history {
-            let device=self.state.read(cx).selected_chat_row().filter(|c|c.scheduled_task_info.as_ref().is_some_and(|t|t.task_id==id)).map(|c|c.device_id.clone());
+            let device = self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .filter(|c| {
+                    c.scheduled_task_info
+                        .as_ref()
+                        .is_some_and(|t| t.task_id == id)
+                })
+                .map(|c| c.device_id.clone());
             page.update(cx, |p, cx| p.show_task(id, device, cx));
         } else {
             page.update(cx, |p, cx| p.show_tasks(cx));
@@ -5095,7 +5381,9 @@ impl Shell {
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
             }
-            NavEntry::ScheduledTasks => { self.route = Route::ScheduledTasks; }
+            NavEntry::ScheduledTasks => {
+                self.route = Route::ScheduledTasks;
+            }
             NavEntry::Overview => {
                 self.route = Route::Overview;
             }
@@ -5154,7 +5442,9 @@ impl Shell {
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
                             AppearanceSettingsEvent::SidebarOutlineGroupsChanged(value) => {
                                 this.settings.sidebar_outline_groups = value;
-                                this.state.update(cx, |state, cx| state.set_sidebar_outline_sections(value, cx));
+                                this.state.update(cx, |state, cx| {
+                                    state.set_sidebar_outline_sections(value, cx)
+                                });
                                 this.sidebar_prev_order.clear();
                                 this.schedule_save(cx);
                                 cx.notify();
@@ -5162,14 +5452,18 @@ impl Shell {
                             AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
                                 this.settings.compact_single_chat = value;
                                 if let Some(overview) = &this.overview_page {
-                                    overview.update(cx, |overview, cx| overview.set_compact_single_chat(value, cx));
+                                    overview.update(cx, |overview, cx| {
+                                        overview.set_compact_single_chat(value, cx)
+                                    });
                                 }
                                 this.schedule_save(cx);
                                 cx.notify();
                             }
                             AppearanceSettingsEvent::TeamTabVisibilityChanged(value) => {
                                 this.settings.team_tab_visibility = value;
-                                if value == crate::settings::TeamTabVisibility::Hide && this.resolved_right_active(cx) == RightSurface::Team {
+                                if value == crate::settings::TeamTabVisibility::Hide
+                                    && this.resolved_right_active(cx) == RightSurface::Team
+                                {
                                     this.set_right_active(RightSurface::Item, cx);
                                 }
                                 this.schedule_save(cx);
@@ -5188,7 +5482,9 @@ impl Shell {
                 }
             }
             SettingsSection::Developer => {
-                let page = self.design_page.get_or_insert_with(|| cx.new(crate::settings::design_panel::DesignPanel::new));
+                let page = self
+                    .design_page
+                    .get_or_insert_with(|| cx.new(crate::settings::design_panel::DesignPanel::new));
                 page.clone().into_any_element()
             }
             SettingsSection::Files => {
@@ -5380,8 +5676,9 @@ impl Shell {
             SettingsSection::WorkflowPack => {
                 if self.workflow_pack_page.is_none() {
                     let state = self.state.clone();
-                    self.workflow_pack_page =
-                        Some(cx.new(|cx| crate::settings::workflow_pack::WorkflowPackPage::new(state, cx)));
+                    self.workflow_pack_page = Some(cx.new(|cx| {
+                        crate::settings::workflow_pack::WorkflowPackPage::new(state, cx)
+                    }));
                 }
                 match &self.workflow_pack_page {
                     Some(page) => page.clone().into_any_element(),
@@ -5668,7 +5965,6 @@ impl Shell {
             if changed {
                 self.schedule_save(cx);
             }
-            return;
         }
         // Remote pins come exclusively from per-pin registry records.
     }
@@ -6690,9 +6986,9 @@ impl Shell {
                     .pt(px(Theme::TITLEBAR_TOP_PAD))
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-                    .child(
-                        crate::components::shell_parts::titlebar_route_label(&theme, "Overview"),
-                    );
+                    .child(crate::components::shell_parts::titlebar_route_label(
+                        &theme, "Overview",
+                    ));
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("overview-header-titlebar", bar, cx)
                     .into_any_element()
@@ -6706,9 +7002,10 @@ impl Shell {
                     .pt(px(Theme::TITLEBAR_TOP_PAD))
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-                    .child(
-                        crate::components::shell_parts::titlebar_route_label(&theme, "Pull requests"),
-                    );
+                    .child(crate::components::shell_parts::titlebar_route_label(
+                        &theme,
+                        "Pull requests",
+                    ));
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("pr-review-chats-header-titlebar", bar, cx)
                     .into_any_element()
@@ -7274,12 +7571,37 @@ impl Shell {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
+        // While a working chat's spinner is on screen, the pane must NOT be a
+        // `.cached()` view: a spinner tick dirties the pane as an ancestor, and
+        // gpui re-renders a dirty cached view with `refreshing` set for its whole
+        // subtree, which defeats the per-row cached views below it (every row
+        // was rebuilt and re-prepainted each tick). Uncached, the pane re-emits
+        // cheap row stubs and only the rows that changed re-render. With nothing
+        // animating the cached pane keeps skipping Shell renders it does not care
+        // about (streaming deltas, composer typing).
+        let animating = self
+            .state
+            .read(cx)
+            .sessions
+            .iter()
+            .any(|session| session.status == mast_proto::SessionStatus::Working);
+        let pane = self.sidebar_pane.clone();
+        let inner: AnyElement = if animating {
+            div()
                 .w(px(self.sidebar_shown_width()))
                 .h_full()
-                .flex_none(),
-        );
+                .flex_none()
+                .child(pane)
+                .into_any_element()
+        } else {
+            pane.cached(
+                gpui::StyleRefinement::default()
+                    .w(px(self.sidebar_shown_width()))
+                    .h_full()
+                    .flex_none(),
+            )
+            .into_any_element()
+        };
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
@@ -7287,7 +7609,7 @@ impl Shell {
         crate::components::shell_parts::sidebar_frame(
             &theme,
             width,
-            inner.into_any_element(),
+            inner,
             cx.listener(|this, _, _, cx| this.open_new_session(cx)),
         )
     }
@@ -7330,9 +7652,9 @@ impl Shell {
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
-                    .child(
-                        crate::components::shell_parts::settings_sidebar_heading(theme),
-                    )
+                    .child(crate::components::shell_parts::settings_sidebar_heading(
+                        theme,
+                    ))
                     .child(
                         div().flex().flex_col().gap(px(2.0)).children(
                             SettingsSection::ALL
@@ -7343,16 +7665,23 @@ impl Shell {
                                 })
                                 .map(|item| {
                                     let selected = item == section;
-                                    crate::components::shell_parts::settings_sidebar_row(theme, SharedString::from(format!("settings-nav-{}", item.label())), selected)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_settings(item, cx)
-                                        }))
-                                        .child(
-                                            icon(section_icon(item))
-                                                .size(px(16.0))
-                                                .text_color(theme.text_muted),
-                                        )
-                                        .child(SharedString::from(item.label()))
+                                    crate::components::shell_parts::settings_sidebar_row(
+                                        theme,
+                                        SharedString::from(format!(
+                                            "settings-nav-{}",
+                                            item.label()
+                                        )),
+                                        selected,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_settings(item, cx)
+                                    }))
+                                    .child(
+                                        icon(section_icon(item))
+                                            .size(px(16.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from(item.label()))
                                 }),
                         ),
                     ),
@@ -7403,6 +7732,12 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        {
+            perf_counts::CHAT_ROW_BUILDS.with(|c| c.set(c.get() + 1));
+            perf_counts::CHAT_ROW_BY_ID
+                .with(|m| *m.borrow_mut().entry(id.clone()).or_default() += 1);
+        }
         // Activity, not position (t3code Sidebar): status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
@@ -7444,55 +7779,122 @@ impl Shell {
         } else {
             match status {
                 mast_proto::ChatIndicator::Working => Some("Working"),
-                mast_proto::ChatIndicator::AwaitingInput => Some(crate::components::shell_parts::awaiting_input_label(theme)),
+                mast_proto::ChatIndicator::AwaitingInput => {
+                    Some(crate::components::shell_parts::awaiting_input_label(theme))
+                }
                 mast_proto::ChatIndicator::Errored => Some("Failed"),
                 mast_proto::ChatIndicator::Completed => Some("Done"),
                 mast_proto::ChatIndicator::Idle => None,
             }
         };
-        let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
+        let resolved_status = if undelivered {
+            crate::status_style::Status::Errored
+        } else if queued {
+            crate::status_style::Status::Waiting
+        } else {
+            status.into()
+        };
         let identity = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
             let config = chat.and_then(|chat| chat.config.as_ref());
-            theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
+            theme.agent_identity_color(
+                config.map(|config| config.harness).or(harness),
+                config
+                    .and_then(|config| config.model.as_deref())
+                    .or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())),
+            )
         };
-        let horizon_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let horizon_hovered =
+            !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archive_id = id.clone();
-        if let Some(row) = crate::components::shell_parts::horizon_sidebar_chat_row(theme, row_id.clone(), &id, identity, title.clone(), resolved_status, status_label.unwrap_or("Idle"), selected, search_query.is_some(), self.state.read(cx).chat_account_badge(&id), change_request.clone(), jump_label.clone(), preview, horizon_hovered, archived, cx.listener(move |this, _, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))) {
+        if let Some(row) = crate::components::shell_parts::horizon_sidebar_chat_row(
+            theme,
+            row_id.clone(),
+            &id,
+            identity,
+            title.clone(),
+            resolved_status,
+            status_label.unwrap_or("Idle"),
+            selected,
+            search_query.is_some(),
+            self.state.read(cx).chat_account_badge(&id),
+            change_request.clone(),
+            jump_label.clone(),
+            preview,
+            horizon_hovered,
+            archived,
+            cx.listener(move |this, _, _, cx| {
+                this.set_chat_archived(archive_id.clone(), !archived, cx)
+            }),
+        ) {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row
-                .when(!preview, |el| el.cursor_pointer()
-                    .on_hover({
-                        let hover_id = row_id.clone();
-                        cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                    this.chat_status_hover = Some(hover_id.clone());
+                .debug_selector({
+                    let selector = row_id.clone();
+                    move || selector
+                })
+                .role(gpui::Role::Button)
+                .aria_label(title.clone())
+                .aria_selected(selected)
+                .when(!preview, |el| {
+                    el.cursor_pointer()
+                        .on_hover({
+                            let hover_id = row_id.clone();
+                            cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    if this.chat_status_hover.as_deref() != Some(hover_id.as_str())
+                                    {
+                                        this.chat_status_hover = Some(hover_id.clone());
+                                        cx.notify();
+                                    }
+                                } else if this.chat_status_hover.as_deref()
+                                    == Some(hover_id.as_str())
+                                {
+                                    this.chat_status_hover = None;
                                     cx.notify();
                                 }
-                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.chat_status_hover = None;
-                                cx.notify();
-                            }
+                            })
                         })
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter().find(|chat| chat.id == menu_id).and_then(|chat| chat.cwd.as_deref()));
-                        this.chat_menu.open(ChatMenuState { chat_id: menu_id.clone(), position: event.position, page: ChatMenuPage::Root, closeable });
-                        this.load_branch_review_target(menu_id.clone(), cx);
-                        cx.notify();
-                    })))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_chat(select_id.clone(), cx)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                let closeable = crate::chat_closeout::is_closeout_candidate(
+                                    this.state
+                                        .read(cx)
+                                        .chats
+                                        .iter()
+                                        .find(|chat| chat.id == menu_id)
+                                        .and_then(|chat| chat.cwd.as_deref()),
+                                );
+                                this.chat_menu.open(ChatMenuState {
+                                    chat_id: menu_id.clone(),
+                                    position: event.position,
+                                    page: ChatMenuPage::Root,
+                                    closeable,
+                                });
+                                this.load_branch_review_target(menu_id.clone(), cx);
+                                cx.notify();
+                            }),
+                        )
+                })
                 .when_some(drag, |el, payload| {
                     let shell = cx.entity();
                     el.on_drag(payload, move |payload, point, window, cx| {
-                        shell.update(cx, |shell, cx| shell.begin_sidebar_session_transfer(payload, point, window, cx));
+                        shell.update(cx, |shell, cx| {
+                            shell.begin_sidebar_session_transfer(payload, point, window, cx)
+                        });
                         cx.stop_propagation();
                         cx.new(|_| DragGhost)
                     })
-                }).into_any_element();
+                })
+                .into_any_element();
         }
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
@@ -7521,9 +7923,31 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == mast_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
-            let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed && !queued && !undelivered, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
-            crate::components::shell_parts::compact_sidebar_status(theme, format!("{row_id}-status"), format!("chat-status-{id}"), status_label.unwrap_or("Idle"), status_color, glyph)
+            let resolved_status = if undelivered {
+                crate::status_style::Status::Errored
+            } else if queued {
+                crate::status_style::Status::Waiting
+            } else {
+                status.into()
+            };
+            let glyph = crate::components::shell_parts::sidebar_status_glyph(
+                theme,
+                resolved_status,
+                working,
+                status == mast_proto::ChatIndicator::Completed && !queued && !undelivered,
+                format!("{row_id}-working"),
+                status_color,
+                self.sidebar_pane.entity_id(),
+                cx,
+            );
+            crate::components::shell_parts::compact_sidebar_status(
+                theme,
+                format!("{row_id}-status"),
+                format!("chat-status-{id}"),
+                status_label.unwrap_or("Idle"),
+                status_color,
+                glyph,
+            )
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
@@ -7535,7 +7959,12 @@ impl Shell {
             // Any other geometry reads as a second badge system on the row.
             crate::components::shell_parts::sidebar_jump_badge(theme, label)
         } else if corner_hovered {
-            crate::components::shell_parts::sidebar_archive_glyph(theme, compact, archived, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
+            crate::components::shell_parts::sidebar_archive_glyph(
+                theme,
+                compact,
+                archived,
+                SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
+            )
         } else if compact {
             if remote {
                 icon(icons::REMOTE_SERVER)
@@ -7551,8 +7980,23 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
-                    let glyph = crate::components::shell_parts::sidebar_status_glyph(theme, resolved_status, working, status == mast_proto::ChatIndicator::Completed, format!("{row_id}-working"), status_color, self.sidebar_pane.entity_id(), cx);
+                    let resolved_status = if undelivered {
+                        crate::status_style::Status::Errored
+                    } else if queued {
+                        crate::status_style::Status::Waiting
+                    } else {
+                        status.into()
+                    };
+                    let glyph = crate::components::shell_parts::sidebar_status_glyph(
+                        theme,
+                        resolved_status,
+                        working,
+                        status == mast_proto::ChatIndicator::Completed,
+                        format!("{row_id}-working"),
+                        status_color,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    );
                     crate::components::shell_parts::sidebar_status_word(label, status_color, glyph)
                 }
                 None => crate::components::shell_parts::sidebar_idle_time(theme, time_ago.clone()),
@@ -7605,7 +8049,8 @@ impl Shell {
                 .into_any_element()
         };
         let mut corner = Some(corner);
-        let (text, selected_wash, identity_dot) = crate::components::shell_parts::sidebar_row_colors(theme, identity, selected);
+        let (text, selected_wash, identity_dot) =
+            crate::components::shell_parts::sidebar_row_colors(theme, identity, selected);
         let hover = theme.glass_hover();
         let subline = if search_query.is_some() {
             theme.text_muted
@@ -7634,229 +8079,254 @@ impl Shell {
         } else {
             text.opacity(0.8)
         };
-        crate::components::shell_parts::sidebar_row_frame(theme, row_id.clone(), sidebar_row_height(
+        crate::components::shell_parts::sidebar_row_frame(
+            theme,
+            row_id.clone(),
+            sidebar_row_height(
                 compact,
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
                 theme.ui_style.tokens,
-            ), search_query.is_some(), &fade_key, rest_text, text, rest_bg, hover_bg)
-            // No selection ring (user request) — the wash alone marks the
-            // active row.
-            // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
-            // hover listener per element).
-            .when(!preview, |el| {
-                el.on_hover({
-                    let fade_hover = motion::hover_listener(fade_key.clone());
-                    let hover_id = row_id.clone();
-                    cx.listener(move |this, hovered: &bool, window, cx| {
-                        fade_hover(hovered, window, cx);
-                        if *hovered {
-                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
-                                cx.notify();
-                            }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
+            ),
+            search_query.is_some(),
+            &fade_key,
+            rest_text,
+            text,
+            rest_bg,
+            hover_bg,
+        )
+        .role(gpui::Role::Button)
+        .aria_label(title.clone())
+        .aria_selected(selected)
+        // No selection ring (user request) — the wash alone marks the
+        // active row.
+        // Row hover drives BOTH the wash blend and the corner's
+        // status→Archive swap (one listener — gpui allows a single
+        // hover listener per element).
+        .when(!preview, |el| {
+            el.on_hover({
+                let fade_hover = motion::hover_listener(fade_key.clone());
+                let hover_id = row_id.clone();
+                cx.listener(move |this, hovered: &bool, window, cx| {
+                    fade_hover(hovered, window, cx);
+                    if *hovered {
+                        if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                            this.chat_status_hover = Some(hover_id.clone());
                             cx.notify();
                         }
-                    })
-                })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_chat(select_id.clone(), cx);
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        let closeable = crate::chat_closeout::is_closeout_candidate(
-                            this.state
-                                .read(cx)
-                                .chats
-                                .iter()
-                                .find(|c| c.id == menu_id)
-                                .and_then(|c| c.cwd.as_deref()),
-                        );
-                        this.chat_menu.open(ChatMenuState {
-                            chat_id: menu_id.clone(),
-                            position: event.position,
-                            page: ChatMenuPage::Root,
-                            closeable,
-                        });
-                        this.load_branch_review_target(menu_id.clone(), cx);
+                    } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                        this.chat_status_hover = None;
                         cx.notify();
-                    }),
-                )
-            })
-            .when_some(drag, |el, payload| {
-                let shell = cx.entity();
-                el.on_drag(payload, move |payload, point, window, cx| {
-                    shell.update(cx, |shell, cx| {
-                        shell.begin_sidebar_session_transfer(payload, point, window, cx);
-                    });
-                    cx.stop_propagation();
-                    cx.new(|_| DragGhost)
+                    }
                 })
             })
-            // Line 1: "Space @ device", status word / time-ago right.
-            .when(!compact && show_label, |el| {
-                el.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM))
-                        .child(sidebar_faded_label(
-                            format!("chat-device-{content_id}").into(),
-                            true,
-                            crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(space_name, search_query, theme)),
-                        ))
-                        .child(div().text_color(subline).children(corner.take())),
-                )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_chat(select_id.clone(), cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let closeable = crate::chat_closeout::is_closeout_candidate(
+                        this.state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .find(|c| c.id == menu_id)
+                            .and_then(|c| c.cwd.as_deref()),
+                    );
+                    this.chat_menu.open(ChatMenuState {
+                        chat_id: menu_id.clone(),
+                        position: event.position,
+                        page: ChatMenuPage::Root,
+                        closeable,
+                    });
+                    this.load_branch_review_target(menu_id.clone(), cx);
+                    cx.notify();
+                }),
+            )
+        })
+        .when_some(drag, |el, payload| {
+            let shell = cx.entity();
+            el.on_drag(payload, move |payload, point, window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.begin_sidebar_session_transfer(payload, point, window, cx);
+                });
+                cx.stop_propagation();
+                cx.new(|_| DragGhost)
             })
-            // Line 2: harness identity belongs directly with the title,
-            // instead of floating as unrelated metadata below it.
-            .child(
+        })
+        // Line 1: "Space @ device", status word / time-ago right.
+        .when(!compact && show_label, |el| {
+            el.child(
                 div()
                     .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(if compact {
-                        4.0
-                    } else {
-                        SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
-                    }))
-                    .children(identity_dot)
-                    .children(compact_status)
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(
-                                        tint.unwrap_or(subline).opacity(if archived_muted {
-                                            0.4
-                                        } else {
-                                            0.8
-                                        }),
-                                    ),
-                            )
-                        },
-                    )
-                    .children(project_icon)
+                    .gap(px(Theme::SPACE_SM))
                     .child(sidebar_faded_label(
-                        format!("chat-title-{content_id}").into(),
+                        format!("chat-device-{content_id}").into(),
                         true,
-                        crate::components::shell_parts::sidebar_title_text(theme, popover::search_highlight(title, search_query, theme)),
+                        crate::components::shell_parts::sidebar_context_text(
+                            theme,
+                            subline,
+                            popover::search_highlight(space_name, search_query, theme),
+                        ),
                     ))
-                    .when_some(self.state.read(cx).chat_account_badge(&id), |el, label| {
+                    .child(div().text_color(subline).children(corner.take())),
+            )
+        })
+        // Line 2: harness identity belongs directly with the title,
+        // instead of floating as unrelated metadata below it.
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(if compact {
+                    4.0
+                } else {
+                    SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
+                }))
+                .children(identity_dot)
+                .children(compact_status)
+                .when_some(
+                    harness.map(crate::pickers::harness_brand_icon),
+                    |el, (path, tint)| {
                         el.child(
-                            crate::managed_accounts::account_pill(theme, label).debug_selector({
-                                let id = id.clone();
-                                move || format!("chat-account-{id}")
-                            }),
-                        )
-                    })
-                    .when(!compact && !show_label && remote, |el| {
-                        el.child(
-                            icon(icons::REMOTE_SERVER)
+                            icon(path)
                                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(subline).opacity(if archived_muted {
+                                    0.4
+                                } else {
+                                    0.8
+                                })),
+                        )
+                    },
+                )
+                .children(project_icon)
+                .child(sidebar_faded_label(
+                    format!("chat-title-{content_id}").into(),
+                    true,
+                    crate::components::shell_parts::sidebar_title_text(
+                        theme,
+                        popover::search_highlight(title, search_query, theme),
+                    ),
+                ))
+                .when_some(self.state.read(cx).chat_account_badge(&id), |el, label| {
+                    el.child(
+                        crate::managed_accounts::account_pill(theme, label).debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-account-{id}")
+                        }),
+                    )
+                })
+                .when(!compact && !show_label && remote, |el| {
+                    el.child(
+                        icon(icons::REMOTE_SERVER)
+                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                            .flex_none()
+                            .text_color(subline),
+                    )
+                })
+                .when(
+                    if compact {
+                        remote || corner_hovered
+                    } else {
+                        !show_label
+                    },
+                    |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(subline)
+                                .children(corner.take()),
+                        )
+                    },
+                )
+                .when(compact, |el| {
+                    el.children(change_request.clone().map(|summary| {
+                        if preview {
+                            crate::change_requests::pull_request_badge_preview(
+                                format!("{row_id}-compact-pr").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                theme,
+                            )
+                        } else {
+                            crate::change_requests::pull_request_badge(
+                                format!("{row_id}-compact-pr").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                theme,
+                            )
+                        }
+                    }))
+                })
+                .when(compact, |el| {
+                    el.child(crate::components::shell_parts::sidebar_compact_time(
+                        theme,
+                        id.clone(),
+                        subline,
+                        compact_jump_label.unwrap_or(time_ago),
+                    ))
+                }),
+        )
+        // Line 3 is structural, not reserved whitespace: compact states
+        // omit it completely when both Branch and Pull request are hidden.
+        .when(!compact && shows_metadata, |row| {
+            row.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .when_some(branch, |el, branch| {
+                        el.child(
+                            icon(icons::GIT_BRANCH)
+                                .size(px(11.0))
                                 .flex_none()
                                 .text_color(subline),
                         )
+                        .child(sidebar_faded_label(
+                            format!("chat-branch-{content_id}").into(),
+                            false,
+                            crate::components::shell_parts::sidebar_context_text(
+                                theme,
+                                subline,
+                                popover::search_highlight(branch, search_query, theme),
+                            ),
+                        ))
                     })
-                    .when(
-                        if compact {
-                            remote || corner_hovered
-                        } else {
-                            !show_label
-                        },
-                        |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(subline)
-                                    .children(corner.take()),
+                    // Stable invisible spring keeps the optional PR badge
+                    // pinned right without changing no-PR paint.
+                    .child(div().flex_1().min_w_0())
+                    .when_some(change_request, |el, summary| {
+                        el.child(if preview {
+                            crate::change_requests::pull_request_badge_preview(
+                                format!("{row_id}-pr").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                theme,
                             )
-                        },
-                    )
-                    .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            }
-                        }))
-                    })
-                    .when(compact, |el| {
-                        el.child(
-                            crate::components::shell_parts::sidebar_compact_time(theme, id.clone(), subline, compact_jump_label.unwrap_or(time_ago)),
-                        )
+                        } else {
+                            crate::change_requests::pull_request_badge_with_query(
+                                format!("{row_id}-pr").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                search_query,
+                                theme,
+                            )
+                        })
                     }),
             )
-            // Line 3 is structural, not reserved whitespace: compact states
-            // omit it completely when both Branch and Pull request are hidden.
-            .when(!compact && shows_metadata, |row| {
-                row.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .when_some(branch, |el, branch| {
-                            el.child(
-                                icon(icons::GIT_BRANCH)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(subline),
-                            )
-                            .child(sidebar_faded_label(
-                                format!("chat-branch-{content_id}").into(),
-                                false,
-                                crate::components::shell_parts::sidebar_context_text(theme, subline, popover::search_highlight(branch, search_query, theme)),
-                            ))
-                        })
-                        // Stable invisible spring keeps the optional PR badge
-                        // pinned right without changing no-PR paint.
-                        .child(div().flex_1().min_w_0())
-                        .when_some(change_request, |el, summary| {
-                            el.child(if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge_with_query(
-                                    format!("{row_id}-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    search_query,
-                                    theme,
-                                )
-                            })
-                        }),
-                )
-            })
-            .into_any_element()
+        })
+        .into_any_element()
     }
 
     fn render_pinned_session_group(
@@ -7981,7 +8451,9 @@ impl Shell {
                 .into_any_element(),
             ),
         };
-        Some(crate::components::shell_parts::connection_line(theme, label, glyph))
+        Some(crate::components::shell_parts::connection_line(
+            theme, label, glyph,
+        ))
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -8008,6 +8480,7 @@ impl Shell {
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
         let session_rows = self.render_active_rows(theme, cx);
+        self.prune_sidebar_row_views();
         let moving_row = session_rows
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
@@ -8397,7 +8870,12 @@ impl Shell {
             // window above this column.)
             .children(assistant_section)
             .child(filter_row)
-            .children(crate::ui_style::help_card("sidebar", "Chats show current activity and items needing your attention.", theme, cx))
+            .children(crate::ui_style::help_card(
+                "sidebar",
+                "Chats show current activity and items needing your attention.",
+                theme,
+                cx,
+            ))
             .child(sidebar_lists)
             .children(crate::components::shell_parts::sidebar_grille(theme))
             // Global connection pill (durable-by-design UI truth): appears
@@ -8502,10 +8980,11 @@ impl Shell {
             )
         };
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
-        let mut strip = crate::components::shell_parts::update_strip(theme, label, failed, clickable);
+        let mut strip =
+            crate::components::shell_parts::update_strip(theme, label, failed, clickable);
         if clickable {
-            strip = strip
-                .on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
+            strip =
+                strip.on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
         }
         Some(strip.into_any_element())
     }
@@ -8601,22 +9080,27 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
-        let mut trigger = crate::components::shell_parts::account_menu_trigger(theme, &user_line, initial, open, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                // A press that found the menu open closes it (the card's
-                // mouse-down-out already began the close) — never reopen.
-                if this.user_menu.take_press_was_open() {
-                    this.close_user_menu(cx);
-                } else {
-                    this.user_menu.open(());
-                }
-                cx.notify();
-            }))
-;
+        let mut trigger = crate::components::shell_parts::account_menu_trigger(
+            theme,
+            &user_line,
+            initial,
+            open,
+            SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            // A press that found the menu open closes it (the card's
+            // mouse-down-out already began the close) — never reopen.
+            if this.user_menu.take_press_was_open() {
+                this.close_user_menu(cx);
+            } else {
+                this.user_menu.open(());
+            }
+            cx.notify();
+        }));
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
             let menu = popover::popover_card(theme)
@@ -8688,7 +9172,7 @@ impl Shell {
                                 .into_any_element()
                         }
                     };
-                    menu.child(row).child(popover::menu_separator(&theme))
+                    menu.child(row).child(popover::menu_separator(theme))
                 })
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
@@ -9188,7 +9672,9 @@ impl Shell {
             return;
         }
         if event.keystroke.key == "escape" && self.work_outline_modal_open() {
-            let picker_closed = self.hand_off_pickers().is_some_and(|pickers| pickers.update(cx, |pickers, cx| pickers.close_open_popover(cx)));
+            let picker_closed = self.hand_off_pickers().is_some_and(|pickers| {
+                pickers.update(cx, |pickers, cx| pickers.close_open_popover(cx))
+            });
             if !picker_closed && !self.dismiss_work_outline_modal_skills(cx) {
                 self.cancel_work_outline_modal(window, cx);
             }
@@ -9299,8 +9785,11 @@ impl Shell {
             let can_ask_side = self.can_ask_on_side(&chat_id, cx);
             let branch_review_id = chat_id.clone();
             let branch_review_available = self.branch_review_targets.contains_key(&chat_id);
-            let branch_review_exists = self.branch_review_targets.get(&chat_id)
-                .and_then(|target| self.existing_branch_review(&chat_id, target, cx)).is_some();
+            let branch_review_exists = self
+                .branch_review_targets
+                .get(&chat_id)
+                .and_then(|target| self.existing_branch_review(&chat_id, target, cx))
+                .is_some();
             let has_workers = self.has_hand_off_workers(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
@@ -9316,37 +9805,69 @@ impl Shell {
                 .flex_col();
             let menu = match menu_state.page {
                 ChatMenuPage::Root => menu
-                    .when(branch_review_available, |menu| menu.child(
-                        popover::menu_row(&theme, false, format!("chat-menu-review-work-{chat_id}"))
+                    .when(branch_review_available, |menu| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-review-work-{chat_id}"),
+                            )
                             .id("chat-menu-review-work")
                             .debug_selector(|| "chat-menu-review-work".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.open_branch_review_for_chat(branch_review_id.clone(), cx);
                             }))
-                            .child(SharedString::from(if branch_review_exists { "Open review" } else { "Review this work…" }))
-                    ))
-                    .when(has_workers, |menu| menu.child(
-                        popover::menu_row(&theme, false, format!("chat-menu-hand-off-{chat_id}"))
+                            .child(SharedString::from(
+                                if branch_review_exists {
+                                    "Open review"
+                                } else {
+                                    "Review this work…"
+                                },
+                            )),
+                        )
+                    })
+                    .when(has_workers, |menu| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-hand-off-{chat_id}"),
+                            )
                             .id("chat-menu-hand-off")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.open_hand_off(hand_off_id.clone(), cx);
                             }))
-                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(
+                                icon(icons::CHAT_ROUND_LINE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
                             .child(SharedString::from("Hand off to new chat…")),
-                    ))
-                    .when(can_ask_side, |menu| menu.child(
-                        popover::menu_row(&theme, false, format!("chat-menu-ask-side-{chat_id}"))
+                        )
+                    })
+                    .when(can_ask_side, |menu| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-ask-side-{chat_id}"),
+                            )
                             .id("chat-menu-ask-side")
                             .debug_selector(|| "chat-menu-ask-side".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.ask_on_side(ask_side_id.clone(), None, cx);
                             }))
-                            .child(icon(icons::CHAT_ROUND_LINE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(
+                                icon(icons::CHAT_ROUND_LINE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
                             .child(SharedString::from("Ask on the side…")),
-                    ))
+                        )
+                    })
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                             .id("chat-menu-rename")
@@ -9418,7 +9939,9 @@ impl Shell {
                                         .size(px(16.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from(crate::admin::grant_entry_label(is_admin))),
+                                .child(SharedString::from(crate::admin::grant_entry_label(
+                                    is_admin,
+                                ))),
                         )
                         .when(is_admin, |menu| {
                             menu.child(
@@ -9443,30 +9966,32 @@ impl Shell {
                     })
                     .when(admin_space || is_assistant, |menu| {
                         menu.child(
-                            popover::menu_row(&theme, false, format!("chat-menu-assistant-{chat_id}"))
-                                .id("chat-menu-assistant")
-                                .debug_selector(|| "chat-menu-assistant".into())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.close_chat_menu(cx);
-                                    let chat_id = assistant_id.clone();
-                                    this.state.update(cx, |state, cx| {
-                                        if is_assistant {
-                                            state.clear_personal_assistant(cx);
-                                        } else {
-                                            state.set_personal_assistant(&chat_id, cx);
-                                        }
-                                    });
-                                }))
-                                .child(
-                                    icon(icons::BOT)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from(if is_assistant {
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-assistant-{chat_id}"),
+                            )
+                            .id("chat-menu-assistant")
+                            .debug_selector(|| "chat-menu-assistant".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                let chat_id = assistant_id.clone();
+                                this.state.update(cx, |state, cx| {
+                                    if is_assistant {
+                                        state.clear_personal_assistant(cx);
+                                    } else {
+                                        state.set_personal_assistant(&chat_id, cx);
+                                    }
+                                });
+                            }))
+                            .child(icon(icons::BOT).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from(
+                                if is_assistant {
                                     crate::personal_assistant::CLEAR_LABEL
                                 } else {
                                     crate::personal_assistant::SET_LABEL
-                                })),
+                                },
+                            )),
                         )
                     })
                     .when(closeable, |menu| {
@@ -9864,14 +10389,19 @@ impl Shell {
         transcript_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(page)=&self.scheduled_tasks_page {
-            let active=self.route==Route::ScheduledTasks;
-            page.update(cx,|p,_|p.set_active(active));
+        if let Some(page) = &self.scheduled_tasks_page {
+            let active = self.route == Route::ScheduledTasks;
+            page.update(cx, |p, _| p.set_active(active));
         }
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if !matches!(self.route, Route::Overview)
+            && let Some(overview) = &self.overview_page
+        {
+            overview.update(cx, |overview, cx| overview.suspend_board(cx));
+        }
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar). Settings never
         // underlaps: pad below the overlaid titlebar.
@@ -9890,7 +10420,13 @@ impl Shell {
 
         if self.route == Route::ScheduledTasks {
             let outlet = self.ensure_scheduled_tasks_page(cx);
-            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(outlet).into_any_element();
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(outlet)
+                .into_any_element();
         }
 
         // Overview route: same shape as Settings (an outlet under the
@@ -9924,8 +10460,13 @@ impl Shell {
 
         if let Route::Review = self.route {
             let outlet = self.render_review(true, cx);
-            return div().flex_1().min_w_0().h_full().pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(outlet).into_any_element();
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(outlet)
+                .into_any_element();
         }
 
         let _ = (text, border);
@@ -10017,7 +10558,14 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        // Cached: the transcript notifies itself when its rows
+                        // change; a composer keystroke or cursor blink must not
+                        // re-render its visible rows.
+                        .child(
+                            self.transcript
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
@@ -10059,18 +10607,20 @@ impl Shell {
                         )
                         .child(
                             div()
-                                .when(cfg!(test), |el| el.debug_selector(move || description.into()))
+                                .when(cfg!(test), |el| {
+                                    el.debug_selector(move || description.into())
+                                })
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    description,
-                                )),
+                                .child(SharedString::from(description)),
                         )
                         .child(
                             popover::btn_primary(&theme_owned, "Add a Space")
                                 .id("onboarding-add-space")
-                                .when(cfg!(test), |el| el.debug_selector(|| "onboarding-add-space".into()))
+                                .when(cfg!(test), |el| {
+                                    el.debug_selector(|| "onboarding-add-space".into())
+                                })
                                 .mt(px(20.0))
                                 .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
                         ),
@@ -10209,7 +10759,7 @@ impl Shell {
                         .inset_0(),
                     )
                     .child(status)
-                    .children(self.render_outside_file_prompt(&theme, cx))
+                    .children(self.render_outside_file_prompt(theme, cx))
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(crate::composer_dock::docked_composer(
@@ -10680,24 +11230,25 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel = crate::components::shell_parts::right_panel_frame(&theme, self.right_pane_expanded)
-            // With the explorer undocked the panel's right edge IS the
-            // window's right edge: it carries the CSD window's rounded corners
-            // directly (gpui cannot clip children rounded — each full-bleed
-            // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
-            // the explorer column is the rightmost layer and rounds instead.
-            .when(
-                Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
-                |el| {
-                    let corner = Self::window_corner_radius(window);
-                    el.rounded_tr(px(corner)).rounded_br(px(corner))
-                },
-            )
-            .overflow_hidden()
-            // The titlebar is a glass overlay over the full-height content
-            // row; the panel's own chrome starts below it.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(content);
+        let panel =
+            crate::components::shell_parts::right_panel_frame(&theme, self.right_pane_expanded)
+                // With the explorer undocked the panel's right edge IS the
+                // window's right edge: it carries the CSD window's rounded corners
+                // directly (gpui cannot clip children rounded — each full-bleed
+                // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
+                // the explorer column is the rightmost layer and rounds instead.
+                .when(
+                    Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
+                    |el| {
+                        let corner = Self::window_corner_radius(window);
+                        el.rounded_tr(px(corner)).rounded_br(px(corner))
+                    },
+                )
+                .overflow_hidden()
+                // The titlebar is a glass overlay over the full-height content
+                // row; the panel's own chrome starts below it.
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(content);
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
             self.right_edge_bounce,
@@ -11023,40 +11574,49 @@ impl Shell {
             } else {
                 accessible_name.to_string()
             };
-            let chip = crate::components::shell_parts::right_surface_tab(ix, group.clone(), CHIP_W, accessible_label, is_active, &theme)
-                .when_some(detail, |chip, detail| {
-                    chip.tooltip(move |_, cx| {
-                        cx.new(|_| SurfaceTabTooltip {
-                            text: detail.clone(),
-                        })
-                        .into()
+            let chip = crate::components::shell_parts::right_surface_tab(
+                ix,
+                group.clone(),
+                CHIP_W,
+                accessible_label,
+                is_active,
+                &theme,
+            )
+            .when_some(detail, |chip, detail| {
+                chip.tooltip(move |_, cx| {
+                    cx.new(|_| SurfaceTabTooltip {
+                        text: detail.clone(),
                     })
-                    .tooltip_show_delay(Duration::from_millis(350))
+                    .into()
                 })
-                // The old session-tab strip's solved carve-out: NOT
-                // `.occlude()` — a BlockMouse hitbox ends the hit test,
-                // so the scroll container behind the tabs never saw
-                // wheel events and an overflowing strip could not be
-                // scrolled (tabs tile the whole region). ExceptScroll
-                // keeps the titlebar drag-region carve-out and lets the
-                // strip scroll.
-                .block_mouse_except_scroll()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.set_right_active(surface, cx);
-                    this.focus_right_file_editor(surface, window, cx);
-                }))
-                // Middle-click closes, like every tab strip.
-                .on_mouse_down(
-                    gpui::MouseButton::Middle,
-                    cx.listener(move |this, _, window, cx| {
-                        this.close_right_surface(surface, window, cx);
-                    }),
-                )
-                .when(crate::click_activation_drag_enabled() && surface != RightSurface::Review, |el| {
+                .tooltip_show_delay(Duration::from_millis(350))
+            })
+            // The old session-tab strip's solved carve-out: NOT
+            // `.occlude()` — a BlockMouse hitbox ends the hit test,
+            // so the scroll container behind the tabs never saw
+            // wheel events and an overflowing strip could not be
+            // scrolled (tabs tile the whole region). ExceptScroll
+            // keeps the titlebar drag-region carve-out and lets the
+            // strip scroll.
+            .block_mouse_except_scroll()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.set_right_active(surface, cx);
+                this.focus_right_file_editor(surface, window, cx);
+            }))
+            // Middle-click closes, like every tab strip.
+            .on_mouse_down(
+                gpui::MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    this.close_right_surface(surface, window, cx);
+                }),
+            )
+            .when(
+                crate::click_activation_drag_enabled() && surface != RightSurface::Review,
+                |el| {
                     el.on_drag(
                         RightTabDrag {
                             panel_key: self.panel_key(cx),
@@ -11070,86 +11630,93 @@ impl Shell {
                             cx.new(|_| SurfaceTabGhost { title })
                         },
                     )
-                })
-                .child(
-                    // Leading slot: icon normally, ✕ on tab hover — two
-                    // stacked layers opacity-swapped by the group hover.
-                    crate::components::shell_parts::surface_close_slot(&theme, ix)
-                        // The tab owns a drag payload. Claim the close press
-                        // before it reaches that parent or GPUI starts a tab
-                        // drag instead of delivering the close click.
-                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .when(surface != RightSurface::Review, |el| el.on_click(cx.listener(move |this, _, window, cx| {
+                },
+            )
+            .child(
+                // Leading slot: icon normally, ✕ on tab hover — two
+                // stacked layers opacity-swapped by the group hover.
+                crate::components::shell_parts::surface_close_slot(&theme, ix)
+                    // The tab owns a drag payload. Claim the close press
+                    // before it reaches that parent or GPUI starts a tab
+                    // drag instead of delivering the close click.
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .when(surface != RightSurface::Review, |el| {
+                        el.on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_right_surface(surface, window, cx);
-                        })))
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(surface != RightSurface::Review, |s| s.group_hover(group.clone(), |s| s.opacity(0.0)))
-                                .child(if subagent_running {
-                                    loaders::mini_glyph_spinner(
-                                        format!("subagent-tab-{ix}"),
-                                        2.0,
-                                        theme.glyph,
-                                        cx.entity_id(),
-                                        cx,
-                                    )
+                        }))
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(surface != RightSurface::Review, |s| {
+                                s.group_hover(group.clone(), |s| s.opacity(0.0))
+                            })
+                            .child(if subagent_running {
+                                loaders::mini_glyph_spinner(
+                                    format!("subagent-tab-{ix}"),
+                                    2.0,
+                                    theme.glyph,
+                                    cx.entity_id(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            } else if let Some(favicon) = browser_favicon {
+                                gpui::img(favicon).size(px(12.0)).into_any_element()
+                            } else if matches!(surface, RightSurface::File(_)) {
+                                crate::file_icons::icon(
+                                    crate::file_icons::FileIconIdentity::file(
+                                        file_identity_path.as_ref(),
+                                    ),
+                                    theme.appearance,
+                                )
+                                .size(px(14.0))
+                                .when(!is_active, |icon| icon.opacity(0.78))
+                                .into_any_element()
+                            } else {
+                                icon(icon_path)
+                                    .size(px(12.0))
+                                    .text_color(if is_active {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_muted.opacity(0.7)
+                                    })
                                     .into_any_element()
-                                } else if let Some(favicon) = browser_favicon {
-                                    gpui::img(favicon).size(px(12.0)).into_any_element()
-                                } else if matches!(surface, RightSurface::File(_)) {
-                                    crate::file_icons::icon(
-                                        crate::file_icons::FileIconIdentity::file(
-                                            file_identity_path.as_ref(),
-                                        ),
-                                        theme.appearance,
-                                    )
-                                    .size(px(14.0))
-                                    .when(!is_active, |icon| icon.opacity(0.78))
-                                    .into_any_element()
-                                } else {
-                                    icon(icon_path)
-                                        .size(px(12.0))
-                                        .text_color(if is_active {
-                                            theme.text_muted
-                                        } else {
-                                            theme.text_muted.opacity(0.7)
-                                        })
-                                        .into_any_element()
-                                }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.0)
-                                .when(surface != RightSurface::Review, |s| s.group_hover(group.clone(), |s| s.opacity(1.0)))
-                                .child(
-                                    icon(icons::CLOSE)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                )
-                .child(
-                    crate::components::shell_parts::surface_tab_title(&theme, title, is_active),
-                )
-                .when(dirty, |chip| {
-                    chip.child(
-                        crate::components::shell_parts::surface_dirty_indicator(&theme),
+                            }),
                     )
-                });
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(0.0)
+                            .when(surface != RightSurface::Review, |s| {
+                                s.group_hover(group.clone(), |s| s.opacity(1.0))
+                            })
+                            .child(
+                                icon(icons::CLOSE)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
+            )
+            .child(crate::components::shell_parts::surface_tab_title(
+                &theme, title, is_active,
+            ))
+            .when(dirty, |chip| {
+                chip.child(crate::components::shell_parts::surface_dirty_indicator(
+                    &theme,
+                ))
+            });
             // Sliding transform while a sibling drags over (the terminal
             // drawer's exact recipe): animate 150ms between committed
             // offsets; the dragged tab leaves an invisible spacer — the
@@ -11812,6 +12379,9 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        perf_counts::SHELL_RENDERS.with(|c| c.set(c.get() + 1));
+        self.ensure_diagram_observer(window, cx);
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("shell");
         self.render_time = Some(std::time::Instant::now());
@@ -12067,13 +12637,17 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
-            .on_action(cx.listener(|this, action: &crate::selection_chip::AddToSession, window, cx| {
-                if !matches!(this.route, Route::Chat | Route::Overview) {
-                    this.route = Route::Chat;
-                }
-                this.composer.update(cx, |composer, cx| composer.add_selected_text(&action.0, window, cx));
-                cx.notify();
-            }))
+            .on_action(cx.listener(
+                |this, action: &crate::selection_chip::AddToSession, window, cx| {
+                    if !matches!(this.route, Route::Chat | Route::Overview) {
+                        this.route = Route::Chat;
+                    }
+                    this.composer.update(cx, |composer, cx| {
+                        composer.add_selected_text(&action.0, window, cx)
+                    });
+                    cx.notify();
+                },
+            ))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
@@ -12159,9 +12733,15 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| this.open_workspace_search(workspace_search::SearchMode::Files, window, cx)))
-            .on_action(cx.listener(|this, _: &SearchWorkspaceContent, window, cx| this.open_workspace_search(workspace_search::SearchMode::Content, window, cx)))
-            .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.open_workspace_search(workspace_search::SearchMode::Line, window, cx)))
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
+                this.open_workspace_search(workspace_search::SearchMode::Files, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SearchWorkspaceContent, window, cx| {
+                this.open_workspace_search(workspace_search::SearchMode::Content, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToLine, window, cx| {
+                this.open_workspace_search(workspace_search::SearchMode::Line, window, cx)
+            }))
             // Works from any route, like New session: the overview is a
             // top-level surface, not chat-scoped. Quiet under an open
             // picker/palette so it never navigates out from underneath one.
@@ -12223,7 +12803,10 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 // Inside Start Chat the shortcut opens the dialog's picker.
-                if let Some(pickers) = this.start_chat_pickers().or_else(|| this.hand_off_pickers()) {
+                if let Some(pickers) = this
+                    .start_chat_pickers()
+                    .or_else(|| this.hand_off_pickers())
+                {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                     return;
                 }
@@ -12467,7 +13050,11 @@ impl Render for Shell {
                 // sliver vertically to where the curve begins, so its tips
                 // never float over the transparent corner cutouts.
                 let window_corner = Self::window_corner_radius(window);
-                let sidebar_tone = crate::components::shell_parts::sidebar_tone(&theme, sidebar_now, window_corner);
+                let sidebar_tone = crate::components::shell_parts::sidebar_tone(
+                    &theme,
+                    sidebar_now,
+                    window_corner,
+                );
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -12504,7 +13091,9 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(crate::components::shell_parts::titlebar_overlay(&theme, title_bar))
+                    .child(crate::components::shell_parts::titlebar_overlay(
+                        &theme, title_bar,
+                    ))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
@@ -12585,2829 +13174,10 @@ impl Render for Shell {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sidebar_drag_nudges_each_edge_once_until_rearmed() {
-        let min = sidebar_drag_sample(SIDEBAR_MIN, None, false);
-        assert_eq!(min.width, SIDEBAR_MIN);
-        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
-        assert!(min.starts_bounce);
-
-        let held_min = sidebar_drag_sample(SIDEBAR_MIN - 80.0, min.edge, false);
-        assert_eq!(held_min.width, SIDEBAR_MIN);
-        assert_eq!(held_min.edge, min.edge);
-        assert!(!held_min.starts_bounce);
-
-        let inside = sidebar_drag_sample(SIDEBAR_MIN + 1.0, held_min.edge, false);
-        assert_eq!(inside.edge, None);
-        assert!(!inside.starts_bounce);
-
-        let rearmed_min = sidebar_drag_sample(SIDEBAR_MIN - 1.0, inside.edge, false);
-        assert!(rearmed_min.starts_bounce);
-
-        let max = sidebar_drag_sample(SIDEBAR_MAX, rearmed_min.edge, false);
-        assert_eq!(max.width, SIDEBAR_MAX);
-        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
-        assert!(max.starts_bounce);
-
-        let held_max = sidebar_drag_sample(SIDEBAR_MAX + 80.0, max.edge, false);
-        assert_eq!(held_max.width, SIDEBAR_MAX);
-        assert!(!held_max.starts_bounce);
-    }
-
-    #[test]
-    fn sidebar_drag_stays_exact_in_range_and_reduced_motion_never_nudges() {
-        let middle = sidebar_drag_sample(312.0, None, false);
-        assert_eq!(middle.width, 312.0);
-        assert_eq!(middle.edge, None);
-        assert!(!middle.starts_bounce);
-
-        for pointer_x in [
-            SIDEBAR_MIN - 100.0,
-            SIDEBAR_MIN,
-            SIDEBAR_MAX,
-            SIDEBAR_MAX + 100.0,
-        ] {
-            let sample = sidebar_drag_sample(pointer_x, None, true);
-            assert!((SIDEBAR_MIN..=SIDEBAR_MAX).contains(&sample.width));
-            assert!(!sample.starts_bounce);
-        }
-    }
-
-    #[test]
-    fn right_pane_uses_the_shared_clamp_and_edge_latch() {
-        let min =
-            motion::resize_drag_sample(RIGHT_PANE_MIN - 40.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(min.width, RIGHT_PANE_MIN);
-        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
-        assert!(min.starts_bounce);
-
-        let held = motion::resize_drag_sample(
-            RIGHT_PANE_MIN - 80.0,
-            RIGHT_PANE_MIN,
-            820.0,
-            min.edge,
-            false,
-        );
-        assert!(!held.starts_bounce);
-
-        let max = motion::resize_drag_sample(900.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(max.width, 820.0);
-        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
-        assert!(max.starts_bounce);
-    }
-
-    #[test]
-    fn sidebar_bounce_has_rounded_out_and_return_phases() {
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.0),
-            0.0
-        );
-        assert_eq!(
-            motion::resize_bounce_offset(
-                motion::ResizeEdge::Max,
-                motion::RESIZE_EDGE_BOUNCE_OUT_FRACTION
-            ),
-            motion::RESIZE_EDGE_NUDGE
-        );
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Max, 1.0),
-            0.0
-        );
-
-        let gentle_start = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.01);
-        let outbound = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.2);
-        let returning = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.7);
-        assert!(gentle_start > 0.0 && gentle_start < 0.1);
-        assert!(outbound > gentle_start && outbound < motion::RESIZE_EDGE_NUDGE);
-        assert!(returning > 0.0 && returning < motion::RESIZE_EDGE_NUDGE);
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Min, 0.2),
-            -outbound
-        );
-    }
-
-    #[test]
-    fn every_default_shortcut_binds_on_this_platform() {
-        // `apply_keymap` silently falls back on an unparseable combo, so a
-        // default gpui cannot parse would ship as a dead shortcut.
-        for id in crate::settings::ShortcutId::ALL {
-            // Work Outline commands without a default ship unbound (the
-            // palette is their entry point); `apply_keymap` skips empty combos.
-            if id.default_combo().is_empty() {
-                assert!(
-                    crate::work_outline::WorkOutlineCommand::from_shortcut_id(id).is_some(),
-                    "{} has no default and is not a Work Outline command",
-                    id.label()
-                );
-                continue;
-            }
-            let combo = platform_combo(id.default_combo());
-            assert!(
-                Keystroke::parse(&combo).is_ok(),
-                "{} default {combo:?} does not parse",
-                id.label()
-            );
-        }
-    }
-
-    #[test]
-    fn overview_navigation_shortcuts_parse_and_do_not_conflict_with_defaults() {
-        let fixed = [
-            FOCUS_OVERVIEW_SEARCH_COMBO,
-            OPEN_PR_REVIEW_CHATS_COMBO,
-            "mod-k",
-            "mod-shift-o",
-            OPEN_ITEM_TAB_COMBO,
-            TOGGLE_ITEM_CARD_COMBO,
-            running_ui::TOGGLE_RUNNING_CHATS_COMBO,
-        ];
-        for (index, combo) in fixed.iter().enumerate() {
-            assert!(Keystroke::parse(&platform_combo(combo)).is_ok());
-            assert!(
-                fixed[index + 1..].iter().all(|other| combo != other),
-                "duplicate fixed shortcut {combo}"
-            );
-            assert!(
-                ShortcutId::ALL
-                    .into_iter()
-                    .all(|id| id.default_combo() != *combo),
-                "fixed shortcut {combo} conflicts with a customizable default"
-            );
-        }
-    }
-
-    #[test]
-    fn island_stays_centered_on_controls_while_expanding() {
-        let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
-        for step in 0..=20 {
-            let (top, height) = titlebar_island_vertical_geometry(step as f32 / 20.0);
-            assert_eq!(top + height * 0.5, center);
-            assert!((28.0..=32.0).contains(&height));
-        }
-        let (top, height) = titlebar_island_vertical_geometry(1.0);
-        assert_eq!(center, 21.0);
-        assert_eq!(center - 12.0 - top, 4.0);
-        assert_eq!(top + height - (center + 12.0), 4.0);
-    }
-
-    #[test]
-    fn new_thread_handoff_is_continuous_and_staged() {
-        assert!(bottom_stack_measurement_matches(false, false));
-        assert!(bottom_stack_measurement_matches(true, true));
-        assert!(!bottom_stack_measurement_matches(false, true));
-        assert!(!bottom_stack_measurement_matches(true, false));
-        assert_eq!(new_thread_background_opacity(false), 1.0);
-        assert_eq!(
-            new_thread_background_opacity(true),
-            NEW_THREAD_BACKGROUND_FROSTED_OPACITY
-        );
-        assert_eq!(new_thread_background_height(400.0), 288.0);
-        assert!((new_thread_background_height(600.0) - 432.0).abs() < 0.001);
-        assert_eq!(new_thread_background_height(1_000.0), 720.0);
-        assert_eq!(new_thread_background_height(1_200.0), 760.0);
-        assert!(new_thread_background_height(848.0) > 848.0 / 2.0);
-    }
-
-    #[test]
-    fn sidebar_width_yields_to_a_narrow_window_without_changing_the_preference() {
-        assert_eq!(sidebar_width_for_viewport(520.0, 1600.0), 520.0);
-        assert_eq!(
-            sidebar_width_for_viewport(520.0, 800.0),
-            800.0 - CHAT_PANEL_MIN
-        );
-        // Never below the sidebar minimum, even in a tiny window.
-        assert_eq!(sidebar_width_for_viewport(300.0, 300.0), SIDEBAR_MIN);
-        assert_eq!(sidebar_width_for_viewport(SIDEBAR_MIN, 300.0), SIDEBAR_MIN);
-    }
-
-    #[test]
-    fn right_pane_ceiling_preserves_the_chat_floor() {
-        assert_eq!(right_pane_max_width(1200.0, 256.0, CHAT_PANEL_MIN), 644.0);
-        assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
-        // The chat floor wins over the right pane's preferred 360px minimum
-        // when the whole window is unusually narrow.
-        assert_eq!(right_pane_max_width(800.0, 256.0, CHAT_PANEL_MIN), 244.0);
-        assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
-    }
-
-    #[test]
-    fn right_pane_takeover_consumes_the_chat_column() {
-        assert_eq!(right_pane_takeover_width(1200.0, 256.0), 944.0);
-        assert_eq!(1200.0 - 256.0 - 944.0, 0.0);
-    }
-
-    #[test]
-    fn escape_interrupts_only_the_active_live_chat() {
-        assert_eq!(
-            resolve_shell_escape(
-                "escape",
-                false,
-                true,
-                Route::Chat,
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-            ShellEscapeOutcome::InterruptChat("chat-a".to_owned())
-        );
-        assert_eq!(
-            resolve_shell_escape(
-                "escape",
-                false,
-                true,
-                Route::Chat,
-                Some("chat-b"),
-                Indicator::AwaitingInput,
-                false,
-            ),
-            ShellEscapeOutcome::InterruptChat("chat-b".to_owned())
-        );
-    }
-
-    #[test]
-    fn escape_ignores_non_live_or_ineligible_views() {
-        assert_eq!(
-            resolve_shell_escape(
-                "escape",
-                true,
-                true,
-                Route::Chat,
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-            ShellEscapeOutcome::Blocked
-        );
-        for (route, selected, indicator, interrupting) in [
-            (Route::Chat, Some("chat-a"), Indicator::None, false),
-            (Route::Chat, None, Indicator::Working, false),
-            (Route::Chat, Some("chat-a"), Indicator::Working, true),
-            (
-                Route::Settings(SettingsSection::Devices),
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-        ] {
-            assert_eq!(
-                resolve_shell_escape(
-                    "escape",
-                    false,
-                    true,
-                    route,
-                    selected,
-                    indicator,
-                    interrupting,
-                ),
-                ShellEscapeOutcome::Ignored
-            );
-        }
-        assert_eq!(
-            resolve_shell_escape(
-                "enter",
-                true,
-                true,
-                Route::Chat,
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-            ShellEscapeOutcome::OtherKey
-        );
-    }
-
-    #[test]
-    fn escape_interrupt_is_opt_in() {
-        assert_eq!(
-            resolve_shell_escape(
-                "escape",
-                false,
-                false,
-                Route::Chat,
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-            ShellEscapeOutcome::Ignored
-        );
-    }
-
-    #[test]
-    fn only_visible_sync_steps_block_escape() {
-        assert!(!SyncFlow::Idle.has_visible_overlay());
-        assert!(!SyncFlow::SwitchOffer { notice_open: false }.has_visible_overlay());
-        assert!(SyncFlow::SwitchOffer { notice_open: true }.has_visible_overlay());
-        assert!(SyncFlow::Importing { done: 1, total: 3 }.has_visible_overlay());
-        assert!(SyncFlow::SignOutConfirm.has_visible_overlay());
-    }
-
-    #[test]
-    fn right_pane_takeover_control_reverses_direction() {
-        assert_eq!(tabs::right_pane_expand_icon(false), icons::EXPAND_ARROWS);
-        assert_eq!(tabs::right_pane_expand_icon(true), icons::COLLAPSE_ARROWS);
-    }
-
-    #[test]
-    fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
-        assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
-        assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
-        assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
-    }
-
-    #[test]
-    fn right_panel_content_keeps_the_larger_width_only_during_transition() {
-        assert_eq!(right_panel_content_width(520.0, None, None), 520.0);
-        assert_eq!(
-            right_panel_content_width(0.0, Some((520.0, 0.0)), None),
-            520.0
-        );
-        assert_eq!(
-            right_panel_content_width(760.0, Some((520.0, 760.0)), None),
-            760.0
-        );
-        assert_eq!(
-            right_panel_content_width(1064.0, Some((520.0, 1064.0)), Some(760.0)),
-            760.0
-        );
-
-        let conversation = conversation_width(1320.0, 256.0, 520.0);
-        let takeover = conversation_width(1320.0, 256.0, 1064.0);
-        assert_eq!(conversation, 544.0);
-        assert_eq!(takeover, 0.0);
-        assert_eq!(
-            stable_panel_content_width(takeover, Some((conversation, takeover))),
-            conversation
-        );
-        assert_eq!(
-            stable_panel_content_width(conversation, Some((takeover, conversation))),
-            conversation
-        );
-    }
-
-    #[tokio::test]
-    async fn remote_shutdown_waits_for_ipc_release() {
-        let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(listener);
-        });
-
-        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2))
-            .await
-            .unwrap();
-        release.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn signed_out_synced_runtime_stops_and_reboots_local() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("session.json"),
-            r#"{"refreshToken":"still-valid","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
-        )
-        .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let boot = EngineBootConfig {
-            data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
-            default_harness: mast_proto::HarnessId::Mock,
-        };
-        let synced = crate::state::EngineHandle::bootstrap(boot.clone())
-            .await
-            .expect("saved session opens its synced profile");
-        assert_eq!(synced.engine_info().workspace_scope, WorkspaceScope::Synced);
-
-        synced
-            .client()
-            .call(methods::SIGN_OUT, serde_json::json!({}))
-            .await
-            .expect("sign out clears credentials");
-        stop_synced_runtime(synced, port, dir.path())
-            .await
-            .expect("synced runtime drains and releases ownership");
-
-        assert!(!dir.path().join("session.json").exists());
-        let local = crate::state::EngineHandle::bootstrap(boot)
-            .await
-            .expect("same process can continue locally");
-        assert_eq!(local.engine_info().workspace_scope, WorkspaceScope::Local);
-        local.shutdown().await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn remote_shutdown_waits_for_engine_lock_release() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock = InstanceLock::acquire(dir.path()).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let lock_released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let released_by_task = lock_released.clone();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            drop(lock);
-            released_by_task.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2))
-            .await
-            .unwrap();
-        assert!(lock_released.load(std::sync::atomic::Ordering::SeqCst));
-        release.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn remote_shutdown_times_out_while_ipc_remains_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let error = wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_millis(100))
-            .await
-            .unwrap_err();
-
-        assert!(error.contains("did not finish stopping"));
-        drop(listener);
-    }
-
-    #[test]
-    fn account_actions_follow_the_attached_workspace_scope() {
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Local), SyncFlow::Idle),
-            Some(AccountMenuAction::EnableSync)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Development), SyncFlow::Idle),
-            None
-        );
-    }
-
-    #[test]
-    fn local_sign_in_offers_the_in_place_switch() {
-        let signed_in = AuthState::SignedIn {
-            user: mast_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::Enabling,
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: true }
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::Idle,
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: true },
-            "another viewport derives the pending switch from AuthStatus"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::SwitchOffer { notice_open: false },
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: false },
-            "shared auth updates do not reopen a postponed wizard"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::RestartPending { notice_open: false },
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::RestartPending { notice_open: false },
-            "the quit fallback survives shared auth updates too"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Local),
-                SyncFlow::SwitchOffer { notice_open: false },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-        for notice_open in [true, false] {
-            assert_eq!(
-                sync_flow_after_auth(
-                    SyncFlow::SwitchOffer { notice_open },
-                    Some(WorkspaceScope::Local),
-                    Some(&AuthState::SignedOut),
-                ),
-                SyncFlow::Idle,
-                "revoked credentials cancel the pending switch"
-            );
-        }
-    }
-
-    #[test]
-    fn import_summary_errors_are_a_failure_not_a_success() {
-        // Clean summary → done with counts.
-        let clean = serde_json::json!({
-            "kind": "summary", "importedChats": 2, "skippedChats": 1, "errors": []
-        });
-        assert_eq!(import_summary_outcome(&clean), Ok((2, 1)));
-
-        // Any error means the wizard must NOT say "all set" — partial
-        // migrations surface as an explicit failure with the first cause.
-        let partial = serde_json::json!({
-            "kind": "summary", "importedChats": 1, "skippedChats": 0,
-            "errors": ["chat c2: journal copy failed"]
-        });
-        let message = import_summary_outcome(&partial).expect_err("errors must fail");
-        assert!(message.contains("journal copy failed"), "{message}");
-        assert!(message.contains("1 imported"), "{message}");
-
-        let many = serde_json::json!({
-            "kind": "summary", "importedChats": 0, "skippedChats": 0,
-            "errors": ["a", "b", "c"]
-        });
-        let message = import_summary_outcome(&many).expect_err("errors must fail");
-        assert!(message.contains("3 failures"), "{message}");
-
-        // A summary missing the errors field entirely (older engine) is
-        // treated as clean rather than failing every import.
-        let legacy = serde_json::json!({ "kind": "summary", "importedChats": 4 });
-        assert_eq!(import_summary_outcome(&legacy), Ok((4, 0)));
-    }
-
-    #[test]
-    fn spaces_only_local_work_still_gets_the_import_offer() {
-        assert_eq!(local_work_phrase(0, 0), None, "nothing to bring");
-        assert_eq!(local_work_phrase(2, 0).as_deref(), Some("the 2 sessions"));
-        assert_eq!(
-            local_work_phrase(0, 1).as_deref(),
-            Some("the 1 project"),
-            "a Spaces-only profile must be offered the import, not a bare switch"
-        );
-        assert_eq!(
-            local_work_phrase(1, 2).as_deref(),
-            Some("the 1 session and 2 projects")
-        );
-    }
-
-    #[test]
-    fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
-        let signed_in = AuthState::SignedIn {
-            user: mast_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-
-        // "Later" postpones the failure notice; it must not evaporate.
-        let dismissed = SyncFlow::ImportFailed { notice_open: false };
-        assert_eq!(
-            sync_flow_after_auth(dismissed, Some(WorkspaceScope::Synced), Some(&signed_in)),
-            dismissed,
-            "a postponed import failure survives auth/scope updates"
-        );
-
-        // …and the account menu on the SYNCED runtime still exposes the
-        // re-entry point. This is the whole point: after the switch there is
-        // no local runtime left to re-derive an offer from, so this menu row
-        // is the only path back to the retry dialog.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), dismissed),
-            Some(AccountMenuAction::RestartPending),
-            "retry must remain reachable after dismissal"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Synced),
-                SyncFlow::ImportFailed { notice_open: true },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-
-        // Resolving the failure restores the normal synced menu.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
-        );
-    }
-
-    #[test]
-    fn switch_lifecycle_survives_the_runtime_replacement_window() {
-        let signed_in = AuthState::SignedIn {
-            user: mast_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-        for flow in [
-            SyncFlow::Switching { import: true },
-            SyncFlow::Importing { done: 1, total: 3 },
-            SyncFlow::ImportDone {
-                imported: 3,
-                skipped: 0,
-            },
-            SyncFlow::ImportFailed { notice_open: true },
-            SyncFlow::ImportFailed { notice_open: false },
-        ] {
-            // Local (before the stop), detached (mid-replacement), and synced
-            // (replacement runtime up): the driver owns these states — auth
-            // and scope edges must never reset them.
-            assert_eq!(
-                sync_flow_after_auth(flow, Some(WorkspaceScope::Local), Some(&signed_in)),
-                flow
-            );
-            assert_eq!(sync_flow_after_auth(flow, None, None), flow);
-            assert_eq!(
-                sync_flow_after_auth(flow, Some(WorkspaceScope::Synced), Some(&signed_in)),
-                flow
-            );
-        }
-    }
-
-    #[test]
-    fn synced_sign_out_blocks_every_viewport_and_cannot_switch_accounts() {
-        let signed_in_as_another_user = AuthState::SignedIn {
-            user: mast_proto::UserProfile {
-                id: "user-2".into(),
-                email: "other@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-2".into()),
-        };
-
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::SigningOut,
-                Some(WorkspaceScope::Synced),
-                Some(&AuthState::SignedOut),
-            ),
-            SyncFlow::SignedOutRestartRequired,
-            "the viewport that requested sign-out is blocked by AuthStatus"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::Idle,
-                Some(WorkspaceScope::Synced),
-                Some(&AuthState::SignedOut),
-            ),
-            SyncFlow::SignedOutRestartRequired,
-            "another viewport observing the same runtime is also blocked"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::SignedOutRestartRequired,
-                Some(WorkspaceScope::Synced),
-                Some(&signed_in_as_another_user),
-            ),
-            SyncFlow::SignedOutRestartRequired,
-            "new credentials cannot reopen the previous account's store"
-        );
-    }
-
-    #[test]
-    fn titlebar_cluster_matches_zeron_window_controls() {
-        // zeron window-controls.tsx: `left: fullscreen ? 12 : 88` — the
-        // cluster clears the {14,15} traffic lights, and reclaims the inset
-        // when fullscreen hides them.
-        assert_eq!(titlebar_cluster_start(false), 88.0);
-        assert_eq!(titlebar_cluster_start(true), 12.0);
-        assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
-        assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
-        assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
-        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
-        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
-        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
-    }
-
-    #[test]
-    fn titlebar_spacer_selects_per_platform_and_fullscreen() {
-        // macOS, lights visible: spacer fills up to the 88px cluster start.
-        assert_eq!(titlebar_spacer_width(true, false, 10.0), 78.0);
-        assert_eq!(titlebar_spacer_width(true, false, 12.0), 76.0);
-        assert_eq!(titlebar_spacer_width(true, false, 26.0), 62.0);
-        // macOS fullscreen: the inset animates away (clamped at zero when the
-        // strip's own padding already exceeds the 12px cluster start).
-        assert_eq!(titlebar_spacer_width(true, true, 10.0), 2.0);
-        assert_eq!(titlebar_spacer_width(true, true, 26.0), 0.0);
-        // Linux / Windows: never any inset.
-        assert_eq!(titlebar_spacer_width(false, false, 10.0), 0.0);
-        assert_eq!(titlebar_spacer_width(false, true, 10.0), 0.0);
-        assert_eq!(
-            TITLEBAR_CLUSTER_PAD + titlebar_spacer_width(true, false, TITLEBAR_CLUSTER_PAD),
-            titlebar_cluster_start(false),
-            "the rendered row padding and spacer must land on the declared cluster start"
-        );
-    }
-
-    #[test]
-    fn windows_caption_controls_reserve_titlebar_space() {
-        assert_eq!(titlebar_right_padding(true, 0, 16.0), 124.0);
-        assert_eq!(titlebar_right_padding(false, 0, 16.0), 16.0);
-    }
-
-    #[test]
-    fn linux_caption_controls_reserve_titlebar_space() {
-        // 24px buttons on the cluster's 2px rhythm.
-        assert_eq!(caption_buttons_width(0), 0.0);
-        assert_eq!(caption_buttons_width(1), 24.0);
-        assert_eq!(caption_buttons_width(3), 76.0);
-        // Right-side captions (the Linux default: minimize,maximize,close):
-        // content pads past the 10px edge inset + the button row.
-        assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 76.0);
-        // GNOME-vanilla ":close" — a single right button.
-        assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 24.0);
-        // Left-side captions ("close:…" layouts) shift the app cluster right
-        // by the button row + one 2px gap.
-        assert_eq!(cluster_buttons_start(false, false, 0), 10.0);
-        assert_eq!(cluster_buttons_start(false, false, 1), 10.0 + 24.0 + 2.0);
-        assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 76.0 + 2.0);
-        // macOS ignores the Linux caption count entirely.
-        assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
-    }
-
-    #[test]
-    fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..92; a 16px-padded header needs 84 more px to
-        // put content at 92 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 84.0 + 64.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 90.0 + 64.0);
-        // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 84.0 + 64.0 + 26.0);
-        // macOS: buttons start at the 88px traffic-light cluster start.
-        assert_eq!(
-            cluster_clearance(true, false, 0, 16.0),
-            88.0 + CLUSTER_BUTTONS_WIDTH + TITLEBAR_TRAILING_SLOTS_WIDTH + 8.0 - 16.0
-        );
-        // macOS fullscreen: cluster reclaims the inset (starts at 12).
-        assert_eq!(
-            cluster_clearance(true, true, 0, 16.0),
-            12.0 + CLUSTER_BUTTONS_WIDTH + TITLEBAR_TRAILING_SLOTS_WIDTH + 8.0 - 16.0
-        );
-    }
-
-    // ---- per-session panel flags (§1.10/1.11 parity: zeron sessionPanels) ----
-
-    #[test]
-    fn session_panels_default_closed_per_chat() {
-        let panels = SessionPanels::default();
-        assert_eq!(panels.get("a"), ChatPanels::default());
-        // Everything closed until explicitly opened (user request — the
-        // brief default-open popped the pane on every visited session).
-        assert!(!panels.get("a").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        assert_eq!(panels.get("a").right_active, RightSurface::Picker);
-        // The new-chat canvas ("" key) is its own session, also closed.
-        assert!(!panels.get("").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_flags_are_chat_scoped() {
-        let mut panels = SessionPanels::default();
-        // Opening the terminal in chat A opens it ONLY in chat A.
-        assert!(panels.toggle_terminal("a"));
-        assert!(panels.get("a").terminal_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("").terminal_open);
-        // Changes pane in B is independent of A's terminal.
-        assert!(panels.toggle_changes("b"));
-        assert!(panels.get("b").changes_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        // Switching back to A restores A's state untouched.
-        assert!(panels.get("a").terminal_open);
-        // Toggling off round-trips.
-        assert!(!panels.toggle_terminal("a"));
-        assert!(!panels.get("a").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_both_flags_coexist_per_chat() {
-        let mut panels = SessionPanels::default();
-        panels.toggle_terminal("a");
-        panels.toggle_changes("a");
-        assert_eq!(
-            panels.get("a"),
-            ChatPanels {
-                terminal_open: true,
-                changes_open: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(panels.get("b"), ChatPanels::default());
-        // The right pane round-trips back closed.
-        assert!(!panels.toggle_changes("a"));
-        assert!(!panels.get("a").changes_open);
-    }
-
-    #[test]
-    fn session_panels_update_tracks_right_surfaces() {
-        let mut panels = SessionPanels::default();
-        panels.update("a", |p| p.right_active = RightSurface::Diff(3));
-        assert_eq!(panels.get("a").right_active, RightSurface::Diff(3));
-        // Other chats keep the picker default.
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-        panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
-        assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        panels.update("a", |p| p.right_active = RightSurface::File(0));
-        assert_eq!(panels.get("a").right_active, RightSurface::File(0));
-    }
-
-    #[test]
-    fn file_surface_is_single_instance_per_tab_list() {
-        let mut tabs = vec![RightSurface::Terminal(1)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::File(0)]);
-    }
-
-    #[test]
-    fn file_editors_are_distinct_surface_tabs_with_stable_titles() {
-        let mut tabs = vec![RightSurface::File(0)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(1)));
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(2)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(1)));
-        assert_eq!(workspace_file_title("src/árbol.rs"), "árbol.rs");
-    }
-
-    // ---- sidebar resort FLIP diff (§1.6) ----
-
-    fn keys(list: &[(&str, f32)]) -> Vec<(String, f32)> {
-        list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
-    }
-
-    #[gpui::test]
-    fn header_buttons_render_for_each_style(cx: &mut gpui::TestAppContext) {
-        struct StyleHost;
-        impl gpui::Render for StyleHost {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let styles = [crate::ui_style::UiStyle::MINIMAL, crate::ui_style::UiStyle::DENSE, crate::ui_style::UiStyle::GUIDED];
-                div().flex().children(styles.into_iter().enumerate().map(|(index, style)| {
-                    let theme = Theme::default().with_ui_style(style);
-                    let id = ["style-minimal", "style-dense", "style-guided"][index];
-                    header_icon_button(id, icons::PEN, "Rename", true, &theme, |_, _, _| {})
-                        .debug_selector(move || id.into())
-                }))
-            }
-        }
-        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
-        vcx.update(|window, cx| window.draw(cx).clear());
-        for id in ["style-minimal", "style-dense", "style-guided"] {
-            assert!(vcx.debug_bounds(id).is_some());
-        }
-    }
-
-    #[gpui::test]
-    fn guided_header_labels_collapse_when_space_is_limited(cx: &mut gpui::TestAppContext) {
-        struct StyleHost;
-        impl gpui::Render for StyleHost {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let theme = Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
-                div().flex().children([(true, "guided-wide"), (false, "guided-narrow")].into_iter().map(|(fits, id)| {
-                    header_icon_button(id, icons::PEN, "Rename", fits, &theme, |_, _, _| {})
-                        .debug_selector(move || id.into())
-                }))
-            }
-        }
-        let (_, vcx) = cx.add_window_view(|_, _| StyleHost);
-        vcx.update(|window, cx| window.draw(cx).clear());
-        let wide = vcx.debug_bounds("guided-wide").unwrap();
-        let narrow = vcx.debug_bounds("guided-narrow").unwrap();
-        assert!(wide.size.width > narrow.size.width);
-        assert_eq!(narrow.size.width, px(34.0));
-    }
-
-    #[test]
-    fn sidebar_style_metrics_preserve_minimal_and_keep_rows_positive() {
-        let minimal = crate::ui_style::UiStyle::MINIMAL.tokens;
-        assert_eq!(sidebar_row_height(true, true, false, false, minimal), 29.0);
-        assert_eq!(sidebar_row_height(false, true, false, false, minimal), 45.0);
-        assert_eq!(sidebar_row_height(false, false, true, false, minimal), 45.0);
-        for style in [crate::ui_style::UiStyle::MINIMAL, crate::ui_style::UiStyle::DENSE, crate::ui_style::UiStyle::GUIDED] {
-            let compact = sidebar_row_height(true, true, false, false, style.tokens);
-            let expanded = sidebar_row_height(false, true, false, false, style.tokens);
-            assert!(compact > 0.0 && compact < expanded);
-        }
-    }
-
-    #[test]
-    fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 45.0);
-        assert_eq!(chat_row_height(true, false), 61.0);
-        assert_eq!(chat_row_height(false, true), 63.0);
-        assert_eq!(chat_row_height(true, true), 63.0);
-    }
-
-    #[test]
-    fn sidebar_harness_geometry_reflects_row_hierarchy() {
-        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
-    }
-
-    #[test]
-    fn sidebar_height_change_is_not_a_reorder() {
-        let open = keys(&[("first-group", 105.0), ("second-group", 240.0)]);
-        let collapsed = keys(&[("first-group", 40.0), ("second-group", 240.0)]);
-        assert!(!sidebar_key_order_changed(&open, &collapsed));
-
-        let reordered = keys(&[("second-group", 240.0), ("first-group", 40.0)]);
-        assert!(sidebar_key_order_changed(&collapsed, &reordered));
-    }
-
-    #[test]
-    fn resort_offsets_empty_when_order_unchanged() {
-        let order = keys(&[("a", 29.0), ("b", 29.0), ("c", 45.0)]);
-        assert!(resort_offsets(&order, &order, 2.0).is_empty());
-    }
-
-    #[test]
-    fn resort_offsets_activity_moves_row_to_top() {
-        // c (bottom, y=62) jumps to top: c glides down-from-above? No — c's
-        // old y is 62, new y is 0 → starts +62 below… offset = old - new = +62,
-        // painted at +62 decaying to 0 (a glide UP into place). a and b shift
-        // down by c's height + gap (31).
-        let old = keys(&[("a", 29.0), ("b", 29.0), ("c", 29.0)]);
-        let new = keys(&[("c", 29.0), ("a", 29.0), ("b", 29.0)]);
-        let offsets = resort_offsets(&old, &new, 2.0);
-        assert_eq!(offsets.get("c"), Some(&62.0));
-        assert_eq!(offsets.get("a"), Some(&-31.0));
-        assert_eq!(offsets.get("b"), Some(&-31.0));
-    }
-
-    #[test]
-    fn resort_offsets_respect_heights_and_gap() {
-        // Tall row (45px) swaps with a short one (29px).
-        let old = keys(&[("tall", 45.0), ("short", 29.0)]);
-        let new = keys(&[("short", 29.0), ("tall", 45.0)]);
-        let offsets = resort_offsets(&old, &new, 2.0);
-        // short: old y 47 → new y 0; tall: old y 0 → new y 31.
-        assert_eq!(offsets.get("short"), Some(&47.0));
-        assert_eq!(offsets.get("tall"), Some(&-31.0));
-    }
-
-    #[test]
-    fn resort_offsets_ignore_added_and_removed_keys() {
-        let old = keys(&[("a", 29.0), ("gone", 29.0), ("b", 29.0)]);
-        let new = keys(&[("new", 29.0), ("a", 29.0), ("b", 29.0)]);
-        let offsets = resort_offsets(&old, &new, 2.0);
-        // "new" has no old position (fades in instead); "gone" just goes.
-        assert!(!offsets.contains_key("new"));
-        assert!(!offsets.contains_key("gone"));
-        // a: old 0 → new 31 (pushed down by the insert); b: 62 → 62 (gone's
-        // slot replaced by "new" of equal height — no move, no entry).
-        assert_eq!(offsets.get("a"), Some(&-31.0));
-        assert_eq!(offsets.get("b"), None);
-    }
-
-    #[test]
-    fn resort_glide_spec_matches_original() {
-        // §1.6: 260ms cubic-bezier(0.22, 1, 0.36, 1).
-        assert_eq!(RESORT.duration_ms, 260);
-        assert_eq!(RESORT.curve, motion::EASE_RESORT);
-    }
-
-    // ---- navigation history (titlebar back/forward) ----
-
-    fn chat(id: &str) -> NavEntry {
-        NavEntry::Chat(id.to_string())
-    }
-
-    #[test]
-    fn nav_history_starts_with_nothing_to_walk() {
-        let nav = NavHistory::new(chat(""));
-        assert!(!nav.can_back());
-        assert!(!nav.can_forward());
-        assert_eq!(*nav.current(), chat(""));
-    }
-
-    #[test]
-    fn nav_push_then_back_and_forward() {
-        let mut nav = NavHistory::new(chat("a"));
-        nav.push(chat("b"));
-        nav.push(NavEntry::Settings(SettingsSection::Devices));
-        assert!(nav.can_back());
-        assert!(!nav.can_forward());
-
-        // Back walks toward the oldest entry without dropping anything.
-        assert_eq!(
-            nav.back(),
-            Some(chat("b")),
-            "back lands on the previous route"
-        );
-        assert_eq!(nav.back(), Some(chat("a")));
-        assert!(!nav.can_back());
-        assert!(nav.can_forward());
-        assert_eq!(nav.back(), None, "past the oldest entry is a no-op");
-
-        // Forward retraces the same path.
-        assert_eq!(nav.forward(), Some(chat("b")));
-        assert_eq!(
-            nav.forward(),
-            Some(NavEntry::Settings(SettingsSection::Devices))
-        );
-        assert!(!nav.can_forward());
-        assert_eq!(nav.forward(), None);
-    }
-
-    #[test]
-    fn pr_review_chats_is_a_first_class_history_entry() {
-        let mut nav = NavHistory::new(NavEntry::Overview);
-        nav.push(NavEntry::PrReviewChats);
-        assert_eq!(nav.back(), Some(NavEntry::Overview));
-        assert_eq!(nav.forward(), Some(NavEntry::PrReviewChats));
-    }
-
-    #[test]
-    fn nav_push_dedups_the_current_route() {
-        let mut nav = NavHistory::new(chat("a"));
-        nav.push(chat("a"));
-        nav.push(chat("a"));
-        assert_eq!(nav.len(), 1, "re-selecting the current route never stacks");
-        nav.push(NavEntry::Settings(SettingsSection::Agents));
-        nav.push(NavEntry::Settings(SettingsSection::Agents));
-        assert_eq!(nav.len(), 2);
-    }
-
-    #[test]
-    fn nav_push_truncates_the_forward_branch() {
-        // a → b → c, back to a, then push d: the b/c branch is gone (browser
-        // semantics — zeron's memory history PUSH truncates entries ahead).
-        let mut nav = NavHistory::new(chat("a"));
-        nav.push(chat("b"));
-        nav.push(chat("c"));
-        nav.back();
-        nav.back();
-        assert_eq!(*nav.current(), chat("a"));
-        assert!(nav.can_forward());
-        nav.push(chat("d"));
-        assert!(!nav.can_forward(), "the old branch is unreachable");
-        assert_eq!(nav.len(), 2);
-        assert_eq!(nav.back(), Some(chat("a")));
-        assert_eq!(nav.forward(), Some(chat("d")));
-    }
-
-    #[test]
-    fn nav_replace_swaps_in_place() {
-        // The boot auto-select replaces the untouched canvas entry, so Back
-        // stays disabled after landing in the last-used chat.
-        let mut nav = NavHistory::new(chat(""));
-        nav.replace(chat("boot"));
-        assert_eq!(nav.len(), 1);
-        assert_eq!(*nav.current(), chat("boot"));
-        assert!(!nav.can_back());
-    }
-
-    #[test]
-    fn nav_settings_sections_are_distinct_entries() {
-        let mut nav = NavHistory::new(chat("a"));
-        nav.push(NavEntry::Settings(SettingsSection::Devices));
-        nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
-        assert_eq!(nav.len(), 3, "section changes are navigations");
-        assert_eq!(
-            nav.back(),
-            Some(NavEntry::Settings(SettingsSection::Devices))
-        );
-        assert_eq!(nav.back(), Some(chat("a")));
-    }
-
-    #[test]
-    fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
-        let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
-        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
-        assert_eq!(tween.current(), 0.0);
-        assert!(!tween.animating());
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod exit_regressions {
-    use super::*;
-    use gpui::{AppContext, TestAppContext};
-
-    #[gpui::test]
-    fn repo_map_new_chat_targets_the_exact_existing_worktree(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_spaces(vec![mast_proto::Space {
-                        id: "repo".into(),
-                        device_id: "local".into(),
-                        path: "/repo".into(),
-                        name: None,
-                        git_detected: true,
-                        git_checked_at: None,
-                        checkout_id: None,
-                        created_at: Utc::now(),
-                    }]);
-                    state.selected_chat = Some("old-chat".into());
-                });
-
-                shell.open_new_session_in_worktree(
-                    "repo".into(),
-                    "/repo/.worktrees/audit".into(),
-                    Some("feature/audit".into()),
-                    cx,
-                );
-
-                assert!(matches!(shell.route, Route::Chat));
-                assert!(shell.state.read(cx).selected_chat.is_none());
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("repo"));
-                let pickers = shell.composer.read(cx).pickers().clone();
-                assert_eq!(
-                    pickers.read(cx).draft_worktree_scope(cx),
-                    Some(crate::pickers::DraftWorktreeScope {
-                        path: "/repo/.worktrees/audit".into(),
-                        worktree_name: "audit".into(),
-                        repo_name: "repo".into(),
-                        branch: "feature/audit".into(),
-                    }),
-                    "the blank draft visibly derives the same exact target that send consumes"
-                );
-                assert_eq!(
-                    pickers.read(cx).checkout_plan(),
-                    crate::pickers::CheckoutPlan::ReuseWorktree {
-                        path: "/repo/.worktrees/audit".into(),
-                        branch: "feature/audit".into(),
-                    }
-                );
-
-                // `+` while already on this unsent draft creates a genuinely
-                // fresh tab/draft instead of invisibly carrying the pin.
-                shell.open_new_session(cx);
-                assert!(pickers.read(cx).draft_worktree_scope(cx).is_none());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn appshot_destinations_retain_last_session_and_use_new_canvas_defaults(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.spaces = ["a", "b"]
-                        .into_iter()
-                        .map(|id| {
-                            serde_json::from_value(serde_json::json!({
-                                "id": id, "deviceId": "local", "path": "/tmp", "gitDetected": false,
-                                "createdAt": Utc::now(),
-                            }))
-                            .unwrap()
-                        })
-                        .collect();
-                    state.chats =
-                        vec![serde_json::from_value(serde_json::json!({
-                    "id": "last", "deviceId": "local", "spaceId": "a", "archived": false,
-                    "createdAt": Utc::now(),
-                })).unwrap()];
-                    state.select_chat(Some("last".into()), cx);
-                });
-                shell.on_state_changed(&shell.state.clone(), cx);
-                shell.settings.space_filter = Some("b".into());
-                shell.open_new_session(cx);
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert!(shell.active_chat.is_empty());
-                shell.settings.appshot_destination =
-                    crate::appshots::AppshotDestination::LastSession;
-                shell.receive_appshot(crate::appshots::tests::shot(), window, cx);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("last"));
-                assert_eq!(shell.composer.read(cx).appshots["last"].len(), 1);
-                shell.settings.appshot_destination =
-                    crate::appshots::AppshotDestination::NewSession;
-                shell.receive_appshot(crate::appshots::tests::shot(), window, cx);
-                assert!(shell.state.read(cx).selected_chat.is_none());
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("b"));
-                assert_eq!(shell.composer.read(cx).appshots[""].len(), 1);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                let duration = RESIZE.total().mul_f32(motion::speed_scale());
-                let started = std::time::Instant::now() - duration.mul_f32(2.);
-                let tween = Some(WidthTween {
-                    from: 520.,
-                    to: 0.,
-                    started,
-                });
-                shell.reduced_motion = false;
-                // The frame started halfway through the transition but rendering
-                // crossed its deadline. Every region must still use that frame.
-                shell.render_time = Some(started + duration.mul_f32(0.5));
-                assert!(shell.tween_active(tween));
-                assert_eq!(shell.active_tween_endpoints(tween), Some((520., 0.)));
-                let width = shell.eval_tween(tween, 0.);
-                assert!(width > 0. && width < 520.);
-                assert_eq!(shell.eval_tween(tween, 0.), width);
-                shell.active_chat = "preview".into();
-                shell.viewport_width = 1000.;
-                shell.right_tween = tween;
-                shell.toggle_right_pane(cx);
-                assert_eq!(
-                    shell.right_tween.unwrap().from,
-                    width,
-                    "reversing must not restart from zero"
-                );
-                let files = cx.new(|cx| {
-                    FilesSurface::new(
-                        shell.state.clone(),
-                        "preview".into(),
-                        false,
-                        1000,
-                        13.0,
-                        false,
-                        false,
-                        cx,
-                    )
-                });
-                let key = shell.panel_key(cx);
-                shell.file_surfaces.insert(0, files.clone());
-                shell
-                    .right_tabs
-                    .insert(key.clone(), vec![RightSurface::File(0)]);
-                shell
-                    .panels
-                    .update(&key, |panel| panel.right_active = RightSurface::File(0));
-                assert!(files.read(cx).test_images_visible());
-                shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx));
-                assert!(shell.tween_active(shell.right_tween));
-                assert!(
-                    !files.read(cx).test_images_visible(),
-                    "closing suspends image resources immediately"
-                );
-                let _ = shell.render_right_pane(window, cx);
-                assert!(
-                    !files.read(cx).test_images_visible(),
-                    "closing animation must not reactivate images"
-                );
-                shell.settings.sidebar_collapsed = true;
-                shell.sidebar_tween = tween;
-                shell.toggle_sidebar(cx);
-                assert_eq!(shell.sidebar_tween.unwrap().from, width);
-                shell.render_time = None;
-                assert!(!shell.tween_active(tween));
-                assert_eq!(shell.active_tween_endpoints(tween), None);
-                assert_eq!(shell.eval_tween(tween, 0.), 0.);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn panel_saves_preserve_settings_selected_outside_the_shell(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        for (index, effect) in settings::NewThreadBackgroundEffect::ALL
-            .into_iter()
-            .enumerate()
-        {
-            let open_links_in_zeron = index % 2 == 0;
-            let terminal_family = if open_links_in_zeron {
-                crate::typography::UiFontFamily::System
-            } else {
-                crate::typography::UiFontFamily::Geist
-            };
-            let code_family = if open_links_in_zeron {
-                crate::typography::UiFontFamily::Geist
-            } else {
-                crate::typography::UiFontFamily::System
-            };
-            let terminal_size = 15.0 + index as f32;
-            let code_size = 11.0 + index as f32;
-            let transcript_width = 736.0 + 16.0 * index as f32;
-            let geometry = Some(settings::WindowGeometry {
-                display_uuid: Some(uuid::Uuid::from_u128(7)),
-                x: 80.0 + index as f32,
-                y: 60.0,
-                width: 1100.0,
-                height: 750.0,
-            });
-            window
-                .update(cx, |shell, _, cx| {
-                    // Selection changes in Appearance, independently of the shell's
-                    // cached snapshot. Include a previously queued geometry save.
-                    shell.settings.sidebar_width = 280.0;
-                    shell.schedule_save(cx);
-                    settings::set_new_thread_background_effect(effect, cx);
-                    settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-                        settings.window_geometry = geometry;
-                        settings.open_web_links_in_mast = open_links_in_zeron;
-                        settings.terminal_font_family = terminal_family.clone();
-                        settings.terminal_font_size = terminal_size;
-                        settings.code_font_family = code_family.clone();
-                        settings.code_font_size = code_size;
-                        settings.transcript_width = transcript_width;
-                    });
-                    for step in 0..3 {
-                        shell.settings.sidebar_width = 290.0 + step as f32;
-                        shell.settings.right_pane_width = 540.0 + step as f32;
-                        shell.settings.terminal_height = 300.0 + step as f32;
-                        shell.schedule_save(cx);
-                        let current = settings::current(cx);
-                        assert_eq!(current.window_geometry, geometry);
-                        assert_eq!(current.new_thread_background_effect, effect);
-                        assert_eq!(current.open_web_links_in_mast, open_links_in_zeron);
-                        assert_eq!(current.terminal_font_family, terminal_family);
-                        assert_eq!(current.terminal_font_size, terminal_size);
-                        assert_eq!(current.code_font_family, code_family);
-                        assert_eq!(current.code_font_size, code_size);
-                        assert_eq!(current.transcript_width, transcript_width);
-                    }
-                    settings::flush(cx);
-                    let loaded = settings::UiSettings::load(dir.path());
-                    assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(loaded.new_thread_background_effect, effect);
-                    assert_eq!(loaded.open_web_links_in_mast, open_links_in_zeron);
-                    assert_eq!(loaded.terminal_font_family, terminal_family);
-                    assert_eq!(loaded.terminal_font_size, terminal_size);
-                    assert_eq!(loaded.code_font_family, code_family);
-                    assert_eq!(loaded.code_font_size, code_size);
-                    assert_eq!(loaded.transcript_width, transcript_width);
-                    assert_eq!(loaded.sidebar_width, 292.0);
-                    assert_eq!(loaded.right_pane_width, 542.0);
-                    assert_eq!(loaded.terminal_height, 302.0);
-                })
-                .unwrap();
-        }
-    }
-
-    #[gpui::test]
-    fn opening_terminals_focuses_the_terminal_once(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let mut drawer_window = None;
-        for embedded in [false, false, true] {
-            let panel = window
-                .update(cx, |shell, window, cx| {
-                    shell.open_chat("terminal-session".into(), cx);
-                    shell.active_chat = "terminal-session".into();
-                    let panel = if embedded {
-                        shell.add_terminal_surface(cx);
-                        shell.right_terminal.clone().unwrap()
-                    } else {
-                        shell.toggle_terminal(window, cx);
-                        shell.terminal.clone().unwrap()
-                    };
-                    assert!(!shell.composer.read(cx).focus_pending);
-                    panel
-                })
-                .unwrap();
-            let terminal_window = if !embedded && drawer_window.is_some() {
-                drawer_window.unwrap()
-            } else {
-                let handle = cx.update(|cx| {
-                    cx.open_window(gpui::WindowOptions::default(), |_, _| panel.clone())
-                        .unwrap()
-                });
-                if !embedded {
-                    drawer_window = Some(handle);
-                }
-                handle
-            };
-            cx.update_window(terminal_window.into(), |_, window, cx| {
-                window.draw(cx).clear();
-                assert!(
-                    panel.read(cx).focus_handle().is_focused(window),
-                    "embedded: {embedded}"
-                );
-                // Ordinary redraws must not steal focus from another control.
-                let other_input = cx.focus_handle();
-                window.focus(&other_input, cx);
-                window.draw(cx).clear();
-                assert!(other_input.is_focused(window));
-            })
-            .unwrap();
-            if !embedded {
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.toggle_terminal(window, cx);
-                        assert!(shell.composer.focus_handle(cx).is_focused(window));
-                    })
-                    .unwrap();
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn session_navigation_focuses_composer_once(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        // Render the real composer in its own window to exercise mounting
-        // without the shell's boot/connection gate hiding the destination.
-        let composer_window = cx.update(|cx| {
-            let composer = window.read(cx).unwrap().composer.clone();
-            cx.open_window(gpui::WindowOptions::default(), |_, _| composer)
-                .unwrap()
-        });
-        for destination in ["initial", "chat", "chat", "new", "new", "back", "settings"] {
-            window
-                .update(cx, |shell, _, cx| match destination {
-                    "chat" => shell.open_chat("existing-session".into(), cx),
-                    "new" => shell.open_new_session(cx),
-                    "back" => shell.apply_nav(NavEntry::Chat("existing-session".into()), cx),
-                    "settings" => {
-                        shell.open_settings(SettingsSection::Devices, cx);
-                        shell.close_settings(cx);
-                    }
-                    _ => {}
-                })
-                .unwrap();
-            cx.update_window(composer_window.into(), |composer, window, cx| {
-                window.draw(cx).clear();
-                assert!(
-                    composer
-                        .downcast::<Composer>()
-                        .unwrap()
-                        .focus_handle(cx)
-                        .is_focused(window),
-                    "{destination}"
-                );
-                // Subsequent renders after a click-away must not reclaim it.
-                window.blur();
-                window.draw(cx).clear();
-                assert!(window.focused(cx).is_none(), "{destination}");
-            })
-            .unwrap();
-        }
-    }
-
-    /// The overview's chat panel selects a chat without leaving the route or
-    /// recording history; "Open full chat →" on that already-selected chat
-    /// still records the chat entry, so Back returns to the overview.
-    #[gpui::test]
-    fn copy_chat_identity_writes_clipboard_and_flashes_header_feedback(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.chats = vec![
-                        serde_json::from_value(serde_json::json!({
-                            "id": "c1", "deviceId": "local", "archived": false,
-                            "title": "Fix\nlogin", "harnessSessionId": "sess-9",
-                            "createdAt": Utc::now(),
-                        }))
-                        .unwrap(),
-                        serde_json::from_value(serde_json::json!({
-                            "id": "c2", "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now(),
-                        }))
-                        .unwrap(),
-                    ];
-                    cx.notify();
-                });
-                // Header button: clipboard + transient check, no sidebar notice.
-                shell.copy_chat_identity("c1", false, cx);
-                assert_eq!(
-                    cx.read_from_clipboard()
-                        .and_then(|item| item.text())
-                        .as_deref(),
-                    Some("Fix login \u{2014} chat c1 \u{2014} session sess-9")
-                );
-                assert_eq!(shell.copied_chat_identity.as_deref(), Some("c1"));
-                assert!(shell.sidebar_notice.is_none());
-                // Menu item: no session id -> the session part is omitted.
-                shell.copy_chat_identity("c2", true, cx);
-                assert_eq!(
-                    cx.read_from_clipboard()
-                        .and_then(|item| item.text())
-                        .as_deref(),
-                    Some("New session \u{2014} chat c2")
-                );
-                assert_eq!(
-                    shell.sidebar_notice.as_deref(),
-                    Some("Chat name + IDs copied")
-                );
-            })
-            .unwrap();
-        // The header check clears itself after the flash.
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(1300));
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, _| {
-                assert!(shell.copied_chat_identity.is_none());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn overview_chat_preview_keeps_route_and_history(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                shell.open_overview(cx);
-                shell.preview_chat_in_overview("existing-session".into(), cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert!(matches!(shell.route, Route::Overview));
-                assert_eq!(
-                    shell.state.read(cx).selected_chat.as_deref(),
-                    Some("existing-session")
-                );
-                assert_eq!(shell.active_chat, "existing-session");
-                assert_eq!(*shell.nav.current(), NavEntry::Overview);
-                shell.open_chat("existing-session".into(), cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert!(matches!(shell.route, Route::Chat));
-                assert_eq!(
-                    *shell.nav.current(),
-                    NavEntry::Chat("existing-session".into())
-                );
-                shell.navigate_back(cx);
-                assert!(matches!(shell.route, Route::Overview));
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn projectless_new_session_restores_opt_out_and_clears_sidebar_filter(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        crate::settings::composer::ComposerDefaults {
-            device: Some("remote".into()),
-            no_project: true,
-            ..Default::default()
-        }
-        .save(dir.path())
-        .unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_spaces(vec![mast_proto::Space {
-                        id: "repo".into(),
-                        device_id: "local".into(),
-                        path: "/repo".into(),
-                        name: None,
-                        git_detected: false,
-                        git_checked_at: None,
-                        checkout_id: None,
-                        created_at: Utc::now(),
-                    }]);
-                    // Boot opened an existing project session after loading defaults.
-                    state.selected_chat = Some("existing-project-chat".into());
-                    state.no_project = false;
-                });
-                shell.settings.space_filter = None;
-                shell.open_new_session(cx);
-                assert!(shell.state.read(cx).no_project);
-                assert!(shell.state.read(cx).selected_space.is_none());
-                assert_eq!(
-                    shell.state.read(cx).effective_device_id().as_deref(),
-                    Some("remote")
-                );
-
-                // An explicit filter may select its project, but opting out again
-                // must remove that filter before the first send can hide the chat.
-                shell.set_space_filter(Some("repo".into()), cx);
-                shell
-                    .state
-                    .update(cx, |state, cx| state.select_space(None, cx));
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert!(shell.settings.space_filter.is_none());
-                assert!(shell.state.read(cx).no_project);
-            })
-            .unwrap();
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[gpui::test]
-    fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) {
-        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window.update(cx, |shell, window, cx| {
-            shell.active_chat = "source".into();
-            shell.state.update(cx, |state, _| {
-                state.selected_chat = Some("source".into());
-                state.chats.push(mast_proto::Chat {
-                    id: "destination".into(),
-                    scheduled_task_info: None,
-                    scheduled_task: None,
-                    side_of: None,
-                    side_absorbed_through: None,
-                    device_id: "here".into(),
-                    title: None,
-                    archived: false,
-                    cwd: None,
-                    branch: None,
-                    checkout_id: None,
-                    source_context: None,
-                    config: None,
-                    last_message_preview: None,
-                    last_message_at: None,
-                    created_at: Utc::now(),
-                    harness_session_id: None,
-                    harness_session_cwd: None,
-                    actual_model: None,
-                    parent_chat_id: None,
-                    space_id: None,
-                    last_seen_at: None,
-                    room_gen: None,
-                    linked_pr_url: None,
-                    linked_pr_source: None,
-                    linked_ticket_id: None,
-                    linked_ticket_source: None,
-                });
-            });
-            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-                settings.open_web_links_in_mast = false;
-            });
-            let mut activation = LinkActivation {
-                target: LinkTarget::new("Session", "mast://chat/destination"),
-                action: LinkAction::Primary,
-                source_session: Some("stale".into()),
-            };
-            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
-            activation.source_session = Some("source".into());
-            activation.action = LinkAction::External;
-            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
-            activation.action = LinkAction::Primary;
-            activation.target = LinkTarget::new("Missing", "mast://chat/missing");
-            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
-            activation.target = LinkTarget::new("Other workspace",
-                "mast://open/chat/destination?workspace=other");
-            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Rejected);
-            activation.target = LinkTarget::new("Session", "mast://chat/destination");
-            let browsers = shell.browsers.len();
-            assert_eq!(shell.activate_session_link(&activation, window, cx), LinkOutcome::Internal);
-            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("destination"));
-            assert!(matches!(shell.route, Route::Chat));
-            assert_eq!(shell.browsers.len(), browsers);
-        }).unwrap();
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[gpui::test]
-    fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let weak = window
-            .update(cx, |shell, window, cx| {
-                use crate::markdown::render::{
-                    LinkAction, LinkActivation, LinkOutcome, LinkTarget,
-                };
-                shell.active_chat = "first-session".into();
-                shell.state.update(cx, |state, _| {
-                    state.selected_chat = Some("first-session".into())
-                });
-                let mut activation = LinkActivation {
-                    target: LinkTarget::new("Docs", "https://example.com/docs"),
-                    action: LinkAction::Primary,
-                    source_session: Some("first-session".into()),
-                };
-                assert!(!shell.right_pane_open(cx));
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Internal
-                );
-                assert!(shell.right_pane_open(cx));
-                let first = shell.browser_seq;
-                assert_eq!(
-                    shell.browsers[&first].read(cx).page.url.as_deref(),
-                    Some("https://example.com/docs")
-                );
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(first)
-                );
-                // The same page again focuses its tab; a page's own new-tab
-                // request (target=_blank) still opens another.
-                shell.activate_session_link(&activation, window, cx);
-                assert_eq!(shell.browsers.len(), 1);
-                shell.add_browser_surface(Some("https://example.com/docs".into()), window, cx);
-                assert_eq!(shell.browsers.len(), 2);
-                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-                    settings.open_web_links_in_mast = false;
-                });
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::External("https://example.com/docs".into())
-                );
-                assert_eq!(shell.browsers.len(), 2);
-                activation.action = LinkAction::Internal;
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Internal,
-                    "the explicit internal action ignores the default preference"
-                );
-                assert_eq!(shell.browsers.len(), 2, "and focuses the open tab");
-                activation.action = LinkAction::External;
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::External("https://example.com/docs".into())
-                );
-                assert_eq!(shell.browsers.len(), 2);
-                activation.source_session = Some("other-session".into());
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Rejected
-                );
-                activation.source_session = Some("first-session".into());
-                shell.state.update(cx, |state, _| {
-                    state.selected_chat = Some("switch-in-progress".into())
-                });
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Rejected
-                );
-                assert_eq!(shell.browsers.len(), 2);
-                shell.state.update(cx, |state, _| {
-                    state.selected_chat = Some("first-session".into())
-                });
-                shell.add_subagent_surface(
-                    "first-session".into(),
-                    "child-doc".into(),
-                    "Child".into(),
-                    true,
-                    cx,
-                );
-                let child = shell
-                    .subagent_tabs
-                    .values()
-                    .next()
-                    .unwrap()
-                    .transcript
-                    .clone();
-                let ui = child.read(cx).link_ui().unwrap();
-                assert_eq!(ui.source_session.as_deref(), Some("first-session"));
-                activation.action = LinkAction::Internal;
-                activation.source_session = ui.source_session;
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Internal
-                );
-                assert_eq!(shell.browsers.len(), 2);
-                let weak = shell.browsers[&first].downgrade();
-                shell.close_right_surface(RightSurface::Browser(first), window, cx);
-                weak
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(weak.upgrade().is_none());
-    }
-
-    #[gpui::test]
-    fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
-        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let root_text = root.to_string_lossy().into_owned();
-        let bound = root.join(".worktrees/ui-pr-5767");
-        std::fs::create_dir_all(bound.join(".mast/reviews")).unwrap();
-        let payload = bound.join(".mast/reviews/pr-5767.review.json");
-        std::fs::write(&payload, "{}").unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "viz".into();
-                shell.state.update(cx, |state, _| {
-                    state.local_device_id = Some("here".into());
-                    state.selected_chat = Some("viz".into());
-                    state.chats.push(mast_proto::Chat {
-                        id: "viz".into(),
-                        device_id: "here".into(),
-                        title: None,
-                        archived: false,
-                        cwd: Some(root_text.clone()),
-                        branch: None,
-                        checkout_id: None,
-                        source_context: None,
-                        config: None,
-                        last_message_preview: None,
-                        last_message_at: None,
-                        created_at: Utc::now(),
-                        harness_session_id: None,
-                        harness_session_cwd: None,
-                        actual_model: None,
-                        parent_chat_id: None,
-                        space_id: None,
-                        last_seen_at: None,
-                        room_gen: None,
-                        linked_pr_url: None,
-                        linked_pr_source: None,
-                        linked_ticket_id: None,
-                        linked_ticket_source: None,
-                        scheduled_task: None,
-                        scheduled_task_info: None,
-                        side_of: None,
-                        side_absorbed_through: None,
-                    });
-                    state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
-                        chat_id: "viz".into(),
-                        targets: vec![mast_proto::ChatDiffTargetView {
-                            path: bound.to_string_lossy().into_owned(),
-                            checkout_id: "ui-wt".into(),
-                            source: mast_proto::ChatDiffTargetSource::Agent,
-                            selected: true,
-                            repo_name: "ui".into(),
-                            branch: None,
-                            head_sha: None,
-                        }],
-                        ref_targets: vec![],
-                    }]);
-                });
-                let activation = LinkActivation {
-                    target: LinkTarget::new("Saved review", payload.to_str().unwrap()),
-                    action: LinkAction::Primary,
-                    source_session: Some("viz".into()),
-                };
-                assert_eq!(
-                    shell.activate_session_link(&activation, window, cx),
-                    LinkOutcome::Internal
-                );
-                assert_eq!(shell.file_surface_paths.len(), 1);
-                assert_eq!(
-                    shell.file_surface_paths.values().next().unwrap(),
-                    ".mast/reviews/pr-5767.review.json"
-                );
-                assert_eq!(
-                    shell.active_checkout(cx).unwrap().0,
-                    bound.to_string_lossy()
-                );
-                let context =
-                    crate::files::client::FilesRequestContext::for_chat(shell.state.read(cx), "viz")
-                        .unwrap();
-                assert_eq!(context.target.checkout_path.as_deref(), bound.to_str());
-                assert_eq!(
-                    shell.state.read(cx).chats[0].cwd.as_deref(),
-                    Some(root_text.as_str())
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn visualization_links_render_fragments_and_open_previews_externally(cx: &mut TestAppContext) {
-        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
-        let dir = tempfile::tempdir().unwrap();
-        let checkout = tempfile::tempdir().unwrap();
-        let root = checkout.path().canonicalize().unwrap();
-        std::fs::create_dir_all(root.join("work")).unwrap();
-        std::fs::write(root.join("work/mock.fragment.html"), "<div id=m>x</div>").unwrap();
-        std::fs::write(root.join("work/mock.preview.html"), "<!doctype html>").unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let root_text = root.to_string_lossy().into_owned();
-        let preview_url = crate::browser::file_url(&root.join("work/mock.preview.html")).unwrap();
-        let link_ui = window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "viz".into();
-                shell.state.update(cx, |state, _| {
-                    state.local_device_id = Some("here".into());
-                    state.selected_chat = Some("viz".into());
-                    state.chats.push(mast_proto::Chat {
-                        id: "viz".into(),
-                        device_id: "here".into(),
-                        title: None,
-                        archived: false,
-                        cwd: Some(root_text.clone()),
-                        branch: None,
-                        checkout_id: None,
-                        source_context: None,
-                        config: None,
-                        last_message_preview: None,
-                        last_message_at: None,
-                        created_at: Utc::now(),
-                        harness_session_id: None,
-                        harness_session_cwd: None,
-                        actual_model: None,
-                        scheduled_task: None,
-                        scheduled_task_info: None,
-                        parent_chat_id: None,
-                        side_of: None,
-                        side_absorbed_through: None,
-                        space_id: None,
-                        last_seen_at: None,
-                        room_gen: None,
-                        linked_pr_url: None,
-                        linked_pr_source: None,
-                        linked_ticket_id: None,
-                        linked_ticket_source: None,
-                    });
-                });
-                let activate = |shell: &mut Shell,
-                                original: &str,
-                                action: LinkAction,
-                                window: &mut Window,
-                                cx: &mut Context<Shell>| {
-                    shell.activate_session_link(
-                        &LinkActivation {
-                            target: LinkTarget::new("Mockup", original),
-                            action,
-                            source_session: Some("viz".into()),
-                        },
-                        window,
-                        cx,
-                    )
-                };
-                let fragments = |shell: &Shell, cx: &App| {
-                    shell
-                        .browsers
-                        .values()
-                        .filter_map(|browser| {
-                            let view = browser.read(cx).fragment()?;
-                            Some((view.source.clone(), view.notice.clone()))
-                        })
-                        .collect::<Vec<_>>()
-                };
-
-                // A fragment link renders instead of opening its source.
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.fragment.html",
-                        LinkAction::Primary,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                let shown = fragments(shell, cx);
-                assert_eq!(shown.len(), 1);
-                assert_eq!(shown[0].0.path, "work/mock.fragment.html");
-                assert_eq!(shown[0].0.title, "Mockup");
-                assert_eq!(shown[0].0.local_root.as_deref(), Some(root.as_path()));
-                assert!(shell.file_surface_keys.is_empty());
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(shell.browser_seq)
-                );
-                let tab = shell.browsers[&shell.browser_seq].clone();
-                assert_eq!(tab.read(cx).title().as_ref(), "Mockup");
-                // No engine in this test: the read fails with an actionable error.
-                let error = tab.read(cx).fragment().unwrap().error.clone().unwrap();
-                assert!(error.message().contains("try again"), "{}", error.message());
-
-                // The absolute form reuses (and reloads) the same tab.
-                let absolute = format!("{root_text}/work/mock.fragment.html");
-                activate(shell, &absolute, LinkAction::Primary, window, cx);
-                assert_eq!(fragments(shell, cx).len(), 1);
-
-                // The export opens in the system browser from either file.
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.preview.html",
-                        LinkAction::Primary,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::External(preview_url.clone())
-                );
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.fragment.html",
-                        LinkAction::External,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::External(preview_url.clone())
-                );
-                // "Open in Mast" on the export shows its fragment.
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.preview.html",
-                        LinkAction::Internal,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                assert_eq!(fragments(shell, cx).len(), 1);
-
-                // View source opens the editor, not a rendered view.
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.fragment.html",
-                        LinkAction::Source,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                assert!(
-                    shell
-                        .file_surface_keys
-                        .keys()
-                        .any(|(_, path)| path == "work/mock.fragment.html")
-                );
-
-                // A plain `.html` visualize reference renders wide on request.
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/chart.html",
-                        LinkAction::Visualize { wide: true },
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                assert!(
-                    fragments(shell, cx)
-                        .iter()
-                        .any(|(source, _)| source.path == "work/chart.html" && source.wide)
-                );
-                // An ordinary `.html` link still opens as a file.
-                let tabs = fragments(shell, cx).len();
-                activate(shell, "work/page.html", LinkAction::Primary, window, cx);
-                assert_eq!(fragments(shell, cx).len(), tabs);
-
-                // Outside the checkout nothing opens as a file: the owning
-                // device is offered the artifact import instead.
-                let tabs = fragments(shell, cx).len();
-                assert_eq!(
-                    activate(
-                        shell,
-                        "/etc/x.fragment.html",
-                        LinkAction::Primary,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                assert_eq!(fragments(shell, cx).len(), tabs);
-                assert!(shell.outside_file_prompt.is_some());
-                shell.outside_file_prompt = None;
-
-                // Without an export, the preview action explains what to do.
-                std::fs::remove_file(root.join("work/mock.preview.html")).unwrap();
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.fragment.html",
-                        LinkAction::External,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                let notice = fragments(shell, cx)
-                    .into_iter()
-                    .find(|(source, _)| source.path == "work/mock.fragment.html")
-                    .and_then(|(_, notice)| notice)
-                    .unwrap();
-                assert!(notice.contains("No standalone export"), "{notice}");
-
-                // A chat on another device can't open local files externally.
-                shell.state.update(cx, |state, _| {
-                    state.local_device_id = Some("elsewhere".into())
-                });
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.preview.html",
-                        LinkAction::Primary,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                assert_eq!(
-                    activate(
-                        shell,
-                        "work/mock.fragment.html",
-                        LinkAction::Reveal,
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Rejected
-                );
-                shell
-                    .state
-                    .update(cx, |state, _| state.local_device_id = Some("here".into()));
-                std::fs::write(root.join("work/mock.preview.html"), "<!doctype html>").unwrap();
-                Shell::session_links(Some("viz".into()), cx)
-            })
-            .unwrap();
-
-        // Transcript cards route through the same handler: their preview
-        // action reaches the system opener with the export's file URL.
-        cx.update_window(window.into(), |_, window, cx| {
-            crate::markdown::render::activate_link(
-                LinkTarget::new("Mockup", "work/mock.fragment.html"),
-                LinkAction::External,
-                Some(&link_ui),
-                window,
-                cx,
-            )
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert_eq!(cx.opened_url(), Some(preview_url));
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[gpui::test]
-    fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
-        use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let surfaces = window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "owner".into();
-                shell
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("owner".into()));
-                shell.add_files_surface(window, cx);
-                shell.add_file_surface("README.md".into(), window, cx);
-                [
-                    shell.files[&shell.panel_key(cx)].clone(),
-                    shell.file_surfaces[&shell.file_surface_seq].clone(),
-                ]
-            })
-            .unwrap();
-        let mut last_external_url = None;
-        for (index, surface) in surfaces.iter().enumerate() {
-            let mut activation = LinkActivation {
-                target: LinkTarget::new("Docs", &format!("https://example.com/preview/{index}")),
-                action: LinkAction::Primary,
-                source_session: Some("owner".into()),
-            };
-            surface.update(cx, |_, cx| {
-                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
-            });
-            cx.run_until_parked();
-            assert_eq!(cx.opened_url(), last_external_url);
-            window
-                .update(cx, |shell, _, cx| {
-                    assert!(shell.right_pane_open(cx));
-                    assert_eq!(shell.browsers.len(), index + 1);
-                    assert_eq!(
-                        shell.resolved_right_active(cx),
-                        RightSurface::Browser(shell.browser_seq)
-                    );
-                    assert_eq!(
-                        shell.browsers[&shell.browser_seq]
-                            .read(cx)
-                            .page
-                            .url
-                            .as_deref(),
-                        Some(activation.target.original.as_str())
-                    );
-                })
-                .unwrap();
-            activation.action = LinkAction::External;
-            surface.update(cx, |_, cx| {
-                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
-            });
-            cx.run_until_parked();
-            assert_eq!(
-                cx.opened_url().as_deref(),
-                Some(activation.target.original.as_str())
-            );
-            last_external_url = Some(activation.target.original.clone());
-            activation.target = LinkTarget::new("Stale", "https://example.com/stale");
-            activation.source_session = Some("stale-owner".into());
-            for action in [LinkAction::Internal, LinkAction::External] {
-                activation.action = action;
-                surface.update(cx, |_, cx| {
-                    cx.emit(FilesEvent::OpenWebLink(activation.clone()))
-                });
-                cx.run_until_parked();
-                assert_eq!(cx.opened_url(), last_external_url);
-            }
-            window
-                .update(cx, |shell, _, _| {
-                    assert_eq!(shell.browsers.len(), index + 1)
-                })
-                .unwrap();
-        }
-    }
-
-    #[gpui::test]
-    fn browser_tabs_keep_session_ownership_and_release_on_close(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let weak = window
-            .update(cx, |shell, window, cx| {
-                // A fresh-session canvas never accumulates ownerless tabs.
-                shell.add_browser_surface(None, window, cx);
-                assert!(shell.browsers.is_empty());
-                shell.active_chat = "first-session".into();
-                shell.add_browser_surface(None, window, cx);
-                let first = shell.browser_seq;
-                let weak = shell.browsers[&first].downgrade();
-                shell.add_browser_surface(None, window, cx);
-                let second = shell.browser_seq;
-                assert_ne!(first, second);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                shell.active_chat = "second-session".into();
-                assert!(shell.right_surface_rows(cx).is_empty());
-                shell.add_browser_surface(None, window, cx);
-                let other = shell.browser_seq;
-                shell.active_chat = "first-session".into();
-                assert_eq!(shell.right_surface_rows(cx).len(), 2);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                // Closing a background tab preserves the selected address input.
-                let focus = window.focused(cx);
-                shell.close_right_surface(RightSurface::Browser(first), window, cx);
-                assert_eq!(window.focused(cx), focus);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                shell.close_right_surface(RightSurface::Browser(second), window, cx);
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                shell.active_chat = "second-session".into();
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(other)
-                );
-                shell.close_right_surface(RightSurface::Browser(other), window, cx);
-                assert!(shell.browsers.is_empty());
-                assert!(shell.browser_subs.is_empty());
-                weak
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(
-            weak.upgrade().is_none(),
-            "closed browser retained by callbacks"
-        );
-    }
-
-    #[gpui::test]
-    fn cmd_w_closes_the_active_right_pane_surface_before_the_window(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "session".into();
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx));
-
-                shell.add_browser_surface(None, window, cx);
-                let first = shell.browser_seq;
-                shell.add_browser_surface(None, window, cx);
-                let second = shell.browser_seq;
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-
-                // ⌘W closes the active tab, not the window.
-                assert!(shell.close_active_surface(window, cx));
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(first)
-                );
-
-                // …and again for the last tab, which also collapses the
-                // surface host (nothing left to show).
-                assert!(shell.close_active_surface(window, cx));
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                assert!(!shell.right_pane_open(cx));
-
-                // A closed pane falls through to the window-close rung
-                // instead of being consumed.
-                assert!(!shell.close_active_surface(window, cx));
-
-                // So does an open pane with nothing left to close.
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx));
-                assert!(!shell.close_active_surface(window, cx));
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn lifecycle_actions_keep_pending_and_failed_file_saves_alive(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: mast_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        for failed in [false, true] {
-            window
-                .update(cx, |shell, window, cx| {
-                    window.activate_window();
-                    let state = shell.state.clone();
-                    let files = cx.new(|cx| {
-                        let mut files = FilesSurface::new(
-                            state,
-                            "test".into(),
-                            false,
-                            1000,
-                            13.0,
-                            false,
-                            false,
-                            cx,
-                        );
-                        files.seed_pending_exit_test_document(failed);
-                        files
-                    });
-                    shell.file_surfaces.insert(0, files);
-                    shell
-                        .file_surface_keys
-                        .insert(("test".into(), "test.rs".into()), 0);
-                })
-                .unwrap();
-            cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));
-            cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| {
-                    assert!(matches!(shell.pending_exit, Some(PendingExit::Quit)));
-                    assert!(!shell.all_file_edits_flushed(cx));
-                    shell.cancel_file_close(RightSurface::File(0), cx);
-                    assert!(shell.pending_exit.is_none());
-                })
-                .unwrap();
-            cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseWindow));
-            cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| {
-                    assert!(matches!(shell.pending_exit, Some(PendingExit::CloseWindow)));
-                    shell.quit_for_runtime_change(cx);
-                    assert!(matches!(
-                        shell.pending_exit,
-                        Some(PendingExit::RuntimeChange)
-                    ));
-                    assert!(shell.runtime_change_task.is_none());
-                    shell.apply_staged_update(PathBuf::from("must-not-install"), cx);
-                    assert!(matches!(
-                        shell.pending_exit,
-                        Some(PendingExit::InstallUpdate(_))
-                    ));
-                    assert!(matches!(shell.update_flow, UpdateFlow::Idle));
-                    shell.cancel_file_close(RightSurface::File(0), cx);
-                    assert!(shell.pending_exit.is_none());
-                })
-                .unwrap();
-        }
-    }
-}
+mod exit_regressions;
 
 /// Native browser regression fixture hooks are excluded from shipped builds.
 #[cfg(feature = "browser-fixture")]
@@ -15480,330 +13250,10 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod right_tab_mouse_regressions {
-    use super::*;
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
-
-    // Render the production strip and use its real Shell callbacks, without
-    // starting an engine or rendering the rest of the desktop application.
-    struct TabHost {
-        shell: Entity<Shell>,
-        _data_dir: tempfile::TempDir,
-    }
-
-    impl Render for TabHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            self.shell.update(cx, |shell, cx| {
-                let tabs = shell.render_right_tab_strip(cx);
-                shell.titlebar_drag_region(
-                    "right-tab-test-titlebar",
-                    div().w(px(400.)).h(px(40.)).child(tabs),
-                    cx,
-                )
-            })
-        }
-    }
-
-    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            let shell = cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.active_chat = "parent".into();
-                for id in ["first", "second"] {
-                    shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
-                }
-                shell
-            });
-            TabHost {
-                shell,
-                _data_dir: dir,
-            }
-        });
-        let shell = host.read_with(cx, |host, _| host.shell.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-        (shell, cx)
-    }
-
-    #[gpui::test]
-    fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
-        let end = start + gpui::point(px(6.), px(0.));
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.update(|_, cx| assert!(!cx.has_active_drag(), "close press started a tab drag"));
-        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(!shell.subagent_tabs.contains_key(&1));
-            assert!(shell.subagent_tabs.contains_key(&2));
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
-        });
-    }
-
-    #[gpui::test]
-    fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            for id in ["third", "fourth", "fifth", "sixth"] {
-                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
-            }
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        cx.update(|window, cx| {
-            window.dispatch_event(
-                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                    position: start,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
-                    modifiers: gpui::Modifiers::default(),
-                    touch_phase: gpui::TouchPhase::Moved,
-                }),
-                cx,
-            );
-        });
-        shell.read_with(cx, |shell, _| {
-            assert!(
-                shell.right_tab_scroll.offset().x < px(0.),
-                "tab strip did not scroll"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn subagent_tab_body_still_selects_drags_and_middle_closes(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        cx.simulate_click(start, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
-        });
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            start + gpui::point(px(8.), px(0.)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        cx.update(|_, cx| {
-            assert_eq!(
-                cx.has_active_drag(),
-                crate::click_activation_drag_enabled(),
-                "tab drag policy does not match the current platform"
-            )
-        });
-        cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
-        cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, _| {
-            assert!(!shell.subagent_tabs.contains_key(&1));
-            assert!(shell.subagent_tabs.contains_key(&2));
-        });
-    }
-
-    #[cfg(target_os = "windows")]
-    #[gpui::test]
-    fn subagent_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        let end = start + gpui::point(px(8.), px(0.));
-
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.update(|_, cx| {
-            assert!(
-                !cx.has_active_drag(),
-                "ordinary Windows click jitter started a tab drag"
-            )
-        });
-        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
-
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
-        });
-    }
-}
+mod right_tab_mouse_regressions;
 
 #[cfg(test)]
-mod shortcut_focus_regressions {
-    use super::*;
-    use gpui::{AppContext, TestAppContext};
-
-    struct ShortcutHost {
-        root: FocusHandle,
-        unfocused: FocusHandle,
-        editor: FocusHandle,
-        show_editor: bool,
-        jumps: usize,
-    }
-
-    impl Render for ShortcutHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let root = self.root.clone();
-            let unfocused = self.unfocused.clone();
-            let preferred = self.editor.clone();
-            window.defer(cx, move |window, cx| {
-                restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
-            });
-            div()
-                .size_full()
-                .track_focus(&self.root)
-                .child(div().track_focus(&self.unfocused))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        // Exercise mouse focus handoffs, hiding a focused pane,
-                        // and clicking a control that explicitly clears focus.
-                        this.show_editor = event.position.x < px(100.0);
-                        if event.position.x < px(200.0) {
-                            window.focus(&this.editor, cx);
-                        } else {
-                            window.blur();
-                        }
-                        cx.notify();
-                    }),
-                )
-                .on_action(cx.listener(|this, _: &JumpSession, _, _| this.jumps += 1))
-                .when(self.show_editor, |el| {
-                    el.child(div().track_focus(&self.editor))
-                })
-        }
-    }
-
-    #[gpui::test]
-    fn explicit_blur_does_not_refocus_a_mounted_input(cx: &mut TestAppContext) {
-        let host = cx.add_window(|_, cx| ShortcutHost {
-            root: cx.focus_handle(),
-            unfocused: cx.focus_handle(),
-            editor: cx.focus_handle(),
-            show_editor: true,
-            jumps: 0,
-        });
-        cx.run_until_parked();
-        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        host.update(cx, |host, window, cx| {
-            window.focus(&host.editor, cx);
-            window.blur();
-            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
-            assert!(host.unfocused.is_focused(window));
-            // Subsequent renders must keep the neutral shortcut focus too.
-            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
-            assert!(host.unfocused.is_focused(window));
-        })
-        .unwrap();
-    }
-
-    #[gpui::test]
-    fn shortcuts_recover_from_retained_editor_focus(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            cx.bind_keys([KeyBinding::new(
-                &platform_combo("mod-2"),
-                JumpSession(1),
-                None,
-            )]);
-        });
-        let host = cx.add_window(|_, cx| ShortcutHost {
-            root: cx.focus_handle(),
-            unfocused: cx.focus_handle(),
-            editor: cx.focus_handle(),
-            show_editor: true,
-            jumps: 0,
-        });
-        for show_editor in [true, false, true, false] {
-            host.update(cx, |host, window, cx| {
-                host.show_editor = show_editor;
-                // Keep the editor handle alive and focused even when hidden.
-                window.focus(&host.editor, cx);
-                cx.notify();
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
-                .unwrap();
-            host.update(cx, |host, window, cx| {
-                restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
-                assert!(host.root.contains_focused(window, cx));
-                assert_eq!(host.editor.is_focused(window), show_editor);
-            })
-            .unwrap();
-            cx.simulate_keystrokes(host.into(), &platform_combo("mod-2"));
-        }
-        host.update(cx, |host, window, cx| {
-            assert_eq!(host.jumps, 4);
-            window.blur();
-            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
-            assert!(host.unfocused.is_focused(window));
-        })
-        .unwrap();
-    }
-
-    #[gpui::test]
-    fn shortcuts_work_after_mouse_focus_changes(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            cx.bind_keys([KeyBinding::new(
-                &platform_combo("mod-2"),
-                JumpSession(1),
-                None,
-            )]);
-        });
-        let host = cx.add_window(|_, cx| ShortcutHost {
-            root: cx.focus_handle(),
-            unfocused: cx.focus_handle(),
-            editor: cx.focus_handle(),
-            show_editor: true,
-            jumps: 0,
-        });
-        for (index, x) in [50.0, 150.0, 250.0, 50.0, 150.0, 250.0]
-            .into_iter()
-            .enumerate()
-        {
-            cx.update_window(host.into(), |_, window, cx| {
-                window.draw(cx).clear();
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseDown(MouseDownEvent {
-                        position: gpui::point(px(x), px(20.0)),
-                        button: MouseButton::Left,
-                        modifiers: gpui::Modifiers::default(),
-                        click_count: 1,
-                        first_mouse: false,
-                    }),
-                    cx,
-                );
-            })
-            .unwrap();
-            // Dispatch immediately after the mouse event; no manual recovery.
-            cx.simulate_keystrokes(host.into(), &platform_combo("mod-2"));
-            host.update(cx, |host, window, cx| {
-                assert_eq!(
-                    host.jumps,
-                    index + 1,
-                    "shortcut failed after mouse click at {x}"
-                );
-                assert!(host.root.contains_focused(window, cx));
-                assert_eq!(host.editor.is_focused(window), x < 100.0);
-            })
-            .unwrap();
-        }
-    }
-}
+mod shortcut_focus_regressions;
 
 #[cfg(feature = "snapshot")]
 impl Shell {
@@ -15812,16 +13262,54 @@ impl Shell {
         self.splash = SplashPhase::Gone;
     }
 
+    /// Boot the real in-process engine behind a fixture shell. Call it only
+    /// after the window has opened and drawn once: attaching fires the state
+    /// observer, which cannot run while the window is still being created.
+    pub(crate) fn fixture_boot_params(&self) -> (Entity<AppState>, EngineBootConfig) {
+        (self.state.clone(), self.boot.clone())
+    }
+
+    /// One line of shell state for the driver's header and for diagnosing a
+    /// blank tree.
+    pub fn fixture_status(&self, cx: &App) -> String {
+        let state = self.state.read(cx);
+        format!(
+            "connection={:?} chats={} selected={} splash={}",
+            state.connection,
+            state.chats.len(),
+            state.selected_chat.as_deref().unwrap_or("-"),
+            if matches!(self.splash, SplashPhase::Gone) {
+                "gone"
+            } else {
+                "visible"
+            },
+        )
+    }
+
+    /// The engine is attached, the connection is up and its chats have arrived.
+    pub fn fixture_engine_ready(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state.engine().is_some()
+            && matches!(state.connection, crate::state::ConnectionStatus::Ready)
+            && !state.chats.is_empty()
+    }
+
     pub fn fixture_snapshot_model_catalog(&mut self, cx: &mut Context<Self>) {
-        self.composer.read(cx).pickers().clone().update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+        self.composer
+            .read(cx)
+            .pickers()
+            .clone()
+            .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
     }
 
     pub fn fixture_snapshot_attachment(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        self.composer.update(cx, |composer, _| composer.fixture_attachment(bytes));
+        self.composer
+            .update(cx, |composer, _| composer.fixture_attachment(bytes));
     }
 
     pub fn fixture_snapshot_type(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.composer.update(cx, |composer, cx| composer.fixture_type(text, cx));
+        self.composer
+            .update(cx, |composer, cx| composer.fixture_type(text, cx));
     }
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
@@ -15838,7 +13326,9 @@ impl Shell {
     }
 
     pub fn fixture_snapshot_expand_tool_group(&mut self, cx: &mut Context<Self>) {
-        self.transcript.update(cx, |transcript, cx| transcript.fixture_expand_tool_group(cx));
+        self.transcript.update(cx, |transcript, cx| {
+            transcript.fixture_expand_tool_group(cx)
+        });
     }
 }
 
@@ -15866,139 +13356,4 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod titlebar_lamp_layout {
-    use super::*;
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
-
-    struct BarHost {
-        shell: Entity<Shell>,
-        width: f32,
-        _data_dir: tempfile::TempDir,
-    }
-
-    impl Render for BarHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let width = self.width;
-            self.shell.update(cx, |shell, cx| {
-                div()
-                    .relative()
-                    .w(px(width))
-                    .h(px(Theme::TITLEBAR_HEIGHT))
-                    .child(shell.render_title_bar(px(800.0), cx))
-                    .child(shell.render_titlebar_cluster(cx))
-            })
-        }
-    }
-
-    fn setup(
-        cx: &mut TestAppContext,
-        route: Route,
-        width: f32,
-        sidebar_collapsed: bool,
-    ) -> &mut VisualTestContext {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let (_host, cx) = cx.add_window_view(|_, cx| {
-            let shell = cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: mast_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.viewport_width = width;
-                shell.settings.sidebar_collapsed = sidebar_collapsed;
-                if matches!(route, Route::Chat) {
-                    shell.active_chat = "long".into();
-                    shell.state.update(cx, |state, _| {
-                        state.local_device_id = Some("here".into());
-                        state.selected_chat = Some("long".into());
-                        state.chats.push(mast_proto::Chat {
-                            id: "long".into(),
-                            device_id: "here".into(),
-                            title: Some("A very long chat title ".repeat(8)),
-                            archived: false,
-                            cwd: None,
-                            branch: None,
-                            checkout_id: None,
-                            source_context: None,
-                            config: None,
-                            last_message_preview: None,
-                            last_message_at: None,
-                            created_at: Utc::now(),
-                            harness_session_id: None,
-                            harness_session_cwd: None,
-                            actual_model: None,
-                            scheduled_task: None,
-                            scheduled_task_info: None,
-                            parent_chat_id: None,
-                            side_of: None,
-                            side_absorbed_through: None,
-                            space_id: None,
-                            last_seen_at: None,
-                            room_gen: None,
-                            linked_pr_url: None,
-                            linked_pr_source: None,
-                            linked_ticket_id: None,
-                            linked_ticket_source: None,
-                        });
-                    });
-                }
-                shell.route = route;
-                shell
-            });
-            BarHost {
-                shell,
-                width,
-                _data_dir: dir,
-            }
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx
-    }
-
-    #[gpui::test]
-    fn lamp_never_overlaps_the_title(cx: &mut TestAppContext) {
-        // Default window width and the window minimum (900, `window_min_size`), sidebar collapsed (cluster over the title) and open.
-        for (name, route) in [
-            ("overview", Route::Overview),
-            ("chat", Route::Chat),
-            ("pull requests", Route::PrReviewChats),
-        ] {
-            for width in [1280.0_f32, 900.0] {
-                for collapsed in [true, false] {
-                    let cx = setup(cx, route, width, collapsed);
-                    let lamp = cx.debug_bounds("running-lamp").expect("lamp rendered");
-                    let title = cx.debug_bounds("titlebar-title").expect("title rendered");
-                    assert!(
-                        !lamp.intersects(&title) && title.left() >= lamp.right(),
-                        "{name} @ {width}px collapsed={collapsed}: lamp {lamp:?} vs title {title:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn lamp_position_is_stable_across_routes(cx: &mut TestAppContext) {
-        let overview = setup(cx, Route::Overview, 1280.0, true)
-            .debug_bounds("running-lamp")
-            .unwrap();
-        let chat = setup(cx, Route::Chat, 1280.0, true)
-            .debug_bounds("running-lamp")
-            .unwrap();
-        assert_eq!(overview.origin, chat.origin);
-    }
-}
+mod titlebar_lamp_layout;

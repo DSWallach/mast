@@ -492,7 +492,7 @@ impl ArtifactQuestionSync {
         let ws = self.artifacts.workspace();
         let candidates = artifact.current_owner_chat_id().into_iter().chain(artifact.chat_id.as_deref());
         for chat_id in candidates {
-            let live = ws.chat(&chat_id).ok().flatten().is_some_and(|c| {
+            let live = ws.chat(chat_id).ok().flatten().is_some_and(|c| {
                 !c.archived && c.space_id.as_deref() == Some(artifact.space_id.as_str())
             });
             if live {

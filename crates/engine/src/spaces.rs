@@ -197,27 +197,6 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::repos::{is_automatic_access_blocked, is_broad_workspace_root};
-    use std::path::Path;
-
-    #[test]
-    fn native_watch_skips_the_live_home_root() {
-        let home = crate::repos::home_dir();
-        assert!(is_broad_workspace_root(&home));
-        assert!(is_automatic_access_blocked(&home.join("Music")));
-        assert!(is_automatic_access_blocked(
-            &home.join("Pictures").join("Photos Library.photoslibrary")
-        ));
-        assert!(is_automatic_access_blocked(
-            &home.join("Documents").join("project")
-        ));
-        assert!(is_broad_workspace_root(Path::new("/")));
-        assert!(is_broad_workspace_root(Path::new("relative/project")));
-    }
-}
-
 /// Per-space task: trailing-debounce kicks, then recheck git presence.
 async fn entry_task(
     inner: Weak<SpacesSyncInner>,
@@ -365,5 +344,26 @@ async fn spaces_task(
                 sweep_orphans(&inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::repos::{is_automatic_access_blocked, is_broad_workspace_root};
+    use std::path::Path;
+
+    #[test]
+    fn native_watch_skips_the_live_home_root() {
+        let home = crate::repos::home_dir();
+        assert!(is_broad_workspace_root(&home));
+        assert!(is_automatic_access_blocked(&home.join("Music")));
+        assert!(is_automatic_access_blocked(
+            &home.join("Pictures").join("Photos Library.photoslibrary")
+        ));
+        assert!(is_automatic_access_blocked(
+            &home.join("Documents").join("project")
+        ));
+        assert!(is_broad_workspace_root(Path::new("/")));
+        assert!(is_broad_workspace_root(Path::new("relative/project")));
     }
 }
