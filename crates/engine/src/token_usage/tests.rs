@@ -747,3 +747,70 @@ fn slow_writer_does_not_block_collection_and_queue_overflow_is_visible() {
 }
 
 mod efficiency;
+
+#[tokio::test]
+async fn retention_skips_unrelated_writes_and_retries_database_failure_on_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = crate::EngineCore::assemble(
+        dir.path(),
+        Arc::new(crate::default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let usage = core.sessions.token_usage().unwrap();
+    let passes = || usage.0.lock().unwrap().retention_passes;
+    let wait_for = |expected| {
+        let usage = usage.clone();
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(35), async {
+                while usage.0.lock().unwrap().retention_passes < expected {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    };
+    wait_for(1).await;
+    core.workspace
+        .rename_device(&core.device_id, "unrelated revision")
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        passes(),
+        1,
+        "device writes must not flush the usage database"
+    );
+    usage.flush().unwrap();
+    usage
+        .0
+        .lock()
+        .unwrap()
+        .db
+        .execute_batch("ALTER TABLE turns RENAME TO turns_backup")
+        .unwrap();
+    core.workspace
+        .create_chat("retry", None, None, None, None)
+        .unwrap();
+    wait_for(2).await;
+    for name in ["first unrelated write", "second unrelated write"] {
+        core.workspace.rename_device(&core.device_id, name).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(passes(), 2, "a failed pass must wait for the retry timer");
+    }
+    usage
+        .0
+        .lock()
+        .unwrap()
+        .db
+        .execute_batch("ALTER TABLE turns_backup RENAME TO turns")
+        .unwrap();
+    wait_for(3).await;
+    assert_eq!(
+        passes(),
+        3,
+        "the safety timer retries after database recovery"
+    );
+    core.shutdown().await;
+}

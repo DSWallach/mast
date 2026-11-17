@@ -46,6 +46,8 @@ struct Inner {
     active: HashMap<String, Active>,
     signature_key: String,
     capture_failures: u64,
+    #[cfg(test)]
+    retention_passes: usize,
 }
 #[derive(Clone)]
 pub struct TokenUsage(
@@ -131,6 +133,8 @@ impl TokenUsage {
                 active: HashMap::new(),
                 signature_key,
                 capture_failures: 0,
+                #[cfg(test)]
+                retention_passes: 0,
             })),
             Arc::new(path),
             None,

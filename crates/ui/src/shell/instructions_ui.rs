@@ -1653,9 +1653,20 @@ mod tests {
             .center();
         cx.simulate_click(mark, gpui::Modifiers::default());
         draw(cx);
-        let diagnostic = shell.read_with(cx, |shell, cx| format!("modal={} selected={:?} width={} route={:?}", shell.work_outline_modal.is_some(), shell.state.read(cx).selected_chat, shell.viewport_width, shell.route));
+        let diagnostic = shell.read_with(cx, |shell, cx| {
+            format!(
+                "modal={} selected={:?} width={} route={:?}",
+                shell.work_outline_modal.is_some(),
+                shell.state.read(cx).selected_chat,
+                shell.viewport_width,
+                shell.route
+            )
+        });
         let viewport = cx.update(|window, _| window.viewport_size());
-        assert!(cx.debug_bounds("instruction-compare").is_some(), "compare dialog missing after drift mark at {mark:?}, viewport={viewport:?}, {diagnostic}");
+        assert!(
+            cx.debug_bounds("instruction-compare").is_some(),
+            "compare dialog missing after drift mark at {mark:?}, viewport={viewport:?}, {diagnostic}"
+        );
         shell.read_with(cx, |shell, cx| {
             assert!(shell.state.read(cx).selected_chat.is_none())
         });

@@ -32,21 +32,40 @@ impl TokenUsage {
         let mut changes = workspace.watch_changes();
         tokio::spawn(async move {
             let mut reconciled = None;
+            let mut retry_on_tick = false;
+            let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            retry_tick.tick().await;
             loop {
                 let generation = workspace.chats_generation();
-                if reconciled != Some(generation) {
-                    let usage = usage.clone();
-                    let workspace = workspace.clone();
-                    let result = tokio::task::spawn_blocking(move || usage.reconcile_deletions(&workspace)).await;
+                if !retry_on_tick && reconciled != Some(generation) {
+                    let worker_usage = usage.clone();
+                    let worker_workspace = workspace.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        worker_usage.reconcile_deletions(&worker_workspace)
+                    })
+                    .await;
                     if matches!(result, Ok(Ok(()))) {
                         reconciled = Some(generation);
                     } else {
+                        retry_on_tick = true;
                         tracing::warn!("token usage deletion reconciliation failed; retrying");
+                    }
+                    #[cfg(test)]
+                    {
+                        usage
+                            .0
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .retention_passes += 1;
                     }
                 }
                 tokio::select! {
-                    changed=changes.changed()=>if changed.is_err(){break;},
-                    _=tokio::time::sleep(std::time::Duration::from_secs(30))=>{reconciled = None;},
+                    changed = changes.changed() => if changed.is_err() { break; },
+                    _ = retry_tick.tick() => {
+                        reconciled = None;
+                        retry_on_tick = false;
+                    },
                 }
             }
         })
