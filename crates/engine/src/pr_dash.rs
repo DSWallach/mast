@@ -1271,11 +1271,10 @@ impl PrDash {
         if !valid(owner) || !valid(repo) || number == 0 { return Err("Invalid pull request".into()); }
         let key = format!("{}/{}#{number}", owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
         let mut cache = self.inner.threads.lock().await;
-        if let Some(entry) = cache.get(&key) {
-            if entry.retry_after.is_none_or(|delay| entry.checked.elapsed() < delay) {
+        if let Some(entry) = cache.get(&key)
+            && entry.retry_after.is_none_or(|delay| entry.checked.elapsed() < delay) {
                 return entry.result.clone();
             }
-        }
         let failures = cache.get(&key).map_or(0, |entry| entry.failures);
         let result = review_threads::fetch(self.inner.gh.as_ref(), owner, repo, number).await;
         let (failures, retry_after) = match &result {

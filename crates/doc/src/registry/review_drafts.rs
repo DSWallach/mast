@@ -249,7 +249,7 @@ mod tests {
         };
         assert!(
             registry
-                .put_review_drafts(target, &[draft.clone()])
+                .put_review_drafts(target, std::slice::from_ref(&draft))
                 .unwrap()
         );
         assert_eq!(registry.review_drafts(target), vec![draft.clone()]);

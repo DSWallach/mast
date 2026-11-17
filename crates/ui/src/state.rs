@@ -2284,6 +2284,7 @@ impl AppState {
     /// Plumbing for the Milestone 4 notification detector: it diffs this map
     /// against its previous copy and fires on 0 -> nonzero. No notification or
     /// color is produced in Milestone 1.
+    #[cfg(test)]
     pub(crate) fn work_outline_unresolved_user_actions(&self) -> HashMap<String, u32> {
         self.work_outlines.unresolved_user_action_totals()
     }

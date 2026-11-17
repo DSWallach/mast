@@ -23,6 +23,7 @@ pub(crate) struct PrReviewOperations {
 }
 
 impl PrReviewOperations {
+    #[cfg(test)]
     pub(crate) fn params(
         &mut self,
         reference: &PrReference,

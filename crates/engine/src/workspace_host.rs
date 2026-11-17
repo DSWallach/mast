@@ -1939,12 +1939,12 @@ impl WorkspaceHost {
     /// LWW write of one durable link slot (`linkedPrUrl`/`linkedTicketId` +
     /// its source), gated by write-time precedence — manual > created_in_chat
     /// > mentioned (see [`mast_proto::ChatLinkSource::can_overwrite`]).
-    /// `value: None` clears the slot; clearing is manual-only (a mined writer
-    /// passing `value: None` is refused outright — mining only ever adds a
-    /// link, never removes one). Returns `Ok(false)` when the write was
-    /// skipped: no such chat row, a mined clear attempt, or an existing
-    /// higher-or-equal-ranked source blocked it — none of these are errors,
-    /// matching every other best-effort registry write in this file.
+    /// > `value: None` clears the slot; clearing is manual-only (a mined writer
+    /// > passing `value: None` is refused outright — mining only ever adds a
+    /// > link, never removes one). Returns `Ok(false)` when the write was
+    /// > skipped: no such chat row, a mined clear attempt, or an existing
+    /// > higher-or-equal-ranked source blocked it — none of these are errors,
+    /// > matching every other best-effort registry write in this file.
     pub fn set_chat_link(
         &self,
         chat_id: &str,

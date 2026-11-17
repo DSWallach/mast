@@ -6,7 +6,6 @@
 //! The key is never logged: errors carry `security`'s stderr only, and the
 //! value is passed to `security` as an argument (as `agent_accounts` does).
 
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -110,8 +109,8 @@ impl KeychainKeyStore {
     const TIMEOUT: Duration = Duration::from_secs(15);
 
     fn run(args: &[&str]) -> Result<(bool, String, String), String> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("security")
+        use std::process::Stdio;
+        let mut child = mast_harness::command("security")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

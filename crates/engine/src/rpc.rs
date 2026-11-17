@@ -145,11 +145,10 @@ async fn hand_off_config(
     }
     let resolved = registry.resolve(target).map_err(|e| RpcError::Failed(e.to_string()))?;
     let models = crate::model_catalogs::list(data_dir, resolved, false).await.unwrap_or_default();
-    if let Some(ref requested) = model {
-        if !models.is_empty() && !models.iter().any(|m| m.id == *requested) {
+    if let Some(ref requested) = model
+        && !models.is_empty() && !models.iter().any(|m| m.id == *requested) {
             return Err(RpcError::Failed(format!("model {requested:?} is not offered by {target:?} (see list_models)")));
         }
-    }
     if target != config.harness {
         config.harness = target;
         let default = models.iter().find(|m| target.default_model() == Some(m.id.as_str())).or_else(|| models.first());

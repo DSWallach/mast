@@ -235,7 +235,7 @@ pub fn snapshot_hash(
     let mut hasher = Sha256::new();
     for line in &lines {
         hasher.update(line.as_bytes());
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
     }
     Ok(hasher
         .finalize()

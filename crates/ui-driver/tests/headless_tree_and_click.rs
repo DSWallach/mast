@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, AppContext, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent,
+    AnyWindowHandle, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PlatformInput, px, size,
 };
 use mast_ui::{

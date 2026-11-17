@@ -40,7 +40,6 @@
 //! `forceUsage` on page mount/refresh. Cached results (60s TTL) are served to
 //! non-forced lists in between.
 
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (2 non-test sites) through mast_harness::command / git_command
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -1863,7 +1862,7 @@ mod keychain {
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
 
     pub(super) async fn credential_presence() -> LocalSignInStatus {
-        let mut command = tokio::process::Command::new("security");
+        let mut command = mast_harness::command_async("security");
         command.args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1877,7 +1876,7 @@ mod keychain {
     }
 
     async fn exec(args: &[&str]) -> (bool, String, String) {
-        let run = tokio::process::Command::new("security")
+        let run = mast_harness::command_async("security")
             .args(args)
             .stdin(std::process::Stdio::null())
             .output();

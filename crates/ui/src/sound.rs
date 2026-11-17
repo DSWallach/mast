@@ -11,7 +11,6 @@
 //! - failures are logged and swallowed — a missing player must never bother
 //!   the session flow.
 
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -233,7 +232,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     // the chime's duration. Pass the path through the child environment rather
     // than interpolating it into PowerShell source (paths may contain quotes).
     let script = "(New-Object Media.SoundPlayer $env:MAST_SOUND_PATH).PlaySync()";
-    let output = std::process::Command::new("powershell.exe")
+    let output = mast_harness::command("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -275,7 +274,7 @@ fn run_player(path: &Path) -> Result<(), String> {
 
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
-    let mut child = std::process::Command::new(program)
+    let mut child = mast_harness::command(program)
         .args(args)
         .arg(path)
         .stdin(std::process::Stdio::null())

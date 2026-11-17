@@ -206,6 +206,7 @@ impl ScratchDirectories {
 
     /// Copy a template data directory into an empty run directory. Symlinks are
     /// rejected rather than followed, including links back to the template.
+    #[cfg(test)]
     pub(crate) fn copy_template_data(&self, template: &ScratchDirectories) -> io::Result<()> {
         fn validate_directory(source: &Path) -> io::Result<()> {
             for entry in std::fs::read_dir(source)? {

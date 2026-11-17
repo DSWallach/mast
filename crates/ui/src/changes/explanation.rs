@@ -831,6 +831,7 @@ impl Changes {
 }
 
 /// Format the selected lines as a normal chat message, preserving patch markers.
+#[cfg(test)]
 pub(super) fn selection_question(
     path: &str,
     side: SourceSide,

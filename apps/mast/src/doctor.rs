@@ -155,11 +155,10 @@ impl Environment for System {
         if is_git {
             // git_command is required for all Git spawns; bind its lookup to the
             // exact absolute directory selected by executable discovery.
-            if executable.file_stem().is_some_and(|stem| stem == "git") {
-                if let Some(parent) = executable.parent() {
+            if executable.file_stem().is_some_and(|stem| stem == "git")
+                && let Some(parent) = executable.parent() {
                     command.env("PATH", parent);
                 }
-            }
         } else {
             mast_harness::compose_login_shell_path_std(&mut command);
         }
@@ -404,7 +403,7 @@ fn linear_check(env: &impl Environment) -> Check {
             );
         };
         // No -w: security only reports item attributes, and stdout is discarded.
-        return if ["computer.mikey.mast.linear", "sh.zeron.linear"]
+        if ["computer.mikey.mast.linear", "sh.zeron.linear"]
             .iter()
             .any(|service| {
                 env.run(
@@ -423,7 +422,7 @@ fn linear_check(env: &impl Environment) -> Check {
                 "Keychain item absent or unavailable",
                 Some("Optionally add a key in Settings → Linear"),
             )
-        };
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -460,7 +459,7 @@ fn free_space(path: &Path) -> Option<u64> {
         return None;
     }
     let stats = unsafe { stats.assume_init() };
-    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
 }
 #[cfg(not(unix))]
 fn free_space(_: &Path) -> Option<u64> {

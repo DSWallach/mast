@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use chrono::TimeZone;
 use gpui::{
-    AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-    VisualTestContext, Window, div, px,
+    Context, IntoElement, Render, TestAppContext, VisualTestContext, Window, div, px,
 };
 use mast_proto::{
     ChatAccountPin, HarnessId, ManagedAccount, ManagedAccountsSnapshot, WorkOutlineSnapshot,
@@ -17,7 +16,6 @@ use crate::work_outline::store::{fixture_ids::*, fixture_snapshot};
 
 struct Host {
     shell: Entity<Shell>,
-    chat_id: &'static str,
     tab: bool,
     _dir: tempfile::TempDir,
 }
@@ -155,7 +153,6 @@ pub(super) fn mount<'a>(
         });
         Host {
             shell,
-            chat_id,
             tab,
             _dir: dir,
         }

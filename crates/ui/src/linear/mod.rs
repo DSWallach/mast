@@ -270,6 +270,7 @@ pub(crate) mod fixture {
     }
 
     /// A Work Outline external reference view (provider `linear`).
+    #[cfg(test)]
     pub(crate) fn reference(
         id: &str,
         space_id: &str,

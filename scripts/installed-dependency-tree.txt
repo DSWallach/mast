@@ -1485,6 +1485,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   ├── hyper v1.11.0 [client,default,http1,server] (*)
 │   │   ├── hyper-util v0.1.20 [client,client-legacy,client-proxy,default,http1,tokio] (*)
 │   │   ├── libc v0.2.189 [default,extra_traits,std]
+│   │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
 │   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
 │   │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream] (*)
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
@@ -1946,6 +1947,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   ├── mast-update v0.2.82 (<workspace>/crates/update) []
 │   │   ├── anyhow v1.0.104 [default,std]
 │   │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
+│   │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
 │   │   ├── mast-proto v0.2.82 (<workspace>/crates/proto) [] (*)
 │   │   ├── reqwest v0.12.28 [__rustls,__rustls-ring,__tls,json,rustls-tls,rustls-tls-webpki-roots,rustls-tls-webpki-roots-no-provider,stream] (*)
 │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
