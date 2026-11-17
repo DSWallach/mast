@@ -2324,7 +2324,8 @@ async fn friction_tools_are_agent_scoped_and_forwarded() {
 }
 
 #[tokio::test]
-async fn handoff_predecessors_remain_readable_after_archiving()        let world = Arc::new(World {
+async fn handoff_predecessors_remain_readable_after_archiving() {
+    let world = Arc::new(World {
         alpha_archived: true,
         handoff_sources: vec!["chat-alpha-1"],
         ..World::default()
