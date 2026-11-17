@@ -231,6 +231,28 @@ mod tests {
         }
     }
 
+    struct FailingGh(AtomicUsize);
+    #[async_trait::async_trait]
+    impl GhRunner for FailingGh {
+        async fn current_user(&self) -> Result<String, String> {
+            Ok("reviewer".into())
+        }
+        async fn graphql(&self, _: &str, _: &[(&str, &str)]) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("network unavailable".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_failed_reads_respect_retry_budget() {
+        let gh = Arc::new(FailingGh(AtomicUsize::new(0)));
+        let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        for _ in 0..100 {
+            assert!(dash.review_threads("owner", "repo", 1).await.is_err());
+        }
+        assert_eq!(gh.0.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn fetches_remaining_comment_pages_with_a_bound() {
         let gh = PagedGh(AtomicUsize::new(0));

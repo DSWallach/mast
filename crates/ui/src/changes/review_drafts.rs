@@ -292,6 +292,14 @@ impl Changes {
                     Ok(_) => {
                         let target = draft.target.clone();
                         let draft_id = draft.id.clone();
+                        if this.review_target.as_deref() != Some(&target)
+                            && !this.local_draft_pending.contains_key(&target)
+                        {
+                            this.local_review_drafts.remove(&target);
+                            this.local_draft_acknowledged.remove(&target);
+                            this.local_draft_comments.remove(&target);
+                            return;
+                        }
                         this.local_review_drafts
                             .entry(target.clone())
                             .or_default()
@@ -479,6 +487,7 @@ impl Changes {
                         this.local_draft_acknowledged
                             .insert(target.clone(), drafts.clone());
                         this.local_review_drafts.entry(target).or_insert(drafts);
+                        this.prune_local_draft_cache();
                         this.rebuild_draft_index(cx);
                     }
                     Err(error) => {
@@ -489,6 +498,25 @@ impl Changes {
             })
             .ok();
         }));
+    }
+
+    fn prune_local_draft_cache(&mut self) {
+        while self.local_review_drafts.len() > 32 {
+            let victim = self
+                .local_review_drafts
+                .keys()
+                .find(|key| {
+                    self.review_target.as_ref() != Some(*key)
+                        && !self.local_draft_pending.contains_key(*key)
+                })
+                .cloned();
+            let Some(victim) = victim else {
+                break;
+            };
+            self.local_review_drafts.remove(&victim);
+            self.local_draft_comments.remove(&victim);
+            self.local_draft_acknowledged.remove(&victim);
+        }
     }
 
     pub(super) fn retry_local_drafts(&mut self, cx: &mut Context<Self>) {
@@ -647,6 +675,13 @@ impl Changes {
         let remaining = self.outdated_limit.saturating_sub(cards.len());
         for &index in self.unplaced_review_threads.iter().take(remaining) {
             if let Some(height) = self.review_thread_index.heights.get(index) {
+                let Some(thread) = self.review_threads.get(index) else {
+                    continue;
+                };
+                let location = thread.line.map_or_else(
+                    || thread.path.clone(),
+                    |line| format!("{}:{line}", thread.path),
+                );
                 cards.push(
                     div()
                         .w_full()
@@ -656,7 +691,7 @@ impl Changes {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.text_faint)
-                                .child("Thread outside the current diff"),
+                                .child(format!("Thread outside the current diff · {location}")),
                         )
                         .child(self.render_review_thread(index, *height, theme))
                         .into_any_element(),
