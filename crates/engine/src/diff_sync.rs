@@ -19,6 +19,13 @@
 //! slow 2-minute repair tick because native watchers may coalesce or drop events.
 //! Snapshots carry a sha256 checksum; an unchanged checksum publishes nothing.
 //!
+//! Repair-probe backoff: a fully watched checkout whose repair probe found
+//! nothing for [`REPAIR_QUIET_TICKS_BEFORE_BACKOFF`] ticks is probed every
+//! [`REPAIR_BACKOFF_STRIDE`] ticks (phase-staggered per checkout). A change the
+//! watcher missed is therefore caught within 120 s normally and within 600 s
+//! (stride x interval) once backed off; any watcher event, new chat, or probe
+//! hit resets it. Unwatched / over-budget checkouts never back off.
+//!
 //! Reconcile is deliberately damped, because it runs on *every* workspace chat
 //! row change — including the `checkoutId` writes reconcile itself makes.
 //! Checkout identities are memoized per cwd (chat-watch reconciles spawn
@@ -35,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -76,6 +83,28 @@ const MAX_SUBMODULE_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Slow repair pass: re-reconcile + re-sync every checkout.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
+/// Repair-probe backoff. A fully watched checkout whose last
+/// `REPAIR_QUIET_TICKS_BEFORE_BACKOFF` repair probes all found nothing changed
+/// is probed only every `REPAIR_BACKOFF_STRIDE` ticks (120 s -> 600 s). Any
+/// watcher event, new chat, or probe that finds a change resets it to every
+/// tick. Probes are phase-staggered per checkout so they spread over the
+/// stride instead of bursting on one tick.
+///
+/// Detection bound for a change the watcher missed: at most one
+/// `REPAIR_INTERVAL` (120 s) before backoff starts and at most
+/// `REPAIR_BACKOFF_STRIDE * REPAIR_INTERVAL` (600 s) once backed off, plus the
+/// debounce and probe time. Checkouts with no live root watcher (over the
+/// watch budget, or watcher setup failed) are never backed off: their working
+/// tree edits only ride the repair tick.
+const REPAIR_QUIET_TICKS_BEFORE_BACKOFF: u32 = 3;
+const REPAIR_BACKOFF_STRIDE: u64 = 5;
+/// How long the first sync may wait for the watchers to attach, so its probe is
+/// taken after attach and the capture-to-attach re-probe is skipped. Zero by
+/// default: measured FSEvents registration takes ~1-2.5 s per checkout (two at
+/// a time), so at startup the first sync would almost always time out and the
+/// first diff would only be delayed. When attach does win the race (or a
+/// test raises this) the re-probe is skipped either way.
+static INITIAL_SYNC_ATTACH_WAIT_MS: AtomicU64 = AtomicU64::new(0);
 /// Max subdirectories a checkout may have before we skip its live recursive
 /// watch (one OS watch per dir; past this the watcher thread's own bookkeeping
 /// costs more than instant diffs are worth). A normal source tree is well
@@ -161,6 +190,21 @@ struct CheckoutEntry {
     /// Set by the repair tick: the next sync may be skipped when the probe
     /// shows nothing changed. Watcher and new-chat kicks leave it clear.
     repair_kick: AtomicBool,
+    /// Consecutive repair probes that found nothing changed (see
+    /// [`REPAIR_BACKOFF_STRIDE`]); reset by watcher kicks, new chats, changes.
+    quiet_ticks: AtomicU32,
+    /// Repair ticks this entry has seen; with `probe_phase` picks which tick of
+    /// a backed-off stride probes.
+    repair_ticks_seen: AtomicU64,
+    probe_phase: u64,
+    /// True once every watch target is attached; only then may the repair
+    /// probe back off.
+    fully_watched: AtomicBool,
+    /// The first sync has been kicked (by attach, or by the attach-wait timeout).
+    initial_kicked: AtomicBool,
+    /// A sync started its probe after the watchers attached, so changes after
+    /// that point are watcher-visible and the attach re-probe is redundant.
+    probed_after_attach: AtomicBool,
 }
 
 /// Kick channel into an entry's sync task that also counts sends, so
@@ -190,8 +234,21 @@ impl CheckoutEntry {
         if idle {
             return;
         }
+        if self.fully_watched.load(Ordering::SeqCst)
+            && self.quiet_ticks.load(Ordering::Relaxed) >= REPAIR_QUIET_TICKS_BEFORE_BACKOFF
+        {
+            let tick = self.repair_ticks_seen.fetch_add(1, Ordering::Relaxed);
+            if !(tick + self.probe_phase).is_multiple_of(REPAIR_BACKOFF_STRIDE) {
+                return;
+            }
+        }
         self.repair_kick.store(true, Ordering::Relaxed);
         self.kick_tx.send();
+    }
+
+    /// Watcher activity or a new chat: probe at the base cadence again.
+    fn reset_repair_backoff(&self) {
+        self.quiet_ticks.store(0, Ordering::Relaxed);
     }
 }
 
@@ -420,6 +477,29 @@ impl CheckoutDiffSync {
         reconcile(&self.inner, chats, true).await;
         for entry in lock(&self.inner.entries).values() {
             entry.kick_for_repair();
+        }
+    }
+
+    /// How long a new entry's first sync may wait for its watchers to attach
+    /// (default 0: no wait). Process-wide; test hook.
+    #[doc(hidden)]
+    pub fn set_initial_sync_attach_wait_for_test(wait: Duration) {
+        INITIAL_SYNC_ATTACH_WAIT_MS.store(wait.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Ticks between probes of a backed-off, fully watched checkout: the detection
+    /// bound for a missed change is this many repair intervals. Test hook.
+    #[doc(hidden)]
+    pub fn max_repair_gap_ticks() -> u64 {
+        REPAIR_BACKOFF_STRIDE
+    }
+
+    /// Drop every checkout's fs watchers while leaving them marked fully
+    /// watched, simulating events the OS never delivered. Test hook.
+    #[doc(hidden)]
+    pub fn drop_watchers_for_test(&self) {
+        for entry in lock(&self.inner.entries).values() {
+            lock(&entry.watchers).clear();
         }
     }
 
@@ -1032,6 +1112,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     has_new
                 };
                 if has_new {
+                    entry.reset_repair_backoff();
                     entry.kick_tx.send(); // new chat needs a sidecar now
                 }
             }
@@ -1175,6 +1256,12 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
     let (tx, kick_rx) = mpsc::unbounded_channel();
     let kick_tx = Kicker { tx, sent: Arc::new(AtomicU64::new(0)) };
+    let probe_phase = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        identity.id.hash(&mut hasher);
+        hasher.finish() % REPAIR_BACKOFF_STRIDE
+    };
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
@@ -1186,6 +1273,12 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
         repair_kick: AtomicBool::new(false),
+        quiet_ticks: AtomicU32::new(0),
+        repair_ticks_seen: AtomicU64::new(0),
+        probe_phase,
+        fully_watched: AtomicBool::new(false),
+        initial_kicked: AtomicBool::new(false),
+        probed_after_attach: AtomicBool::new(false),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -1194,15 +1287,39 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_rx,
         inner.cancel.clone(),
     ));
-    kick_tx.send(); // initial snapshot — must not wait for watchers
+    // The initial snapshot normally goes at once; with a non-zero
+    // INITIAL_SYNC_ATTACH_WAIT_MS it waits for the watcher attach (below) so its
+    // probe lands after attach, falling back to going ahead after the wait.
+    let attach_wait = Duration::from_millis(INITIAL_SYNC_ATTACH_WAIT_MS.load(Ordering::Relaxed));
+    if attach_wait.is_zero() {
+        entry.initial_kicked.store(true, Ordering::SeqCst);
+        kick_tx.send(); // initial snapshot — must not wait for watchers
+    } else {
+        let weak = Arc::downgrade(&entry);
+        let kick_tx = kick_tx.clone();
+        let cancel = inner.cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(attach_wait) => {}
+            }
+            if let Some(entry) = weak.upgrade()
+                && !entry.initial_kicked.swap(true, Ordering::SeqCst)
+            {
+                kick_tx.send();
+            }
+        });
+    }
 
     // Watcher setup is genuinely blocking: the budget walk reads up to
     // MAX_WATCH_DIRS directory entries and FSEvents stream registration stalls
     // for seconds when fseventsd is contended. Doing it inline starved the whole
     // runtime (workspace watches, presence) whenever entries were (re)built, so
     // it runs on the blocking pool and attaches to the entry when ready. Events
-    // occurring before attachment are covered by the initial sync; one extra
-    // kick after attachment closes the capture→attach gap.
+    // occurring before attachment are covered by the initial sync when that ran
+    // after attach; when the attach-wait timeout let the initial sync go first,
+    // one probe-gated kick after attachment closes the capture->attach gap
+    // (one `git status` when nothing moved).
     // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
     // checkout).
     let weak = Arc::downgrade(&entry);
@@ -1210,15 +1327,17 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
-        let watchers = build_watchers(&entry.identity, &kick_tx);
+        let (watchers, fully_watched) = build_watchers(&entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
-        // This kick only closes the capture→attach gap, so it is probe-gated
-        // like a repair kick: one `git status` when nothing moved, instead of a
-        // second full ~8-spawn capture per checkout (which, when attach lags
-        // under load, also landed inside later idle windows).
-        entry.repair_kick.store(true, Ordering::Relaxed);
+        entry.fully_watched.store(fully_watched, Ordering::SeqCst);
         entry.watch_attached.store(true, Ordering::SeqCst);
-        kick_tx.send();
+        if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
+            // First sync, probed after attach: nothing to close.
+            kick_tx.send();
+        } else if !entry.probed_after_attach.load(Ordering::SeqCst) {
+            entry.repair_kick.store(true, Ordering::Relaxed);
+            kick_tx.send();
+        }
     }));
 }
 
@@ -1229,9 +1348,13 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 fn build_watchers(
     identity: &CheckoutIdentity,
     kick_tx: &Kicker,
-) -> Vec<crate::watch_budget::Watcher> {
+) -> (Vec<crate::watch_budget::Watcher>, bool) {
     let mut watchers = Vec::new();
-    for target in watch_targets(identity) {
+    let targets = watch_targets(identity);
+    // Fully watched: the working tree root itself has a live watcher.
+    let mut root_watched = false;
+    for target in targets {
+        let is_root = target == identity.root;
         let tx = kick_tx.clone();
         let git_dir = identity.git_dir.clone();
         let watcher =
@@ -1245,7 +1368,10 @@ fn build_watchers(
         match watcher {
             Some(mut watcher) => {
                 match watcher.watch(&target, notify::RecursiveMode::Recursive) {
-                    Ok(()) => watchers.push(watcher),
+                    Ok(()) => {
+                        root_watched |= is_root;
+                        watchers.push(watcher)
+                    }
                     Err(err) => {
                         tracing::debug!(path = %target.display(), error = %err, "diff-sync: watch failed")
                     }
@@ -1254,7 +1380,7 @@ fn build_watchers(
             None => tracing::debug!("diff-sync: watcher unavailable; using repair polling"),
         }
     }
-    watchers
+    (watchers, root_watched)
 }
 
 /// Whether a watch event can change this checkout's diff. A superproject's
@@ -1448,12 +1574,21 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     // costs exactly one `git status` and no capture ever starts without a
     // baseline being stored with its result.
     let repair = entry.repair_kick.swap(false, Ordering::Relaxed);
+    // Read before the probe starts: a probe that begins after attach covers
+    // everything the watchers did not see (see `probed_after_attach`).
+    if entry.watch_attached.load(Ordering::SeqCst) {
+        entry.probed_after_attach.store(true, Ordering::SeqCst);
+    }
+    if !repair {
+        entry.reset_repair_backoff(); // watcher or chat activity
+    }
     let (probe, probe_status_v2) = repair_probe_with_status(&entry.identity).await;
     if repair
         && lock(&entry.checksum).is_some()
         && let Some(now) = probe
         && lock(&entry.probe).replace(now) == Some(now)
     {
+        entry.quiet_ticks.fetch_add(1, Ordering::Relaxed);
         return; // one `git status` said nothing moved: skip the full capture
     }
     // Spawn savers for the full capture: HEAD comes from the git dir's files and
@@ -1482,6 +1617,16 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
         }
     };
     *lock(&entry.probe) = probe;
+    if repair {
+        // An undecidable probe (a dirty submodule) runs this full capture every
+        // tick; an unchanged result counts as quiet so those checkouts back
+        // off too, under the same detection bound. A changed one resets.
+        if lock(&entry.checksum).as_deref() == Some(snapshot.checksum.as_str()) {
+            entry.quiet_ticks.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry.reset_repair_backoff();
+        }
+    }
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
     }

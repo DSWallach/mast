@@ -4,7 +4,7 @@
 # worse. Post-mortem 2026-11-16; HANDOFF "Perf gate before every install", gate 3.
 #
 #   scripts/perf-soak.sh <candidate> [--baseline <installed>] [--seconds N]
-#                        [--synthetic | --real | --template DIR]
+#                        [--order abba|ab|ba] [--synthetic | --real | --template DIR]
 #
 # Data source (default --synthetic):
 #   --synthetic   generate temp repos/worktrees + Spaces/chats (soak_seed test)
@@ -18,6 +18,12 @@
 # HOME, PATH-first shims (read-only `git` guard, fail-closed gh/claude/codex/...).
 # MAST_SOAK=1 additionally makes the candidate refuse to start unless a probe
 # connect fails, git is the guard, and the workspace scope is Local.
+#
+# Run order (with a baseline): default `abba` = baseline, candidate, candidate, baseline, and each
+# side is the mean of its two runs, so a linear drift or first-run penalty (page cache, fseventsd
+# and the machine warming up) cancels instead of landing on one binary. `ab` / `ba` run each
+# binary once in that order (cheaper, order-biased). Soaking the same binary on both sides
+# shows the residual noise (see the per-run table).
 #
 # Fails (exit 1) when candidate avg CPU or git spawns/min (whole run, and steady state after
 # the first 60 s) > RATIO x baseline
@@ -34,19 +40,21 @@ RATIO=${RATIO:-1.5}
 RSS_MAX_MB=${RSS_MAX_MB:-500}
 CPU_FLOOR=${CPU_FLOOR:-3}
 SPAWN_FLOOR=${SPAWN_FLOOR:-10}
-MODE=synthetic; TEMPLATE=""; CAND=""; BASE=""
+MODE=synthetic; TEMPLATE=""; CAND=""; BASE=""; ORDER=abba
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline) BASE="$2"; shift 2 ;;
     --seconds) SECONDS_TOTAL="$2"; shift 2 ;;
+    --order) ORDER="$2"; shift 2 ;;
     --synthetic) MODE=synthetic; shift ;;
     --real) MODE=real; shift ;;
     --template) MODE=template; TEMPLATE="$2"; shift 2 ;;
-    -h|--help) sed -n 2,28p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,34p "$0"; exit 0 ;;
     *) [ -z "$CAND" ] && CAND="$1" || { echo "unexpected: $1" >&2; exit 2; }; shift ;;
   esac
 done
 [ -n "$CAND" ] && [ -x "$CAND" ] || { echo "candidate binary missing or not executable: $CAND" >&2; exit 2; }
+case "$ORDER" in abba|ab|ba) ;; *) echo "--order must be abba, ab or ba" >&2; exit 2 ;; esac
 [ -z "$BASE" ] || [ -x "$BASE" ] || { echo "baseline not executable: $BASE" >&2; exit 2; }
 case "$SECONDS_TOTAL" in ''|*[!0-9]*) echo "--seconds must be a number" >&2; exit 2 ;; esac
 [ "$SECONDS_TOTAL" -ge 70 ] || { echo "--seconds must be >= 70 (a sample is taken at 60 s)" >&2; exit 2; }
@@ -166,11 +174,44 @@ run_one() {
 }
 get() { grep "^$2=" "$ROOT/$1.result" | cut -d= -f2; }
 
-run_one candidate "$CAND" || { echo "candidate run failed" >&2; exit 2; }
-if [ -n "$BASE" ]; then
-  LOAD=$(uptime | sed 's/.*load averages*: *//' | awk '{gsub(",","");print $1}')
-  awk -v l="$LOAD" 'BEGIN{exit !(l>12)}' && { echo "load $LOAD > 12; stopping before baseline" >&2; exit 2; }
-  run_one baseline "$BASE" || { echo "baseline run failed" >&2; exit 2; }
+# Mean of the numeric keys of the given result files (non-numeric keys keep the first file's value).
+merge_results() {  # merge_results <out-label> <in-label>...
+  local out="$1"; shift
+  local files=(); for l in "$@"; do files+=("$ROOT/$l.result"); done
+  awk -F= '{ if (FILENAME != prev) { prev = FILENAME; fi++ }
+            if ($2 ~ /^-?[0-9.]+$/) { sum[$1] += $2; n[$1]++; if (!($1 in order)) { order[$1] = ++k; key[k] = $1 } }
+            else if (!($1 in first)) { first[$1] = $2; if (!($1 in order)) { order[$1] = ++k; key[k] = $1 } } }
+       END { for (i = 1; i <= k; i++) { x = key[i]
+               if (x in sum) printf((x ~ /_pct$|_per_min$/ ? "%s=%.1f\n" : "%s=%.0f\n"), x, sum[x] / n[x]); else printf "%s=%s\n", x, first[x] } }' "${files[@]}" > "$ROOT/$out.result"
+}
+check_load() {
+  local l; l=$(uptime | sed 's/.*load averages*: *//' | awk '{gsub(",","");print $1}')
+  awk -v l="$l" 'BEGIN{exit !(l>12)}' && { echo "load $l > 12; stopping before $1" >&2; return 1; }
+  return 0
+}
+
+if [ -z "$BASE" ]; then
+  run_one candidate "$CAND" || { echo "candidate run failed" >&2; exit 2; }
+elif [ "$ORDER" = abba ]; then
+  run_one base1 "$BASE" || { echo "baseline run failed" >&2; exit 2; }
+  check_load cand1 || exit 2
+  run_one cand1 "$CAND" || { echo "candidate run failed" >&2; exit 2; }
+  check_load cand2 || exit 2
+  run_one cand2 "$CAND" || { echo "candidate run failed" >&2; exit 2; }
+  check_load base2 || exit 2
+  run_one base2 "$BASE" || { echo "baseline run failed" >&2; exit 2; }
+  merge_results candidate cand1 cand2; merge_results baseline base1 base2
+  echo; echo "=== per-run (order: base1 cand1 cand2 base2) ==="
+  printf '%-8s %10s %10s %10s %10s %10s\n' run cpu_pct steady_cpu footprint_mb peak_fp_mb git_per_min
+  for l in base1 cand1 cand2 base2; do
+    printf '%-8s %10s %10s %10s %10s %10s\n' "$l" "$(get $l cpu_pct)" "$(get $l steady_cpu_pct)" "$(get $l footprint_mb)" "$(get $l peak_footprint_mb)" "$(get $l git_per_min)"
+  done
+else
+  FIRST_L=candidate; FIRST_B="$CAND"; SECOND_L=baseline; SECOND_B="$BASE"
+  [ "$ORDER" = ba ] && { FIRST_L=baseline; FIRST_B="$BASE"; SECOND_L=candidate; SECOND_B="$CAND"; }
+  run_one "$FIRST_L" "$FIRST_B" || { echo "$FIRST_L run failed" >&2; exit 2; }
+  check_load "$SECOND_L" || exit 2
+  run_one "$SECOND_L" "$SECOND_B" || { echo "$SECOND_L run failed" >&2; exit 2; }
 fi
 
 # ---- compare -----------------------------------------------------------------
