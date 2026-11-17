@@ -184,12 +184,17 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
+                "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
+                "board" => mast_ui::snapshot::board_fixture(false, false, cx).into(),
+                "board-table" => mast_ui::snapshot::board_fixture(true, false, cx).into(),
+                "board-empty" => mast_ui::snapshot::board_fixture(false, true, cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
+                "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
                 "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),

@@ -197,7 +197,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         "summary": "Changes the readme.", "steps": [], "questions": [],
         "highlights": [{"kind": "risk", "severity": "low", "text": "Check the change",
             "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}],
-        "suggestedComments": []
+        "suggestedComments": [{"id": "suggestion-1", "body": "Check this", "severity": "low",
+            "suggestion": "changed", "anchor": {"file": "README.md", "side": "right", "startLine": 1, "endLine": 1}}]
     });
     let url = "https://github.com/owner/repo/pull/42";
     let reply = tool(
@@ -217,6 +218,8 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         .unwrap();
     assert_eq!(read["artifactId"], id);
     assert_eq!(read["review"]["summary"], "Changes the readme.");
+    assert_eq!(read["review"]["suggestedComments"][0]["id"], "suggestion-1");
+    assert_eq!(read["review"]["suggestedComments"][0]["suggestion"], "changed");
     assert_eq!(
         read["review"]["highlights"][0]["anchor"]["hunkHash"]
             .as_str()
@@ -299,6 +302,11 @@ async fn review_publish_and_get_validate_identity_and_scope() {
         error.contains("Valid hunks per file") && error.contains("README.md"),
         "{error}"
     );
+    let mut bad_suggestion = review.clone();
+    bad_suggestion["suggestedComments"][0]["anchor"]["startLine"] = json!(999);
+    bad_suggestion["suggestedComments"][0]["anchor"]["endLine"] = json!(999);
+    let error = tool(&rig, &rig.token, "review_publish", json!({"prUrl":url, "headSha":head, "review":bad_suggestion})).await.unwrap_err();
+    assert!(error.contains("Valid hunks per file") && error.contains("README.md"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

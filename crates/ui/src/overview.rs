@@ -1783,6 +1783,7 @@ impl Overview {
                 this.open_proposals(space_id.clone(), item_id.clone(), cx);
             }
             OutlineEvent::OpenRequiredActions => this.open_required_actions(cx),
+            OutlineEvent::OpenRequiredAction(id) => this.open_required_action(id.clone(), cx),
             OutlineEvent::LinearIssueDropped {
                 space_id,
                 item_id,
@@ -4621,6 +4622,8 @@ impl Render for Overview {
         self.declare_outline_spaces(cx);
         if self.view_mode == OverviewMode::Outline {
             self.sync_outline(cx);
+        } else {
+            self.suspend_board(cx);
         }
 
         let new_chat_button = self.render_new_chat_button(&theme, cx);
@@ -5728,6 +5731,10 @@ impl Overview {
     #[cfg(test)]
     pub(crate) fn search_focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
         gpui::Focusable::focus_handle(self.search.read(cx), cx)
+    }
+
+    pub(crate) fn suspend_board(&mut self, cx: &mut Context<Self>) {
+        self.outline.update(cx, |outline, cx| outline.suspend_board(cx));
     }
 
     pub(crate) fn outline_entity(&self) -> Entity<OutlineView> {

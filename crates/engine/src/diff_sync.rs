@@ -2867,6 +2867,17 @@ pub async fn resolve_range(
     })
 }
 
+/// Resolve a diff range and read one immutable source file at either revision.
+pub async fn resolve_code_ref_source(root: &Path, base_ref: &str, head_ref: &str, path: &str, head: bool) -> Result<(String, String), EngineError> {
+    let path = validate_diff_path(path)?;
+    let range = resolve_range(root, base_ref, head_ref).await?;
+    let revision = if head { range.head } else { range.merge_base };
+    let source = read_git_source(root, &revision, path).await?;
+    if source.truncated { return Err(EngineError::Other("code reference source exceeds size limit".into())); }
+    let text = String::from_utf8(source.stdout).map_err(|_| EngineError::Other("code reference source is not UTF-8".into()))?;
+    Ok((revision, text))
+}
+
 /// Resolve a branch against the local remote-default ref, without fetching.
 pub async fn resolve_branch_review_base(
     root: &Path,
@@ -3283,6 +3294,30 @@ mod watch_budget_tests {
         assert_eq!(result.head_sha, head);
         assert_eq!(result.ahead_count, 1);
         assert_eq!(super::resolve_branch_review_base(directory.path(), "main", "device").await.unwrap().ahead_count, 0);
+    }
+
+    #[tokio::test]
+    async fn code_reference_base_reads_the_merge_base_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = mast_harness::git_command().current_dir(directory.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(directory.path().join("file.rs"), "before\n").unwrap();
+        git(&["add", "file.rs"]);
+        git(&["commit", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "feature"]);
+        git(&["rm", "file.rs"]);
+        git(&["commit", "-m", "delete"]);
+        let (sha, text) = super::resolve_code_ref_source(directory.path(), "main", "HEAD", "file.rs", false).await.unwrap();
+        assert_eq!(sha, base);
+        assert_eq!(text, "before\n");
+        assert!(super::resolve_code_ref_source(directory.path(), "main", "HEAD", "../file.rs", false).await.is_err());
     }
 
     #[test]

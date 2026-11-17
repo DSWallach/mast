@@ -65,6 +65,7 @@ use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
+mod code_ref;
 mod actions_ui;
 pub(crate) mod artifacts_ui;
 #[cfg(test)]
@@ -122,6 +123,7 @@ actions!(
         ToggleFiles,
         OpenMyPrs,
         QuickOpen,
+        AddCodeToChat,
         SearchWorkspaceContent,
         GoToLine,
         AddSpacePalette,
@@ -416,13 +418,14 @@ pub fn apply_keymap(
     cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
     for (id, action) in [
         (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
         (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
         (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),
     ] {
         let combo = keymap.get(id);
         if combo.is_empty() { continue; }
-        let context = (id == ShortcutId::ReplaceFile).then_some("Input");
+        let context = if id == ShortcutId::AddCodeToChat { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
         let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
         if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
             cx.bind_keys([binding]);
@@ -1834,6 +1837,9 @@ pub struct Shell {
     /// values remain owned by the workspace doc and are read through the
     /// existing multi-PR `CHAT_LINK_STATUS` endpoint.
     chat_header_links: std::collections::HashMap<String, ChatHeaderLinkCache>,
+    board_links_revision: u64,
+    board_links_generation: u64,
+    board_link_versions: std::collections::HashMap<String, u64>,
     chat_header_links_pending: std::collections::HashSet<String>,
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
@@ -2302,6 +2308,9 @@ impl Shell {
             copied_chat_identity: None,
             copied_chat_identity_clear: None,
             chat_header_links: Default::default(),
+            board_links_revision: 0,
+            board_links_generation: 0,
+            board_link_versions: Default::default(),
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
             running: running_ui::RunningUi::new(
@@ -3275,6 +3284,7 @@ impl Shell {
         {
             return LinkOutcome::Rejected;
         }
+        if let Some(outcome) = self.activate_pinned_code_ref(activation, window, cx) { return outcome; }
         if activation.target.navigation.is_err() {
             if crate::artifacts::model::link_target(&activation.target.original).is_some() {
                 if activation.action == LinkAction::Copy {
@@ -3734,6 +3744,7 @@ impl Shell {
         let lookup = (panel_key.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
             let surface = RightSurface::File(id);
+            if let Some(file) = self.file_surfaces.get(&id) { file.update(cx, |file, cx| file.clear_pinned_reference(cx)); }
             self.set_right_active(surface, cx);
             if let Some(line) = line
                 && let Some(file) = self.file_surfaces.get(&id).cloned()
@@ -4746,6 +4757,8 @@ impl Shell {
                         &chat_id,
                         &crate::review_chats::links_of_status(&status),
                     );
+                    this.board_links_revision = this.board_links_revision.wrapping_add(1);
+                    this.board_link_versions.insert(chat_id.clone(), this.board_links_revision);
                     this.chat_header_links.insert(
                         chat_id,
                         ChatHeaderLinkCache {
@@ -4770,6 +4783,8 @@ impl Shell {
 
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {
         self.chat_header_links.remove(chat_id);
+        self.board_links_revision = self.board_links_revision.wrapping_add(1);
+        self.board_link_versions.insert(chat_id.to_owned(), self.board_links_revision);
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
@@ -9682,6 +9697,9 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if !matches!(self.route, Route::Overview) && let Some(overview) = &self.overview_page {
+            overview.update(cx, |overview, cx| overview.suspend_board(cx));
+        }
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar). Settings never
         // underlaps: pad below the overlaid titlebar.
@@ -11610,6 +11628,7 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_diagram_observer(window, cx);
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("shell");
         self.render_time = Some(std::time::Instant::now());

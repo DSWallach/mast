@@ -736,6 +736,7 @@ pub struct AppState {
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
+    pub(crate) board_status_revision: u64,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -750,6 +751,9 @@ pub struct AppState {
     transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
     review_comments: HashMap<String, Vec<ReviewComment>>,
+    pub(crate) review_comments_revision: u64,
+    code_refs: HashMap<String, Vec<crate::code_ref::StagedCodeRef>>,
+    code_ref_pending: HashMap<String, usize>,
     /// File surfaces whose editor-backed comments currently cite a buffer
     /// revision that has not reached disk yet. A chat remains blocked until
     /// every surface waiting on a workspace write has finished or cancelled.
@@ -831,6 +835,8 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    board_watch_docs: std::collections::HashSet<String>,
+    tab_watch_docs: std::collections::HashSet<String>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -882,11 +888,15 @@ impl AppState {
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
+            board_status_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
+            review_comments_revision: 0,
+            code_refs: HashMap::new(),
+            code_ref_pending: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
@@ -923,6 +933,8 @@ impl AppState {
             github: Default::default(),
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            board_watch_docs: Default::default(),
+            tab_watch_docs: Default::default(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -938,6 +950,35 @@ impl AppState {
         self.selected_chat.clone().unwrap_or_default()
     }
 
+    pub fn begin_code_ref_load(&mut self, key: &str) -> bool {
+        let count = self.code_ref_pending.entry(key.to_string()).or_default();
+        if *count >= 32 { return false; }
+        *count += 1;
+        true
+    }
+    pub fn end_code_ref_load(&mut self, key: &str) {
+        if let Some(count) = self.code_ref_pending.get_mut(key) { *count = count.saturating_sub(1); if *count == 0 { self.code_ref_pending.remove(key); } }
+    }
+    pub fn code_ref_load_pending(&self, key: &str) -> bool { self.code_ref_pending.get(key).copied().unwrap_or(0) > 0 }
+
+    pub fn code_refs(&self, key: &str) -> &[crate::code_ref::StagedCodeRef] {
+        self.code_refs.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn add_code_ref(&mut self, key: &str, reference: crate::code_ref::StagedCodeRef) {
+        self.code_refs.entry(key.to_string()).or_default().push(reference);
+    }
+
+    pub fn remove_code_ref(&mut self, key: &str, id: &str) {
+        if let Some(references) = self.code_refs.get_mut(key) {
+            references.retain(|reference| reference.id != id);
+        }
+    }
+
+    pub fn take_code_refs(&mut self, key: &str) -> Vec<crate::code_ref::StagedCodeRef> {
+        self.code_refs.remove(key).unwrap_or_default()
+    }
+
     pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
         self.review_comments
             .get(key)
@@ -946,6 +987,7 @@ impl AppState {
     }
 
     pub fn add_review_comment(&mut self, key: &str, comment: ReviewComment) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comments
             .entry(key.to_string())
             .or_default()
@@ -953,6 +995,7 @@ impl AppState {
     }
 
     pub fn remove_review_comment(&mut self, key: &str, id: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(list) = self.review_comments.get_mut(key) {
             list.retain(|c| c.id != id);
             if list.is_empty() {
@@ -965,6 +1008,7 @@ impl AppState {
     /// Update only a staged comment's body. A stale editor must never recreate
     /// a comment that has already been removed or sent to the agent.
     pub fn update_review_comment_body(&mut self, key: &str, id: &str, body: String) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comment) = self
             .review_comments
             .get_mut(key)
@@ -975,6 +1019,7 @@ impl AppState {
     }
 
     pub fn update_review_comment_line(&mut self, key: &str, id: &str, line: u32) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comment) = self
             .review_comments
             .get_mut(key)
@@ -985,6 +1030,7 @@ impl AppState {
     }
 
     pub fn rename_review_comment_path(&mut self, key: &str, old_path: &str, new_path: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         if let Some(comments) = self.review_comments.get_mut(key) {
             for comment in comments
                 .iter_mut()
@@ -996,11 +1042,13 @@ impl AppState {
     }
 
     pub fn take_review_comments(&mut self, key: &str) -> Vec<ReviewComment> {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key).unwrap_or_default()
     }
 
     pub fn purge_review_comments(&mut self, key: &str) {
+        self.review_comments_revision = self.review_comments_revision.wrapping_add(1);
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key);
     }
@@ -1041,6 +1089,7 @@ impl AppState {
 
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
+        if self.chats != chats { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
         self.chats = chats;
         self.chats_synced = true;
         self.transcript_cache
@@ -1077,7 +1126,9 @@ impl AppState {
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
-        self.apply_sessions_at(sessions, Utc::now())
+        let changed = self.apply_sessions_at(sessions, Utc::now());
+        if changed { self.board_status_revision = self.board_status_revision.wrapping_add(1); }
+        changed
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
@@ -1499,6 +1550,11 @@ impl AppState {
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
     pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+        self.tab_watch_docs.insert(doc_id.clone());
+        self.ensure_subagent_doc_watch(doc_id, cx);
+    }
+
+    fn ensure_subagent_doc_watch(&mut self, doc_id: String, cx: &mut Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1513,6 +1569,21 @@ impl AppState {
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
+        self.tab_watch_docs.remove(doc_id);
+        if self.board_watch_docs.contains(doc_id) { return; }
+        self.remove_subagent_doc_watch(doc_id);
+    }
+
+    pub(crate) fn set_board_watch_docs(&mut self, ids: std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        let removed: Vec<_> = self.board_watch_docs.difference(&ids).cloned().collect();
+        self.board_watch_docs = ids;
+        for id in removed {
+            if !self.tab_watch_docs.contains(&id) { self.remove_subagent_doc_watch(&id); }
+        }
+        for id in self.board_watch_docs.clone() { self.ensure_subagent_doc_watch(id, cx); }
+    }
+
+    fn remove_subagent_doc_watch(&mut self, doc_id: &str) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
@@ -1591,6 +1662,7 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        self.board_status_revision = self.board_status_revision.wrapping_add(1);
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
@@ -1610,6 +1682,7 @@ impl AppState {
             .is_some_and(|p| p.message_id == message_id)
         {
             self.pending_sends.remove(chat_id);
+            self.board_status_revision = self.board_status_revision.wrapping_add(1);
         }
     }
 
@@ -1872,6 +1945,16 @@ impl AppState {
     /// Full display status for a chat (tab dots, Active list). A send in
     /// flight ([`Self::begin_pending_send`]) reads as Working — the queued
     /// command is as good as running.
+    /// Board status lookup in one pass over sessions and chats.
+    pub(crate) fn board_indicators(&self, now: DateTime<Utc>) -> HashMap<String, ChatIndicator> {
+        let mut sessions = HashMap::new();
+        for session in &self.sessions { sessions.entry(session.chat_id.as_str()).or_insert(session); }
+        self.chats.iter().map(|chat| {
+            let indicator = if self.send_pending(&chat.id, now) { ChatIndicator::Working } else { display_status(chat, sessions.get(chat.id.as_str()).copied(), now) };
+            (chat.id.clone(), indicator)
+        }).collect()
+    }
+
     pub fn display_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
@@ -4212,6 +4295,11 @@ fn spawn_queue_watch(
     })
 }
 
+fn subagent_watch_terminal(error: &RpcError) -> bool {
+    matches!(error, RpcError::BadParams(_) | RpcError::UnknownMethod(_))
+        || matches!(error, RpcError::Failed(message) if message.to_ascii_lowercase().contains("not found"))
+}
+
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
@@ -4221,24 +4309,22 @@ fn spawn_subagent_watch(
     doc_id: String,
 ) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        let mut backoff = mast_harness::backoff::Backoff::new(
-            std::time::Duration::from_secs(2),
-            std::time::Duration::from_secs(30),
-        );
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
         'resubscribe: loop {
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
                 Err(err) => {
-                    tracing::warn!(%doc_id, error = %err, "subagent watch failed; retrying");
-                    if this.update(cx, |_, _| {}).is_err() {
+                    let terminal = subagent_watch_terminal(&err);
+                    tracing::warn!(%doc_id, error = %err, terminal, "subagent watch failed");
+                    if terminal || this.update(cx, |_, _| {}).is_err() {
                         return;
                     }
-                    cx.background_executor().timer(backoff.next_delay()).await;
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
             };
@@ -4257,12 +4343,11 @@ fn spawn_subagent_watch(
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
-                        cx.background_executor().timer(backoff.next_delay()).await;
+                        cx.background_executor().timer(retry.next_delay()).await;
                         continue 'resubscribe;
                     }
                 };
                 preparation = next_preparation;
-                backoff.reset();
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
@@ -4295,14 +4380,16 @@ fn spawn_subagent_watch(
                     return;
                 }
                 if desync {
+                    cx.background_executor().timer(retry.next_delay()).await;
                     continue 'resubscribe;
                 }
+                retry.reset();
             }
             tracing::debug!(%doc_id, "subagent stream ended; resubscribing");
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
-            cx.background_executor().timer(backoff.next_delay()).await;
+            cx.background_executor().timer(retry.next_delay()).await;
         }
     })
 }
@@ -5844,6 +5931,22 @@ mod tests {
             .map(|attempt| work_outline_retry_delay(attempt).as_secs())
             .collect();
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
+    #[test]
+    fn subagent_watch_retry_budget_and_terminal_errors() {
+        assert!(subagent_watch_terminal(&RpcError::BadParams("bad".into())));
+        assert!(subagent_watch_terminal(&RpcError::UnknownMethod("watch".into())));
+        assert!(subagent_watch_terminal(&RpcError::Failed("chat not found".into())));
+        assert!(!subagent_watch_terminal(&RpcError::Closed));
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut attempts = 0;
+        let mut retry = mast_harness::backoff::Backoff::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(30));
+        while elapsed < std::time::Duration::from_secs(180) {
+            elapsed += mast_harness::backoff::jittered_with(retry.next_delay_exact(), 1000);
+            attempts += 1;
+        }
+        assert!(attempts <= 11, "too many retries in three minutes: {attempts}");
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub mod chat_type_view;
 mod chat_work_context;
 mod comment_ui;
 pub mod comments;
+pub mod code_ref;
 pub mod composer;
 pub mod components;
 pub mod stories;
@@ -85,6 +86,7 @@ mod review_chats;
 pub mod running_chats;
 pub mod settings;
 pub mod shell;
+mod board;
 mod team;
 #[cfg(test)]
 #[global_allocator]

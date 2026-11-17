@@ -119,7 +119,7 @@ enum ReloadDecision {
 
 pub(super) struct FilePreviewState {
     images_visible: bool,
-    documents: HashMap<String, FileDocument>,
+    pub(super) documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
     active: Option<String>,
     highlights: HashMap<String, HighlightedFile>,
@@ -2509,6 +2509,9 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(reference) = self.pinned_reference.as_ref() {
+            return super::code_ref_bar::pinned_view(reference, theme);
+        }
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
                 "Workspace changed. Image preview suspended.",
@@ -2559,6 +2562,18 @@ impl FilesSurface {
                 state.set_editor_style(super::editor_adapter::editor_style(theme));
             });
             let overlays = self.render_editor_comment_overlays(path, &editor, theme, cx);
+            let action_bar = {
+                let state = editor.read(cx);
+                let selection = state.selected_range();
+                if selection.is_empty() { None } else {
+                    let input_bounds = state.input_bounds();
+                    let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
+                        let left = f32::from(bounds.origin.x - input_bounds.origin.x).clamp(0.0, (f32::from(input_bounds.size.width) - 160.0).max(0.0));
+                        (bounds.origin.y + bounds.size.height - input_bounds.origin.y, px(left))
+                    }).unwrap_or((px(12.0), px(12.0)));
+                    Some(self.selection_actions(theme, top, left, cx))
+                }
+            };
             return div()
                 .id("files-editor-body")
                 .flex_1()
@@ -2573,6 +2588,7 @@ impl FilesSurface {
                 ))
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
+                .children(action_bar)
                 .into_any_element();
         }
         let Some(file) = document.file.as_ref() else {

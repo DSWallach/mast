@@ -1,4 +1,5 @@
 //! Offscreen Metal snapshots for test fixtures. No native window is created.
+mod code_reference;
 use std::{path::PathBuf, sync::Arc};
 
 use gpui::{App, AppContext, Entity, HeadlessAppContext, Pixels, Render, Size, Window};
@@ -67,6 +68,10 @@ pub fn render_to_png_with_layout<V: Render + 'static>(
     Ok(path)
 }
 
+pub fn code_reference_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
+    code_reference::fixture(window, cx)
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)
@@ -108,13 +113,33 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
             ("fixture-tests", "Verify the changes"),
         ].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":harness,"model":model,"reasoning":"high","sandbox":"workspace-write"}})).unwrap()).collect();
         preview_chat_outline(&mut state);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() {
+            state.add_code_ref("fixture-chat", crate::code_ref::StagedCodeRef {
+                id: "fixture-reference".into(),
+                reference: mast_proto::CodeRef {
+                    version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: "fixture-repo".into(), worktree_id: None, path: "src/review.rs".into() },
+                    kind: mast_proto::CodeRefKind::Lines,
+                    range: Some(mast_proto::CodeRefRange { start_line: 88, end_line: 112 }),
+                    symbol: None,
+                    at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "fixture".into() },
+                },
+                snippet: "fn review() {}".into(),
+            });
+        }
         state
     });
     state.update(cx, |state, cx| {
+        let review_text = crate::code_ref::with_code_refs("Review the sidebar spacing.", state.code_refs("fixture-chat"));
         state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
-            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
+            {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":review_text}],"createdAt":1788900000000_i64,"deviceId":"local"},
             {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"I inspected the layout.\n\nThe controls now align with their captions.\n\n- The model name stays visible.\n- The attachment has one border.\n\n```rust\nfn validate_layout() {\n    assert!(controls_align());\n}\n```"},{"id":"tool","kind":"tool","call":{"kind":"exec","command":"cargo test"},"resolved":true,"output":"Tests passed"},{"id":"tool2","kind":"tool","call":{"kind":"exec","command":"git diff --stat"},"resolved":true,"output":"Three files changed"},{"id":"next","kind":"text","text":"I checked the resulting changes. The transcript keeps this longer explanation within a comfortable reading width, even when the window becomes narrow.\n\n- The first list item has enough text to wrap onto another line while keeping its continuation aligned with the beginning of the item.\n- The second item shares the same indentation."},{"id":"tool3","kind":"tool","call":{"kind":"exec","command":"cargo check"},"resolved":true,"output":"Check passed"},{"id":"tool4","kind":"tool","call":{"kind":"exec","command":"cargo fmt --check"},"resolved":true,"output":"Formatting passed"}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
         ])).unwrap() }, cx).unwrap();
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() {
+            let text = crate::code_ref::with_code_refs("Review these lines.", state.code_refs("fixture-chat"));
+            let entry = serde_json::from_value(serde_json::json!({"id":"reference-user","role":"user","parts":[{"id":"text","kind":"text","text":text}],"createdAt":1788900002000_i64,"deviceId":"local"})).unwrap();
+            state.receive_transcript_frame(mast_doc::TranscriptFrame::Delta { upsert: vec![mast_doc::TranscriptUpsert { after: Some("assistant".into()), entry }], append: Vec::new(), remove: Vec::new(), count: 3 }, cx).ok();
+        }
         if std::env::var_os("MAST_PREVIEW_RETRY").is_some() {
             state.sessions.push(serde_json::from_value(serde_json::json!({
                 "chatId": "fixture-chat", "deviceId": "local", "status": "errored",
@@ -147,6 +172,7 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
     shell.update(cx, |shell, cx| {
         shell.fixture_snapshot_item_panel(cx);
         shell.fixture_snapshot_expand_tool_group(cx);
+        if std::env::var_os("MAST_PREVIEW_CODE_REF").is_some() { shell.fixture_changed_code_ref(cx); }
         if std::env::var("MAST_OPEN_DIALOG").is_ok_and(|value| value == "model") {
             shell.fixture_snapshot_model_catalog(cx);
         }
@@ -349,6 +375,38 @@ pub fn preview_chat_outline(state: &mut crate::state::AppState) {
     state.set_work_outline_for_test(outline_with_requests("fixture-space"));
 }
 
+/// Offline coordination board fixture for the preview renderer.
+pub fn board_fixture(table: bool, empty: bool, cx: &mut App) -> Entity<impl Render + use<>> {
+    use crate::work_outline::{model::OutlineSpace, outline_view::{OutlineInputs, OutlineView}, store::WorkOutlineLoad};
+    let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+        "spaceId":"fixture-space", "available":true,
+        "items":[
+            {"id":"todo", "spaceId":"fixture-space", "title":"Document the release"},
+            {"id":"active", "spaceId":"fixture-space", "title":"Implement navigation", "effectiveStatus":"active", "chatIds":["worker"]},
+            {"id":"review", "spaceId":"fixture-space", "title":"Review the changes", "effectiveStatus":"active", "chatIds":["reviewer"]},
+            {"id":"waiting", "spaceId":"fixture-space", "title":"Choose a layout", "effectiveStatus":"userActionRequired", "chatIds":["waiting-worker"]},
+            {"id":"done", "spaceId":"fixture-space", "title":"Prepare the fixtures", "effectiveStatus":"completed"}
+        ],
+        "userActionRequests":[
+            {"id":"review-action","spaceId":"fixture-space","workItemId":"review","chatId":"reviewer","kind":"handoff","text":"Ready to merge"},
+            {"id":"waiting-action","spaceId":"fixture-space","workItemId":"waiting","chatId":"waiting-worker","kind":"ask","text":"Choose a layout"}
+        ]
+    })).unwrap();
+    let mut snapshot = snapshot;
+    if empty { snapshot.items.clear(); snapshot.user_action_requests.clear(); }
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.chats = [("worker", "Implementation worker"), ("reviewer", "Review worker"), ("waiting-worker", "Design worker")].into_iter().map(|(id, title)| serde_json::from_value(serde_json::json!({"id":id,"deviceId":"local","spaceId":"fixture-space","title":title,"archived":false,"branch":"feature/example","lastMessagePreview":"Running checks","createdAt":"2026-09-08T00:00:00Z"})).unwrap()).collect();
+        state
+    });
+    let outline = cx.new(|cx| OutlineView::new(state, cx));
+    outline.update(cx, |outline, cx| {
+        outline.set_inputs(OutlineInputs { spaces: vec![OutlineSpace { id:"fixture-space".into(), label:"Mast Dev".into(), load:WorkOutlineLoad::Ready(Arc::new(snapshot)), hidden:false }], ..Default::default() }, cx);
+        outline.fixture_board_mode(table);
+    });
+    outline
+}
+
 pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
     use crate::work_outline::{
         model::OutlineSpace,
@@ -408,4 +466,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         details,
         _shell: shell,
     })
+}
+
+/// Construct a transcript diagram card with a deterministic preview.
+pub fn diagram_card_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    crate::artifacts::preview_thumb::snapshot_fixture(cx)
 }
