@@ -14,6 +14,7 @@ The command prints a contact sheet for each screen and an index under `$CARGO_TA
 Set `MAST_PREVIEW_WIDTH` to a value from 320 to 4096 to render a different window width (default 1440 pixels). The height remains 900 pixels.
 Set `MAST_PREVIEW_HARNESS=codex` to render the chat fixture with Codex instead of Claude Code.
 Set `MAST_PREVIEW_ASSISTANT=1` to add a scheduled personal assistant to the chat fixture.
+With `--screens overview-column`, set `MAST_PREVIEW_PINNED=overview` or `MAST_PREVIEW_PINNED=sessions` to seed a pinned chat and select the corresponding presentation.
 With `--screens overview-column`, set `MAST_PREVIEW_ATTENTION_EMPTY=1` to show the Needs interaction filter with no matching chats and an empty Work Outline. Combine it with `MAST_PREVIEW_WIDTH=600` to inspect the wrapped empty-state hint in the narrow navigation overlay.
 
 Each output directory also contains `manifest.json`, listing the selected axes,

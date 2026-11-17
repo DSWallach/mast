@@ -8511,7 +8511,8 @@ impl Shell {
         // just go (matching the original). First fill and chat switches (which
         // don't reorder) never animate.
         let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
-        let show_pinned_section = pinned_count > 0 || self.sidebar_session_transfer.is_some();
+        let show_pinned_section = !self.settings.sidebar_overview
+            && (pinned_count > 0 || self.sidebar_session_transfer.is_some());
         let shortcut_rows_height = keyed
             .iter()
             .enumerate()
@@ -8816,11 +8817,7 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from(if self.settings.sidebar_overview {
-                    "No pinned sessions"
-                } else {
-                    "No sessions yet"
-                }))
+                .when(!self.settings.sidebar_overview, |el| el.child("No sessions yet"))
                 .into_any_element()
         };
 
@@ -16537,6 +16534,14 @@ impl Shell {
 
     pub fn fixture_snapshot_overview(&mut self, cx: &mut Context<Self>) {
         self.open_overview(cx);
+        if let Ok(view) = std::env::var("MAST_PREVIEW_PINNED")
+            && matches!(view.as_str(), "overview" | "sessions")
+        {
+            if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) = vec!["fixture-design".into()];
+            }
+            self.settings.sidebar_overview = view == "overview";
+        }
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
             self.ensure_overview_page(cx)
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));

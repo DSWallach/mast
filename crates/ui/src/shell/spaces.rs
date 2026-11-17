@@ -5086,9 +5086,14 @@ impl Shell {
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
                 .collect()
         };
-        let pinned_order = frozen_pinned
-            .as_ref()
-            .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
+        // Pins organize Sessions only; Overview keeps normal collection membership.
+        let pinned_order = if shortcuts_only {
+            &[][..]
+        } else {
+            frozen_pinned
+                .as_ref()
+                .map_or(saved_pins.as_slice(), |ids| ids.as_slice())
+        };
         let base_ids: Vec<String> = rows.iter().map(|row| row.chat.id.clone()).collect();
         let ordered_ids = project_pinned_first(&base_ids, pinned_order);
         let rank: std::collections::HashMap<&str, usize> = ordered_ids
