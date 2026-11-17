@@ -1956,6 +1956,7 @@ struct HoverRow {
 struct CommentDraft {
     editing_id: Option<String>,
     local: Option<review_drafts::LocalDraftEdit>,
+    outdated: bool,
     /// Composer the note will stage onto, captured when the card opened. A
     /// draft belongs to the checkout it was written over, so it must not
     /// follow the user onto whatever chat is selected by commit time.
@@ -2044,6 +2045,7 @@ pub struct Changes {
     review_task: Option<Task<()>>,
     review_threads: Vec<mast_proto::ReviewThread>,
     review_thread_index: review_drafts::ThreadIndex,
+    unplaced_review_threads: Vec<usize>,
     review_threads_task: Option<Task<()>>,
     review_threads_error: Option<String>,
     local_review_drafts: HashMap<String, Vec<mast_proto::ReviewDraft>>,
@@ -2063,6 +2065,10 @@ pub struct Changes {
     review_suggestions: HashMap<String, mast_proto::ReviewSuggestedComment>,
     suggestion_comments: Vec<ReviewComment>,
     suggestion_target: Option<String>,
+    suggestion_head: Option<String>,
+    suggestion_display_head: Option<Option<String>>,
+    outdated_suggestions: Vec<(String, String)>,
+    outdated_limit: usize,
     dismissed_suggestions: std::collections::HashSet<String>,
     suggestion_dispositions_target: Option<String>,
     suggestion_load_task: Option<Task<()>>,
@@ -2325,6 +2331,7 @@ impl Changes {
             review_task: None,
             review_threads: Vec::new(),
             review_thread_index: review_drafts::ThreadIndex::default(),
+            unplaced_review_threads: Vec::new(),
             review_threads_task: None,
             review_threads_error: None,
             local_review_drafts: HashMap::new(),
@@ -2344,6 +2351,10 @@ impl Changes {
             review_suggestions: HashMap::new(),
             suggestion_comments: Vec::new(),
             suggestion_target: None,
+            suggestion_head: None,
+            suggestion_display_head: None,
+            outdated_suggestions: Vec::new(),
+            outdated_limit: 20,
             dismissed_suggestions: std::collections::HashSet::new(),
             suggestion_dispositions_target: None,
             suggestion_load_task: None,
@@ -3755,13 +3766,14 @@ impl Changes {
     fn draft_anchor(&self) -> Option<(String, CommentSide, u32)> {
         self.draft
             .as_ref()
+            .filter(|draft| !draft.outdated)
             .map(|draft| (draft.path.clone(), draft.side, draft.line))
     }
 
     fn draft_anchor_in(&self, path: &str) -> Option<(CommentSide, u32)> {
         self.draft
             .as_ref()
-            .filter(|draft| draft.path == path)
+            .filter(|draft| !draft.outdated && draft.path == path)
             .map(|draft| (draft.side, draft.line))
     }
 
@@ -3901,6 +3913,7 @@ impl Changes {
         self.draft = Some(CommentDraft {
             editing_id: None,
             local,
+            outdated: false,
             key,
             path,
             old_path,

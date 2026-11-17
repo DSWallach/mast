@@ -133,7 +133,7 @@ impl ReviewHost {
                         changes.update(cx, |changes, cx| {
                             changes.walkthrough_target = Some(target);
                             changes.ensure_review_state(cx);
-                            changes.set_review_suggestions(&review.target_key, &review.suggested_comments, cx);
+                            changes.set_review_suggestions(&review.target_key, &review.head, &review.suggested_comments, cx);
                         });
                         this.view = Some(cx.new(|cx| Walkthrough::new(review, changes, cx)))
                     }
@@ -1213,7 +1213,47 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
     let changes = populated.then(|| super::snapshot_populated_changes(cx));
     let populated = changes.is_some();
     if let Some(changes) = &changes {
-        changes.update(cx, |changes, _| changes.review_target = Some(review.target_key.clone()));
+        changes.update(cx, |changes, cx| {
+            changes.pinned_cwd = None;
+            changes.scope = super::DiffScope::Branch;
+            changes.owner = Some(super::ChangesTarget {
+                chat_id: "preview".into(), device_id: "local".into(), cwd: Some("/snapshot".into()),
+                checkout_id: None, branch: Some("preview".into()), unconfirmed: None, exact_checkout: false,
+                range: Some(crate::work_outline::execution::RefRange { label: "preview".into(), head_branch: "preview".into(),
+                    head_ref: "refs/heads/preview".into(), head_sha: Some("a".into()), pr_url: Some("https://github.com/o/r/pull/1".into()),
+                    base_branch: "main".into(), base_ref: "refs/heads/main".into() }),
+            });
+            if let Some(diff) = &changes.scoped {
+                let key = changes.parse_key(diff);
+                if let Some(parsed) = &mut changes.parsed { parsed.key = key; }
+            }
+            let target = review.target_key.clone();
+            changes.review_target = Some(target.clone());
+            changes.review_state = Some(mast_proto::DiffReviewState { target: target.clone(), head_sha: Some("a".into()), ..Default::default() });
+            changes.review_status_checked = Some(std::time::Instant::now());
+            changes.local_review_drafts.insert(target.clone(), Vec::new());
+            if let Some(mut draft) = changes.new_local_draft(&target, "src/hooks/decorated/main.rs", super::CommentSide::New, 4) {
+                draft.body = "Could this preserve the existing error?".into();
+                changes.local_review_drafts.get_mut(&target).unwrap().push(draft);
+            }
+            changes.review_threads = vec![mast_proto::ReviewThread {
+                id: "preview-thread".into(), path: "src/hooks/decorated/main.rs".into(), line: Some(4),
+                side: Some(mast_proto::ReviewSide::Right), outdated: false, resolved: true,
+                comments: vec![mast_proto::ReviewThreadComment { id: "preview-comment".into(), author: "reviewer".into(), body: "The fallback looks good.".into() }],
+            }];
+            changes.review_thread_index = super::review_drafts::ThreadIndex::new(&changes.review_threads);
+            changes.rebuild_draft_index(cx);
+            if let Some(hash) = changes.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.first()).and_then(|hunks| hunks.first()).cloned() {
+                changes.suggestion_dispositions_target = Some(target.clone());
+                changes.set_review_suggestions(&target, "a", &[mast_proto::ReviewSuggestedComment {
+                    id: Some("preview-suggestion".into()),
+                    anchor: mast_proto::ReviewAnchor { file: "src/hooks/decorated/main.rs".into(), side: mast_proto::ReviewSide::Right, start_line: 4, end_line: 4, hunk_hash: Some(hash) },
+                    body: "Consider covering the failure case.".into(), severity: "low".into(), suggestion: None,
+                }], cx);
+                changes.refresh_suggestion_head(Some("a".into()), cx);
+            }
+            changes.refresh_thread_rows(cx);
+        });
     }
     cx.new(|cx| Walkthrough {
         review, files: Arc::new(Vec::new()), coverage: None,

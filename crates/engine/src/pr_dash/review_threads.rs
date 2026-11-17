@@ -6,9 +6,15 @@ const QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!, $afte
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor }
       nodes { id path line originalLine diffSide isOutdated isResolved
-        comments(first: 100) { pageInfo { hasNextPage } nodes { id body author { login } } }
+        comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { id body author { login } } }
       }
     }
+  } }
+}";
+
+const COMMENTS_QUERY: &str = "query($id: ID!, $after: String!) {
+  node(id: $id) { ... on PullRequestReviewThread {
+    comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id body author { login } } }
   } }
 }";
 
@@ -22,6 +28,7 @@ pub(super) async fn fetch(
     let number = number.to_string();
     let mut cursor: Option<String> = None;
     let mut threads = Vec::new();
+    let mut remaining_comment_pages = 20usize;
     for _ in 0..20 {
         let mut vars = vec![
             ("owner", owner),
@@ -43,7 +50,37 @@ pub(super) async fn fetch(
             .pointer("/data/repository/pullRequest/reviewThreads")
             .filter(|value| value.is_object())
             .ok_or("GitHub returned no review threads")?;
-        threads.extend(parse_page(connection)?);
+        let mut page = parse_page(connection)?;
+        let nodes = connection
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or("Missing thread nodes")?;
+        for (thread, node) in page.iter_mut().zip(nodes) {
+            let comments = node.get("comments").ok_or("Missing thread comments")?;
+            let mut next = next_comment_cursor(comments)?;
+            let mut seen = HashSet::new();
+            while let Some(after) = next {
+                if remaining_comment_pages == 0 {
+                    return Err("GitHub returned too many review comment pages".into());
+                }
+                remaining_comment_pages -= 1;
+                if !seen.insert(after.clone()) {
+                    return Err("GitHub repeated a comment cursor".into());
+                }
+                let response = gh
+                    .graphql(
+                        COMMENTS_QUERY,
+                        &[("id", thread.id.as_str()), ("after", after.as_str())],
+                    )
+                    .await?;
+                let comments = response
+                    .pointer("/data/node/comments")
+                    .ok_or("GitHub returned no thread comments")?;
+                thread.comments.extend(parse_comments(comments)?);
+                next = next_comment_cursor(comments)?;
+            }
+        }
+        threads.extend(page);
         if !connection
             .pointer("/pageInfo/hasNextPage")
             .and_then(Value::as_bool)
@@ -64,6 +101,24 @@ pub(super) async fn fetch(
     Err("GitHub returned too many review thread pages".into())
 }
 
+fn next_comment_cursor(comments: &Value) -> Result<Option<String>, String> {
+    if !comments
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        comments
+            .pointer("/pageInfo/endCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or("GitHub returned no comment cursor")?
+            .to_owned(),
+    ))
+}
+
 fn parse_page(connection: &Value) -> Result<Vec<ReviewThread>, String> {
     let nodes = connection
         .get("nodes")
@@ -78,36 +133,7 @@ fn parse_page(connection: &Value) -> Result<Vec<ReviewThread>, String> {
                     .filter(|s| !s.is_empty())
             };
             let comments = node.get("comments").ok_or("Missing thread comments")?;
-            if comments
-                .pointer("/pageInfo/hasNextPage")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err("A review thread has more than 100 comments".into());
-            }
-            let comments = comments
-                .get("nodes")
-                .and_then(Value::as_array)
-                .ok_or("Missing thread comment nodes")?
-                .iter()
-                .map(|comment| ReviewThreadComment {
-                    id: comment
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    author: comment
-                        .pointer("/author/login")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Deleted user")
-                        .to_owned(),
-                    body: comment
-                        .get("body")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                })
-                .collect();
+            let comments = parse_comments(comments)?;
             Ok(ReviewThread {
                 id: string("id").ok_or("Missing thread id")?.into(),
                 path: string("path").ok_or("Missing thread path")?.into(),
@@ -135,6 +161,32 @@ fn parse_page(connection: &Value) -> Result<Vec<ReviewThread>, String> {
         .collect()
 }
 
+fn parse_comments(comments: &Value) -> Result<Vec<ReviewThreadComment>, String> {
+    Ok(comments
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or("Missing thread comment nodes")?
+        .iter()
+        .map(|comment| ReviewThreadComment {
+            id: comment
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            author: comment
+                .pointer("/author/login")
+                .and_then(Value::as_str)
+                .unwrap_or("Deleted user")
+                .to_owned(),
+            body: comment
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +206,44 @@ mod tests {
                 }}}}}),
             )
         }
+    }
+
+    struct PagedGh(AtomicUsize);
+    #[async_trait::async_trait]
+    impl GhRunner for PagedGh {
+        async fn current_user(&self) -> Result<String, String> {
+            Ok("reviewer".into())
+        }
+        async fn graphql(&self, query: &str, _: &[(&str, &str)]) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if query == QUERY {
+                Ok(
+                    serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+                        "pageInfo":{"hasNextPage":false},"nodes":[{"id":"T1","path":"a","line":1,"diffSide":"RIGHT",
+                        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"first"},"nodes":[{"id":"c1","body":"one"}]}}]
+                    }}}}}),
+                )
+            } else {
+                Ok(
+                    serde_json::json!({"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"c2","body":"two"}]}}}}),
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetches_remaining_comment_pages_with_a_bound() {
+        let gh = PagedGh(AtomicUsize::new(0));
+        let threads = fetch(&gh, "o", "r", 1).await.unwrap();
+        assert_eq!(
+            threads[0]
+                .comments
+                .iter()
+                .map(|comment| comment.body.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert_eq!(gh.0.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -181,5 +271,16 @@ mod tests {
         assert_eq!(result[0].comments[0].body, "Please check");
         assert_eq!(result[0].side, Some(ReviewSide::Right));
         assert!(result[0].resolved);
+    }
+
+    #[test]
+    fn outdated_thread_keeps_its_original_location() {
+        let page = serde_json::json!({"nodes":[{"id":"T2","path":"a","line":null,"originalLine":9,"diffSide":"LEFT","isOutdated":true,"isResolved":false,
+            "comments":{"nodes":[{"id":"c","body":"Old note","author":null}]}}]});
+        let result = parse_page(&page).unwrap();
+        assert_eq!(result[0].line, Some(9));
+        assert_eq!(result[0].side, Some(ReviewSide::Left));
+        assert!(result[0].outdated);
+        assert_eq!(result[0].comments[0].author, "Deleted user");
     }
 }

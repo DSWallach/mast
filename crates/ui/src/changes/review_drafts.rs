@@ -3,6 +3,7 @@ use super::{
     AnyElement, Changes, Context, DiffRow, LineKind, SharedString, Theme, div, methods, px,
 };
 use crate::comments::CommentSide;
+use gpui::Focusable as _;
 use gpui::prelude::*;
 use mast_proto::{ReviewDraft, ReviewSide, ReviewThread};
 
@@ -22,14 +23,25 @@ fn suggestion_body(suggestion: &mast_proto::ReviewSuggestedComment) -> String {
     }
 }
 
+fn thread_comment_height(body: &str) -> f32 {
+    let lines: usize = body
+        .split('\n')
+        .map(|line| line.chars().count().div_ceil(40).max(1))
+        .sum();
+    36.0 + lines as f32 * 18.0
+}
+
 impl Changes {
     pub(super) fn set_review_suggestions(
         &mut self,
         target: &str,
+        head: &str,
         suggestions: &[mast_proto::ReviewSuggestedComment],
         cx: &mut Context<Self>,
     ) {
         self.suggestion_target = Some(target.to_owned());
+        self.suggestion_head = Some(head.to_owned());
+        self.suggestion_display_head = Some(self.review_identity(cx).and_then(|(_, head)| head));
         self.review_suggestions = suggestions
             .iter()
             .map(|suggestion| {
@@ -42,6 +54,13 @@ impl Changes {
         self.rebuild_draft_index(cx);
     }
 
+    pub(super) fn refresh_suggestion_head(&mut self, head: Option<String>, cx: &mut Context<Self>) {
+        if self.suggestion_display_head.as_ref() != Some(&head) {
+            self.suggestion_display_head = Some(head);
+            self.rebuild_suggestion_comments(cx);
+        }
+    }
+
     fn load_suggestion_dispositions(&mut self, target: &str, cx: &mut Context<Self>) {
         if self.suggestion_dispositions_target.as_deref() == Some(target) {
             return;
@@ -50,6 +69,7 @@ impl Changes {
         self.suggestion_dispositions_target = None;
         self.dismissed_suggestions.clear();
         self.suggestion_comments.clear();
+        self.outdated_suggestions.clear();
         let target = target.to_owned();
         let task = self.state.update(cx, |state, cx| {
             state.chat_diff_rpc(
@@ -85,6 +105,7 @@ impl Changes {
 
     fn rebuild_suggestion_comments(&mut self, cx: &mut Context<Self>) {
         self.suggestion_comments.clear();
+        self.outdated_suggestions.clear();
         if self.suggestion_target != self.review_target
             || self.suggestion_dispositions_target != self.review_target
         {
@@ -97,15 +118,27 @@ impl Changes {
             if self.dismissed_suggestions.contains(&suggestion.stable_id()) {
                 continue;
             }
-            if self
-                .draft_anchor_index
-                .line_hash_at(&suggestion.anchor, suggestion.anchor.start_line)
-                .is_none()
+            let same_head = self
+                .suggestion_head
+                .as_deref()
+                .zip(
+                    self.suggestion_display_head
+                        .as_ref()
+                        .and_then(|head| head.as_deref()),
+                )
+                .is_some_and(|(reviewed, current)| reviewed.eq_ignore_ascii_case(current));
+            if !same_head
+                || self
+                    .draft_anchor_index
+                    .line_hash_at(&suggestion.anchor, suggestion.anchor.start_line)
+                    .is_none()
                 || self
                     .draft_anchor_index
                     .line_hash_at(&suggestion.anchor, suggestion.anchor.end_line)
                     .is_none()
             {
+                self.outdated_suggestions
+                    .push((id.clone(), suggestion_body(suggestion)));
                 continue;
             }
             let side = match suggestion.anchor.side {
@@ -154,6 +187,8 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .bg(crate::theme::ink(0.05))
+            .border_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .h(px(24.0))
@@ -343,6 +378,8 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .bg(crate::theme::ink(0.05))
+            .border_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .h(px(24.0))
@@ -405,6 +442,7 @@ impl Changes {
     }
 
     pub(super) fn load_local_drafts(&mut self, target: &str, cx: &mut Context<Self>) {
+        self.outdated_limit = 20;
         if self
             .draft
             .as_ref()
@@ -471,11 +509,29 @@ impl Changes {
         let Some(target) = self.review_target.as_ref() else {
             return Vec::new();
         };
-        self.local_outdated_drafts
+        let mut cards: Vec<AnyElement> = self
+            .local_outdated_drafts
             .iter()
             .filter(|draft| &draft.target == target)
+            .take(self.outdated_limit)
             .map(|draft| {
+                if let Some(editor) = self.draft.as_ref().filter(|editor| {
+                    editor.outdated && editor.editing_id.as_deref() == Some(draft.id.as_str())
+                }) {
+                    return crate::comment_ui::render_comment_draft(
+                        &draft.anchor.file,
+                        draft.anchor.end_line,
+                        editor.input.clone(),
+                        true,
+                        theme,
+                        cx,
+                        Changes::cancel_draft,
+                        Changes::commit_draft,
+                        None,
+                    );
+                }
                 let id = draft.id.clone();
+                let edit_id = id.clone();
                 let label = format!(
                     "Outdated · {}:{}",
                     draft.anchor.file, draft.anchor.start_line
@@ -487,11 +543,26 @@ impl Changes {
                     .px(px(Theme::SPACE_LG))
                     .py(px(6.0))
                     .bg(crate::theme::ink(0.05))
+                    .border_1()
+                    .border_color(theme.border)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(10.0))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "outdated-draft-edit-{edit_id}"
+                                    )))
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_outdated_draft(&edit_id, window, cx)
+                                    }))
+                                    .child("Edit"),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -519,7 +590,148 @@ impl Changes {
                     )
                     .into_any_element()
             })
-            .collect()
+            .collect();
+        if self.suggestion_target.as_ref() == Some(target) {
+            let remaining = self.outdated_limit.saturating_sub(cards.len());
+            cards.extend(
+                self.outdated_suggestions
+                    .iter()
+                    .take(remaining)
+                    .map(|(id, body)| {
+                        let id = id.clone();
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .px(px(Theme::SPACE_LG))
+                            .py(px(6.0))
+                            .bg(crate::theme::ink(0.05))
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(11.0))
+                                            .text_color(theme.text_faint)
+                                            .child("Outdated · agent suggestion"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "outdated-suggestion-dismiss-{id}"
+                                            )))
+                                            .cursor_pointer()
+                                            .text_size(px(11.0))
+                                            .text_color(theme.text_muted)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.dismiss_suggestion(&id, cx)
+                                            }))
+                                            .child("Dismiss"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_dim)
+                                    .child(SharedString::from(body.clone())),
+                            )
+                            .into_any_element()
+                    }),
+            );
+        }
+        let remaining = self.outdated_limit.saturating_sub(cards.len());
+        for &index in self.unplaced_review_threads.iter().take(remaining) {
+            if let Some(height) = self.review_thread_index.heights.get(index) {
+                cards.push(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child("Thread outside the current diff"),
+                        )
+                        .child(self.render_review_thread(index, *height, theme))
+                        .into_any_element(),
+                );
+            }
+        }
+        let total = self.local_outdated_drafts.len()
+            + if self.suggestion_target.as_ref() == Some(target) {
+                self.outdated_suggestions.len()
+            } else {
+                0
+            }
+            + self.unplaced_review_threads.len();
+        if total > self.outdated_limit {
+            cards.push(
+                div()
+                    .id("more-outdated-review-items")
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.outdated_limit = this.outdated_limit.saturating_add(20);
+                        cx.notify();
+                    }))
+                    .child(format!(
+                        "Show more outdated items ({})",
+                        total - self.outdated_limit
+                    ))
+                    .into_any_element(),
+            );
+        }
+        cards
+    }
+
+    fn edit_outdated_draft(&mut self, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(original) = self
+            .local_outdated_drafts
+            .iter()
+            .find(|draft| draft.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        if self.draft.is_some() {
+            self.commit_draft(cx);
+        }
+        let input = cx.new(|cx| super::ComposerInput::new("Edit draft…", cx));
+        let events = cx.subscribe(&input, |this: &mut Changes, _, event, cx| match event {
+            super::ComposerInputEvent::Submitted => this.commit_draft(cx),
+            super::ComposerInputEvent::Edited => this.local_draft_edited(cx),
+            _ => {}
+        });
+        let handle = input.read(cx).focus_handle(cx);
+        let side = match original.anchor.side {
+            ReviewSide::Left => CommentSide::Old,
+            ReviewSide::Right => CommentSide::New,
+        };
+        self.draft = Some(super::CommentDraft {
+            editing_id: Some(original.id.clone()),
+            local: Some(LocalDraftEdit {
+                draft: original.clone(),
+                original: Some(original.clone()),
+            }),
+            outdated: true,
+            key: self.owner_chat_id_owned().unwrap_or_default(),
+            path: original.anchor.file.clone(),
+            old_path: None,
+            side,
+            line: original.anchor.end_line,
+            input: input.clone(),
+            _events: events,
+        });
+        input.update(cx, |input, cx| input.set_text(original.body, cx));
+        window.focus(&handle, cx);
+        cx.notify();
     }
 
     pub(super) fn rebuild_draft_index(&mut self, cx: &mut Context<Self>) {
@@ -539,6 +751,7 @@ impl Changes {
             .unwrap_or_default();
         self.rebuild_draft_comments(cx);
         self.rebuild_suggestion_comments(cx);
+        self.rebuild_thread_placement();
     }
 
     pub(super) fn rebuild_draft_comments(&mut self, cx: &mut Context<Self>) {
@@ -759,6 +972,7 @@ impl Changes {
     pub(super) fn load_review_threads(&mut self, target: &str, cx: &mut Context<Self>) {
         self.review_threads_task = None;
         self.review_threads.clear();
+        self.unplaced_review_threads.clear();
         self.review_thread_index = ThreadIndex::default();
         self.review_threads_error = None;
         self.refresh_thread_rows(cx);
@@ -790,6 +1004,7 @@ impl Changes {
                     Ok(threads) => {
                         this.review_thread_index = ThreadIndex::new(&threads);
                         this.review_threads = threads;
+                        this.rebuild_thread_placement();
                         this.refresh_thread_rows(cx);
                     }
                     Err(error) => {
@@ -808,6 +1023,39 @@ impl Changes {
         self.sync_comment_rows(cx);
     }
 
+    fn rebuild_thread_placement(&mut self) {
+        let mut placed = std::collections::HashSet::new();
+        if let Some(parsed) = &self.parsed {
+            for file in parsed
+                .files
+                .iter()
+                .filter(|file| self.review_thread_index.by_anchor.contains_key(&file.path))
+            {
+                for line in file.hunks.iter().flat_map(|hunk| &hunk.lines) {
+                    if let Some(number) = line.old_no {
+                        placed.extend(
+                            self.review_thread_index
+                                .at(&file.path, CommentSide::Old, number)
+                                .iter()
+                                .copied(),
+                        );
+                    }
+                    if let Some(number) = line.new_no {
+                        placed.extend(
+                            self.review_thread_index
+                                .at(&file.path, CommentSide::New, number)
+                                .iter()
+                                .copied(),
+                        );
+                    }
+                }
+            }
+        }
+        self.unplaced_review_threads = (0..self.review_threads.len())
+            .filter(|index| !placed.contains(index))
+            .collect();
+    }
+
     pub(super) fn add_thread_rows(&self, file_ix: usize, rows: Vec<DiffRow>) -> Vec<DiffRow> {
         let Some(file) = self
             .parsed
@@ -822,7 +1070,8 @@ impl Changes {
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
             result.push(row);
-            let mut anchors = Vec::new();
+            let mut anchors = [None; 4];
+            let mut count = 0;
             let mut append = |hunk: u32, line: u32| {
                 let Some(line) = file
                     .hunks
@@ -833,12 +1082,18 @@ impl Changes {
                 };
                 if line.kind != LineKind::Add {
                     if let Some(n) = line.old_no {
-                        anchors.push((CommentSide::Old, n));
+                        if let Some(slot) = anchors.get_mut(count) {
+                            *slot = Some((CommentSide::Old, n));
+                            count += 1;
+                        }
                     }
                 }
                 if line.kind != LineKind::Del {
                     if let Some(n) = line.new_no {
-                        anchors.push((CommentSide::New, n));
+                        if let Some(slot) = anchors.get_mut(count) {
+                            *slot = Some((CommentSide::New, n));
+                            count += 1;
+                        }
                     }
                 }
             };
@@ -856,21 +1111,15 @@ impl Changes {
                 }
                 _ => {}
             }
-            for (side, line) in anchors {
+            for (side, line) in anchors.into_iter().flatten() {
                 for &thread in self.review_thread_index.at(&file.path, side, line) {
-                    let Some(item) = self.review_threads.get(thread) else {
+                    let Some(&height) = self.review_thread_index.heights.get(thread) else {
                         continue;
                     };
-                    let height = 30.0
-                        + item
-                            .comments
-                            .iter()
-                            .map(|comment| crate::comments::card_height(&comment.body))
-                            .sum::<f32>();
                     result.push(DiffRow::ReviewThread {
                         file: file_ix as u32,
                         thread: thread as u32,
-                        height: height.ceil() as u32,
+                        height,
                     });
                 }
             }
@@ -896,6 +1145,8 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .bg(crate::theme::ink(0.05))
+            .border_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .h(px(30.0))
@@ -906,7 +1157,7 @@ impl Changes {
         for comment in &thread.comments {
             card = card.child(
                 div()
-                    .h(px(crate::comments::card_height(&comment.body)))
+                    .h(px(thread_comment_height(&comment.body)))
                     .overflow_hidden()
                     .flex()
                     .flex_col()
@@ -919,6 +1170,7 @@ impl Changes {
                     .child(
                         div()
                             .text_size(px(12.0))
+                            .line_height(px(18.0))
                             .text_color(theme.text_dim)
                             .child(SharedString::from(comment.body.clone())),
                     ),
@@ -1042,12 +1294,25 @@ impl DraftAnchorIndex {
 #[derive(Default)]
 pub(super) struct ThreadIndex {
     by_anchor: HashMap<String, HashMap<(CommentSide, u32), Vec<usize>>>,
+    heights: Vec<u32>,
 }
 
 impl ThreadIndex {
     pub(super) fn new(threads: &[ReviewThread]) -> Self {
         let mut index = Self::default();
         for (ix, thread) in threads.iter().enumerate() {
+            index.heights.push(
+                (30.0
+                    + thread
+                        .comments
+                        .iter()
+                        .map(|comment| thread_comment_height(&comment.body))
+                        .sum::<f32>())
+                .ceil() as u32,
+            );
+            if thread.outdated {
+                continue;
+            }
             let (Some(side), Some(line)) = (thread.side, thread.line) else {
                 continue;
             };
@@ -1181,7 +1446,16 @@ mod tests {
                 severity: "low".into(),
                 suggestion: None,
             };
-            changes.set_review_suggestions(target, &[suggestion("one"), suggestion("two")], cx);
+            changes.set_review_suggestions(
+                target,
+                "head",
+                &[suggestion("one"), suggestion("two")],
+                cx,
+            );
+            changes.refresh_suggestion_head(Some("other-head".into()), cx);
+            assert!(changes.suggestion_comments.is_empty());
+            assert_eq!(changes.outdated_suggestions.len(), 2);
+            changes.refresh_suggestion_head(Some("head".into()), cx);
             assert_eq!(changes.suggestion_comments.len(), 2);
             changes.dismiss_suggestion("suggestion:one", cx);
         });
@@ -1266,6 +1540,7 @@ mod tests {
             };
             changes.draft = Some(super::super::CommentDraft {
                 editing_id: None,
+                outdated: false,
                 local: Some(LocalDraftEdit {
                     draft,
                     original: None,

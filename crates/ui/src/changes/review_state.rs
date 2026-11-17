@@ -210,7 +210,7 @@ fn checkout_matches_pr(
 }
 
 impl Changes {
-    fn review_identity(&self, cx: &App) -> Option<(String, Option<String>)> {
+    pub(super) fn review_identity(&self, cx: &App) -> Option<(String, Option<String>)> {
         if let Some(owner) = &self.owner {
             if let Some(target @ mast_proto::ReviewTarget::Branch { checkout_path: Some(path), branch, head_sha, .. }) = &self.walkthrough_target
                 && owner.cwd.as_deref() == Some(path.as_str())
@@ -549,6 +549,7 @@ impl Changes {
         let Some((target, head_sha)) = self.review_identity(cx) else {
             return;
         };
+        self.refresh_suggestion_head(head_sha.clone(), cx);
         if self.review_target.as_deref() == Some(&target) {
             self.refresh_review_status(cx);
             if self.review_closed {
