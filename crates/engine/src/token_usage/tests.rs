@@ -791,7 +791,7 @@ async fn retention_skips_unrelated_writes_and_retries_database_failure_on_timer(
         .execute_batch("ALTER TABLE turns RENAME TO turns_backup")
         .unwrap();
     core.workspace
-        .create_chat("retry", None, None, None, None)
+        .create_chat("retry", None, Some(&core.device_id), None, None)
         .unwrap();
     wait_for(2).await;
     for name in ["first unrelated write", "second unrelated write"] {
