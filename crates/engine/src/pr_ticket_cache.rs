@@ -294,7 +294,7 @@ impl Entry<PrStatus> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TicketKey {
     Cli(String),
-    Linear { identifier: String, account_id: Option<String> },
+    Linear { identifier: String, account_id: Option<String>, credential_revision: u64 },
 }
 
 struct Inner {
@@ -423,8 +423,11 @@ impl PrTicketCache {
         let account = space_id.and_then(|space| {
             lock(&self.inner.linear)
                 .as_ref()
-                .and_then(|(_, workspace)| workspace.space_linear_account(space))
-                .map(|account| account.filter(|id| id != "default"))
+                .and_then(|(linear, workspace)| workspace.space_linear_account(space).map(|account| {
+                    let account = account.filter(|id| id != "default");
+                    let revision = linear.for_account(account.as_deref()).credential_revision();
+                    (account, revision)
+                }))
         });
         self.status_for_links_with_checkout(
             cwd,
@@ -440,10 +443,11 @@ impl PrTicketCache {
     /// through the CLI. An unavailable account never falls back to another.
     async fn fetch_ticket(&self, key: TicketKey) -> Option<TicketStatus> {
         match key {
-            TicketKey::Linear { identifier, account_id } => {
+            TicketKey::Linear { identifier, account_id, credential_revision } => {
                 let linear = lock(&self.inner.linear).as_ref().map(|(l, _)| l.clone())?;
-                linear.for_account(account_id.as_deref())
-                    .issue(&identifier, false)
+                let linear = linear.for_account(account_id.as_deref());
+                if linear.credential_revision() != credential_revision { return None; }
+                linear.issue(&identifier, false)
                     .await
                     .ok()
                     .map(|issue| TicketStatus {
@@ -511,7 +515,7 @@ impl PrTicketCache {
         linked_pr_links: &[mast_proto::ChatPrLink],
         linked_ticket_id: Option<&str>,
         checkout: Option<(&str, Option<&str>)>,
-        linear_account: Option<Option<String>>,
+        linear_account: Option<(Option<String>, u64)>,
     ) -> ChatLinkStatus {
         let mut status = ChatLinkStatus::default();
         let automatic_cwd =
@@ -604,7 +608,7 @@ impl PrTicketCache {
             .or_else(|| branch.and_then(extract_ticket_id));
         if let Some(ticket_id) = ticket_id {
             let ticket_id = match linear_account {
-                Some(account_id) => TicketKey::Linear { identifier: ticket_id, account_id },
+                Some((account_id, credential_revision)) => TicketKey::Linear { identifier: ticket_id, account_id, credential_revision },
                 None => TicketKey::Cli(ticket_id),
             };
             let cache = lock(&self.inner.ticket_cache);
@@ -1737,8 +1741,8 @@ mod tests {
     #[test]
     fn changing_one_linear_account_invalidates_only_its_tickets() {
         let cache = PrTicketCache::new();
-        let default = TicketKey::Linear { identifier: "ENG-1".into(), account_id: None };
-        let personal = TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()) };
+        let default = TicketKey::Linear { identifier: "ENG-1".into(), account_id: None, credential_revision: 0 };
+        let personal = TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()), credential_revision: 0 };
         for key in [default.clone(), personal.clone()] {
             lock(&cache.inner.ticket_cache).insert(key, Entry { data: None, fetched_at: Instant::now() });
         }
@@ -1752,12 +1756,15 @@ mod tests {
     fn ticket_cache_keys_include_linear_account() {
         let cache = PrTicketCache::new();
         for account in [None, Some("personal".to_owned())] {
-            cache.status_for_links_with_checkout(None, None, &[], Some("ENG-1"), None, Some(account));
+            cache.status_for_links_with_checkout(None, None, &[], Some("ENG-1"), None, Some((account, 0)));
         }
         let pending = lock(&cache.inner.pending_ticket);
-        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: None }));
-        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()) }));
+        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: None, credential_revision: 0 }));
+        assert!(pending.contains(&TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()), credential_revision: 0 }));
         assert_eq!(pending.len(), 2);
+        drop(pending);
+        cache.status_for_links_with_checkout(None, None, &[], Some("ENG-1"), None, Some((None, 1)));
+        assert_eq!(lock(&cache.inner.pending_ticket).len(), 3);
     }
 
     #[test]

@@ -212,6 +212,11 @@ impl LinearService {
         lock(&self.inner.accounts).clear();
     }
 
+    /// Changes whenever this account's credential caches are invalidated.
+    pub fn credential_revision(&self) -> u64 {
+        self.inner.key_revision.load(Ordering::SeqCst)
+    }
+
     /// Return the service and caches belonging to one account. Absent selects
     /// the existing Default service and its environment fallback.
     pub fn for_account(&self, account_id: Option<&str>) -> Self {
@@ -301,7 +306,10 @@ impl LinearService {
         let _guard = self.inner.catalog_change.lock().await;
         let id = uuid::Uuid::new_v4().to_string();
         let account = self.for_account(Some(&id));
-        account.set_api_key(key).await?;
+        if let Err(error) = account.set_api_key(key).await {
+            lock(&self.inner.accounts).remove(&id);
+            return Err(error);
+        }
         let saved = {
             let mut catalog = lock(&self.inner.catalog);
             let mut labels = catalog.list().to_vec();
@@ -310,6 +318,7 @@ impl LinearService {
         };
         if saved.is_err() {
             let _ = account.clear_api_key().await;
+            lock(&self.inner.accounts).remove(&id);
             return Err(LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"));
         }
         Ok(LinearAccount { id, label, key_set: true })
