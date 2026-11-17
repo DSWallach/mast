@@ -69,9 +69,8 @@ fn tracker_counts(workers: &[&WorkerFacts], tickets_done: usize) -> [usize; 6] {
         pr_count("open"), pr_count("merged"), tickets_done]
 }
 
-fn tracker_ticket_label(ticket: &crate::chat_metadata::HeaderTicket) -> String {
-    ticket.title.as_deref().filter(|title| !title.is_empty())
-        .map(|title| format!("{} · {title}", ticket.identifier)).unwrap_or_else(|| ticket.identifier.clone())
+fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallback: &str) -> String {
+    ticket.and_then(|ticket| ticket.title.as_deref()).filter(|title| !title.is_empty()).unwrap_or(fallback).to_owned()
 }
 
 fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
@@ -104,7 +103,7 @@ mod tracker_tests {
     use crate::team::WorkerState;
 
     fn worker(id: &str, state: WorkerState) -> WorkerFacts {
-        WorkerFacts { chat_id: id.into(), title: id.into(), state, last_active: None, activity: None,
+        WorkerFacts { chat_id: id.into(), title: id.into(), work_item_title: Some(id.into()), state, last_active: None, activity: None,
             branch: None, prs: Vec::new(), ticket: None, diff: None, ready: None, archived: false, archivable: None }
     }
 
@@ -125,11 +124,11 @@ mod tracker_tests {
     }
 
     #[test]
-    fn tracker_ticket_label_includes_available_title() {
+    fn tracker_headline_uses_ticket_title_or_work_item() {
         let mut ticket = crate::chat_metadata::HeaderTicket { identifier: "ENG-42".into(), title: Some("Review changes".into()), ..Default::default() };
-        assert_eq!(tracker_ticket_label(&ticket), "ENG-42 · Review changes");
+        assert_eq!(tracker_headline(Some(&ticket), "Work item"), "Review changes");
         ticket.title = None;
-        assert_eq!(tracker_ticket_label(&ticket), "ENG-42");
+        assert_eq!(tracker_headline(Some(&ticket), "Work item"), "Work item");
     }
 
     #[test]
@@ -263,13 +262,23 @@ impl Shell {
                 links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
+            snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
+                id: "fixture-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-root".into(),
+                chat_id: "fixture-worker-5".into(), text: "Use the compact layout first?".into(),
+                kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
+                origin_kind: Default::default(), message_id: None, tool_call_id: None, info: None, options: Vec::new(),
+                links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
+                state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
+            });
             state.set_work_outline_for_test(snapshot);
         });
         for index in 0..8 {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
+            let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
+                "Add filtering", "Verify light themes", "Inspect status facts", "Test the expanded view"];
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
-            let pr = (index < 4).then(|| PrStatus {
-                additions: None, deletions: None,
+            let pr = (index < 4 || index == 7).then(|| PrStatus {
+                additions: Some(312), deletions: Some(48),
                 number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
@@ -277,7 +286,7 @@ impl Shell {
                 has_reviewer_requested: false, merged_at: None,
             });
             let status = ChatLinkStatus {
-                pr, ticket: Some(TicketStatus { identifier: format!("EX-{}", index + 100), title: None, url: None, status: None }),
+                pr, ticket: Some(TicketStatus { identifier: format!("EX-{}", index + 100), title: Some(titles[index as usize].into()), url: None, status: None }),
                 diff_stat: Some(DiffStat { files_changed: 1, lines_added: 4, lines_removed: 2 }),
                 ..Default::default()
             };
@@ -359,6 +368,14 @@ impl Shell {
                     && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi) {
                     requests.entry(request.chat_id.clone()).or_insert_with(|| request.text.clone());
                 }
+            }
+        }
+        for session in &state.sessions {
+            if session.status == mast_proto::SessionStatus::AwaitingInput
+                && let Some(question) = session.awaiting_input.as_ref().and_then(|input| input.questions.first())
+                && !question.question.trim().is_empty()
+            {
+                requests.entry(session.chat_id.clone()).or_insert_with(|| question.question.clone());
             }
         }
         let items = snapshot.as_ref().and_then(|snapshot| {
@@ -583,16 +600,20 @@ impl Shell {
                 if show_not_started {
                     for item in &self.tracker.not_started {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
-                            .child(crate::components::shell_parts::worker_title(&theme, item.title.clone()))
-                            .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::worker_metadata(&theme, ticket, theme.text_faint)))
+                            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
+                                .child(div().size(px(7.0)).rounded_full().bg(theme.border))
+                                .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
+                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
                             .child(tracker_stage_track(&item.id, [false; 6], &theme)));
                     }
                 }
                 if show_completed {
                     for item in self.tracker.completed_items.iter().filter(|item| self.tracker.filter != TrackerFilter::Done || item.ticket.is_some()) {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
-                            .child(crate::components::shell_parts::worker_title(&theme, item.title.clone()))
-                            .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::worker_metadata(&theme, ticket, theme.text_faint)))
+                            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
+                                .child(div().size(px(7.0)).rounded_full().bg(theme.success))
+                                .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
+                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
                             .child(tracker_stage_track(&item.id, [false; 6], &theme)));
                     }
                 }
@@ -603,51 +624,56 @@ impl Shell {
     }
 
     fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::team::TrackerGroup;
         let id = worker.chat_id.clone();
         let open_id = id.clone();
         let menu_id = id.clone();
-        let changes_id = id.clone();
-        let changes_branch = worker.branch.clone();
-        let (title, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
-        let identity = [Some(harness).filter(|s| !s.is_empty()), model].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-        let mut references = div().flex().flex_wrap().gap(px(Theme::SPACE_SM));
+        let (_, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
+        let identity = model.filter(|model| !model.is_empty()).unwrap_or(harness);
+        let group = worker.tracker_group();
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
             && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
+        let status = if group == TrackerGroup::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
+        let status_color = crate::status_style::status_style(status, theme.appearance).color;
+        let stalled = self.tracker.stalled.get(&id).cloned();
+        let title = tracker_headline(worker.ticket.as_ref(), worker.work_item_title.as_deref().unwrap_or("Unassigned work"));
+        let mut header = div().flex().items_center().gap(px(Theme::SPACE_SM))
+            .debug_selector({ let id = id.clone(); move || format!("tracker-heading-{id}") })
+            .child(div().flex_none().size(px(7.0)).rounded_full().bg(status_color));
         if let Some(ticket) = &worker.ticket {
             let url = ticket.url.clone();
-            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), tracker_ticket_label(ticket), ChipTone::Link)
-                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+            header = header.child(crate::components::shell_parts::tracker_mono(theme, ticket.identifier.clone(), theme.text_faint)
+                .id(SharedString::from(format!("team-ticket-{id}"))).cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(url) = &url { this.open_web_reference(url, window.modifiers().secondary(), window, cx); }
                 })));
         }
-        if let Some(branch) = &worker.branch {
-            references = references.child(Self::chip(theme, format!("team-branch-{id}"), branch.clone(), ChipTone::Dim));
+        header = header.child(crate::components::shell_parts::worker_title(theme, title));
+        if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
+            let tip = SharedString::from(format!("Unseen by the orchestrator:\n{}", unseen.join("\n")));
+            header = header.child(crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
+                .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
         }
-        for (index, pr) in worker.prs.iter().enumerate() {
-            let mut label = pr.label();
-            if !pr.state.is_empty() { label.push_str(&format!(" · {}", pr.state.to_lowercase())); }
-            let url = pr.url.clone();
-            references = references.child(Self::chip(theme, format!("team-pr-{id}-{index}"), label, Self::pr_tone(pr))
-                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    if !url.is_empty() { this.open_web_reference(&url, window.modifiers().secondary(), window, cx); }
-                })));
-        }
-        if let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
-            references = references.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
-        }
-        let activity = self.tracker.requests.get(&id).or(worker.activity.as_ref()).cloned().unwrap_or_default();
-        let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
-        let status = if worker.tracker_group() == crate::team::TrackerGroup::ReadyToMerge {
-            crate::status_style::Status::Ready
-        } else { worker.state.into() };
-        let status_color = crate::status_style::status_style(status, theme.appearance).color;
         let stages = worker.tracker_stages();
         let track = tracker_stage_track(&id, [stages.chat_started, stages.changes, stages.pr_open, stages.checks, stages.review, stages.merged], theme);
-        let todo = self.tracker.todos.get(&id).copied().map(tracker_todo_label);
-        let stalled = self.tracker.stalled.get(&id).cloned();
-        let unseen = unseen.cloned().unwrap_or_default();
+        let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
+            .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
+        if let Some(todo) = self.tracker.todos.get(&id) {
+            progress = progress.child(crate::components::shell_parts::tracker_checklist(theme, *todo, tracker_todo_label(*todo)));
+        }
+        let mut identity_line = div().flex().items_center().gap(px(Theme::SPACE_SM)).min_w_0()
+            .debug_selector({ let id = id.clone(); move || format!("tracker-identity-{id}") });
+        let has_identity = !identity.is_empty();
+        if has_identity { identity_line = identity_line.child(crate::components::shell_parts::tracker_metadata(theme, identity)); }
+        if let Some(branch) = &worker.branch {
+            if has_identity { identity_line = identity_line.child(crate::components::shell_parts::worker_metadata(theme, "·".into(), theme.text_faint)); }
+            identity_line = identity_line.child(div().id(SharedString::from(format!("team-branch-{id}")))
+                .debug_selector({ let id = id.clone(); move || format!("team-branch-{id}") })
+                .flex().items_center().gap(px(Theme::SPACE_XS)).min_w_0().text_color(theme.text_faint)
+                .child(crate::icons::icon(crate::icons::GIT_BRANCH).size(px(11.0)))
+                .child(crate::components::shell_parts::tracker_mono(theme, branch.clone(), theme.text_faint)));
+        }
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("team-worker-{id}"))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
@@ -657,68 +683,89 @@ impl Shell {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
-            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
-                .child(div().flex_none().size(px(7.0)).rounded_full().bg(status_color))
-                .child(crate::components::shell_parts::worker_title(theme, title))
-                .child(crate::components::shell_parts::worker_metadata(theme, identity, theme.text_faint))
-                .children((!unseen.is_empty()).then(|| {
-                    let tip = SharedString::from(format!("Unseen by the orchestrator:\n{}", unseen.join("\n")));
-                    crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
-                        .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into())
-                }))
-                .child(crate::components::shell_parts::worker_metadata(theme, stalled.as_ref().map(|(label, _)| label.clone()).unwrap_or_else(|| if worker.tracker_group() == crate::team::TrackerGroup::ReadyToMerge { "ready to merge".into() } else { worker.state.label().into() }), if stalled.as_ref().is_some_and(|(_, failed)| *failed) { theme.danger } else { status_color })
-                    .debug_selector({ let id = id.clone(); let has_stall = stalled.is_some(); move || if has_stall { format!("team-worker-stalled-{id}") } else { format!("tracker-status-{id}") } }))
-                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Changes")
-                    .id(SharedString::from(format!("team-worker-changes-{id}")))
-                    .debug_selector({ let id = id.clone(); move || format!("team-worker-changes-{id}") })
-                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx); }))))
-            .child(div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
-                .children(todo.map(|count| crate::components::shell_parts::worker_metadata(theme, count, theme.text_faint))))
-            .child(references);
-        if let Some(report) = report {
+            .child(header).child(progress).child(identity_line);
+        for (index, pr) in worker.prs.iter().enumerate() {
+            let url = pr.url.clone();
+            let mut line = crate::components::shell_parts::tracker_pr_line(theme, format!("team-pr-{id}-{index}"))
+                .child(SharedString::from(if pr.number == 0 { "PR".into() } else { format!("#{} {}", pr.number, pr.state.to_lowercase()) }));
+            if let Some(checks) = pr.checks {
+                let (label, color) = match checks {
+                    mast_engine::pr_ticket_cache::ChecksStatus::Passing => ("checks passing", theme.success),
+                    mast_engine::pr_ticket_cache::ChecksStatus::Failing => ("checks failing", theme.danger),
+                    mast_engine::pr_ticket_cache::ChecksStatus::Pending => ("checks running", theme.text_muted),
+                };
+                line = line.child(" · ").child(crate::components::shell_parts::worker_metadata(theme, label.into(), color));
+            }
+            if let Some(review) = pr.review { line = line.child(SharedString::from(format!(" · {review}"))); }
+            if let (Some(added), Some(removed)) = (pr.additions, pr.deletions) {
+                line = line.child(" · ").child(crate::components::shell_parts::tracker_mono(theme, format!("+{added}"), theme.success))
+                    .child(crate::components::shell_parts::tracker_mono(theme, format!("−{removed}"), theme.danger));
+            }
+            if index == 0 && let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
+                line = line.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
+            }
+            row = row.child(line.on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if !url.is_empty() { this.open_web_reference(&url, window.modifiers().secondary(), window, cx); }
+            })));
+        }
+        if worker.prs.is_empty() && let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
+            row = row.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
+        }
+        let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
+        let request = self.tracker.requests.get(&id);
+        let activity = request.map(|request| if group == TrackerGroup::NeedsYou { format!("Asked: {request}") } else { request.clone() })
+            .or_else(|| worker.activity.clone())
+            .or_else(|| stalled.as_ref().map(|(label, _)| label.clone())).unwrap_or_default();
+        let activity = [activity, age.clone()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
+        if let Some(report) = report.filter(|_| request.is_none()) {
             let expanded = self.wakes.expanded_reports.contains(&id);
             let toggle_id = id.clone();
-            row = row.child(crate::components::shell_parts::worker_report_toggle(theme, format!("team-worker-report-toggle-{id}"), format!("team-worker-activity-{id}"), format!("{} Report: {}", if expanded { "▾" } else { "▸" }, crate::team::activity_line(report).unwrap_or_default()))
+            let summary = [crate::team::activity_line(report).unwrap_or_default(), age].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
+            row = row.child(crate::components::shell_parts::worker_report_toggle(theme, format!("team-worker-report-toggle-{id}"), format!("team-worker-activity-{id}"), format!("{} Report: {summary}", if expanded { "▾" } else { "▸" }))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_report_expanded(&toggle_id, cx); })));
             if expanded { row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-report-{id}"), report.clone(), true)); }
-            if let Some(request) = self.tracker.requests.get(&id) {
-                row = row.child(crate::components::shell_parts::worker_activity(theme, format!("tracker-request-{id}"), request.clone(), false));
-            }
         } else {
-            row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), [age, activity].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "), false));
+            row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), activity, false)
+                .when(stalled.is_some(), |el| el.debug_selector({ let id = id.clone(); move || format!("team-worker-stalled-{id}") })));
         }
-        if let Some(pr) = open_pr {
+        let mut actions = div().flex().items_center().gap(px(Theme::SPACE_SM))
+            .debug_selector({ let id = id.clone(); move || format!("tracker-actions-{id}") });
+        if group == TrackerGroup::NeedsYou {
+            let answer_id = id.clone();
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-answer-{id}"), "Answer", true)
+                .debug_selector({ let id = id.clone(); move || format!("tracker-answer-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_chat(answer_id.clone(), cx); })));
+        } else if group == TrackerGroup::ReadyToMerge && open_pr.is_some() {
+            let pr = open_pr.unwrap();
             let review_id = id.clone();
             let review_branch = worker.branch.clone();
             let review_url = pr.url.clone();
             let review_head = pr.head_sha.clone();
             let merge_url = pr.url.clone();
-            row = row.child(div().flex().gap(px(Theme::SPACE_SM))
-                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Review PR")
-                    .id(SharedString::from(format!("tracker-review-{id}")))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.tracker.key = None;
-                        this.tracker.review_progress.clear();
-                        this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
-                        this.tracker.review_task = None;
-                        this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), review_head.clone(), cx);
-                    })))
-                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Merge…")
-                    .id(SharedString::from(format!("tracker-merge-{id}")))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx);
-                    }))));
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-review-{id}"), "Review PR", true)
+                .debug_selector({ let id = id.clone(); move || format!("tracker-review-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.tracker.key = None;
+                    this.tracker.review_progress.clear();
+                    this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
+                    this.tracker.review_task = None;
+                    this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), review_head.clone(), cx);
+                })))
+                .child(crate::components::shell_parts::tracker_action(theme, format!("tracker-merge-{id}"), "Merge…", false)
+                    .debug_selector({ let id = id.clone(); move || format!("tracker-merge-{id}") })
+                    .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx); })));
+        } else {
+            let changes_id = id.clone();
+            let changes_branch = worker.branch.clone();
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("team-worker-changes-{id}"), "Changes", false)
+                .debug_selector({ let id = id.clone(); move || format!("team-worker-changes-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx); })));
         }
+        row = row.child(actions);
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
-        }
-        if worker.ready.is_some() {
-            row = row.child(div().flex().child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Jump")
-                .id(SharedString::from(format!("team-worker-jump-{id}")))
-                .debug_selector({ let id = id.clone(); move || format!("team-worker-jump-{id}") })
-                .on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.open_item_tab(cx); }))));
         }
         row.into_any_element()
     }

@@ -1724,6 +1724,38 @@ pub(crate) fn tracker_stage_indicator(theme: &Theme, id: SharedString, lit: bool
         .bg(if lit { theme.accent } else { theme.border })
 }
 
+pub(crate) fn tracker_mono(theme: &Theme, text: String, color: gpui::Hsla) -> gpui::Div {
+    div().min_w_0().truncate().font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(10.5)).text_color(color).child(SharedString::from(text))
+}
+
+pub(crate) fn tracker_metadata(theme: &Theme, text: String) -> gpui::Div {
+    div().min_w_0().truncate().text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_muted).child(SharedString::from(text))
+}
+
+pub(crate) fn tracker_checklist(theme: &Theme, progress: mast_proto::TodoProgress, label: String) -> gpui::Div {
+    let mut bar = div().flex().items_center().gap(px(Theme::SPACE_XS));
+    let segments = progress.total.min(8);
+    for index in 0..segments {
+        let completed = index * progress.total < progress.done * segments;
+        bar = bar.child(div().w(px(5.0)).h(px(5.0)).rounded_full()
+            .bg(if completed { theme.accent } else { theme.border }));
+    }
+    bar.child(tracker_mono(theme, label, theme.text_faint))
+}
+
+pub(crate) fn tracker_pr_line(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {
+    div().id(SharedString::from(id.clone())).debug_selector(move || id.clone()).flex().flex_wrap().items_center().gap(px(Theme::SPACE_XS))
+        .cursor_pointer().text_size(crate::typography::ui_rems(10.5)).text_color(theme.text_muted)
+}
+
+pub(crate) fn tracker_action(theme: &Theme, id: String, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+    running_button(id, label, primary, theme).when(primary, |button| {
+        button.bg(theme.accent).border_color(theme.accent).text_color(theme.on_accent)
+    })
+}
+
 pub(crate) fn tracker_group_heading(theme: &Theme, label: &str, count: usize) -> gpui::Div {
     div().pt(px(Theme::SPACE_SM)).text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_faint).child(format!("{}  {count}", label.to_uppercase()))

@@ -148,6 +148,7 @@ pub(crate) struct WorkerFacts {
     pub chat_id: String,
     /// The worker's item title, else its chat title.
     pub title: String,
+    pub work_item_title: Option<String>,
     pub state: WorkerState,
     pub last_active: Option<DateTime<Utc>>,
     /// One line: the last message's first line, clipped.
@@ -468,6 +469,7 @@ pub(crate) fn worker_with_index(
     WorkerFacts {
         chat_id: chat.id.clone(),
         title,
+        work_item_title: item.map(|item| item.title.trim()).filter(|title| !title.is_empty()).map(str::to_owned),
         state,
         last_active: chat.last_message_at.or(Some(chat.created_at)),
         activity: chat.last_message_preview.as_deref().and_then(|text| activity_line(&crate::message_source::preview(text))),
@@ -500,6 +502,7 @@ mod tests {
                 .map(|(i, (state, ready))| WorkerFacts {
                     chat_id: format!("c{i}"),
                     title: format!("w{i}"),
+                    work_item_title: Some(format!("w{i}")),
                     state: *state,
                     last_active: None,
                     activity: None,

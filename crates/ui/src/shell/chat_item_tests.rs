@@ -1228,6 +1228,47 @@ fn the_team_tab_lists_a_worker_per_row_with_state_activity_and_a_roll_up(cx: &mu
 }
 
 #[gpui::test]
+fn tracker_orders_worker_lifecycle_lines(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let heading = vcx.debug_bounds("tracker-heading-w-0").unwrap();
+    let progress = vcx.debug_bounds("tracker-progress-w-0").unwrap();
+    let identity = vcx.debug_bounds("tracker-identity-w-0").unwrap();
+    let activity = vcx.debug_bounds("team-worker-activity-w-0").unwrap();
+    let actions = vcx.debug_bounds("tracker-actions-w-0").unwrap();
+    assert!(heading.bottom() <= progress.top());
+    assert!(progress.bottom() <= identity.top());
+    assert!(identity.bottom() <= activity.top());
+    assert!(activity.bottom() <= actions.top());
+}
+
+#[gpui::test]
+fn tracker_shows_state_specific_actions(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 3);
+    shell.update(vcx, |shell, cx| {
+        let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+            "isWorktree": false, "pr": {"number": 57, "url": "https://github.com/example/project/pull/57", "state": "OPEN",
+                "isDraft": false, "reviewDecision": "REVIEW_REQUIRED", "reviewers": [], "checks": "passing",
+                "title": "Review", "branch": "feature/w-2", "headSha": "abc", "mergeable": "mergeable",
+                "hasReviewerRequested": true, "additions": 312, "deletions": 48}
+        })).unwrap();
+        shell.chat_header_links.insert("w-2".into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-answer-w-1"));
+    assert!(has(vcx, "team-pr-w-2-0"));
+    assert!(has(vcx, "tracker-review-w-2"));
+    assert!(has(vcx, "tracker-merge-w-2"));
+    assert!(has(vcx, "team-worker-changes-w-0"));
+    assert!(!has(vcx, "team-worker-changes-w-1"));
+}
+
+#[gpui::test]
 fn worker_changes_action_opens_a_diff(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 2);
@@ -1263,8 +1304,7 @@ fn team_tab_rows_stack_without_overlap_for_two_and_fifteen_workers(cx: &mut Test
         // Each row names its branch; the waiting and ready ones say more.
         assert!(has(vcx, "team-branch-w-0"));
         assert!(has(vcx, "team-worker-activity-w-0"));
-        assert_eq!(has(vcx, "team-worker-jump-w-2"), n > 2, "ready-to-merge jump");
-        assert!(!has(vcx, "team-worker-jump-w-0"));
+        assert!(!has(vcx, "team-worker-jump-w-2"));
     }
 }
 
@@ -1561,9 +1601,9 @@ fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
     add_workers(&shell, vcx, 2);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    assert!(has(vcx, "team-worker-activity-w-1") || !has(vcx, "team-worker-report-w-1"));
+    assert!(has(vcx, "team-worker-activity-w-0") || !has(vcx, "team-worker-report-w-0"));
     let report = |id: &str, text: &str| {
-        let mut e = wake_event(id, "w-1", false);
+        let mut e = wake_event(id, "w-0", false);
         e.kind = mast_proto::WakeEventKind::WorkerReport;
         e.report = Some(text.into());
         e
@@ -1582,21 +1622,21 @@ fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
             ..Default::default()
         },
     );
-    assert!(has(vcx, "team-worker-activity-w-1"));
-    assert!(!has(vcx, "team-worker-report-w-1"), "collapsed by default");
+    assert!(has(vcx, "team-worker-activity-w-0"));
+    assert!(!has(vcx, "team-worker-report-w-0"), "collapsed by default");
     shell.read_with(vcx, |shell, _| {
         assert_eq!(
-            shell.latest_report_for_worker("w-1").as_deref(),
+            shell.latest_report_for_worker("w-0").as_deref(),
             Some("Done: merged the fix\nsecond line of detail")
         );
-        assert_eq!(shell.latest_report_for_worker("w-0"), None);
+        assert_eq!(shell.latest_report_for_worker("w-1"), None);
     });
-    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-0", cx));
     draw(vcx);
-    assert!(has(vcx, "team-worker-report-w-1"), "expands to the full text");
-    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
+    assert!(has(vcx, "team-worker-report-w-0"), "expands to the full text");
+    shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-0", cx));
     draw(vcx);
-    assert!(!has(vcx, "team-worker-report-w-1"));
+    assert!(!has(vcx, "team-worker-report-w-0"));
 }
 
 #[gpui::test]
