@@ -7700,7 +7700,13 @@ fn user_bubble_text(
         at = span.range.end;
         if let Some(badge) = &span.badge_range {
             if at < badge.start { runs.push(body_run(badge.start - at)); }
-            runs.push(body_run(badge.len()));
+            let mut run = body_run(badge.len());
+            run.color = match span.resolution {
+                Some(crate::code_ref::Resolution::Changed) => theme.warning_muted,
+                Some(crate::code_ref::Resolution::Moved(_)) => theme.accent,
+                _ => run.color,
+            };
+            runs.push(run);
             at = badge.end;
         }
     }
@@ -7711,6 +7717,8 @@ fn user_bubble_text(
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
     let border = theme.border;
+    let warning_wash = theme.warning.opacity(0.12);
+    let accent_wash = theme.accent.opacity(0.12);
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let hit_mentions = mentions.clone();
@@ -7730,7 +7738,12 @@ fn user_bubble_text(
                 }
                 if let Some(badge) = &span.badge_range {
                     for rect in render::range_rects(&layout, badge, 0.0, 2.0) {
-                        window.paint_quad(quad(rect, px(Theme::SPACE_XS), wash, px(1.0), border, BorderStyle::default()));
+                        let background = match span.resolution {
+                            Some(crate::code_ref::Resolution::Changed) => warning_wash,
+                            Some(crate::code_ref::Resolution::Moved(_)) => accent_wash,
+                            _ => wash,
+                        };
+                        window.paint_quad(quad(rect, px(Theme::SPACE_XS), background, px(0.0), gpui::transparent_black(), BorderStyle::default()));
                     }
                 }
             }

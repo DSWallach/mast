@@ -19,14 +19,7 @@ impl ReferenceCard {
         if cx.try_global::<ReferenceHighlightCache>().is_none() {
             cx.set_global(ReferenceHighlightCache::default());
         }
-        let bounded = super::code_block::bounded_source(&reference.snippet);
-        let source = bounded.split('\n').take(4).collect::<Vec<_>>().join("\n");
-        let visible_lines = source.split('\n').count() as u32;
-        let total_lines = reference.reference.range.map_or_else(
-            || bounded.lines().count() as u32,
-            |range| range.end_line.saturating_sub(range.start_line).saturating_add(1),
-        );
-        let remaining_lines = total_lines.saturating_sub(visible_lines);
+        let (source, remaining_lines) = reference_card_source(&reference);
         let path = reference.reference.location.path.clone();
         let key = mast_syntax::language_for_path(&path)
             .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
@@ -51,6 +44,17 @@ impl ReferenceCard {
         }
         Self { label: reference.label(), source, first_line: reference.reference.range.map_or(1, |range| range.start_line), remaining_lines, highlight }
     }
+}
+
+fn reference_card_source(reference: &crate::code_ref::StagedCodeRef) -> (String, u32) {
+    let bounded = super::code_block::bounded_source(&reference.snippet);
+    let source = bounded.split('\n').take(4).collect::<Vec<_>>().join("\n");
+    let visible_lines = source.split('\n').count() as u32;
+    let total_lines = reference.reference.range.map_or_else(
+        || bounded.lines().count() as u32,
+        |range| range.end_line.saturating_sub(range.start_line).saturating_add(1),
+    );
+    (source, total_lines.saturating_sub(visible_lines))
 }
 
 impl gpui::Render for ReferenceCard {
@@ -115,5 +119,22 @@ mod tests {
         assert_eq!(selection_action_position(selection, viewport), (px(30.0), px(140.0)));
         let selection = Bounds::new(point(px(110.0), px(290.0)), size(px(10.0), px(20.0)));
         assert_eq!(selection_action_position(selection, viewport), (px(158.0), px(10.0)));
+    }
+
+    #[test]
+    fn reference_card_limits_lines_and_reports_remainder() {
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "reference".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "src/file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange { start_line: 8, end_line: 13 }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "one\ntwo\nthree\nfour\nfive\nsix".into(),
+        };
+        assert_eq!(reference_card_source(&reference), ("one\ntwo\nthree\nfour".into(), 2));
     }
 }

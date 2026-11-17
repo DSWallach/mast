@@ -34,7 +34,7 @@ pub(crate) fn code_block(
         div().flex().gap(px(Theme::SPACE_MD))
             .child(div().w(px(Theme::SPACE_LG * 3.0)).flex_none().text_right()
                 .text_color(theme.text_faint).child(first_line.saturating_add(index as u32).to_string()))
-            .child(StyledText::new(line.to_owned()).with_runs(runs))
+            .child(div().flex_1().min_w_0().child(StyledText::new(line.to_owned()).with_runs(runs)))
     });
     div().font_family(theme.font_mono.clone()).text_size(text_size).children(lines)
 }
