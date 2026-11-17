@@ -44,6 +44,7 @@ pub(crate) struct LinearStore {
     pub status_loading: bool,
     pub accounts: Option<Vec<LinearAccount>>,
     pub accounts_loading: bool,
+    accounts_refresh_pending: bool,
     revisions: HashMap<String, u64>,
     issues: HashMap<String, IssueEntry>,
     /// Identifiers with a fetch under way.
@@ -185,7 +186,10 @@ impl LinearStore {
 /// Fetch account metadata once, or after an account change.
 pub(crate) fn refresh_accounts(state: &Entity<AppState>, cx: &mut App) {
     let task = state.update(cx, |state, _| {
-        if state.linear.accounts_loading { return None; }
+        if state.linear.accounts_loading {
+            state.linear.accounts_refresh_pending = true;
+            return None;
+        }
         state.linear.accounts_loading = true;
         Some(state.work_outline_actions().linear_list_accounts())
     });
@@ -193,11 +197,14 @@ pub(crate) fn refresh_accounts(state: &Entity<AppState>, cx: &mut App) {
     let state = state.clone();
     cx.spawn(async move |cx| {
         let result = task.await;
-        state.update(cx, |state, cx| {
+        let retry = state.update(cx, |state, cx| {
             state.linear.accounts_loading = false;
             state.linear.accounts = Some(result.unwrap_or_default());
+            let retry = std::mem::take(&mut state.linear.accounts_refresh_pending);
             cx.notify();
+            retry
         });
+        if retry { let _ = cx.update(|cx| refresh_accounts(&state, cx)); }
     }).detach();
 }
 
