@@ -37,6 +37,16 @@ use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
 
+fn chat_item_title(title: Option<&str>) -> String {
+    title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("New chat")
+        .chars()
+        .take(mast_proto::work_outline::limits::MAX_TITLE_CHARS)
+        .collect()
+}
+
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
 pub const WORKSPACE_DOC_ID: &str = "workspace2";
@@ -1579,6 +1589,142 @@ impl WorkspaceHost {
 
     // ── host-side row writes ────────────────────────────────────────────────
 
+    /// Give a user-created chat durable work ownership. Launches with an
+    /// explicit item keep their assignment; children and side chats share
+    /// their source's item. The registry lock prevents duplicate defaults
+    /// when creation and first-command recovery race.
+    pub fn ensure_chat_work_item(&self, chat_id: &str) -> Result<String, EngineError> {
+        use mast_proto::{
+            AssignChatToWorkItemParams, CreateWorkItemParams, WorkOutlineActor, WorkOutlineActorKind,
+        };
+        if crate::work_outline::writes_disabled() {
+            return Err(EngineError::Other(
+                "Work Outline changes are turned off on this device".into(),
+            ));
+        }
+        let personal_root = self.inner.store.root().join("projectless");
+        self.mutate(|doc| -> Result<String, EngineError> {
+            let chat = doc
+                .chat(chat_id)?
+                .ok_or_else(|| EngineError::Other("Chat not found".into()))?;
+            if chat.archived {
+                return Err(EngineError::Other(
+                    "An archived chat cannot start new work".into(),
+                ));
+            }
+            let space_id = match chat.space_id.as_deref() {
+                Some(id) => id.to_owned(),
+                None => {
+                    if chat.device_id != self.device_id() {
+                        return Err(EngineError::Other(
+                            "The chat's host must assign its personal Space".into(),
+                        ));
+                    }
+                    std::fs::create_dir_all(&personal_root)?;
+                    let id = Space::personal_id(&chat.device_id);
+                    if doc.space(&id)?.is_none() {
+                        doc.create_space_with_pr_prompts(
+                            &Space {
+                                id: id.clone(),
+                                device_id: chat.device_id.clone(),
+                                path: personal_root.to_string_lossy().into_owned(),
+                                name: Some("Personal".into()),
+                                git_detected: false,
+                                git_checked_at: None,
+                                checkout_id: None,
+                                created_at: Utc::now(),
+                            },
+                            &mast_proto::PrReviewPrompts::neutral(),
+                        )?;
+                    }
+                    doc.set_chat_space(chat_id, &id);
+                    id
+                }
+            };
+            if let Some(item) = doc.chat_assigned_work_item(chat_id, &space_id) {
+                return Ok(item);
+            }
+            if space_id == Space::personal_id(&chat.device_id) && chat.device_id != self.device_id() {
+                return Err(EngineError::Other(
+                    "The chat's host must initialize its personal work item".into(),
+                ));
+            }
+            let actor = WorkOutlineActor {
+                kind: WorkOutlineActorKind::System,
+                chat_id: None,
+                device_id: self.device_id().to_owned(),
+                message_id: None,
+            };
+            let now = Utc::now().timestamp_millis();
+            let inherited = chat
+                .parent_chat_id
+                .as_deref()
+                .or(chat.side_of.as_deref())
+                .and_then(|parent| doc.chat_assigned_work_item(parent, &space_id));
+            let operation_id = format!(
+                "chat-item:{}",
+                mast_proto::derive_id(chat_id, "default-item")
+            );
+            let item = match inherited {
+                Some(item) => item,
+                None => {
+                    let id = mast_proto::derive_id(&operation_id, mast_proto::roles::ITEM);
+                    if doc.row_state(mast_doc::KIND_WORK_ITEMS, &id) != mast_doc::RowState::Live {
+                        doc.create_work_item(
+                            &CreateWorkItemParams {
+                                space_id: space_id.clone(),
+                                parent_work_item_id: None,
+                                placement: Default::default(),
+                                title: chat_item_title(chat.title.as_deref()),
+                                description: None,
+                                status: None,
+                                operation_id: operation_id.clone(),
+                            },
+                            &actor,
+                            now,
+                        )
+                        .map_err(|e| EngineError::Other(e.to_wire_message()))?;
+                    }
+                    if space_id == Space::personal_id(&chat.device_id)
+                        && doc.row_state(
+                            mast_doc::registry::work_outline::KIND_EXECUTION_CONFIGURATIONS,
+                            &format!("w:{id}"),
+                        ) == mast_doc::RowState::Absent
+                    {
+                        let root = personal_root.join(crate::run_journal::sanitize_id(chat_id));
+                        std::fs::create_dir_all(&root)?;
+                        doc.configure_execution(
+                            &mast_proto::ConfigureExecutionParams {
+                                scope: mast_proto::ExecutionScope::WorkItem {
+                                    work_item_id: id.clone(),
+                                },
+                                configuration: Some(mast_proto::ExecutionConfiguration::implicit(
+                                    root.to_string_lossy(),
+                                )),
+                                operation_id: operation_id.clone(),
+                            },
+                            &actor,
+                            now,
+                        )
+                        .map_err(|e| EngineError::Other(e.to_wire_message()))?;
+                    }
+                    id
+                }
+            };
+            doc.assign_chat_to_work_item(
+                &AssignChatToWorkItemParams {
+                    chat_id: chat_id.to_owned(),
+                    work_item_id: item.clone(),
+                    operation_id,
+                },
+                &actor,
+                now,
+            )
+            .map_err(|e| EngineError::Other(e.to_wire_message()))?;
+            Ok(item)
+        })
+    }
+
     /// Sidebar freshness on message persist: preview = first 120 chars of the last
     /// message's text. Claims the row first so a pre-workspace chat gains one.
     pub fn note_message(&self, chat_id: &str, text: &str) {
@@ -1695,6 +1841,7 @@ impl WorkspaceHost {
                 cwd: Some(cwd.unwrap_or_else(|| {
                     space
                         .as_ref()
+                        .filter(|space| !space.is_personal())
                         .map(|s| s.path.clone())
                         .unwrap_or_else(|| "~".to_string())
                 })),
@@ -1878,7 +2025,42 @@ impl WorkspaceHost {
     }
 
     pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
+        self.mutate(|doc| {
+            if !crate::work_outline::writes_disabled()
+                && let Some(chat) = doc.chat(chat_id)?
+                && let Some(space) = chat.space_id.as_deref()
+            {
+                let operation = format!(
+                    "chat-item:{}",
+                    mast_proto::derive_id(chat_id, "default-item")
+                );
+                let item_id = mast_proto::derive_id(&operation, mast_proto::roles::ITEM);
+                if doc.chat_assigned_work_item(chat_id, space).as_deref() == Some(&item_id)
+                    && let Some(item) = doc.row(mast_doc::KIND_WORK_ITEMS, &item_id)
+                    && item.fields.get("title").and_then(serde_json::Value::as_str)
+                        == Some(chat_item_title(chat.title.as_deref()).as_str())
+                {
+                    let actor = mast_proto::WorkOutlineActor {
+                        device_id: self.device_id().to_owned(),
+                        ..Default::default()
+                    };
+                    doc.update_work_item(
+                        &mast_proto::UpdateWorkItemParams {
+                            work_item_id: item_id,
+                            operation_id: operation,
+                            changes: mast_proto::WorkItemChanges {
+                                title: Some(chat_item_title(Some(title))),
+                                ..Default::default()
+                            },
+                        },
+                        &actor,
+                        Utc::now().timestamp_millis(),
+                    )
+                    .map_err(|e| EngineError::Other(e.to_wire_message()))?;
+                }
+            }
+            Ok(doc.rename_chat(chat_id, title)?)
+        })
     }
 
     pub fn set_chat_scheduled_task(&self, chat_id: &str, task: &str) -> Result<bool, EngineError> {

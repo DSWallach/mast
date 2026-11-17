@@ -554,6 +554,13 @@ impl SessionsEngine {
         }
     }
 
+    pub(crate) fn chat_account_pin(&self, chat_id: &str, harness: HarnessId) -> Option<String> {
+        self.inner
+            .managed_accounts
+            .get()?
+            .chat_pin(chat_id, harness)
+    }
+
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);

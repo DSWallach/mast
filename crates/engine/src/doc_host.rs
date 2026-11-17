@@ -5506,6 +5506,12 @@ impl DocHost {
         // creates the row under our device id (we are about to host it).
         if let Some(ws) = self.workspace() {
             ws.claim_chat(chat_id, Some(&request.cwd))?;
+            // Do not reattach a chat the user explicitly removed from its item.
+            if ws.registry_row_state(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id) == mast_doc::RowState::Absent
+                && !crate::work_outline::writes_disabled()
+            {
+                ws.ensure_chat_work_item(chat_id)?;
+            }
             // A pre-existing row (the client's createChat raced ahead)
             // still carries the repo folder — repoint it at the fresh
             // worktree, and stamp the actual `zeron/<name>` branch so

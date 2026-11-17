@@ -775,7 +775,7 @@ pub fn journal_paths(dir: &Path, chat_id: &str) -> (PathBuf, PathBuf) {
 
 /// Chat ids become file names; anything outside a conservative set is replaced so a
 /// hostile id cannot traverse paths. (Ids are uuids in practice.)
-fn sanitize_id(chat_id: &str) -> String {
+pub(crate) fn sanitize_id(chat_id: &str) -> String {
     chat_id
         .chars()
         .map(|c| {

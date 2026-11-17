@@ -1995,6 +1995,13 @@ impl EngineRpc {
                         tracing::warn!(chat = %chat_id, main = %main_id, error = %err,
                             "side chat account pin failed");
                     }
+                    if !crate::work_outline::writes_disabled()
+                        && (side.device_id == self.workspace.device_id()
+                            || side.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&side.device_id)))
+                    {
+                        self.workspace.ensure_chat_work_item(&main_id).map_err(failed)?;
+                        self.workspace.ensure_chat_work_item(&chat_id).map_err(failed)?;
+                    }
                     return Ok(());
                 }
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
@@ -2026,13 +2033,30 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
-                if let Some(parent) = parent_chat_id
-                    && let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent)
+                if let Some(parent) = parent_chat_id {
+                    if !crate::work_outline::writes_disabled()
+                        && let Some(source) = self.workspace.chat(&parent).map_err(failed)?
+                        && source.space_id == space_id
+                        && (source.device_id == self.workspace.device_id()
+                            || source.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&source.device_id)))
+                    {
+                        self.workspace.ensure_chat_work_item(&parent).map_err(failed)?;
+                    }
+                    if let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent) {
+                        // The Chat exists; a failed inheritance must not make a
+                        // caller retry into a duplicate Chat.
+                        tracing::warn!(chat = %chat_id, parent = %parent, error = %err,
+                            "child chat work-outline inheritance failed");
+                    }
+                }
+                // Remote folderless chats are assigned by their hosting device
+                // when the first command arrives.
+                if !crate::work_outline::writes_disabled()
+                    && let Some(chat) = self.workspace.chat(&chat_id).map_err(failed)?
+                    && (chat.device_id == self.workspace.device_id()
+                        || chat.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&chat.device_id)))
                 {
-                    // The Chat exists; a failed inheritance must not make a
-                    // caller retry into a duplicate Chat.
-                    tracing::warn!(chat = %chat_id, parent = %parent, error = %err,
-                        "child chat work-outline inheritance failed");
+                    self.workspace.ensure_chat_work_item(&chat_id).map_err(failed)?;
                 }
                 Ok(())
             }
@@ -2262,6 +2286,7 @@ fn forwardable(method: &str) -> bool {
             | methods::QUEUE_MESSAGE
             // Reads the side chat and queues into its main chat on their host.
             | methods::ABSORB_SIDE_CHAT
+            | methods::HAND_OFF_ORCHESTRATOR
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -3756,10 +3781,13 @@ impl RpcService for EngineRpc {
                 if source.archived {
                     return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
                 }
-                let space_id = source.space_id.as_deref()
-                    .ok_or_else(|| RpcError::Failed("Chat has no Space".into()))?;
-                let item = self.workspace.chat_assigned_work_item(&p.chat_id, space_id)
-                    .ok_or_else(|| RpcError::Failed("Chat has no work item".into()))?;
+                if source.device_id != self.workspace.device_id() {
+                    let mut forwarded = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    forwarded["targetDeviceId"] = serde_json::json!(source.device_id);
+                    return self.forward(&source.device_id, methods::HAND_OFF_ORCHESTRATOR, forwarded).await;
+                }
+                let item = self.workspace.ensure_chat_work_item(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
@@ -6356,6 +6384,8 @@ mod tests {
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
+        assert!(forwardable(methods::HAND_OFF_ORCHESTRATOR));
+        assert!(!is_stream_method(methods::HAND_OFF_ORCHESTRATOR));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::WATCH_WORKSPACE_SEARCH_FILES));

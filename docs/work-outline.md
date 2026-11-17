@@ -6,7 +6,11 @@ It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
 surface. Overview is the persistent left column, with the Work Outline as its
 default presentation. Choose Sessions for the session list and its grouping
-controls. A Chat never needs a work item.
+controls. New Chats automatically get a work item unless they already belong
+under one. Children and side chats reuse their source's item. Chats created
+without a folder live in the host device's Personal Space and keep their own
+scratch directory. Older unassigned Chats gain an item when you hand them off
+or next run them.
 
 | Concept | What it is |
 | --- | --- |
