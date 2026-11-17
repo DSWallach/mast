@@ -301,6 +301,18 @@ impl ScheduledTasks {
         }
         Ok(written)
     }
+    /// Spaces this device's tasks launch into, paused tasks included: deleting
+    /// one would fail every later run of its task.
+    pub fn task_space_ids(&self) -> Result<std::collections::HashSet<String>, EngineError> {
+        Ok(self
+            .0
+            .store
+            .tasks()?
+            .into_iter()
+            .filter(|t| !t.deleted && t.device_id == self.0.workspace.device_id())
+            .filter_map(|t| t.draft.space_id)
+            .collect())
+    }
     fn find(&self, id: &str) -> Result<ScheduledTask, EngineError> {
         self.0
             .store

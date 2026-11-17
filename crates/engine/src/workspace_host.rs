@@ -1450,11 +1450,12 @@ impl WorkspaceHost {
     /// Fold this device's Spaces that sit on a linked worktree into the Space
     /// of the checkout the worktree came from ([`space_home`], created when
     /// none exists): their chats move over and the emptied Space is deleted.
-    /// Spaces that aren't [foldable](RegistryDoc::space_foldable) are
-    /// left alone. Destructive on a stale view (a peer's chats or outline rows
-    /// may not have arrived yet): callers gate on [`Self::registry_synced`].
+    /// Spaces that aren't [foldable](RegistryDoc::space_foldable), or are in
+    /// `held` (a scheduled task still launches into them), are left alone.
+    /// Destructive on a stale view (a peer's chats or outline rows may not
+    /// have arrived yet): callers gate on [`Self::registry_synced`].
     /// Returns how many Spaces were folded.
-    pub fn fold_worktree_spaces(&self) -> usize {
+    pub fn fold_worktree_spaces(&self, held: &std::collections::HashSet<String>) -> usize {
         let device_id = &self.inner.config.device_id;
         let spaces = match self.read(|doc| doc.read_spaces()) {
             Ok(spaces) => spaces,
@@ -1464,7 +1465,10 @@ impl WorkspaceHost {
             }
         };
         let mut folded = 0;
-        for space in spaces.iter().filter(|s| s.device_id == *device_id) {
+        for space in spaces
+            .iter()
+            .filter(|s| s.device_id == *device_id && !held.contains(&s.id))
+        {
             if worktree_home_origin(std::path::Path::new(&space.path)).is_none()
                 || !self
                     .read(|doc| doc.space_foldable(&space.id))
@@ -4133,7 +4137,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(host.fold_worktree_spaces(), 3);
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 3);
         let spaces = host.read(|doc| doc.read_spaces()).unwrap();
         let module_home = spaces
             .iter()
@@ -4156,7 +4160,7 @@ mod tests {
         );
 
         // Idempotent, and new chats in the worktree skip the leftover Space.
-        assert_eq!(host.fold_worktree_spaces(), 0);
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 0);
         host.claim_chat("c-new", blocked_wt.to_str()).unwrap();
         assert_eq!(space_of("c-new"), "repo");
 

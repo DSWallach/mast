@@ -22,7 +22,7 @@
 //! ([`WorkspaceHost::registry_synced`]): on an un-synced replica a missing
 //! space row means "we haven't heard yet", not "deleted".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
@@ -58,7 +58,13 @@ struct SpacesSyncInner {
     /// it once the whole graph drops).
     cancel: CancellationToken,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Spaces another service still launches into (scheduled tasks); the
+    /// worktree fold never deletes them. Unset or failing = no fold.
+    space_holds: Mutex<Option<SpaceHolds>>,
 }
+
+/// Space ids that must not be folded away, or `Err` when unknown.
+pub type SpaceHolds = Arc<dyn Fn() -> Result<HashSet<String>, crate::EngineError> + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -81,6 +87,7 @@ impl SpacesSync {
                 entries: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
+                space_holds: Mutex::new(None),
             }),
         };
         let task = tokio::spawn(spaces_task(
@@ -90,6 +97,12 @@ impl SpacesSync {
         ));
         *lock(&sync.inner.supervisor) = Some(task);
         sync
+    }
+
+    /// Register the Spaces the worktree fold must keep; until this is set the
+    /// fold doesn't run.
+    pub fn set_space_holds(&self, holds: SpaceHolds) {
+        *lock(&self.inner.space_holds) = Some(holds);
     }
 
     /// Stop the supervisor loop and wait for it to exit (per-space tasks are
@@ -287,19 +300,29 @@ mod tests {
             ids
         };
 
+        let none = std::collections::HashSet::new();
         // Not synced: nothing at all, not even the orphan deletes.
-        super::repair_spaces(&host, "dev", false, false);
+        super::repair_spaces(&host, "dev", false, false, Some(&none));
         assert_eq!(spaces(), ["repo", "wt"]);
         assert_eq!(space_of("orphan-plain").as_deref(), Some("gone"));
 
         // Outline writes switched off: no fold, but orphans still resolve.
-        super::repair_spaces(&host, "dev", true, true);
+        super::repair_spaces(&host, "dev", true, true, Some(&none));
         assert_eq!(spaces(), ["repo", "wt"]);
         assert_eq!(space_of("in-wt").as_deref(), Some("wt"));
         assert_eq!(space_of("orphan-wt").as_deref(), Some("repo"));
         assert_eq!(space_of("orphan-plain"), None);
 
-        super::repair_spaces(&host, "dev", true, false);
+        // Held Spaces unknown, or a scheduled task still launching into the
+        // worktree Space: no fold.
+        super::repair_spaces(&host, "dev", true, false, None);
+        assert_eq!(spaces(), ["repo", "wt"]);
+        let held = std::collections::HashSet::from(["wt".to_string()]);
+        super::repair_spaces(&host, "dev", true, false, Some(&held));
+        assert_eq!(spaces(), ["repo", "wt"]);
+        assert_eq!(space_of("in-wt").as_deref(), Some("wt"));
+
+        super::repair_spaces(&host, "dev", true, false, Some(&none));
         assert_eq!(spaces(), ["repo"]);
         assert_eq!(space_of("in-wt").as_deref(), Some("repo"));
     }
@@ -375,16 +398,32 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
 /// Host-side repair: delete OUR chats whose `spaceId` dangles (create-vs-delete
 /// race). Chats hosted by other devices are left alone.
 fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
+    let holds = lock(&inner.space_holds).clone();
+    let held = holds
+        .map(|holds| holds())
+        .transpose()
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "spaces: worktree fold skipped (held Spaces unknown)");
+            None
+        });
     repair_spaces(
         &inner.workspace,
         &inner.device_id,
         inner.workspace.registry_synced(),
         crate::work_outline::writes_disabled(),
+        held.as_ref(),
     );
 }
 
-/// [`sweep_orphans`] with its gates passed in.
-fn repair_spaces(workspace: &WorkspaceHost, device_id: &str, synced: bool, writes_disabled: bool) {
+/// [`sweep_orphans`] with its gates passed in. `held` lists Spaces the fold
+/// must keep; `None` (unknown) skips the fold.
+fn repair_spaces(
+    workspace: &WorkspaceHost,
+    device_id: &str,
+    synced: bool,
+    writes_disabled: bool,
+    held: Option<&HashSet<String>>,
+) {
     // NEVER sweep off a replica that hasn't heard from the server this boot:
     // a gapped/pre-heal/offline-at-boot view is missing rows, and "space row
     // absent" on it is not evidence the space was deleted — sweeping there
@@ -396,8 +435,8 @@ fn repair_spaces(workspace: &WorkspaceHost, device_id: &str, synced: bool, write
     // Worktree Spaces (minted before claims and imports resolved worktrees to
     // their checkout's Space) fold into that Space; same synced gate, since
     // the fold deletes the emptied Space.
-    if !writes_disabled {
-        let folded = workspace.fold_worktree_spaces();
+    if !writes_disabled && let Some(held) = held {
+        let folded = workspace.fold_worktree_spaces(held);
         if folded > 0 {
             tracing::info!(spaces = folded, "folded worktree spaces");
         }

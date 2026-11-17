@@ -1074,3 +1074,73 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_worktree_space_a_task_launches_into_is_never_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, _item) = item_core(&root).await;
+    let wt = root.join(".worktrees/feature");
+    let admin = root.join(".git/worktrees/feature");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    client
+        .call(
+            mast_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createSpace", "spaceId": "wt-space",
+                "deviceId": ITEM_DEVICE, "path": wt.to_string_lossy() }),
+        )
+        .await
+        .unwrap();
+    let mut pinned = item_draft(&root, None);
+    pinned.space_id = Some("wt-space".into());
+    pinned.cwd = wt.to_string_lossy().into();
+    let saved = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "pinned".into(),
+            expected_revision: 0,
+            draft: pinned,
+            operation_id: "save-pinned".into(),
+        })
+        .await
+        .unwrap();
+
+    let held = core.scheduled_tasks.task_space_ids().unwrap();
+    assert!(held.contains("wt-space"));
+    assert_eq!(core.workspace.fold_worktree_spaces(&held), 0);
+    assert!(core.workspace.space("wt-space").unwrap().is_some());
+    let run = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow {
+            id: "pinned".into(),
+            operation_id: "run-pinned".into(),
+        })
+        .await;
+    assert!(run.is_ok(), "the task still launches into its Space");
+
+    let revision = saved
+        .tasks
+        .iter()
+        .find(|t| t.id == "pinned")
+        .unwrap()
+        .revision;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Delete {
+            id: "pinned".into(),
+            expected_revision: revision,
+            operation_id: "delete-pinned".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !core
+            .scheduled_tasks
+            .task_space_ids()
+            .unwrap()
+            .contains("wt-space")
+    );
+    core.shutdown().await;
+}
