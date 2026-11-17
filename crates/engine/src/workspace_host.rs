@@ -1725,6 +1725,15 @@ impl WorkspaceHost {
         })
     }
 
+    pub(crate) fn ensure_chat_work_item_best_effort(&self, chat_id: &str) {
+        if crate::work_outline::writes_disabled() {
+            return;
+        }
+        if let Err(error) = self.ensure_chat_work_item(chat_id) {
+            tracing::warn!(chat = %chat_id, %error, "automatic work item assignment deferred");
+        }
+    }
+
     /// Sidebar freshness on message persist: preview = first 120 chars of the last
     /// message's text. Claims the row first so a pre-workspace chat gains one.
     pub fn note_message(&self, chat_id: &str, text: &str) {

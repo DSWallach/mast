@@ -5510,7 +5510,7 @@ impl DocHost {
             if ws.registry_row_state(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id) == mast_doc::RowState::Absent
                 && !crate::work_outline::writes_disabled()
             {
-                ws.ensure_chat_work_item(chat_id)?;
+                ws.ensure_chat_work_item_best_effort(chat_id);
             }
             // A pre-existing row (the client's createChat raced ahead)
             // still carries the repo folder — repoint it at the fresh

@@ -1901,6 +1901,20 @@ impl EngineRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
+        if method == methods::HAND_OFF_ORCHESTRATOR {
+            let supported = self.workspace.read_devices().ok().is_some_and(|devices| {
+                devices.iter().any(|device| {
+                    device.id == target
+                        && device.supports(mast_proto::capabilities::CHAT_HANDOFF_V1)
+                })
+            });
+            if !supported {
+                return Err(RpcError::Failed(format!(
+                    "Update Mast on {} and reconnect to hand off this chat.",
+                    self.device_label(target)
+                )));
+            }
+        }
         let Some(links) = &self.links else {
             return Err(RpcError::Failed(format!(
                 "cannot reach device {target}: remote routing unavailable (offline)"
@@ -1999,8 +2013,8 @@ impl EngineRpc {
                         && (side.device_id == self.workspace.device_id()
                             || side.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&side.device_id)))
                     {
-                        self.workspace.ensure_chat_work_item(&main_id).map_err(failed)?;
-                        self.workspace.ensure_chat_work_item(&chat_id).map_err(failed)?;
+                        self.workspace.ensure_chat_work_item_best_effort(&main_id);
+                        self.workspace.ensure_chat_work_item_best_effort(&chat_id);
                     }
                     return Ok(());
                 }
@@ -2040,7 +2054,7 @@ impl EngineRpc {
                         && (source.device_id == self.workspace.device_id()
                             || source.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&source.device_id)))
                     {
-                        self.workspace.ensure_chat_work_item(&parent).map_err(failed)?;
+                        self.workspace.ensure_chat_work_item_best_effort(&parent);
                     }
                     if let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent) {
                         // The Chat exists; a failed inheritance must not make a
@@ -2056,7 +2070,7 @@ impl EngineRpc {
                     && (chat.device_id == self.workspace.device_id()
                         || chat.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&chat.device_id)))
                 {
-                    self.workspace.ensure_chat_work_item(&chat_id).map_err(failed)?;
+                    self.workspace.ensure_chat_work_item_best_effort(&chat_id);
                 }
                 Ok(())
             }
@@ -3774,6 +3788,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::HAND_OFF_ORCHESTRATOR => {
+                let routed = params.get("targetDeviceId").is_some();
                 let p: mast_proto::HandOffOrchestratorParams = parse_params(params)?;
                 let source = self.workspace.chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
@@ -3782,6 +3797,9 @@ impl RpcService for EngineRpc {
                     return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
                 }
                 if source.device_id != self.workspace.device_id() {
+                    if routed {
+                        return Err(RpcError::Failed("The chat's host changed. Reconnect and try the handoff again.".into()));
+                    }
                     let mut forwarded = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
                     forwarded["targetDeviceId"] = serde_json::json!(source.device_id);
                     return self.forward(&source.device_id, methods::HAND_OFF_ORCHESTRATOR, forwarded).await;

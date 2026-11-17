@@ -1170,6 +1170,57 @@ async fn first_command_recovers_work_item_without_create_chat_rpc() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn assignment_failure_does_not_break_creation_retries_or_runs() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .create_chat("archived-without-item", Some(SPACE), None, None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_chat_archived("archived-without-item", true)
+        .unwrap();
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"createChat", "chatId":"archived-without-item", "spaceId":SPACE}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_none()
+    );
+    rig.core
+        .doc_host
+        .queue_command(
+            "archived-without-item",
+            run_command("run despite assignment failure", &rig.space_path),
+        )
+        .unwrap();
+    wait_for(
+        || {
+            rig.harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "run despite assignment failure")
+        },
+        "run despite assignment failure",
+    )
+    .await;
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remote_folderless_chat_waits_for_its_host_to_initialize_work() {
     let rig = rig().await;
     let count = rig.core.workspace.read_spaces().unwrap().len();
