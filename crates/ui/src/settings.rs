@@ -712,6 +712,7 @@ pub struct UiSettings {
     pub sidebar_compact: bool,
     pub sidebar_outline_groups: bool,
     pub team_tab_visibility: TeamTabVisibility,
+    /// Kept in saved settings so older builds retain the compact-row preference.
     pub compact_single_chat: bool,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,

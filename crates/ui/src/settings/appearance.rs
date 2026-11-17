@@ -2689,6 +2689,11 @@ impl Render for AppearancePage {
         })
         .collect::<Vec<_>>();
         let mut settings_rows = Vec::new();
+        settings_rows.push(crate::artifacts::preview_thumb::settings_row(
+            &theme,
+            ui_settings.open_diagrams_automatically,
+            cx,
+        ));
         settings_rows.push(widgets::card_row(&theme, false)
             .child(widgets::row_tile(&theme, icons::LIST))
             .child(div().flex_1().child(widgets::row_title(&theme, "Use Work Outline groups in the sidebar"))
