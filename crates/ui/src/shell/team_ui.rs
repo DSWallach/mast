@@ -474,6 +474,7 @@ impl Shell {
         let (title, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
         let identity = [Some(harness).filter(|s| !s.is_empty()), model].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let mut references = div().flex().flex_wrap().gap(px(Theme::SPACE_SM));
+        let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty());
         if let Some(ticket) = &worker.ticket {
             let url = ticket.url.clone();
             references = references.child(Self::chip(theme, format!("team-ticket-{id}"), ticket.identifier.clone(), ChipTone::Link)
@@ -542,6 +543,24 @@ impl Shell {
             }
         } else {
             row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), [age, activity].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "), false));
+        }
+        if let Some(pr) = open_pr {
+            let review_id = id.clone();
+            let review_branch = worker.branch.clone();
+            let merge_url = pr.url.clone();
+            row = row.child(div().flex().gap(px(Theme::SPACE_SM))
+                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Review PR")
+                    .id(SharedString::from(format!("tracker-review-{id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_request_diff(review_id.clone(), review_branch.clone(), cx);
+                    })))
+                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Merge…")
+                    .id(SharedString::from(format!("tracker-merge-{id}")))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx);
+                    }))));
         }
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
