@@ -8622,8 +8622,7 @@ impl Shell {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
-        let session_rows =
-            self.render_sidebar_collection_rows(theme, self.settings.sidebar_overview, cx);
+        let session_rows = self.render_active_rows(theme, cx);
         self.prune_sidebar_row_views();
         let moving_row = session_rows
             .moving_row
