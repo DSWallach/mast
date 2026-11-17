@@ -61,9 +61,20 @@ case "$SECONDS_TOTAL" in ''|*[!0-9]*) echo "--seconds must be a number" >&2; exi
 command -v sandbox-exec >/dev/null || { echo "sandbox-exec not found; refusing to soak without it" >&2; exit 2; }
 LOAD=$(uptime | sed 's/.*load averages*: *//' | awk '{gsub(",","");print $1}')
 awk -v l="$LOAD" 'BEGIN{exit !(l>12)}' && { echo "load $LOAD > 12; not starting" >&2; exit 2; }
-if pgrep -f "perf-soak.sh" | grep -qv "^$$\$"; then
-  for p in $(pgrep -f "perf-soak.sh"); do [ "$p" != "$$" ] && [ "$p" != "$PPID" ] && { echo "another soak is running (pid $p)" >&2; exit 2; }; done
-fi
+# Another soak = a live perf-soak.sh process that is not this script, one of its ancestors,
+# or one of its own subshells. $(...) and pipelines fork bash children with the same command
+# line, and an agent's wrapping shell (e.g. `zsh -c "... perf-soak.sh ..."`) carries the name
+# too; a plain pgrep found those and the guard refused to start.
+ancestors=" "; a=$$
+while [ -n "$a" ] && [ "$a" != 0 ] && [ "$a" != 1 ]; do
+  ancestors="$ancestors$a "; a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' ')
+done
+for p in $(pgrep -f "perf-soak.sh"); do
+  case "$ancestors" in *" $p "*) continue ;; esac
+  pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  [ -z "$pp" ] || [ "$pp" = "$$" ] && continue
+  echo "another soak is running (pid $p)" >&2; exit 2
+done
 
 ROOT=$(mktemp -d /private/tmp/mast-soak.XXXXXX) || exit 2
 echo "soak root: $ROOT"
