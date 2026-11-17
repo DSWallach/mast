@@ -1965,6 +1965,7 @@ pub struct Shell {
     item_tab_open: std::collections::HashSet<&'static str>,
     item_needs: Option<chat_item_ui::ItemNeeds>,
     team_panel_focus: Option<FocusHandle>,
+    tracker: team_ui::TrackerState,
     /// Orchestrator wakes: per-chat status cache and refresh loops.
     wakes: wake_ui::WakeUi,
     /// Admin chats: the grant dialog.
@@ -2437,6 +2438,7 @@ impl Shell {
             item_tab_open: Default::default(),
             item_needs: None,
             team_panel_focus: None,
+            tracker: Default::default(),
             wakes: Default::default(),
             admin_ui: Default::default(),
             chat_header_extra_clearance: 0.0,

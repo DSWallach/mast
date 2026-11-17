@@ -392,6 +392,12 @@ pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
     shell
 }
 
+pub fn tracker_expanded_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_tracker_expanded(cx));
+    shell
+}
+
 impl gpui::Render for OutlineFixture {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, px};
