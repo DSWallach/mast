@@ -418,6 +418,11 @@ pub(crate) fn artifact_card_frame(id: SharedString, label: String, theme: &Theme
     super::segmented_key(card, theme, false)
 }
 
+pub(crate) fn artifact_card_footer(theme: &Theme) -> Div {
+    div().w_full().flex().items_center().gap(px(Theme::SPACE_SM))
+        .text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
+}
+
 pub(crate) fn artifact_card_icon(glyph: &'static str, theme: &Theme) -> Div {
     div()
         .flex_none()

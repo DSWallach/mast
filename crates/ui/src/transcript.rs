@@ -6746,7 +6746,8 @@ impl Transcript {
                     workspace_root.as_deref(),
                 );
                 let thumbnail = card.preview.as_ref().and_then(|artifact| crate::artifacts::preview_thumb::thumbnail(artifact, self.state.clone(), &theme, window, cx));
-                crate::artifacts::cards::artifact_card(&row.id, card, self.link_ui(), &theme, thumbnail)
+                let footer = card.preview.as_ref().map(|_| crate::artifacts::preview_thumb::card_footer(&row.id, &theme, crate::settings::current(cx).open_diagrams_automatically, cx));
+                crate::artifacts::cards::artifact_card(&row.id, card, self.link_ui(), &theme, thumbnail, footer)
             }
             RowKind::ErrorChip { message } => {
                 let chat = self.chat_id.clone().filter(|_| self.doc_override.is_none());
@@ -7042,7 +7043,7 @@ impl Transcript {
             }
             None => None,
         };
-        Some(Arc::new(crate::changes::DiffHighlights { old, new }))
+        Some(Arc::new(crate::changes::DiffHighlights { old, new, hunk_symbols: Vec::new() }))
     }
 
     fn render_tool_group(

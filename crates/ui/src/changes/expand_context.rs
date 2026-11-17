@@ -173,6 +173,15 @@ fn starts(hunk: &super::Hunk) -> Option<((u32, u32), (u32, u32))> {
     Some((range(parts.next()?, '-')?, range(parts.next()?, '+')?))
 }
 
+pub(super) fn known_gap_size(file: &FileDiff, gap: usize) -> Option<usize> {
+    let (_, (start, _)) = starts(file.hunks.get(gap)?)?;
+    let previous = if gap == 0 { 1 } else {
+        let (_, (start, count)) = starts(file.hunks.get(gap - 1)?)?;
+        start.checked_add(count)?
+    };
+    Some(start.checked_sub(previous)? as usize)
+}
+
 pub(super) fn may_have_gap(file: &FileDiff, gap: usize) -> bool {
     if file.status != FileStatus::Modified
         || file.binary
@@ -272,6 +281,14 @@ mod tests {
             (Some(6), Some(7))
         );
         assert!(gaps(&file, "changed\ntwo\nadded\nthree\nfour\nwrong\nsix\n").is_none());
+    }
+
+    #[test]
+    fn known_gap_size_uses_the_previous_new_side_range() {
+        let file = super::super::parse_patch("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -3,1 +3,2 @@\n three\n+added\n@@ -8,1 +9,1 @@\n eight\n").remove(0);
+        assert_eq!(known_gap_size(&file, 0), Some(2));
+        assert_eq!(known_gap_size(&file, 1), Some(4));
+        assert_eq!(known_gap_size(&file, 2), None);
     }
 
     #[test]

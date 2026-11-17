@@ -176,7 +176,8 @@ impl Changes {
                 .id(SharedString::from(id))
                 .cursor_pointer()
                 .text_size(px(11.0))
-                .text_color(theme.text_muted)
+                .when(text == "Accept", |el| crate::components::review_primary_action(el, theme))
+                .when(text != "Accept", |el| crate::components::hunk_action(el, theme))
                 .child(text)
         };
         div()
@@ -186,7 +187,7 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(crate::theme::ink(0.05))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(
@@ -196,11 +197,7 @@ impl Changes {
                     .items_center()
                     .gap(px(10.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child(label),
+                        div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child(label)),
                     )
                     .child(
                         button(format!("suggestion-accept-{}", comment.id), "Accept").on_click(
@@ -375,7 +372,7 @@ impl Changes {
                 .id(SharedString::from(id))
                 .cursor_pointer()
                 .text_size(px(11.0))
-                .text_color(theme.text_muted)
+                .when(true, |el| crate::components::hunk_action(el, theme))
                 .child(label)
         };
         div()
@@ -385,7 +382,7 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(crate::theme::ink(0.05))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(
@@ -395,11 +392,7 @@ impl Changes {
                     .items_center()
                     .gap(px(10.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child("Draft"),
+                        div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child("Draft")),
                     )
                     .child(
                         button(format!("draft-stage-{}", comment.id), "Add to chat").on_click(
@@ -693,7 +686,7 @@ impl Changes {
                                 .text_color(theme.text_faint)
                                 .child(format!("Thread outside the current diff · {location}")),
                         )
-                        .child(self.render_review_thread(index, *height, theme))
+                        .child(self.render_review_thread(index, *height, theme, cx))
                         .into_any_element(),
                 );
             }
@@ -1007,6 +1000,7 @@ impl Changes {
     pub(super) fn load_review_threads(&mut self, target: &str, cx: &mut Context<Self>) {
         self.review_threads_task = None;
         self.review_threads.clear();
+        self.collapsed_review_threads.clear();
         self.unplaced_review_threads.clear();
         self.review_thread_index = ThreadIndex::default();
         self.review_threads_error = None;
@@ -1037,7 +1031,11 @@ impl Changes {
                 this.review_threads_task = None;
                 match result {
                     Ok(threads) => {
+                        this.collapsed_review_threads = threads.iter().filter(|thread| thread.resolved).map(|thread| thread.id.clone()).collect();
                         this.review_thread_index = ThreadIndex::new(&threads);
+                        for (index, thread) in threads.iter().enumerate() {
+                            if thread.resolved { this.review_thread_index.heights[index] = 30; }
+                        }
                         this.review_threads = threads;
                         this.rebuild_thread_placement();
                         this.refresh_thread_rows(cx);
@@ -1158,7 +1156,7 @@ impl Changes {
         result
     }
 
-    pub(super) fn render_review_thread(&self, ix: usize, height: u32, theme: &Theme) -> AnyElement {
+    pub(super) fn render_review_thread(&self, ix: usize, height: u32, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let Some(thread) = self.review_threads.get(ix) else {
             return gpui::Empty.into_any_element();
         };
@@ -1168,6 +1166,9 @@ impl Changes {
             (false, true) => "Outdated",
             (false, false) => "Review thread",
         };
+        let collapsed = self.collapsed_review_threads.contains(&thread.id);
+        let id = thread.id.clone();
+        let summary = thread.comments.first().map(|comment| format!("{} · {label} · {}", comment.author, comment.body.lines().next().unwrap_or(""))).unwrap_or_else(|| label.to_owned());
         let mut card = div()
             .w_full()
             .h(px(height as f32))
@@ -1175,17 +1176,29 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(crate::theme::ink(0.05))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(
                 div()
+                    .id(SharedString::from(format!("review-thread-toggle-{ix}")))
                     .h(px(30.0))
+                    .cursor_pointer()
                     .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(label),
+                    .text_color(if thread.resolved { theme.success } else if thread.outdated { theme.warning } else { theme.accent })
+                    .flex().items_center().gap(px(Theme::SPACE_SM))
+                    .child(div().flex_1().min_w_0().truncate().child(if collapsed { summary } else { label.to_owned() }))
+                    .child(if collapsed { "Expand" } else { "Collapse" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_review_threads.remove(&id) { this.collapsed_review_threads.insert(id.clone()); }
+                        this.review_thread_index = ThreadIndex::new(&this.review_threads);
+                        for (index, thread) in this.review_threads.iter().enumerate() {
+                            if this.collapsed_review_threads.contains(&thread.id) { this.review_thread_index.heights[index] = 30; }
+                        }
+                        this.refresh_thread_rows(cx);
+                    })),
             );
-        for comment in &thread.comments {
+        for comment in thread.comments.iter().filter(|_| !collapsed) {
             card = card.child(
                 div()
                     .h(px(thread_comment_height(&comment.body)))
@@ -1329,6 +1342,10 @@ pub(super) struct ThreadIndex {
 }
 
 impl ThreadIndex {
+    pub(super) fn collapse(&mut self, index: usize) {
+        if let Some(height) = self.heights.get_mut(index) { *height = 30; }
+    }
+
     pub(super) fn new(threads: &[ReviewThread]) -> Self {
         let mut index = Self::default();
         for (ix, thread) in threads.iter().enumerate() {
@@ -1432,7 +1449,7 @@ mod tests {
                 .position(|row| matches!(row, DiffRow::ReviewThread { thread: 0, .. }))
                 .unwrap();
             assert!(matches!(rows[row - 1], DiffRow::Line { .. }));
-            let _card = changes.render_review_thread(0, 100, Theme::of(cx));
+            let _card = changes.render_review_thread(0, 100, Theme::of(cx), cx);
         });
     }
 

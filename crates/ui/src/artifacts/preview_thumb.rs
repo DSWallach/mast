@@ -161,7 +161,16 @@ pub(crate) fn thumbnail<V: 'static>(
     };
     cache.insert(key.clone(), Entry::Pending(attempt));
     let renders = cache.renders.clone();
-    let fragment_theme = FragmentTheme::from_theme(theme);
+    let mut fragment_theme = FragmentTheme::from_theme(theme);
+    // The host document paints the viewport background into the snapshot.
+    // Match the card so the preview has no contrasting letterbox.
+    let card_variable = if crate::components::is_horizon(theme) { "--accent" } else { "--secondary" };
+    let card_background = fragment_theme.vars.iter().find(|(name, _)| *name == card_variable).map(|(_, value)| value.clone());
+    if let Some(background) = card_background {
+        if let Some((_, value)) = fragment_theme.vars.iter_mut().find(|(name, _)| *name == "--background") {
+            *value = background;
+        }
+    }
     let target_device_id = (state.read(cx).local_device_id.as_deref()
         != Some(artifact.device.as_str()))
     .then(|| artifact.device.clone());
@@ -296,6 +305,19 @@ pub(crate) fn settings_row<V: 'static>(
         .into_any_element()
 }
 
+pub(crate) fn card_footer<V: 'static>(row_id: &str, theme: &Theme, enabled: bool, cx: &mut Context<V>) -> gpui::AnyElement {
+    crate::components::browser_parts::artifact_card_footer(theme)
+        .child(div().flex_1().child("Open diagrams automatically"))
+        .child(crate::settings::widgets::toggle_switch(theme, enabled)
+            .id(gpui::SharedString::from(format!("{row_id}#diagram-auto-open")))
+            .cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.open_diagrams_automatically = !enabled);
+                cx.notify();
+            })))
+        .into_any_element()
+}
+
 #[cfg(feature = "snapshot")]
 pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render + use<>> {
     struct Fixture;
@@ -303,7 +325,7 @@ pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render +
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             use gpui::px;
             let theme = Theme::of(cx).clone();
-            let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="190" viewBox="0 0 600 190"><rect width="600" height="190" fill="#f5f6f8"/><g fill="#e1e9f5" stroke="#6785a8" stroke-width="2"><rect x="32" y="55" width="145" height="70" rx="8"/><rect x="228" y="55" width="145" height="70" rx="8"/><rect x="423" y="55" width="145" height="70" rx="8"/></g><g fill="#243b53" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="104" y="96">Draft</text><text x="300" y="96">Review</text><text x="495" y="96">Submit</text></g><path d="M177 90h48m148 0h48" stroke="#6785a8" stroke-width="3"/></svg>"##;
+            let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="342" viewBox="0 0 600 342"><g transform="translate(0 76)"><g fill="#e1e9f5" stroke="#6785a8" stroke-width="2"><rect x="32" y="55" width="145" height="70" rx="8"/><rect x="228" y="55" width="145" height="70" rx="8"/><rect x="423" y="55" width="145" height="70" rx="8"/></g><g fill="#243b53" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="104" y="96">Draft</text><text x="300" y="96">Review</text><text x="495" y="96">Submit</text></g><path d="M177 90h48m148 0h48" stroke="#6785a8" stroke-width="3"/></g></svg>"##;
             let svg = String::from_utf8_lossy(svg);
             let svg = if theme.appearance.is_dark() {
                 svg.replace("#f5f6f8", "#202632")
@@ -333,8 +355,8 @@ pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render +
                     None,
                     &theme,
                     Some(image),
+                    Some(card_footer("diagram-preview", &theme, false, cx)),
                 ))
-                .child(settings_row(&theme, false, cx))
         }
     }
     cx.new(|_| Fixture)
