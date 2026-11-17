@@ -82,7 +82,7 @@ fi
 free_port() { local p; while :; do p=$((20000 + RANDOM % 30000)); nc -z 127.0.0.1 "$p" 2>/dev/null || { echo "$p"; return; }; done; }
 cpu_seconds() { ps -o cputime= -p "$1" 2>/dev/null | awk '{n=split($1,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; print s}'; }
 # Physical footprint (MB) from `vmmap --summary`; RSS counts mapped GPU memory and overstates Mast.
-footprint_mb() { vmmap --summary "$1" 2>/dev/null | awk '/^Physical footprint:/ {v=$3; u=substr(v,length(v)); n=substr(v,1,length(v)-1)+0; if(u=="G")n*=1024; else if(u=="K")n/=1024; else if(u=="B")n/=1048576; printf "%d", n; exit}'; }
+footprint_mb() { perl -e 'alarm 20; exec @ARGV' vmmap --summary "$1" 2>/dev/null | awk '/^Physical footprint:/ {v=$3; u=substr(v,length(v)); n=substr(v,1,length(v)-1)+0; if(u=="G")n*=1024; else if(u=="K")n/=1024; else if(u=="B")n/=1048576; printf "%d", n; exit}'; }
 rss_mb() { ps -o rss= -p "$1" 2>/dev/null | awk '{printf "%d", $1/1024}'; }
 
 # run <label> <binary>; writes $ROOT/<label>.result (key=value lines)
@@ -126,6 +126,12 @@ run_one() {
     fi
   done
   # Metrics are frozen here, before the end sample, so both binaries get the same window.
+  # A stalled probe (vmmap, ps) can stretch the loop far past the window and dilute every
+  # per-minute rate; such a run is not comparable, so it is invalid rather than a result.
+  if [ "$(( $(date +%s) - start ))" -gt "$(( SECONDS_TOTAL + 30 ))" ]; then
+    echo "$label: sampling window overran ($(( $(date +%s) - start ))s for ${SECONDS_TOTAL}s); run invalid, rerun" >&2
+    echo "failed=window" > "$ROOT/$label.result"; kill -TERM "$pid" 2>/dev/null; return 2
+  fi
   local cpu_end end_rss git_end wall; cpu_end=$(cpu_seconds "$pid"); end_rss=$(rss_mb "$pid")
   git_end=$(wc -l < "$dir/git.log" | tr -d ' '); wall=$(( $(date +%s) - start ))
   local foot; foot=$(footprint_mb "$pid")
