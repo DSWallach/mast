@@ -938,4 +938,34 @@ pub(super) mod tests {
         redraw_assistant(vcx);
         assert!(vcx.debug_bounds("overview-current-session").is_none());
     }
+    #[gpui::test]
+    fn sidebar_board_watchers_stay_active_on_chat_routes(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        shell.read_with(vcx, |shell, _| assert_eq!(shell.route, Route::Chat));
+        let board = vcx.debug_bounds("outline-mode-Board").unwrap().center();
+        vcx.simulate_click(board, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        let generation = shell.read_with(vcx, |shell, _| shell.board_links_generation);
+        for _ in 0..3 {
+            redraw_assistant(vcx);
+        }
+        shell.read_with(vcx, |shell, _| {
+            assert_eq!(shell.route, Route::Chat);
+            assert_eq!(
+                shell.board_links_generation, generation,
+                "a visible sidebar board must keep its watchers between frames"
+            );
+        });
+        shell.update(vcx, |shell, cx| {
+            shell.settings.sidebar_collapsed = true;
+            cx.notify();
+        });
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, _| {
+            assert!(
+                shell.board_links_generation > generation,
+                "hiding the sidebar must suspend the board watchers"
+            );
+        });
+    }
 }

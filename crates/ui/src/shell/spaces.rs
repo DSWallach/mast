@@ -3796,8 +3796,6 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The personal assistant's own section, above the space filter: it stays
-    /// put whatever the filter, sort or grouping. A scheduled-task assistant
     /// The personal assistant (when assigned) and the active/open session at
     /// the top of the sidebar, independent of list filters.
     pub(super) fn render_personal_assistant_section(

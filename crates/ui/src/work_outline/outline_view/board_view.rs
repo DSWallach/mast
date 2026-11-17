@@ -255,6 +255,7 @@ impl OutlineView {
             bar = bar.child(
                 div()
                     .id(SharedString::from(format!("outline-mode-{label}")))
+                    .debug_selector(move || format!("outline-mode-{label}"))
                     .cursor_pointer()
                     .px(px(8.0))
                     .py(px(4.0))

@@ -4458,3 +4458,36 @@ mod tree_guides_tests {
 mod compact_rows_tests {
     include!("../work_outline/compact_rows_tests.rs");
 }
+
+#[gpui::test]
+fn sidebar_search_uses_the_displayed_checkout_branch(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_with_repos(cx, dir.path(), &["alpha"]);
+    state.update(cx, |state, _| {
+        state.chats[0].branch = Some("original-branch".into());
+        state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+            chat_id: "c0".into(),
+            targets: vec![mast_proto::ChatDiffTargetView {
+                path: "/work/checkout".into(),
+                checkout_id: "checkout".into(),
+                source: mast_proto::ChatDiffTargetSource::Agent,
+                selected: true,
+                repo_name: "checkout".into(),
+                branch: Some("bound-branch".into()),
+                head_sha: None,
+            }],
+            ref_targets: vec![],
+        }]);
+    });
+    let (overview, vcx) = overview_over(cx, &state);
+    overview.update(vcx, |overview, cx| {
+        overview
+            .search
+            .update(cx, |search, cx| search.set_text("bound-branch", cx));
+        assert!(overview.sidebar_filter_ids(cx).unwrap().contains("c0"));
+        overview
+            .search
+            .update(cx, |search, cx| search.set_text("original-branch", cx));
+        assert!(!overview.sidebar_filter_ids(cx).unwrap().contains("c0"));
+    });
+}

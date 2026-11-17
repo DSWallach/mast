@@ -1201,3 +1201,42 @@ fn explicit_program_launches_do_not_get_archive_scratch_roots() {
     );
     assert!(harness.adapter_scratch().unwrap().is_none());
 }
+
+#[test]
+fn prompt_response_cumulative_usage_does_not_emit_context_usage() {
+    let res = Ok(json!({
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 428_192,
+            "outputTokens": 9_626,
+            "totalTokens": 16_734_637,
+        }
+    }));
+    assert_eq!(context_usage_from_response(&res), None);
+    assert_eq!(
+        usage_from_response(&res),
+        Some(AgentEvent::Usage {
+            input_tokens: 428_192,
+            output_tokens: 9_626,
+        })
+    );
+}
+
+#[test]
+fn prompt_response_explicit_context_occupancy_is_preserved() {
+    let res = Ok(json!({
+        "stopReason": "end_turn",
+        "usage": {
+            "used": 158_946,
+            "size": 1_048_576,
+            "totalTokens": 2_006_197,
+        }
+    }));
+    assert_eq!(
+        context_usage_from_response(&res),
+        Some(AgentEvent::ContextUsage {
+            tokens: Some(158_946),
+            window: Some(1_048_576),
+        })
+    );
+}

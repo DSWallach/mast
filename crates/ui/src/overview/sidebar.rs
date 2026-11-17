@@ -97,9 +97,14 @@ impl Overview {
                         _ => {}
                     }
                     let link = self.link_status.get(&chat.id).map(|entry| &entry.status);
+                    let branch = crate::change_requests::display_checkout(
+                        chat,
+                        state.selected_chat_diff_target(&chat.id),
+                    )
+                    .branch;
                     let mut fields = vec![
                         chat.title.as_deref(),
-                        chat.branch.as_deref(),
+                        branch,
                         chat.cwd.as_deref(),
                         chat.last_message_preview.as_deref(),
                         chat.linked_pr_url.as_deref(),

@@ -10639,6 +10639,7 @@ impl Shell {
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
         if !matches!(self.route, Route::Overview)
+            && !self.overview_navigation_visible()
             && let Some(overview) = &self.overview_page
         {
             overview.update(cx, |overview, cx| overview.suspend_board(cx));
