@@ -26,11 +26,23 @@ pub struct Config {
     pub preset: String,
     pub seed: u64,
     pub render: bool,
+    /// Scripted Mock agent: `approval`, `question` or `error`.
+    pub mock: Option<String>,
+}
+
+/// The scripted-agent names `--mock` accepts and the Mock knob each sets.
+fn mock_knob(name: &str) -> Result<&'static str, String> {
+    match name {
+        "approval" => Ok("MAST_MOCK_APPROVAL"),
+        "question" => Ok("MAST_MOCK_QUESTION"),
+        "error" => Ok("MAST_MOCK_ERROR"),
+        other => Err(format!("unknown mock {other:?}; use approval, question or error")),
+    }
 }
 
 impl Config {
     pub fn to_json(&self) -> Value {
-        json!({"preset": self.preset, "seed": self.seed, "render": self.render})
+        json!({"preset": self.preset, "seed": self.seed, "render": self.render, "mock": self.mock})
     }
     pub fn from_json(value: &Value) -> Result<Self, String> {
         let preset = value["preset"].as_str().unwrap_or("small").to_owned();
@@ -41,6 +53,13 @@ impl Config {
             preset,
             seed: value["seed"].as_u64().unwrap_or(1),
             render: value["render"].as_bool().unwrap_or(false),
+            mock: match value["mock"].as_str() {
+                Some(name) => {
+                    mock_knob(name)?;
+                    Some(name.to_owned())
+                }
+                None => None,
+            },
         })
     }
 }
@@ -142,6 +161,16 @@ pub fn serve_in(scratch: &ScratchDirectories) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let config = Config::from_json(&config)?;
+    if let Some(name) = &config.mock {
+        // Single-threaded here: before the runtime and the app exist. The
+        // sandboxed process has a cleared environment, so this is the only way
+        // the Mock harness learns which script to play.
+        unsafe {
+            std::env::set_var(mock_knob(name)?, "1");
+            // The composer only offers the Mock harness under the dev rig flag.
+            std::env::set_var("MAST_HARNESS", "mock");
+        }
+    }
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

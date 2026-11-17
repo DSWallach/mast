@@ -8738,6 +8738,10 @@ impl Render for Transcript {
             list_el.into_any_element()
         };
         let root = div()
+            .id("transcript-region")
+            .role(gpui::Role::Log)
+            .aria_label("Transcript")
+            .debug_selector(|| "transcript-region".into())
             .relative()
             .size_full()
             .min_h_0()
