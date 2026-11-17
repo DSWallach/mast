@@ -5186,6 +5186,7 @@ dependencies = [
 name = "mast-gallery"
 version = "0.2.82"
 dependencies = [
+ "ctor",
  "gpui",
  "gpui-base",
  "gpui_platform",
@@ -5478,6 +5479,7 @@ dependencies = [
 name = "mast-ui-driver"
 version = "0.2.82"
 dependencies = [
+ "ctor",
  "gpui",
  "gpui-base",
  "gpui_platform",
