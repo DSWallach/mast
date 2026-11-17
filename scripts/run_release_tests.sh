@@ -148,7 +148,7 @@ if [ $status = 0 ]; then
   echo "== budget tests"
   budget_log="$(mktemp "${TMPDIR:-/tmp}/budget-tests.XXXXXX")"
   {
-    with_time_limit cargo nextest run --profile release -p mast-engine --test idle_spawn_budget --no-capture 2>&1 || echo "BUDGET-FAIL engine"
+    with_time_limit cargo nextest run --profile release -p mast-engine --test engine -E "test(idle_spawn_budget::)" --no-capture 2>&1 || echo "BUDGET-FAIL engine"
     with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 \
       change_request_retries_stay_within_a_budget the_index_is_built_once_per_snapshot 2>&1 || echo "BUDGET-FAIL ui"
   } | tee "$budget_log"

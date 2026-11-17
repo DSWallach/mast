@@ -75,7 +75,7 @@ if [ "$MODE" = synthetic ]; then
   TEMPLATE="$ROOT/template"
   mkdir -p "$TEMPLATE"
   echo "seeding synthetic data (cargo test, nice 10) ..."
-  ( cd "$REPO" && MAST_SOAK_SEED_ROOT="$TEMPLATE" nice -n 10 cargo test -p mast-engine --test soak_seed -- --ignored --nocapture 2>&1 | grep -E "soak seed ok|error|panicked" ) || true
+  ( cd "$REPO" && MAST_SOAK_SEED_ROOT="$TEMPLATE" nice -n 10 cargo test -p mast-engine --test engine soak_seed:: -- --ignored --nocapture 2>&1 | grep -E "soak seed ok|error|panicked" ) || true
   [ -f "$TEMPLATE/data/profiles/local/docs.sqlite3" ] || { echo "seeding failed" >&2; exit 2; }
 elif [ "$MODE" = real ]; then
   TEMPLATE="$ROOT/template"
