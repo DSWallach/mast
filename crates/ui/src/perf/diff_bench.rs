@@ -60,6 +60,7 @@ fn bench_diff_pane(cx: &mut gpui::TestAppContext, label: &str, patch: String) {
             window.draw(cx).clear();
         });
     };
+    crate::changes::SHAPED_LINES.with(|c| c.set(0));
     measure(
         "diff",
         "load patch (sync + background parse + flatten)",
@@ -91,6 +92,10 @@ fn bench_diff_pane(cx: &mut gpui::TestAppContext, label: &str, patch: String) {
     });
     eprintln!("BENCH diff | rows={rows} parsed={parsed} scoped={scoped}");
     measure("diff", "first draw", || draw(vcx));
+    eprintln!(
+        "BENCH diff | lines shaped by width measure after load+first draw={}",
+        crate::changes::SHAPED_LINES.with(|c| c.get())
+    );
     measure_n("diff", "idle redraw", 30, |_| draw(vcx));
     vcx.update(|window, cx| {
         changes.update(cx, |changes, cx| window.focus(&changes.diff_focus, cx))
@@ -132,4 +137,119 @@ fn bench_diff_pane(cx: &mut gpui::TestAppContext, label: &str, patch: String) {
         list.scroll_by(px(700.0));
         draw(vcx);
     });
+}
+
+fn diff_pane_with_state(
+    cx: &mut gpui::TestAppContext,
+    patch: String,
+) -> (
+    Entity<Changes>,
+    Entity<AppState>,
+    &mut gpui::VisualTestContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = (0..250).map(bench_chat).collect();
+    });
+    let st = state.clone();
+    let (changes, vcx) = cx.add_window_view(move |_, cx| Changes::for_checkout(st, "/work/repo".into(), cx));
+    changes.update(vcx, |c, cx| {
+        c.scoped = Some(CheckoutDiff {
+            checkout_id: "co".into(),
+            device_id: "local".into(),
+            cwd: "/work/repo".into(),
+            patch,
+            files: Vec::new(),
+            submodules: Vec::new(),
+            additions: 3000,
+            deletions: 1000,
+            truncated: false,
+            checksum: "bench".into(),
+            updated_at: chrono::Utc::now(),
+        });
+        c.scoped_for = Some(format!("local|||/work/repo|{}||", c.scope.mode()) + "|");
+        c.sync(cx);
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+    std::mem::forget(dir);
+    (changes, state, vcx)
+}
+
+/// AppState notifies while a large diff is open (any chat/session change
+/// notifies): cost of the observer's `sync` plus the redraw it triggers.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_diff_pane_state_notifies(cx: &mut gpui::TestAppContext) {
+    let (changes, state, vcx) = diff_pane_with_state(cx, data::unified_diff(60_000));
+    let patch_len = changes.read_with(vcx, |c, _| c.scoped.as_ref().unwrap().patch.len());
+    eprintln!("BENCH diff | patch bytes={patch_len}");
+    let before = changes.read_with(vcx, |c, _| (c.benchmark_sync_count, c.benchmark_render_count));
+    measure_n("diff", "AppState notify + draw (250 chats)", 50, |_| {
+        state.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+    });
+    let after = changes.read_with(vcx, |c, _| (c.benchmark_sync_count, c.benchmark_render_count));
+    eprintln!("BENCH diff | per notify: sync={} render={}", (after.0 - before.0) as f64 / 50.0, (after.1 - before.1) as f64 / 50.0);
+    measure_n("diff", "idle draw (no notify)", 50, |_| {
+        vcx.update(|window, cx| window.draw(cx).clear());
+    });
+}
+
+/// `active_diff` runs on every render, sync and highlight miss: it must hand
+/// out the stored diff, not a copy of its multi-megabyte patch.
+#[gpui::test]
+fn active_diff_does_not_copy_the_patch(cx: &mut gpui::TestAppContext) {
+    let (changes, _state, vcx) = diff_pane_with_state(cx, data::unified_diff(20_000));
+    let patch_len = changes.read_with(vcx, |c, _| c.scoped.as_ref().unwrap().patch.len());
+    const CALLS: u64 = 10;
+    let (_, before) = crate::perf::alloc_totals();
+    changes.read_with(vcx, |c, cx| {
+        for _ in 0..CALLS {
+            assert!(std::hint::black_box(c.active_diff(cx)).is_some());
+        }
+    });
+    let (_, after) = crate::perf::alloc_totals();
+    let per_call = (after - before) / CALLS;
+    eprintln!("BUDGET active_diff: {per_call} bytes/call, patch {patch_len} bytes");
+    assert!(
+        per_call < patch_len as u64 / 10,
+        "active_diff allocated {per_call} bytes per call for a {patch_len}-byte patch"
+    );
+}
+
+fn bench_chat(index: usize) -> mast_proto::Chat {
+    use chrono::TimeZone;
+    mast_proto::Chat {
+        id: format!("c{index}"),
+        device_id: "local".into(),
+        title: Some(format!("Chat {index}")),
+        archived: false,
+        cwd: Some(format!("/work/repo{}", index % 25)),
+        branch: None,
+        checkout_id: None,
+        source_context: None,
+        config: None,
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: chrono::Utc.timestamp_opt(1_600_000_000, 0).unwrap(),
+        harness_session_id: None,
+        harness_session_cwd: None,
+        actual_model: None,
+        parent_chat_id: None,
+        space_id: None,
+        last_seen_at: None,
+        room_gen: None,
+        linked_pr_url: None,
+        linked_pr_source: None,
+        linked_ticket_id: None,
+        linked_ticket_source: None,
+    }
 }
