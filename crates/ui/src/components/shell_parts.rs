@@ -1708,6 +1708,13 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
         })
 }
 
+pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
+    div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
+        .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM))
+        .border_b_1().border_color(theme.border).cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
+}
+
 pub(crate) fn worker_title(theme: &Theme, title: String) -> gpui::Div {
     div()
         .flex_1()
@@ -1727,14 +1734,6 @@ pub(crate) fn team_notice(theme: &Theme, selector: &'static str, text: &'static 
         .child(text)
 }
 
-pub(crate) fn team_rollup(theme: &Theme) -> gpui::Div {
-    div()
-        .debug_selector(|| "team-rollup".into())
-        .text_size(crate::typography::ui_rems(12.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-}
-
 pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let row = div()
         .id("chat-item-team-rollup")
@@ -1747,7 +1746,7 @@ pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .flex()
         .items_center()
         .gap(px(4.0))
-        .child("Team ·")
+        .child("Tracker ·")
         .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(row, theme, false)
 }
@@ -1760,7 +1759,7 @@ pub(crate) fn item_team_all(theme: &Theme, count: usize) -> gpui::Stateful<gpui:
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.accent)
         .when(super::is_horizon(theme), |el| el.rounded_full())
-        .child(SharedString::from(format!("All {count} workers → Team")))
+        .child(SharedString::from(format!("All {count} workers → Tracker")))
 }
 
 pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -> gpui::Div {

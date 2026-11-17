@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use mast_engine::archivable::{Archivable, ArchivableInput, archivable, requests_of};
+use mast_engine::archivable::{Archivable, ArchivableInput, archivable};
 use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, PrStatus};
 use mast_proto::{Chat, ChatIndicator, WorkItemEffectiveStatus, WorkOutlineSnapshot};
 
@@ -350,17 +350,6 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
         ))
     });
     TeamFacts { workers }
-}
-
-pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFacts {
-    let item = item_id.and_then(|id| input.snapshot.and_then(|snapshot| snapshot.item(id)));
-    let requests = input.snapshot.map(|snapshot| requests_of(snapshot, &chat.id)).unwrap_or_default();
-    let ticket = if input.links.get(&chat.id).and_then(|status| status.ticket.as_ref()).is_some() {
-        None
-    } else {
-        input.snapshot.and_then(|snapshot| crate::chat_work_context::ticket(snapshot, item_id?)).map(|found| HeaderTicket { identifier:found.identifier, title:None, url:Some(found.url), state:None })
-    };
-    worker_with_index(chat, item, input, &requests, ticket)
 }
 
 /// Build a worker from already indexed item, requests and inherited ticket.
