@@ -11,6 +11,7 @@ members = [
     "crates/rpc",
     "crates/update",
     "crates/ui",
+    "crates/ui-driver",
     "crates/syntax",
     "crates/mcp",
     "apps/mast",

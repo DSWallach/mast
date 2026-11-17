@@ -124,6 +124,11 @@ if [ -n "$build_pid" ]; then
   if wait "$build_pid"; then echo "installed build ok: target/release-build/installed/zeron"
   else echo "installed build FAILED, see target/release-build.log" >&2; status=1; fi
 fi
+# The clean check builds and inspects the installed binary before any stamp is written.
+if [ "$status" = 0 ]; then
+  echo "== installed build containment"
+  scripts/check-installed-clean.sh || status=1
+fi
 # Budget tests (post-mortem 2026-11-16, P1) always run here, whatever the diff selected, so the
 # perf-gate stamp can name them. Any failure is a new failure and blocks the stamp.
 budget_json="[]"
