@@ -1336,3 +1336,32 @@ async fn project_detail_is_read_only_cached_and_served_stored() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test]
+async fn named_account_removal_reports_disabled_spaces_and_rpc_hides_keys() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = tokio::time::timeout(Duration::from_secs(5), rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    }))).await.expect("add timed out").unwrap();
+    let id = account["id"].as_str().unwrap();
+    assert_eq!(account["label"], "Personal");
+    assert!(account["keySet"].as_bool().unwrap());
+    assert!(!account.to_string().contains(OTHER_KEY));
+    tokio::time::timeout(Duration::from_secs(5), rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"
+    }))).await.expect("select timed out").unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(5), rig.linear_err(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id}))).await.expect("remove timed out");
+    assert!(error.message.contains("off"));
+    assert_eq!(rig.snapshot(OFF_SPACE).space_settings.linear_account_id.as_deref(), Some(id));
+    rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": null, "operationId": "select-default"
+    })).await.unwrap();
+    rig.call(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id})).await.unwrap();
+    let accounts = rig.call(methods::LINEAR_LIST_ACCOUNTS, json!({})).await.unwrap();
+    assert_eq!(accounts.as_array().unwrap().len(), 1);
+    assert!(!accounts.to_string().contains(KEY));
+    assert!(!rig.seen.lock().unwrap().iter().any(|reply| reply.contains(OTHER_KEY)));
+}

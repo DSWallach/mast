@@ -261,6 +261,16 @@ impl LinearService {
         }
     }
 
+    /// Serialize account selection with account removal.
+    pub async fn lock_account_changes(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.catalog_change.lock().await
+    }
+
+    pub fn account_exists(&self, account_id: Option<&str>) -> bool {
+        account_id.is_none_or(|id| id == credentials::DEFAULT_ACCOUNT_ID ||
+            lock(&self.inner.catalog).list().iter().any(|account| account.id == id))
+    }
+
     /// Account labels and credential presence, never the credentials themselves.
     pub async fn list_accounts(&self) -> Vec<LinearAccount> {
         let labels = lock(&self.inner.catalog).list().to_vec();

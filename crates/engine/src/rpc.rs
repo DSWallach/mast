@@ -2725,6 +2725,13 @@ impl RpcService for EngineRpc {
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;
+                let _account_guard = if let mast_proto::WorkOutlineMutation::SetSpaceLinearAccount(p) = &mutation {
+                    let guard = self.linear.lock_account_changes().await;
+                    if !self.linear.account_exists(p.account_id.as_deref()) {
+                        return Err(RpcError::Failed("linear/notFound: Linear account not found".into()));
+                    }
+                    Some(guard)
+                } else { None };
                 let enabled_space = match &mutation {
                     mast_proto::WorkOutlineMutation::SetSpaceLinearEnabled(p) if p.enabled => {
                         Some(p.space_id.clone())
@@ -2894,6 +2901,24 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::ArtifactRenderResultParams = parse_params(params)?;
                 let accepted = self.artifacts.render().respond(p);
                 RpcReply::value(&mast_proto::ArtifactRenderResultReply { accepted })
+            }
+            methods::LINEAR_LIST_ACCOUNTS => RpcReply::value(&self.linear.list_accounts().await),
+            methods::LINEAR_ADD_ACCOUNT => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                Self::linear_reply(self.linear.add_account(p.label.as_deref().unwrap_or(""), &p.api_key).await).await
+            }
+            methods::LINEAR_RENAME_ACCOUNT => {
+                let p: mast_proto::linear::LinearRenameAccountParams = parse_params(params)?;
+                Self::linear_reply(self.linear.rename_account(&p.account_id, &p.label).await.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REPLACE_ACCOUNT_KEY => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                let id = p.account_id.as_deref().unwrap_or("");
+                Self::linear_reply(self.linear.replace_account_key(id, &p.api_key).await.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REMOVE_ACCOUNT => {
+                let p: mast_proto::linear::LinearRemoveAccountParams = parse_params(params)?;
+                Self::linear_reply(self.linear.remove_account(&p.account_id, &self.workspace).await.map(|()| serde_json::json!({}))).await
             }
             methods::LINEAR_STATUS => {
                 let p: mast_proto::LinearStatusParams = parse_params(params)?;

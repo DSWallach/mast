@@ -303,6 +303,40 @@ pub struct LinearAccount {
     pub key_set: bool,
 }
 
+/// Account creation or key replacement. Debug output never includes the key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearAccountKeyParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for LinearAccountKeyParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearAccountKeyParams")
+            .field("account_id", &self.account_id)
+            .field("label", &self.label)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearRenameAccountParams {
+    pub account_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearRemoveAccountParams {
+    pub account_id: String,
+}
+
 /// `LinearStatus {}` → [`LinearConnectionStatus`]. Verifies the key with a
 /// `viewer` query at most once per engine run (cached).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

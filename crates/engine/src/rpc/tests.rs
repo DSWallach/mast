@@ -79,6 +79,11 @@ fn work_outline_methods_are_local_not_forwardable() {
     assert!(!forwardable(methods::WATCH_WORK_OUTLINE));
     assert!(!forwardable(methods::WORK_OUTLINE_MUTATE));
     for linear in [
+        methods::LINEAR_LIST_ACCOUNTS,
+        methods::LINEAR_ADD_ACCOUNT,
+        methods::LINEAR_RENAME_ACCOUNT,
+        methods::LINEAR_REPLACE_ACCOUNT_KEY,
+        methods::LINEAR_REMOVE_ACCOUNT,
         methods::LINEAR_STATUS,
         methods::LINEAR_SET_API_KEY,
         methods::LINEAR_CLEAR_API_KEY,
