@@ -7043,7 +7043,7 @@ impl Transcript {
             }
             None => None,
         };
-        Some(Arc::new(crate::changes::DiffHighlights { old, new }))
+        Some(Arc::new(crate::changes::DiffHighlights { old, new, hunk_symbols: Vec::new() }))
     }
 
     fn render_tool_group(

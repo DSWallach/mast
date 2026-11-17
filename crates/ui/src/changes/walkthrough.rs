@@ -1208,8 +1208,8 @@ pub(crate) fn snapshot_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
 pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> Entity<impl Render + use<>> {
     let document: ReviewDocument = serde_json::from_str(r#"{
         "pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},
-        "steps":[{"id":"s1","title":"Review the data flow","file":"src/main.rs",
-        "hunks":[{"newStart":1,"newEnd":1}],"what":"Update the request handler",
+        "steps":[{"id":"s1","title":"Review the data flow","file":"src/hooks/decorated/main.rs",
+        "hunks":[{"newStart":3,"newEnd":5}],"what":"Update the request handler",
         "why":"Keep the view synchronized","risk":"low","riskNote":"Check error handling","tags":[]}],
         "highlights":[],"questions":[]
     }"#).unwrap();
@@ -1218,6 +1218,8 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
     let populated = changes.is_some();
     if let Some(changes) = &changes {
         changes.update(cx, |changes, cx| {
+            changes.review_walkthrough = true;
+            changes.review_tour = true;
             changes.pinned_cwd = None;
             changes.scope = super::DiffScope::Branch;
             changes.owner = Some(super::ChangesTarget {

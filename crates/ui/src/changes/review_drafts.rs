@@ -197,7 +197,7 @@ impl Changes {
                     .items_center()
                     .gap(px(10.0))
                     .child(
-                        div().flex_1().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child(label)),
+                        div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child(label)),
                     )
                     .child(
                         button(format!("suggestion-accept-{}", comment.id), "Accept").on_click(
@@ -392,7 +392,7 @@ impl Changes {
                     .items_center()
                     .gap(px(10.0))
                     .child(
-                        div().flex_1().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child("Draft")),
+                        div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child("Draft")),
                     )
                     .child(
                         button(format!("draft-stage-{}", comment.id), "Add to chat").on_click(

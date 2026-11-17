@@ -942,6 +942,7 @@ fn native_diff_font_geometry() {
     let state = FileHorizontalState::new(file);
     let highlight = Arc::new(DiffHighlights {
         old: None,
+        hunk_symbols: Vec::new(),
         new: Some(Arc::new(
             mast_syntax::highlight(mast_syntax::HighlightRequest {
                 source: &source,
@@ -976,6 +977,7 @@ fn native_diff_font_geometry() {
             Some(highlight.clone()),
             Some(Arc::new(DiffHighlights {
                 old: None,
+                hunk_symbols: Vec::new(),
                 new: highlight.new.clone(),
             })),
         ] {
@@ -1766,6 +1768,7 @@ fn full_diff_highlights_map_old_new_and_context_by_source_line() {
     };
     let highlights = DiffHighlights {
         old: Some(parse(old_source)),
+        hunk_symbols: Vec::new(),
         new: Some(parse(new_source)),
     };
     let deleted = DiffLine {
@@ -1876,6 +1879,7 @@ fn split_line_runs_use_affected_old_and_new_documents() {
         );
         let highlights = DiffHighlights {
             old: Some(document.clone()),
+            hunk_symbols: Vec::new(),
             new: Some(document),
         };
         for line in [

@@ -4708,7 +4708,9 @@ impl Changes {
                 let label = if loading { "Loading…".to_owned() } else if failed { "Context unavailable".to_owned() } else if let Some(count) = remaining { format!("{} {} more {}", if footer { "↓" } else { "↑" }, count.min(20), if count == 1 { "line" } else { "lines" }) } else { "↓ More lines".to_owned() };
                 div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center()
                     .text_color(theme.text_muted).text_size(px(10.0))
-                    .child(div().id(("expand-context", ix)).cursor_pointer().child(label)
+                    .child(div().id(("expand-context", ix)).cursor_pointer().role(gpui::Role::Button)
+                        .aria_label("Expand context; Option-click to expand all")
+                        .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Option-click to expand all".into())).into()).child(label)
                         .on_click(cx.listener(move |this, _, window, cx| this.expand_context(file, gap, window.modifiers().alt, cx))))
                     .into_any_element()
             }
