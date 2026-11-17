@@ -77,6 +77,7 @@ not (
   | test(~titling_e2e_names_chat_and_renames_worktree_branch)
   | test(~remote_preview_churn_does_not_accumulate_tasks_or_memory)
   | test(~actual_webrtc_pair_streams_in_both_directions)
+  | test(~same_seed_same_hash_different_seed_different_hash)
 )
 '''
 
@@ -115,4 +116,5 @@ default-filter = '''
   | test(~titling_e2e_names_chat_and_renames_worktree_branch)
   | test(~remote_preview_churn_does_not_accumulate_tasks_or_memory)
   | test(~actual_webrtc_pair_streams_in_both_directions)
+  | test(~same_seed_same_hash_different_seed_different_hash)
 '''
