@@ -8511,8 +8511,7 @@ impl Shell {
         // just go (matching the original). First fill and chat switches (which
         // don't reorder) never animate.
         let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
-        let show_pinned_section = !self.settings.sidebar_overview
-            && (pinned_count > 0 || self.sidebar_session_transfer.is_some());
+        let show_pinned_section = pinned_count > 0 || self.sidebar_session_transfer.is_some();
         let shortcut_rows_height = keyed
             .iter()
             .enumerate()
@@ -8817,7 +8816,11 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .when(!self.settings.sidebar_overview, |el| el.child("No sessions yet"))
+                .child(SharedString::from(if self.settings.sidebar_overview {
+                    "No pinned sessions"
+                } else {
+                    "No sessions yet"
+                }))
                 .into_any_element()
         };
 
@@ -8906,7 +8909,9 @@ impl Shell {
                 theme,
                 cx,
             ))
-            .child(sidebar_lists)
+            .when(!self.settings.sidebar_overview, |el| {
+                el.child(sidebar_lists)
+            })
             .when(self.settings.sidebar_overview, |el| {
                 el.child(
                     div()

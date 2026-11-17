@@ -30,7 +30,7 @@ These observations come from reading the implementation at the base SHA, rather 
 | Inbox/Linear and GitHub integrations, including associated outline actions and drops | Main-workspace destinations with working selection/association actions and the same access conditions. |
 | Sidebar Space selector and Space management | Scope control above the tree; preserve All Spaces, projectless sessions, creation/rename and existing Space menus. |
 | Personal assistant and current session outside the active filter | Small fixed access area above the scoped body, visibly identified when outside scope. |
-| Pinned sessions, manual pin ordering, custom sections, section menus and archive-all | Pinned sessions and manual pin ordering appear only in Sessions. Custom sections remain above the Work Outline, backed by the existing synced records. |
+| Pinned sessions, manual pin ordering, custom sections, section menus and archive-all | Overview highlights pinned chats in place. The separate Pinned collection and manual pin ordering appear only in Sessions. Session-list collections appear only in Sessions, backed by the existing synced records. |
 | Archived accordion, restore/archive, scheduled-task runs grouped by task and task-history entry points | Archived and Scheduled collections in the same column; retain existing actions and counts. |
 | Organization by project/device/one list, created/updated sort, compact rows, project icon/label, branch/PR/harness visibility | View menu for a Sessions presentation within this same Overview column. Work Outline remains the default. |
 | Session context menu and conditional actions | Shared session menu on every chat occurrence, including rename, pin, archive/restore, imported-session sync, PR/ticket links, review, handoff, side questions, admin/assistant actions, worktree closeout, copy/IDs/provider links, and confirmed deletion where currently available. |
@@ -43,7 +43,7 @@ Important baseline detail: production Overview restores Outline mode; List is re
 
 ## Interaction decisions
 
-1. **One navigation surface, two presentations.** Default to Work Outline. Offer Sessions in its View menu for flat/project/device organization and sorting. Pins appear only in Sessions. Custom sections, archive, and scheduled runs remain available in either presentation. Switching presentation preserves each presentation's scroll, selection, and expansion.
+1. **One navigation surface, two presentations.** Default to Work Outline. Offer Sessions in its View menu for flat/project/device organization and sorting. Overview highlights pinned chats in place; the Pinned collection appears only in Sessions. Custom sections, archive, and scheduled-run collections appear in Sessions; Overview shows the Work Outline. Switching presentation preserves each presentation's scroll, selection, and expansion.
 2. **Separate shortcuts from hierarchy.** Pins and custom sections reference chats; moving a shortcut never reparents a work item. Outline drag/drop retains its existing work-item/chat semantics. Label drop targets explicitly, retain remote-sync readiness checks, and show mutation errors with rollback. A chat may have a shortcut and an outline occurrence; it occurs only once within each collection and highlights consistently by ID.
 3. **Separate navigation selection from the open workspace.** Arrow keys move the tree selection; Enter/click opens the target. Chat selection opens the normal live chat. Item selection opens details. Existing focus-toggle/full-chat commands move focus between column and workspace. Returning from details, Inbox or a subagent restores the prior target without losing a draft.
 4. **Search and scope remain predictable.** Space scope filters navigation, not the selected chat's execution target or an existing draft. Show the current session outside scope in the fixed access area. Search and attention/repository filters operate consistently across collections, retaining matching ancestors in the outline. Display hidden-result counts and a clear-filter recovery action.
@@ -157,7 +157,6 @@ Moved personal assistant and current-session access into the fixed Overview head
 
 Constrained empty-state and first-use text to the navigation width so Needs interaction with no matching chats wraps within the column. Geometry verification covers 240, 300 and 360 px columns. Native light/dark previews cover all three styles and layouts, including the narrow empty-filter state. Final validation and the pinned review gate are recorded in the linked work-item plan.
 
+### Follow-up: highlight Overview pins in place
 
-### Follow-up: pins belong to Sessions
-
-Overview no longer renders a Pinned collection or an empty pinned placeholder above the tree. Saved pins stay intact and appear in Sessions, including after switching presentations. Pinning a chat does not remove it from its normal Overview custom section or scheduled-task collection.
+Overview keeps pin/unpin actions and highlights pinned chats at their normal outline positions. It no longer renders the separate session-list block between the view-switch buttons and the Overview header. Saved pins stay intact and appear in Sessions, including after switching presentations. Pinning never moves or reparents its Outline row. Saved custom-section and scheduled-task collections remain available in Sessions.

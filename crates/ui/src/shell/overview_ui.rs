@@ -123,6 +123,10 @@ impl Shell {
         page.update(cx, |page, cx| {
             page.set_sidebar_scope(self.settings.space_filter.clone(), cx)
         });
+        let pins = self.active_sidebar_pins(cx).into_iter().collect();
+        page.read(cx).outline_entity().update(cx, |outline, cx| {
+            outline.set_pinned_chats(pins, cx);
+        });
         self.overview_navigation
             .get_or_insert_with(|| cx.new(|cx| crate::overview::OverviewNavigation::new(page, cx)))
             .clone()
@@ -346,7 +350,9 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn pins_are_only_shown_in_sessions_and_survive_view_switching(cx: &mut TestAppContext) {
+    fn overview_highlights_pins_in_place_and_sessions_keeps_its_pinned_section(
+        cx: &mut TestAppContext,
+    ) {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
@@ -359,17 +365,10 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
         assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
         assert!(vcx.debug_bounds("pinned-toggle").is_none());
-        assert_eq!(
-            f32::from(
-                vcx.debug_bounds("overview-shortcut-collections")
-                    .unwrap()
-                    .size
-                    .height
-            ),
-            0.0
-        );
+        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
         assert!(vcx.debug_bounds("overview-navigation").is_some());
         let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
         vcx.simulate_click(sessions, gpui::Modifiers::default());
@@ -383,6 +382,39 @@ pub(super) mod tests {
         assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
         shell.read_with(vcx, |shell, cx| {
             assert_eq!(shell.active_sidebar_pins(cx), vec!["chat".to_string()])
+        });
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
+        let outline = shell.read_with(vcx, |shell, cx| {
+            shell
+                .overview_page
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .outline_entity()
+        });
+        let order = outline.read_with(vcx, |outline, _| {
+            outline
+                .model()
+                .rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+        });
+        shell.update(vcx, |shell, cx| {
+            shell.set_chat_pinned("chat".into(), false, cx)
+        });
+        redraw_assistant(vcx);
+        assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_none());
+        outline.read_with(vcx, |outline, _| {
+            assert_eq!(
+                outline
+                    .model()
+                    .rows
+                    .iter()
+                    .map(|row| row.key.clone())
+                    .collect::<Vec<_>>(),
+                order
+            )
         });
     }
 
@@ -420,9 +452,7 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn overview_search_leaves_sessions_pins_unchanged(
-        cx: &mut TestAppContext,
-    ) {
+    fn overview_search_leaves_sessions_pins_unchanged(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
         let page = shell.read_with(vcx, |shell, _| shell.overview_page.clone().unwrap());
         shell.update(vcx, |shell, cx| {
@@ -438,15 +468,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        assert_eq!(
-            f32::from(
-                vcx.debug_bounds("overview-shortcut-collections")
-                    .unwrap()
-                    .size
-                    .height
-            ),
-            0.0
-        );
+        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
         shell.update(vcx, |shell, cx| {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
             shell.settings.sidebar_overview = false;
@@ -568,13 +590,10 @@ pub(super) mod tests {
     }
 
     #[gpui::test]
-    fn overview_collections_keep_custom_membership_without_duplicating_outline_groups(
-        cx: &mut TestAppContext,
-    ) {
+    fn overview_hides_session_collections_and_preserves_custom_membership(cx: &mut TestAppContext) {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            *shell.settings.sidebar_pins_mut(key.clone()) = vec!["chat".into()];
             shell.settings.sidebar_sections_by_profile.insert(key, vec![crate::settings::SidebarSection {
                 id: "custom".into(), name: "Custom".into(), collapsed: false, session_ids: vec!["chat".into()],
             }]);
@@ -596,14 +615,10 @@ pub(super) mod tests {
             assert_eq!(custom.len(), 1);
             assert_eq!(custom[0].session_ids, vec!["chat"]);
             let theme = Theme::of(cx).clone();
-            let rows = shell.render_sidebar_collection_rows(&theme, true, cx);
-            assert_eq!(rows.custom_count, 1);
-            assert_eq!(rows.pinned_count, 0);
-            cx.notify();
+            assert_eq!(shell.render_sidebar_collection_rows(&theme, true, cx).custom_count, 1);
         });
         redraw_assistant(vcx);
-        assert!(vcx.debug_bounds("chat-chat").is_some(), "pinning must not remove custom-section membership in Overview");
-        assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
+        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
     }
 
     #[gpui::test]
