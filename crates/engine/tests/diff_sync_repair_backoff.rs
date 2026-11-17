@@ -40,7 +40,9 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // Hang guard only (the assertions are the git-spawn budget and the bound). Watch attach
+    // for 50 checkouts takes ~45-55 s alone and longer under a parallel release run.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     while !ready() {
         assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
         tokio::time::sleep(Duration::from_millis(100)).await;
