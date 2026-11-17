@@ -1715,6 +1715,20 @@ pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpu
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
 }
 
+pub(crate) fn tracker_stage_label(theme: &Theme, label: &'static str) -> gpui::Div {
+    div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label)
+}
+
+pub(crate) fn tracker_stage_indicator(theme: &Theme, id: SharedString, lit: bool) -> gpui::Stateful<gpui::Div> {
+    div().id(id).w(px(14.0)).h(px(5.0)).rounded(px(2.0))
+        .bg(if lit { theme.accent } else { theme.border })
+}
+
+pub(crate) fn tracker_group_heading(theme: &Theme, label: &str, count: usize) -> gpui::Div {
+    div().pt(px(Theme::SPACE_SM)).text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint).child(format!("{}  {count}", label.to_uppercase()))
+}
+
 pub(crate) fn worker_title(theme: &Theme, title: String) -> gpui::Div {
     div()
         .flex_1()

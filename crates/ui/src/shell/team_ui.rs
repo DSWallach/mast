@@ -69,13 +69,12 @@ fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
     for (index, (label, lit)) in labels.into_iter().zip(stages).enumerate() {
         let tip = SharedString::from(format!("{label}: {}", if lit { "observed" } else { "not observed" }));
-        track = track.child(div().id(SharedString::from(format!("tracker-stage-{id}-{index}"))).w(px(14.0)).h(px(5.0)).rounded(px(2.0))
-            .bg(if lit { theme.accent } else { theme.border })
+        track = track.child(crate::components::shell_parts::tracker_stage_indicator(theme, SharedString::from(format!("tracker-stage-{id}-{index}")), lit)
             .debug_selector(move || format!("tracker-stage-{label}-{lit}"))
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
     }
     if let Some(label) = labels.into_iter().zip(stages).filter(|(_, lit)| *lit).map(|(label, _)| label).last() {
-        track = track.child(div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label));
+        track = track.child(crate::components::shell_parts::tracker_stage_label(theme, label));
     }
     track.into_any_element()
 }
@@ -442,7 +441,7 @@ impl Shell {
                 if matching.is_empty() && !show_not_started && !show_completed { continue; }
                 let group_count = matching.len() + if show_not_started { self.tracker.not_started.len() } else { 0 }
                     + if show_completed { self.tracker.completed_items.iter().filter(|item| self.tracker.filter == TrackerFilter::All || item.ticket.is_some()).count() } else { 0 };
-                col = col.child(div().pt(px(Theme::SPACE_SM)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_faint).child(format!("{}  {group_count}", label.to_uppercase())));
+                col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, label, group_count));
                 for worker in matching { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
                 if show_not_started {
                     for item in &self.tracker.not_started {

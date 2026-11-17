@@ -2,6 +2,19 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+pub(crate) fn changed_reference_badge(theme: &Theme) -> gpui::Div {
+    div().px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
+        .rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12))
+        .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(11.0)).child("Changed")
+}
+
+pub(crate) fn changed_reference_banner(theme: &Theme) -> gpui::Div {
+    div().my(px(Theme::SPACE_SM)).p(px(Theme::SPACE_SM))
+        .rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.10))
+        .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(12.0))
+        .child("These lines no longer match the file. You are looking at the version that was sent.")
+}
+
 #[derive(Default)]
 struct ReferenceHighlightCache(crate::syntax_cache::SyntaxHighlightCache);
 impl gpui::Global for ReferenceHighlightCache {}

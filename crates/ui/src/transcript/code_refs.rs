@@ -51,7 +51,7 @@ impl Transcript {
     }
 
     pub(super) fn reference_focus_targets(&mut self, row: &SharedString, spans: &[crate::composer::SentMentionSpan], window: &Window, cx: &mut Context<Self>) -> Vec<ReferenceFocus> {
-        let top = self.list.logical_scroll_top().item_ix;
+        let top = self.code_ref_viewport_top;
         // Never evict targets while a viewport is being rendered: a message
         // with hundreds of references would otherwise recreate handles and
         // invalidate layout on every frame. Reclaim after scrolling instead.
