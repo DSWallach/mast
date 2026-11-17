@@ -2878,6 +2878,21 @@ pub async fn resolve_code_ref_source(root: &Path, base_ref: &str, head_ref: &str
     Ok((revision, text))
 }
 
+/// Read one source file at an exact commit of a nested (submodule) repository.
+/// `repo_root` is checkout-relative and must be a real directory inside the
+/// checkout; `path` is relative to the nested repository.
+pub async fn resolve_nested_code_ref_source(root: &Path, repo_root: &str, revision: &str, path: &str) -> Result<(String, String), EngineError> {
+    if !valid_object_id(revision) {
+        return Err(EngineError::Other("invalid code reference revision".into()));
+    }
+    let path = validate_diff_path(path)?;
+    let nested = resolve_submodule_root(root, repo_root).await?;
+    let source = read_git_source(&nested, revision, path).await?;
+    if source.truncated { return Err(EngineError::Other("code reference source exceeds size limit".into())); }
+    let text = String::from_utf8(source.stdout).map_err(|_| EngineError::Other("code reference source is not UTF-8".into()))?;
+    Ok((revision.to_ascii_lowercase(), text))
+}
+
 /// Resolve a branch against the local remote-default ref, without fetching.
 pub async fn resolve_branch_review_base(
     root: &Path,
@@ -3318,6 +3333,49 @@ mod watch_budget_tests {
         assert_eq!(sha, base);
         assert_eq!(text, "before\n");
         assert!(super::resolve_code_ref_source(directory.path(), "main", "HEAD", "../file.rs", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn nested_code_reference_reads_the_submodule_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let sub = directory.path().join("sub-origin");
+        let parent = directory.path().join("parent");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&parent).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = mast_harness::git_command().current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        for dir in [&sub, &parent] {
+            git(dir, &["init", "-b", "main"]);
+            git(dir, &["config", "user.email", "test@example.invalid"]);
+            git(dir, &["config", "user.name", "Test"]);
+        }
+        std::fs::write(sub.join("lib.rs"), "one\ntwo\n").unwrap();
+        git(&sub, &["add", "."]);
+        git(&sub, &["commit", "-m", "sub"]);
+        let first = git(&sub, &["rev-parse", "HEAD"]);
+        // `git submodule add` stalls for minutes on some hosts; a local clone plus a
+        // gitlink and `.gitmodules` entry produces the same repository layout.
+        git(&parent, &["clone", "-q", sub.to_str().unwrap(), "vendor/ui"]);
+        git(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.path", "vendor/ui"]);
+        git(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.url", sub.to_str().unwrap()]);
+        git(&parent, &["add", ".gitmodules", "vendor/ui"]);
+        git(&parent, &["commit", "-m", "add submodule"]);
+        let nested = parent.join("vendor/ui");
+        git(&nested, &["config", "user.email", "test@example.invalid"]);
+        git(&nested, &["config", "user.name", "Test"]);
+        std::fs::write(nested.join("lib.rs"), "zero\none\ntwo\n").unwrap();
+        git(&nested, &["commit", "-am", "edit"]);
+        let second = git(&nested, &["rev-parse", "HEAD"]);
+        let (sha, text) = super::resolve_nested_code_ref_source(&parent, "vendor/ui", &first, "lib.rs").await.unwrap();
+        assert_eq!((sha.as_str(), text.as_str()), (first.as_str(), "one\ntwo\n"));
+        let (sha, text) = super::resolve_nested_code_ref_source(&parent, "vendor/ui", &second, "lib.rs").await.unwrap();
+        assert_eq!((sha.as_str(), text.as_str()), (second.as_str(), "zero\none\ntwo\n"));
+        assert!(super::resolve_nested_code_ref_source(&parent, "vendor/ui", "HEAD", "lib.rs").await.is_err());
+        assert!(super::resolve_nested_code_ref_source(&parent, "../x", &first, "lib.rs").await.is_err());
+        assert!(super::resolve_nested_code_ref_source(&parent, "vendor/ui", &first, "../lib.rs").await.is_err());
     }
 
     #[test]

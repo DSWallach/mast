@@ -4664,10 +4664,10 @@ impl Changes {
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
                 let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
-                // Latest Turn's deleted-only preimage is a tree snapshot, which CodeRef cannot yet name.
-                // Expanded submodule hunks need their own repository revision, not the parent's SHA.
+                // Latest Turn's deleted-only preimage in the checkout's own repository is a tree snapshot, which CodeRef
+                // cannot yet name. Expanded submodule hunks anchor to the submodule's own commits, so they never hit that.
                 let nested_repository = origins.get(file as usize).is_some_and(|origin| origin.repository_path.is_some());
-                let show_reference = !nested_repository && !(self.scope == DiffScope::LatestTurn && code_ref::deleted_only_hunk(&hunk_diff.header));
+                let show_reference = nested_repository || !(self.scope == DiffScope::LatestTurn && code_ref::deleted_only_hunk(&hunk_diff.header));
                 div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
                     .when(show_reference, |row| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))

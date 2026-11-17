@@ -104,6 +104,7 @@ impl Composer {
                             location: mast_proto::CodeRefLocation {
                                 repo_id: identity.repo_id,
                                 worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()),
+                                repo_root: None,
                                 path,
                             },
                             kind: mast_proto::CodeRefKind::File,
@@ -161,6 +162,7 @@ mod tests {
                 location: mast_proto::CodeRefLocation {
                     repo_id: "repo".into(),
                     worktree_id: None,
+                    repo_root: None,
                     path: "src/file.rs".into(),
                 },
                 kind: mast_proto::CodeRefKind::Lines,

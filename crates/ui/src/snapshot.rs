@@ -118,7 +118,7 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
                 id: "fixture-reference".into(),
                 reference: mast_proto::CodeRef {
                     version: 1,
-                    location: mast_proto::CodeRefLocation { repo_id: "fixture-repo".into(), worktree_id: None, path: "src/review.rs".into() },
+                    location: mast_proto::CodeRefLocation { repo_id: "fixture-repo".into(), worktree_id: None, repo_root: None, path: "src/review.rs".into() },
                     kind: mast_proto::CodeRefKind::Lines,
                     range: Some(mast_proto::CodeRefRange { start_line: 88, end_line: 112 }),
                     symbol: None,

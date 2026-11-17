@@ -48,7 +48,7 @@ impl Transcript {
             let range = reference.reference.range;
             let request = mast_proto::ReadWorkspaceFileRequest {
                 target: context.target.clone(),
-                path: reference.reference.location.path.clone(),
+                path: reference.reference.location.workspace_path(),
             };
             let client =
                 crate::files::client::WorkspaceFilesClient::new(engine.clone(), context.clone());
@@ -124,6 +124,7 @@ fn project_resolutions(
                 let reference = span.code_ref.as_ref().unwrap();
                 let path = &reference.reference.location.path;
                 let name = path.rsplit('/').next().unwrap_or(path);
+                let workspace_path = reference.reference.location.workspace_path();
                 let label = match reference.reference.kind {
                     mast_proto::CodeRefKind::Hunk => format!("Hunk · {name}:{}", range.start_line),
                     _ if range.start_line == range.end_line => {
@@ -132,7 +133,7 @@ fn project_resolutions(
                     _ => format!("{name}:{}-{}", range.start_line, range.end_line),
                 };
                 display.push_str(&format!("{label} moved"));
-                span.path = format!("{}:{}", path, range.start_line).into();
+                span.path = format!("{}:{}", workspace_path, range.start_line).into();
             }
             Some(crate::code_ref::Resolution::Changed) => {
                 display.push_str(&text[span.range.clone()]);
@@ -183,7 +184,7 @@ pub(super) fn activate(
     let range = reference.reference.range;
     let request = mast_proto::ReadWorkspaceFileRequest {
         target: context.target.clone(),
-        path: reference.reference.location.path.clone(),
+        path: reference.reference.location.workspace_path(),
     };
     let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
     let handle = window.window_handle();
@@ -232,7 +233,7 @@ pub(super) fn activate(
         let target = match resolution {
             crate::code_ref::Resolution::Unchanged(range)
             | crate::code_ref::Resolution::Moved(range) => {
-                format!("{}:{}", reference.reference.location.path, range.start_line)
+                format!("{}:{}", reference.reference.location.workspace_path(), range.start_line)
             }
             crate::code_ref::Resolution::Changed => crate::code_ref::pinned_link(&reference),
         };
@@ -262,6 +263,7 @@ mod tests {
                 location: mast_proto::CodeRefLocation {
                     repo_id: "repo".into(),
                     worktree_id: None,
+                    repo_root: None,
                     path: "src/file.rs".into(),
                 },
                 kind: mast_proto::CodeRefKind::Lines,

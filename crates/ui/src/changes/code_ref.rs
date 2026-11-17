@@ -46,6 +46,46 @@ pub(super) fn hunk_selection(
     Some((path, range, snippet, old_side))
 }
 
+/// The nested repository and exact commit a submodule hunk was diffed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NestedHunk {
+    pub(super) repo_root: String,
+    pub(super) revision: String,
+}
+
+/// Resolve a hunk's nested repository, its revision on the side the hunk was
+/// anchored to, and its path relative to that repository. Nested diffs always
+/// compare two commits of the submodule, so both revisions are real SHAs.
+pub(super) fn nested_hunk(
+    origin: &FileOrigin,
+    groups: &[SubmoduleGroup],
+    display_path: &str,
+    old_side: bool,
+) -> Option<(NestedHunk, String)> {
+    let repo_root = origin.repository_path.as_deref()?;
+    let group = groups
+        .iter()
+        .find(|group| group.repository_path == repo_root)?;
+    let revision = if old_side {
+        group.old_revision.as_deref()
+    } else {
+        group.new_revision.as_deref()
+    }?;
+    let path = display_path
+        .strip_prefix(repo_root)?
+        .strip_prefix('/')?
+        .to_string();
+    (!revision.is_empty() && !path.is_empty()).then(|| {
+        (
+            NestedHunk {
+                repo_root: repo_root.to_string(),
+                revision: revision.to_string(),
+            },
+            path,
+        )
+    })
+}
+
 fn apply_owner_context(
     context: &mut crate::files::client::FilesRequestContext,
     owner: &ChangesTarget,
@@ -74,18 +114,33 @@ impl Changes {
         hunk: usize,
         cx: &mut Context<Self>,
     ) {
-        let reference = self
-            .parsed
-            .as_ref()
-            .and_then(|parsed| parsed.files.get(file))
-            .and_then(|file| {
-                file.hunks
-                    .get(hunk)
-                    .and_then(|hunk| hunk_selection(file, hunk))
-            });
-        if let Some((path, range, snippet, old_side)) = reference {
-            self.add_hunk_to_chat(path, range, snippet, old_side, cx);
-        }
+        let Some(parsed) = self.parsed.as_ref() else {
+            return;
+        };
+        let Some(selection) = parsed.files.get(file).and_then(|file| {
+            file.hunks
+                .get(hunk)
+                .and_then(|hunk| hunk_selection(file, hunk))
+        }) else {
+            return;
+        };
+        let (path, range, snippet, old_side) = selection;
+        let nested_origin = parsed
+            .origins
+            .get(file)
+            .filter(|origin| origin.repository_path.is_some());
+        let (path, nested) = match nested_origin {
+            None => (path, None),
+            Some(origin) => match nested_hunk(origin, &parsed.submodules, &path, old_side) {
+                Some((nested, path)) => (path, Some(nested)),
+                None => {
+                    self.error = Some("The submodule revision for this hunk is unavailable.".into());
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        self.add_hunk_to_chat(path, range, snippet, old_side, nested, cx);
     }
 
     fn code_ref_context(
@@ -106,6 +161,7 @@ impl Changes {
         range: mast_proto::CodeRefRange,
         expected: String,
         old_side: bool,
+        nested: Option<NestedHunk>,
         cx: &mut Context<Self>,
     ) {
         let Some(key) = self.owner_chat_id_owned() else {
@@ -121,6 +177,7 @@ impl Changes {
             return;
         };
         let commit = match self.scope {
+            _ if nested.is_some() => None,
             DiffScope::Commit => self.commit.as_ref().and_then(|commit| {
                 if old_side {
                     commit.parent_shas.first().cloned()
@@ -136,6 +193,7 @@ impl Changes {
             _ => None,
         };
         let source_refs = match self.scope {
+            _ if nested.is_some() => None,
             DiffScope::WorkingTree if old_side => {
                 Some(("HEAD".to_string(), "HEAD".to_string(), false))
             }
@@ -159,7 +217,8 @@ impl Changes {
                 }),
             _ => None,
         };
-        if commit.is_none()
+        if nested.is_none()
+            && commit.is_none()
             && source_refs.is_none()
             && (old_side || matches!(self.scope, DiffScope::Commit | DiffScope::Range))
         {
@@ -193,7 +252,17 @@ impl Changes {
             let _queue_permit = queue_permit;
             let _permit = crate::code_ref::acquire_io_permit().await;
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
-            let snapshot = if let Some((base_ref, head_ref, head)) = source_refs {
+            let snapshot = if let Some(nested) = nested.as_ref() {
+                // Nested diffs compare two commits of the submodule: read the
+                // anchored side from that repository at its exact revision.
+                let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "repoRoot": nested.repo_root, "revision": nested.revision, "path": path.clone() });
+                engine.client().call(mast_rpc::methods::RESOLVE_CODE_REF_SOURCE, params).await.ok().and_then(|value| {
+                    let sha = value.get("revisionSha")?.as_str()?.to_string();
+                    let contents = value.get("text")?.as_str()?;
+                    let snippet = crate::code_ref::snippet(contents, range)?;
+                    (snippet == expected).then(|| (mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
+                })
+            } else if let Some((base_ref, head_ref, head)) = source_refs {
                 let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "baseRef": base_ref, "headRef": head_ref, "path": path.clone(), "head": head });
                 engine.client().call(mast_rpc::methods::RESOLVE_CODE_REF_SOURCE, params).await.ok().and_then(|value| {
                     let sha = value.get("revisionSha")?.as_str()?.to_string();
@@ -220,7 +289,7 @@ impl Changes {
                     let reference = crate::code_ref::StagedCodeRef {
                         id: uuid::Uuid::new_v4().to_string(),
                         reference: mast_proto::CodeRef { version: 1,
-                            location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), path },
+                            location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), repo_root: nested.as_ref().map(|nested| nested.repo_root.clone()), path },
                             kind: mast_proto::CodeRefKind::Hunk, range: Some(range), symbol: None, at,
                         }, snippet,
                     };
@@ -293,5 +362,154 @@ mod tests {
             (range.start_line, range.end_line, snippet.as_str(), old),
             (1, 2, "one\ntwo", true)
         );
+    }
+
+    /// A parent checkout with a real submodule whose second commit edits `lib.rs`.
+    struct SubmoduleFixture {
+        _dir: tempfile::TempDir,
+        parent: std::path::PathBuf,
+        first: String,
+        second: String,
+        patch: String,
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = mast_harness::git_command()
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn submodule_fixture() -> SubmoduleFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin");
+        let parent = dir.path().join("parent");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&parent).unwrap();
+        for repo in [&origin, &parent] {
+            git_in(repo, &["init", "-q", "-b", "main"]);
+            git_in(repo, &["config", "user.name", "Test"]);
+            git_in(repo, &["config", "user.email", "test@example.invalid"]);
+        }
+        std::fs::write(origin.join("lib.rs"), "one\ntwo\nthree\n").unwrap();
+        git_in(&origin, &["add", "."]);
+        git_in(&origin, &["commit", "-qm", "first"]);
+        // `git submodule add` stalls for minutes on some hosts; a local clone plus a
+        // gitlink and `.gitmodules` entry yields the same layout without the helper.
+        let url = origin.to_str().unwrap();
+        git_in(&parent, &["clone", "-q", url, "vendor/ui"]);
+        git_in(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.path", "vendor/ui"]);
+        git_in(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.url", url]);
+        git_in(&parent, &["add", ".gitmodules", "vendor/ui"]);
+        git_in(&parent, &["commit", "-qm", "add submodule"]);
+        let nested = parent.join("vendor/ui");
+        git_in(&nested, &["config", "user.name", "Test"]);
+        git_in(&nested, &["config", "user.email", "test@example.invalid"]);
+        let first = git_in(&nested, &["rev-parse", "HEAD"]);
+        std::fs::write(nested.join("lib.rs"), "one\ntwo\nTWO\nthree\n").unwrap();
+        git_in(&nested, &["commit", "-qam", "second"]);
+        let second = git_in(&nested, &["rev-parse", "HEAD"]);
+        let patch = git_in(&nested, &["diff", "--no-color", "--unified=3", &first, &second]);
+        SubmoduleFixture { _dir: dir, parent, first, second, patch }
+    }
+
+    fn nested_tree(fixture: &SubmoduleFixture) -> (Vec<FileDiff>, Vec<FileOrigin>, Vec<SubmoduleGroup>) {
+        let summary = mast_proto::SubmoduleDiffSummary {
+            repository_path: "vendor/ui".into(),
+            parent_repository_path: None,
+            old_revision: Some(fixture.first.clone()),
+            new_revision: Some(fixture.second.clone()),
+            expanded: true,
+            patch: format!("{}\n", fixture.patch),
+            files: Vec::new(),
+            additions: 1,
+            deletions: 0,
+            truncated: false,
+        };
+        let (files, origins, groups, _) = parse_diff_tree("", &[summary]);
+        (files, origins, groups)
+    }
+
+    #[test]
+    fn submodule_hunk_carries_nested_root_and_submodule_sha() {
+        let fixture = submodule_fixture();
+        let (files, origins, groups) = nested_tree(&fixture);
+        assert_eq!(files.len(), 1);
+        let (display_path, range, snippet, old_side) =
+            hunk_selection(&files[0], &files[0].hunks[0]).unwrap();
+        assert_eq!(display_path, "vendor/ui/lib.rs");
+        assert!(!old_side);
+        let (nested, path) = nested_hunk(&origins[0], &groups, &display_path, old_side).unwrap();
+        assert_eq!(nested.repo_root, "vendor/ui");
+        assert_eq!(nested.revision, fixture.second);
+        assert_ne!(nested.revision, git_in(&fixture.parent, &["rev-parse", "HEAD"]));
+        assert_eq!(path, "lib.rs");
+
+        // The chip opens the workspace file inside the submodule checkout.
+        let location = mast_proto::CodeRefLocation {
+            repo_id: "repo".into(),
+            worktree_id: None,
+            repo_root: Some(nested.repo_root.clone()),
+            path,
+        };
+        assert_eq!(location.workspace_path(), "vendor/ui/lib.rs");
+        let opened = std::fs::read_to_string(fixture.parent.join(location.workspace_path())).unwrap();
+        assert_eq!(crate::code_ref::snippet(&opened, range).as_deref(), Some(snippet.as_str()));
+        // The anchored snippet matches the submodule's own commit, not the parent's.
+        let at_revision = crate::code_ref::read_commit_file(
+            &fixture.parent.join(&nested.repo_root),
+            &nested.revision,
+            "lib.rs",
+        )
+        .unwrap();
+        assert_eq!(crate::code_ref::snippet(&at_revision, range).as_deref(), Some(snippet.as_str()));
+
+        // After an edit shifts the lines, the reference re-anchors as moved.
+        std::fs::write(
+            fixture.parent.join("vendor/ui/lib.rs"),
+            "zero\none\ntwo\nTWO\nthree\n",
+        )
+        .unwrap();
+        let edited = std::fs::read_to_string(fixture.parent.join(location.workspace_path())).unwrap();
+        assert!(matches!(
+            crate::code_ref::reanchor(&edited, range, &snippet),
+            crate::code_ref::Resolution::Moved(moved) if moved.start_line == range.start_line + 1
+        ));
+    }
+
+    #[test]
+    fn submodule_old_side_uses_the_old_revision_and_missing_revisions_fail() {
+        let fixture = submodule_fixture();
+        let (_, origins, mut groups) = nested_tree(&fixture);
+        let (nested, path) = nested_hunk(&origins[0], &groups, "vendor/ui/lib.rs", true).unwrap();
+        assert_eq!((nested.revision.as_str(), path.as_str()), (fixture.first.as_str(), "lib.rs"));
+        groups[0].new_revision = None;
+        assert!(nested_hunk(&origins[0], &groups, "vendor/ui/lib.rs", false).is_none());
+        assert!(nested_hunk(&origins[0], &groups, "other/lib.rs", true).is_none());
+    }
+
+    #[test]
+    fn reference_without_nested_field_still_reads_and_projects() {
+        let old = serde_json::json!({
+            "version": 1,
+            "where": {"repoId": "repo", "path": "src/a.rs"},
+            "kind": "hunk",
+            "range": {"startLine": 2, "endLine": 3},
+            "at": {"commit": "abc123"}
+        });
+        let reference: mast_proto::CodeRef = serde_json::from_value(old).unwrap();
+        let staged = crate::code_ref::StagedCodeRef {
+            id: "old".into(),
+            reference,
+            snippet: "x\ny".into(),
+        };
+        assert_eq!(staged.reference.location.workspace_path(), "src/a.rs");
+        let prompt = crate::code_ref::with_code_refs("look", &[staged.clone()]);
+        let (_, spans) = crate::code_ref::project_sent_refs(&prompt).unwrap();
+        assert_eq!(spans[0].path.as_ref(), "src/a.rs:2");
+        assert_eq!(spans[0].code_ref.as_ref().unwrap().reference, staged.reference);
     }
 }
