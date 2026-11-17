@@ -376,6 +376,8 @@ pub struct LinearClearApiKeyParams {}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearIssueParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     pub identifier: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub force_refresh: bool,
@@ -387,6 +389,8 @@ pub struct LinearIssueParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearMyIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     /// Skip the engine's list cache.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -400,6 +404,8 @@ pub struct LinearMyIssuesParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearMyProjectsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -411,6 +417,8 @@ pub struct LinearMyProjectsParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearProjectIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -424,6 +432,8 @@ pub struct LinearProjectIssuesParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearProjectDetailParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,

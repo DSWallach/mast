@@ -226,6 +226,7 @@ impl WorkOutlineActions {
         self.linear_call(
             methods::LINEAR_ISSUE,
             LinearIssueParams {
+                space_id: None,
                 identifier: identifier.to_string(),
                 force_refresh,
             },
@@ -236,6 +237,7 @@ impl WorkOutlineActions {
         self.linear_call(
             methods::LINEAR_MY_ISSUES,
             LinearMyIssuesParams {
+                space_id: None,
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
@@ -249,6 +251,7 @@ impl WorkOutlineActions {
         self.linear_call(
             methods::LINEAR_MY_PROJECTS,
             LinearMyProjectsParams {
+                space_id: None,
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
@@ -263,6 +266,7 @@ impl WorkOutlineActions {
         self.linear_call(
             methods::LINEAR_PROJECT_ISSUES,
             LinearProjectIssuesParams {
+                space_id: None,
                 project_id: project_id.to_string(),
                 force: read.force(),
                 cached_only: read.stored_only(),
@@ -278,6 +282,7 @@ impl WorkOutlineActions {
         self.linear_call(
             methods::LINEAR_PROJECT_DETAIL,
             LinearProjectDetailParams {
+                space_id: None,
                 project_id: project_id.to_string(),
                 force: read.force(),
                 cached_only: read.stored_only(),

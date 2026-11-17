@@ -549,6 +549,15 @@ impl EngineRpc {
         }
     }
 
+    fn linear_for_space(&self, space_id: Option<&str>) -> Result<crate::linear::LinearService, RpcError> {
+        let Some(space_id) = space_id else { return Ok(self.linear.clone()); };
+        if self.workspace.space(space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+            return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+        }
+        let account = self.workspace.space_linear_account_id(space_id);
+        Ok(self.linear.for_account(account.as_deref()))
+    }
+
     /// `linear/disabledForSpace` for a Space-scoped Linear mutation in a
     /// Space with Linear off.
     fn linear_mutation_gate(
@@ -2934,20 +2943,20 @@ impl RpcService for EngineRpc {
             }
             methods::LINEAR_ISSUE => {
                 let p: mast_proto::LinearIssueParams = parse_params(params)?;
-                Self::linear_reply(self.linear.issue(&p.identifier, p.force_refresh).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref())?.issue(&p.identifier, p.force_refresh).await).await
             }
             methods::LINEAR_MY_ISSUES => {
                 let p: mast_proto::LinearMyIssuesParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_issues(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref())?.my_issues(p.force, p.cached_only).await).await
             }
             methods::LINEAR_MY_PROJECTS => {
                 let p: mast_proto::LinearMyProjectsParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_projects(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref())?.my_projects(p.force, p.cached_only).await).await
             }
             methods::LINEAR_PROJECT_ISSUES => {
                 let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref())?
                         .project_issues(&p.project_id, p.force, p.cached_only)
                         .await,
                 )
@@ -2956,7 +2965,7 @@ impl RpcService for EngineRpc {
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref())?
                         .project_detail(&p.project_id, p.force, p.cached_only)
                         .await,
                 )

@@ -1365,3 +1365,28 @@ async fn named_account_removal_reports_disabled_spaces_and_rpc_hides_keys() {
     assert!(!accounts.to_string().contains(KEY));
     assert!(!rig.seen.lock().unwrap().iter().any(|reply| reply.contains(OTHER_KEY)));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_queries_resolve_space_account_and_isolate_cached_results() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    })).await.unwrap();
+    let id = account["id"].as_str().unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"})).await.unwrap();
+    rig.mock.set_issue(issue_node("ENG-1", "Default issue", None, "started"));
+    let default = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    rig.mock.script(Reply::ok(json!({"issue": issue_node("ENG-1", "Personal issue", None, "started")})));
+    let personal = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(default["title"], "Default issue");
+    assert_eq!(personal["title"], "Personal issue");
+    let calls: Vec<_> = rig.mock.recorded().into_iter().filter(|r| r.operation == "MastLinearIssue").collect();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].authorization.as_deref() == Some(KEY));
+    assert!(calls[1].authorization.as_deref() == Some(OTHER_KEY));
+    let cached = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(cached["title"], "Default issue");
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+}
