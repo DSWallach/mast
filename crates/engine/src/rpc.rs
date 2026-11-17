@@ -2047,6 +2047,11 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                if let Some(parent) = self.workspace.chat(&chat_id).ok().flatten().and_then(|chat| chat.parent_chat_id)
+                    && let Some(usage) = self.sessions.token_usage()
+                {
+                    usage.promote_orchestrator(&parent);
+                }
                 if let Some(parent) = parent_chat_id {
                     if !crate::work_outline::writes_disabled()
                         && let Some(source) = self.workspace.chat(&parent).map_err(failed)?
@@ -2703,8 +2708,17 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
-            if method==methods::TOKEN_USAGE && self.workspace.read_devices().ok().and_then(|devices|devices.into_iter().find(|device|device.id==target)).is_some_and(|device|!device.supports(mast_proto::capabilities::TOKEN_USAGE_V1)) {
-                return Err(RpcError::Failed("Update Mast on the selected device to view token usage.".into()));
+            if method == methods::TOKEN_USAGE {
+                let required = if params.get("agentType").is_some_and(|value| !value.is_null()) {
+                    mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
+                } else {
+                    mast_proto::capabilities::TOKEN_USAGE_V1
+                };
+                if self.workspace.read_devices().ok().and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| !device.supports(required))
+                {
+                    return Err(RpcError::Failed("Update Mast on the selected device to view the requested token-usage breakdown.".into()));
+                }
             }
             let target = target.to_string();
             return self.forward(&target, method, params).await;
