@@ -1219,6 +1219,28 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 evening; coordinator 544369c6)
+
+- **Installed: release 104** (4bbb92ba0; = 103 + code-block-and-chips + tracker-surface + crash fix). Perf gate:
+  release tests pass; soak vs 103 equal CPU (5.2 vs 4.9 %), footprint 452 vs 564 MB, git/min 108 vs 100 (noise
+  across ABBA runs 94–122). Mikey restarts to pick it up (he was on 96).
+- **Design pass** (item 7d000a94, Sonnet): readability design mast-artifact:bf3fbf6160ebe4be8e1dcbe9285484d6 and
+  work-item tracker design mast-artifact:fce1272a689cfd2b71ee0be36e30d5c9. Mikey: drop Board/Table; wants one view
+  per work item/project tracking workers, tickets, PRs and progress, plus code review. Option A approved: the Team tab
+  becomes the Tracker. Design files on disk (workers can read them): `<home>/Projects/agent-mode-tools/.mast/
+  artifacts/design-wave-1-surfaces-readability-pass-syntax-c-7d000a94/*.fragment.html`.
+- In 104: shared CodeBlock (components/code_block.rs), highlighted pinned code-reference view (header, gutter,
+  Changed badge/banner, Show diff vs current), chip badges + hover/focus cards; Tracker slice 1 (rollup pills,
+  grouped rows, six-step fact-only stage track, expand). First 104 test run caught a crash: reading
+  `ListState::logical_scroll_top()` inside a transcript row panics (RefCell already borrowed); fixed in c60ef6c4e.
+  Rule for briefs: never touch a ListState from row/render callbacks.
+- Ready, held for 105: code-ref-moved-state (a3ff14fff, moved references show the pinned snippet + reanchor action).
+- Building (Codex terra): tracker-review-and-data (Tracker slices 2–3: Review PR/Merge/Tour badge, checklist count,
+  PR +/−, ticket titles) and changes-polish (Changes panel polish + diagram thumbnail). Left after those: Tracker slice
+  4 (outline rollup chip, delete Board/Table ~1900 lines) and readability slice 4 (tokens/style pass).
+- perf-soak.sh guard fixed (5a617a47d): it refused to start when pgrep matched its own subshells or an agent's
+  wrapping shell.
+
 ## In flight (snapshot 2026-11-17 09:30; coordinator da545eee handing off)
 
 - **Installed: release 103.** Mikey is still on 96 until he restarts. Nothing is building; no workers are running.
