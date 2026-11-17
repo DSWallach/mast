@@ -1489,6 +1489,94 @@ thread_local! {
     static RENDERED_ROW_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+impl Transcript {
+    /// Drop runtime handles of code blocks that no longer exist.
+    ///
+    /// Equivalent to retaining only the keys of every markdown row in
+    /// `new_rows`, but O(changed rows): handles are only ever created for rows
+    /// in `self.rows`, so a key can only disappear with a row in the diff's
+    /// old range. A chat attach (rows were just cleared) prunes against the
+    /// whole new list; an unchanged list prunes nothing.
+    fn prune_code_fences(
+        &mut self,
+        attached: bool,
+        diff: &Option<(Range<usize>, usize)>,
+        new_rows: &[Row],
+    ) {
+        if self.code_fences.is_empty() {
+            return;
+        }
+        match diff {
+            _ if attached => {
+                let mut active: HashSet<SharedString> = HashSet::new();
+                for row in new_rows {
+                    active.extend(row_code_fence_keys(row));
+                }
+                self.code_fences.retain(|key, _| active.contains(key));
+            }
+            None => {}
+            Some((old_range, count)) => {
+                let kept: HashSet<SharedString> = new_rows
+                    [old_range.start..old_range.start + count]
+                    .iter()
+                    .flat_map(row_code_fence_keys)
+                    .collect();
+                for row in &self.rows[old_range.clone()] {
+                    for key in row_code_fence_keys(row) {
+                        if !kept.contains(&key) {
+                            self.code_fences.remove(&key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Runtime-handle keys of the code blocks a markdown row renders.
+fn row_code_fence_keys(row: &Row) -> Vec<SharedString> {
+    match &row.kind {
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+            .blocks
+            .get(*block_ix)
+            .map(|top| {
+                render::code_block_indices(&top.block, *block_ix)
+                    .into_iter()
+                    .map(|ix| format!("{}#code{ix}", row.id).into())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+impl Transcript {
+    /// Test hook: jump to the first row.
+    #[cfg(test)]
+    pub(crate) fn test_scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.pinned = false;
+        self.list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    }
+
+    /// Test hook: jump to the end and follow the tail.
+    #[cfg(test)]
+    pub(crate) fn test_scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.pinned = true;
+        self.list.scroll_to_end();
+        cx.notify();
+    }
+}
+
+/// Test hook: how many transcript rows have been rendered on this thread.
+#[cfg(test)]
+pub(crate) fn rendered_row_calls() -> usize {
+    RENDERED_ROW_COUNT.with(|count| count.get())
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -4589,7 +4677,7 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        if self.retain_on_deselect
+                if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
             && self.chat_id.is_some()
@@ -4969,25 +5057,9 @@ impl Transcript {
         // Runtime scroll handles follow the stable code rows exactly. A live
         // block keeps its handle through completion; deleted/reindexed tail
         // blocks and the previous chat cannot accumulate stale handles.
-        let active_code_fences: HashSet<SharedString> = new_rows
-            .iter()
-            .flat_map(|row| match &row.kind {
-                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
-                    tree.blocks
-                        .get(*block_ix)
-                        .map(|top| {
-                            render::code_block_indices(&top.block, *block_ix)
-                                .into_iter()
-                                .map(|ix| format!("{}#code{ix}", row.id).into())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                }
-                _ => Vec::new(),
-            })
-            .collect();
-        self.code_fences
-            .retain(|key, _| active_code_fences.contains(key));
+        // Computed once: the same diff drives this prune and the list splice.
+        let rows_diff = diff_rows(&self.rows, &new_rows);
+        self.prune_code_fences(attached, &rows_diff, &new_rows);
 
         // Text already streamed before this (re)attach is the veil BASELINE:
         // its rows' veils seed instead of fading (render creates them from
@@ -5028,7 +5100,7 @@ impl Transcript {
             should_anchor_live_stream(self.pinned, self.distance_from_bottom(), tail_streaming);
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
-        match diff_rows(&self.rows, &new_rows) {
+        match rows_diff {
             None => {
                 self.rows = new_rows;
                 self.rows_generation = self.rows_generation.wrapping_add(1);
@@ -14159,7 +14231,7 @@ impl Transcript {
 
 #[cfg(test)]
 #[path = "perf/transcript_bench.rs"]
-mod perf_bench;
+pub(crate) mod perf_bench;
 
 #[cfg(test)]
 mod accessible_text_tests {

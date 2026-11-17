@@ -916,7 +916,7 @@ impl OutlineView {
         self.prune_multi();
     }
 
-    fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
         let changed = if collapsed {
             self.collapsed.insert(key.to_string())
         } else {

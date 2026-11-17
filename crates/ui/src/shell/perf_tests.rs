@@ -985,3 +985,291 @@ fn idle_sidebar_ignores_transcript_deltas(cx: &mut TestAppContext) {
     assert!(spent.sidebar_pane <= BUDGET_FRAMES / 10, "idle sidebar re-rendered on transcript deltas: {spent:?}");
     assert!(spent.chat_rows <= 64 * spent.sidebar_pane, "{spent:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Long chat: open, scroll, stream and type in a full Shell.
+// ---------------------------------------------------------------------------
+
+fn load_long_chat(
+    state: &Entity<AppState>,
+    chat_id: &str,
+    entries: Vec<mast_doc::SessionMessageEntry>,
+    vcx: &mut gpui::VisualTestContext,
+) {
+    // Like the app: the watch prepares rows off the UI thread and installs them.
+    let update = mast_doc::TranscriptUpdate {
+        frame: mast_doc::TranscriptFrame::reset(&entries),
+        context_usage: None,
+        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+    };
+    let prepared = crate::transcript::TranscriptPreparation::default()
+        .prepare(&update)
+        .unwrap();
+    state.update(vcx, |state, cx| {
+        state.selected_chat = Some(chat_id.into());
+        state.transcript_replayed = true;
+        state.transcript = entries;
+        state.transcript_revision = state.transcript_revision.wrapping_add(1);
+        state.prepared_transcripts.insert(chat_id.into(), prepared);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+/// Streamed deltas prepared ahead of time, like the watch's background worker:
+/// each is a wire frame plus the rows prepared for the state after it.
+fn prepare_stream(
+    entries: &[mast_doc::SessionMessageEntry],
+    n: usize,
+) -> Vec<(mast_doc::TranscriptFrame, std::sync::Arc<crate::transcript::PreparedTranscript>)> {
+    let mut worker = crate::transcript::TranscriptPreparation::default();
+    let mut current = entries.to_vec();
+    if let Some(last) = current.last_mut() {
+        last.status = Some(mast_doc::MessageStatus::Streaming);
+    }
+    worker
+        .prepare(&mast_doc::TranscriptUpdate {
+            frame: mast_doc::TranscriptFrame::reset(&current),
+            context_usage: None,
+            replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&current)),
+        })
+        .unwrap();
+    (0..n)
+        .map(|_| {
+            let before = current.clone();
+            if let Some(mast_doc::MessagePart::Text { text, .. }) =
+                current.last_mut().and_then(|last| last.parts.last_mut())
+            {
+                text.push_str(" chunk");
+            }
+            let frame = mast_doc::diff_transcript(&before, &current);
+            let prepared = worker
+                .prepare(&mast_doc::TranscriptUpdate {
+                    frame: frame.clone(),
+                    context_usage: None,
+                    replay_baseline: None,
+                })
+                .unwrap();
+            (frame, prepared)
+        })
+        .collect()
+}
+
+/// Mark the chat's last entry streaming (the state the prepared stream starts from).
+fn start_streaming(state: &Entity<AppState>, vcx: &mut gpui::VisualTestContext, entries: Vec<mast_doc::SessionMessageEntry>) {
+    let mut entries = entries;
+    if let Some(last) = entries.last_mut() {
+        last.status = Some(mast_doc::MessageStatus::Streaming);
+    }
+    load_long_chat(state, "c0", entries, vcx);
+}
+
+/// One streamed delta, applied like the watch closure does.
+fn apply_delta(
+    state: &Entity<AppState>,
+    vcx: &mut gpui::VisualTestContext,
+    frame: mast_doc::TranscriptFrame,
+    prepared: std::sync::Arc<crate::transcript::PreparedTranscript>,
+) {
+    state.update(vcx, |state, cx| {
+        state.receive_transcript_frame(frame, cx).unwrap();
+        state.prepared_transcripts.insert("c0".into(), prepared);
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+fn type_key(composer_input: &Entity<crate::composer::ComposerInput>, vcx: &mut gpui::VisualTestContext, i: usize) {
+    composer_input.update(vcx, |input, cx| input.set_text(format!("typing a message {i}"), cx));
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+struct LongChatCounts {
+    rows_rendered: usize,
+    notifies: Vec<(&'static str, u64)>,
+    ms: f64,
+}
+
+fn measure_long_chat<R>(
+    counters: &[Counter],
+    f: impl FnOnce() -> R,
+) -> (R, LongChatCounts) {
+    let rows_before = crate::transcript::rendered_row_calls();
+    let before = totals(counters);
+    let started = std::time::Instant::now();
+    let out = f();
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let notifies = delta(&before, &totals(counters));
+    (
+        out,
+        LongChatCounts {
+            rows_rendered: crate::transcript::rendered_row_calls() - rows_before,
+            notifies,
+            ms,
+        },
+    )
+}
+
+fn long_chat_fixture(
+    cx: &mut TestAppContext,
+    entries: usize,
+) -> (
+    Entity<Shell>,
+    Entity<AppState>,
+    &mut gpui::VisualTestContext,
+    Vec<Counter>,
+    Entity<crate::composer::ComposerInput>,
+) {
+    let (shell, _sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    // Wide enough for the transcript rail (it hides below 768px of content).
+    vcx.simulate_resize(gpui::size(px(1800.0), px(1000.0)));
+    state.update(vcx, |state, cx| {
+        state.sessions.clear();
+        cx.notify();
+    });
+    load_long_chat(&state, "c0", crate::transcript::perf_bench::long_chat(entries), vcx);
+    for _ in 0..4 {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
+    let (transcript, composer) = shell.read_with(vcx, |s, _| (s.transcript.clone(), s.composer.clone()));
+    let input = composer.read_with(vcx, |c, _| c.input.clone());
+    let sidebar = shell.read_with(vcx, |s, _| s.sidebar_pane.clone());
+    let counters = vec![
+        watch(vcx, "shell", &shell),
+        watch(vcx, "transcript", &transcript),
+        watch(vcx, "composer", &composer),
+        watch(vcx, "input", &input),
+        watch(vcx, "sidebar", &sidebar),
+    ];
+    (shell, state, vcx, counters, input)
+}
+
+/// Scenarios 1, 2 and 4 in one table. `BENCH_ENTRIES` sets the chat size
+/// (default 360 entries, about 3,000 rows).
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_long_chat_scenarios(cx: &mut TestAppContext) {
+    let entries: usize = std::env::var("BENCH_ENTRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(360);
+    let (shell, state, vcx, counters, input) = long_chat_fixture(cx, entries);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    let rows = transcript.read_with(vcx, |t, _| t.rows().len());
+    eprintln!("PERF long chat: {entries} entries, {rows} rows");
+    let report = |label: &str, n: usize, c: LongChatCounts| {
+        eprintln!(
+            "PERF {label:<34} n={n:<4} ms/op={:>8.3} rows_rendered/op={:>8.1} notifies/op={:?}",
+            c.ms / n as f64,
+            c.rows_rendered as f64 / n as f64,
+            c.notifies.iter().map(|(k, v)| format!("{k}={:.1}", *v as f64 / n as f64)).collect::<Vec<_>>()
+        );
+    };
+    let (_, c) = measure_long_chat(&counters, || {
+        load_long_chat(&state, "c0", crate::transcript::perf_bench::long_chat(entries), vcx);
+    });
+    report("open (load + draw)", 1, c);
+    let (_, c) = measure_long_chat(&counters, || {
+        transcript.update(vcx, |t, cx| t.test_scroll_to_top(cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+    });
+    report("scroll to top + draw", 1, c);
+    let (_, c) = measure_long_chat(&counters, || {
+        transcript.update(vcx, |t, cx| t.test_scroll_to_bottom(cx));
+        vcx.update(|window, cx| window.draw(cx).clear());
+    });
+    report("scroll to bottom + draw", 1, c);
+    let base = crate::transcript::perf_bench::long_chat(entries);
+    let stream = prepare_stream(&base, 200);
+    start_streaming(&state, vcx, base);
+    transcript.update(vcx, |t, cx| t.test_scroll_to_bottom(cx));
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let (_, c) = measure_long_chat(&counters, || {
+        for (frame, prepared) in stream {
+            apply_delta(&state, vcx, frame, prepared);
+        }
+    });
+    report("stream delta + draw", 200, c);
+    let (_, c) = measure_long_chat(&counters, || {
+        for i in 0..50 {
+            type_key(&input, vcx, i);
+        }
+    });
+    report("composer keystroke + draw", 50, c);
+    // Scenario 4: switch between two long chats.
+    let other = crate::transcript::perf_bench::long_chat(entries);
+    let mut other_state = Some(other);
+    let (_, c) = measure_long_chat(&counters, || {
+        for i in 0..10 {
+            let target = if i % 2 == 0 { "c1" } else { "c0" };
+            state.update(vcx, |state, cx| state.select_chat(Some(target.into()), cx));
+            if let Some(entries) = other_state.take().filter(|_| i == 0) {
+                load_long_chat(&state, "c1", entries, vcx);
+            }
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear());
+        }
+    });
+    report("switch chat + draw", 10, c);
+}
+
+// Budget tests (run in the normal suite; each fails without its fix).
+
+const LONG_CHAT_BUDGET_ENTRIES: usize = 120;
+
+/// Typing in the composer must not re-render transcript rows: the transcript
+/// is a cached view that repaints only when it is notified.
+#[gpui::test]
+fn composer_keystrokes_do_not_rerender_transcript_rows(cx: &mut TestAppContext) {
+    let (_shell, _state, vcx, counters, input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    for i in 0..4 {
+        type_key(&input, vcx, 1000 + i);
+    }
+    let (_, spent) = measure_long_chat(&counters, || {
+        for i in 0..20 {
+            type_key(&input, vcx, i);
+        }
+    });
+    eprintln!("BUDGET typing: rows_rendered={} notifies={:?} ms={:.1}", spent.rows_rendered, spent.notifies, spent.ms);
+    // At most one layout-driven repaint of the visible rows (the composer
+    // growing a line); an uncached transcript re-rendered them on every key.
+    assert!(spent.rows_rendered <= 16, "keystrokes re-rendered transcript rows: {}", spent.rows_rendered);
+    let transcript_notifies = spent.notifies.iter().find(|(name, _)| *name == "transcript").unwrap().1;
+    assert_eq!(transcript_notifies, 0, "keystrokes notified the transcript");
+}
+
+/// Streaming into a long chat: code-fence pruning and the rail's tick-to-row
+/// map are O(changed rows) per delta, not O(rows).
+#[gpui::test]
+fn streaming_deltas_do_not_rescan_every_row(cx: &mut TestAppContext) {
+    const DELTAS: usize = 40;
+    let (shell, state, vcx, _counters, _input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    let rows = transcript.read_with(vcx, |t, _| t.rows().len());
+    let base = crate::transcript::perf_bench::long_chat(LONG_CHAT_BUDGET_ENTRIES);
+    let stream = prepare_stream(&base, DELTAS + 4);
+    start_streaming(&state, vcx, base);
+    transcript.update(vcx, |t, cx| t.test_scroll_to_bottom(cx));
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let mut stream = stream.into_iter();
+    for _ in 0..4 {
+        let (frame, prepared) = stream.next().unwrap();
+        apply_delta(&state, vcx, frame, prepared);
+    }
+    let fences_before = crate::markdown::render::CODE_BLOCK_INDEX_CALLS.with(|c| c.get());
+    let map_builds_before = crate::rail::RAIL_ROW_MAP_BUILDS.with(|c| c.get());
+    for (frame, prepared) in stream {
+        apply_delta(&state, vcx, frame, prepared);
+    }
+    let fences = crate::markdown::render::CODE_BLOCK_INDEX_CALLS.with(|c| c.get()) - fences_before;
+    let map_builds = crate::rail::RAIL_ROW_MAP_BUILDS.with(|c| c.get()) - map_builds_before;
+    eprintln!("BUDGET streaming {DELTAS} deltas over {rows} rows: code_block_indices calls={fences} rail row-map builds={map_builds}");
+    // Rendering the visible rows also calls code_block_indices; a full scan
+    // per delta would be `rows` calls each.
+    assert!(
+        fences < DELTAS * rows / 4,
+        "code-fence pruning scanned every row per delta: {fences} calls for {rows} rows"
+    );
+    assert!(map_builds_before > 0, "the rail never rendered; the budget is vacuous");
+    assert!(map_builds <= 2, "rail rebuilt its row map on {map_builds} of {DELTAS} deltas");
+}
