@@ -135,3 +135,25 @@ async fn stale_persisted_value_is_peekable_then_refetched() {
     assert_eq!(fresh.value, vec![2]);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn clearing_cache_discards_inflight_results() {
+    let store = Store::new(Duration::from_secs(60));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let reader = store.clone();
+    let old = tokio::spawn(async move {
+        reader.get("k", false, || async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+            Ok(vec![1])
+        }.boxed()).await.unwrap()
+    });
+    started_rx.await.unwrap();
+    store.clear();
+    let fresh = store.get("k", false, || async { Ok(vec![2]) }.boxed()).await.unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(old.await.unwrap().value, vec![1]);
+    assert_eq!(fresh.value, vec![2]);
+    assert_eq!(store.peek("k").unwrap().value, vec![2]);
+}

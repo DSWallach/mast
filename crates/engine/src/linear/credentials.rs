@@ -260,7 +260,18 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn delete_account(&self, account_id: &str) -> Result<(), String> {
-        self.write_account(account_id, "")
+        validate_account_id(account_id)?;
+        if account_id == DEFAULT_ACCOUNT_ID {
+            return self.delete();
+        }
+        let (ok, _, stderr) = Self::run(&[
+            "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", keychain_account(account_id),
+        ])?;
+        if ok || stderr.contains("could not be found") {
+            Ok(())
+        } else {
+            Err(format!("Keychain delete failed: {stderr}"))
+        }
     }
 }
 

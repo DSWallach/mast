@@ -99,6 +99,7 @@ where
         let snapshot = {
             let mut state = self.lock();
             state.entries.clear();
+            state.inflight.clear();
             persist_snapshot(&state)
         };
         write_snapshot(snapshot);
@@ -142,7 +143,8 @@ where
 
     fn finish(&self, key: &str, id: u64, result: Result<V, E>) -> Result<Entry<V>, E> {
         let mut state = self.lock();
-        if state.inflight.get(key).is_some_and(|(i, _)| *i == id) {
+        let current = state.inflight.get(key).is_some_and(|(i, _)| *i == id);
+        if current {
             state.inflight.remove(key);
         }
         let value = result?;
@@ -150,6 +152,9 @@ where
             fetched_at: Utc::now(),
             value,
         };
+        if !current {
+            return Ok(entry);
+        }
         state.entries.insert(key.to_owned(), entry.clone());
         let snapshot = persist_snapshot(&state);
         drop(state);

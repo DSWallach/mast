@@ -303,6 +303,7 @@ struct Inner {
     ticket_cache: Mutex<HashMap<TicketKey, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
     pending_ticket: Mutex<HashSet<TicketKey>>,
+    linear_ticket_revisions: Mutex<HashMap<Option<String>, u64>>,
     /// Keyed by cwd — a local, no-throttling-concern lookup (unlike
     /// `pr_cache`'s `(cwd, branch)`, since diff-stat doesn't need a branch).
     diff_stat_cache: Mutex<HashMap<PathBuf, Entry<DiffStat>>>,
@@ -350,6 +351,7 @@ impl PrTicketCache {
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
                 pending_ticket: Mutex::new(HashSet::new()),
+                linear_ticket_revisions: Mutex::new(HashMap::new()),
                 diff_stat_cache: Mutex::new(HashMap::new()),
                 pending_diff_stat: Mutex::new(HashSet::new()),
                 my_prs_list: Mutex::new(None),
@@ -374,6 +376,16 @@ impl PrTicketCache {
         workspace: crate::workspace_host::WorkspaceHost,
     ) {
         *lock(&self.inner.linear) = Some((linear, workspace));
+    }
+
+    /// Discard ticket results for a changed credential, including in-flight reads.
+    pub fn invalidate_linear_account(&self, account_id: &str) {
+        let account = (account_id != "default").then(|| account_id.to_owned());
+        let mut revisions = lock(&self.inner.linear_ticket_revisions);
+        *revisions.entry(account.clone()).or_default() += 1;
+        lock(&self.inner.ticket_cache).retain(|key, _| {
+            !matches!(key, TicketKey::Linear { account_id, .. } if *account_id == account)
+        });
     }
 
     /// [`Self::status_for_links`] for a chat in `space_id`: when that Space
@@ -746,14 +758,21 @@ impl PrTicketCache {
         };
         for id in ticket_ids {
             let inner = self.inner.clone();
+            let revision = match &id {
+                TicketKey::Linear { account_id, .. } => Some(*lock(&inner.linear_ticket_revisions).get(account_id).unwrap_or(&0)),
+                TicketKey::Cli(_) => None,
+            };
             let data = self.fetch_ticket(id.clone()).await;
-            lock(&inner.ticket_cache).insert(
-                id,
-                Entry {
-                    data,
-                    fetched_at: Instant::now(),
-                },
-            );
+            let revisions = lock(&inner.linear_ticket_revisions);
+            let current = match &id {
+                TicketKey::Linear { account_id, .. } => Some(*revisions.get(account_id).unwrap_or(&0)),
+                TicketKey::Cli(_) => None,
+            };
+            if revision == current {
+                lock(&inner.ticket_cache).insert(id, Entry { data, fetched_at: Instant::now() });
+            } else {
+                lock(&inner.pending_ticket).insert(id);
+            }
         }
 
         let diff_stat_keys: Vec<PathBuf> = {
@@ -1712,6 +1731,20 @@ mod tests {
             cwd: PathBuf::from("/tmp/repo"),
             branch: "eng-2715-fix-thing".to_string(),
         }));
+    }
+
+    #[test]
+    fn changing_one_linear_account_invalidates_only_its_tickets() {
+        let cache = PrTicketCache::new();
+        let default = TicketKey::Linear { identifier: "ENG-1".into(), account_id: None };
+        let personal = TicketKey::Linear { identifier: "ENG-1".into(), account_id: Some("personal".into()) };
+        for key in [default.clone(), personal.clone()] {
+            lock(&cache.inner.ticket_cache).insert(key, Entry { data: None, fetched_at: Instant::now() });
+        }
+        cache.invalidate_linear_account("personal");
+        assert!(lock(&cache.inner.ticket_cache).contains_key(&default));
+        assert!(!lock(&cache.inner.ticket_cache).contains_key(&personal));
+        assert_eq!(lock(&cache.inner.linear_ticket_revisions).get(&Some("personal".into())), Some(&1));
     }
 
     #[test]

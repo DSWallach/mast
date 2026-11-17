@@ -2923,11 +2923,15 @@ impl RpcService for EngineRpc {
             methods::LINEAR_REPLACE_ACCOUNT_KEY => {
                 let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
                 let id = p.account_id.as_deref().unwrap_or("");
-                Self::linear_reply(self.linear.replace_account_key(id, &p.api_key).await.map(|()| serde_json::json!({}))).await
+                let result = self.linear.replace_account_key(id, &p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
             }
             methods::LINEAR_REMOVE_ACCOUNT => {
                 let p: mast_proto::linear::LinearRemoveAccountParams = parse_params(params)?;
-                Self::linear_reply(self.linear.remove_account(&p.account_id, &self.workspace).await.map(|()| serde_json::json!({}))).await
+                let result = self.linear.remove_account(&p.account_id, &self.workspace).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(&p.account_id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
             }
             methods::LINEAR_STATUS => {
                 let p: mast_proto::LinearStatusParams = parse_params(params)?;
@@ -2935,11 +2939,15 @@ impl RpcService for EngineRpc {
             }
             methods::LINEAR_SET_API_KEY => {
                 let p: mast_proto::LinearSetApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.set_api_key(&p.api_key).await).await
+                let result = self.linear.set_api_key(&p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_CLEAR_API_KEY => {
                 let _: mast_proto::LinearClearApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.clear_api_key().await).await
+                let result = self.linear.clear_api_key().await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_ISSUE => {
                 let p: mast_proto::LinearIssueParams = parse_params(params)?;

@@ -19,6 +19,7 @@ pub mod sync;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
@@ -115,6 +116,7 @@ struct Inner {
     backend: RwLock<Arc<Backend>>,
     /// `None` = not resolved yet; `Some(None)` = no key anywhere.
     key: Mutex<Option<Option<(String, LinearKeySource)>>>,
+    key_revision: AtomicU64,
     /// The last successful `viewer` check.
     verified: Mutex<Option<LinearConnectionStatus>>,
     issues: Mutex<HashMap<String, (Instant, LinearIssueSummary)>>,
@@ -183,6 +185,7 @@ impl LinearService {
             inner: Arc::new(Inner {
                 backend: RwLock::new(backend),
                 key: Mutex::new(None),
+                key_revision: AtomicU64::new(0),
                 verified: Mutex::new(None),
                 issues: Mutex::new(HashMap::new()),
                 attachments: Mutex::new(HashMap::new()),
@@ -244,7 +247,11 @@ impl LinearService {
     }
 
     fn forget_caches(&self) {
-        *lock(&self.inner.key) = None;
+        {
+            let mut key = lock(&self.inner.key);
+            self.inner.key_revision.fetch_add(1, Ordering::SeqCst);
+            *key = None;
+        }
         *lock(&self.inner.verified) = None;
         lock(&self.inner.issues).clear();
         lock(&self.inner.attachments).clear();
@@ -371,22 +378,27 @@ impl LinearService {
     /// The key and its source, reading the store once (off the async
     /// workers: the Keychain is a `security` process).
     async fn resolve_key(&self) -> Result<Option<(String, LinearKeySource)>, LinearError> {
-        if let Some(known) = lock(&self.inner.key).clone() {
-            return Ok(known);
+        loop {
+            let revision = {
+                let key = lock(&self.inner.key);
+                if let Some(known) = key.clone() { return Ok(known); }
+                self.inner.key_revision.load(Ordering::SeqCst)
+            };
+            let backend = self.backend();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let stored = backend.store.read()?;
+                Ok::<_, String>(match stored {
+                    Some(key) => Some((key, LinearKeySource::Keychain)),
+                    None => (backend.env)().map(|key| (key, LinearKeySource::Environment)),
+                })
+            }).await
+                .map_err(|e| LinearError::new(LinearErrorCode::Network, e.to_string()))?
+                .map_err(|message| LinearError::new(LinearErrorCode::MissingKey, message))?;
+            let mut key = lock(&self.inner.key);
+            if self.inner.key_revision.load(Ordering::SeqCst) != revision { continue; }
+            *key = Some(resolved.clone());
+            return Ok(resolved);
         }
-        let backend = self.backend();
-        let resolved = tokio::task::spawn_blocking(move || {
-            let stored = backend.store.read()?;
-            Ok::<_, String>(match stored {
-                Some(key) => Some((key, LinearKeySource::Keychain)),
-                None => (backend.env)().map(|key| (key, LinearKeySource::Environment)),
-            })
-        })
-        .await
-        .map_err(|e| LinearError::new(LinearErrorCode::Network, e.to_string()))?
-        .map_err(|message| LinearError::new(LinearErrorCode::MissingKey, message))?;
-        *lock(&self.inner.key) = Some(resolved.clone());
-        Ok(resolved)
     }
 
     /// Whether a key is available (reads the store at most once).
@@ -401,6 +413,8 @@ impl LinearService {
             .resolve_key()
             .await?
             .ok_or_else(LinearError::missing_key)?;
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
+        let rejected_key = key.clone();
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         hasher.update([0]);
@@ -423,18 +437,27 @@ impl LinearService {
         };
         let result = shared.await;
         lock(&self.inner.inflight).remove(&slot);
+        let changed = self.inner.key_revision.load(Ordering::SeqCst) != revision ||
+            lock(&self.inner.key).as_ref().and_then(|key| key.as_ref()).is_none_or(|(key, _)| key != &rejected_key);
+        if changed {
+            return Err(LinearError::new(LinearErrorCode::Network, "Linear account changed during the request"));
+        }
         if let Err(error) = &result
             && error.code == LinearErrorCode::Unauthorized
         {
-            self.forget_key(source).await;
+            self.forget_key(source, revision, &rejected_key).await;
         }
         result
     }
 
     /// After a 401: delete a stored key (an environment key cannot be
     /// deleted, it is only reported) and drop the caches.
-    async fn forget_key(&self, source: LinearKeySource) {
+    async fn forget_key(&self, source: LinearKeySource, revision: u64, rejected_key: &str) {
         let _guard = self.inner.key_change.lock().await;
+        if self.inner.key_revision.load(Ordering::SeqCst) != revision ||
+            lock(&self.inner.key).as_ref().and_then(|key| key.as_ref()).is_none_or(|(key, _)| key != rejected_key) {
+            return;
+        }
         if source == LinearKeySource::Keychain {
             let backend = self.backend();
             let deleted = tokio::task::spawn_blocking(move || backend.store.delete()).await;
@@ -575,6 +598,7 @@ impl LinearService {
         if !force && let Some(issue) = self.cached_issue(&id) {
             return Ok(issue);
         }
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
         let data = self.call(&queries::issue(), json!({ "id": id })).await?;
         let issue = data
             .get("issue")
@@ -584,6 +608,7 @@ impl LinearService {
                 LinearError::new(LinearErrorCode::NotFound, format!("{id} was not found"))
             })?;
         let mut cache = lock(&self.inner.issues);
+        if self.inner.key_revision.load(Ordering::SeqCst) != revision { return Ok(issue); }
         cache.insert(id.clone(), (Instant::now(), issue.clone()));
         if issue.identifier != id {
             // A moved issue answers under its new identifier.
@@ -609,6 +634,7 @@ impl LinearService {
         {
             return Ok(cached.clone());
         }
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
         let data = self
             .call(&queries::issue_attachments(), json!({ "id": id }))
             .await?;
@@ -618,7 +644,10 @@ impl LinearService {
                 "Linear answered issue attachments in an unexpected shape",
             )
         })?;
-        lock(&self.inner.attachments).insert(id, (Instant::now(), attachments.clone()));
+        let mut cache = lock(&self.inner.attachments);
+        if self.inner.key_revision.load(Ordering::SeqCst) == revision {
+            cache.insert(id, (Instant::now(), attachments.clone()));
+        }
         Ok(attachments)
     }
 
