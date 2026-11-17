@@ -251,6 +251,10 @@ fn bench_chat(index: usize) -> mast_proto::Chat {
         linked_pr_source: None,
         linked_ticket_id: None,
         linked_ticket_source: None,
+        scheduled_task: None,
+        scheduled_task_info: None,
+        side_of: None,
+        side_absorbed_through: None,
     }
 }
 

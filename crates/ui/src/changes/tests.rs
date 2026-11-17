@@ -1265,6 +1265,10 @@ fn chat(checkout: Option<&str>, device: &str, cwd: Option<&str>) -> Chat {
         linked_pr_source: None,
         linked_ticket_id: None,
         linked_ticket_source: None,
+        scheduled_task: None,
+        scheduled_task_info: None,
+        side_of: None,
+        side_absorbed_through: None,
     }
 }
 

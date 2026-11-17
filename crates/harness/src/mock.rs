@@ -19,6 +19,7 @@ pub struct MockHarness {
 /// driver's first flow clicks Approve).
 fn approval_script() -> Vec<UserInputQuestion> {
     vec![UserInputQuestion {
+        permission: None,
         command_approval: None,
         allow_custom: false,
         id: "q-approve".into(),
