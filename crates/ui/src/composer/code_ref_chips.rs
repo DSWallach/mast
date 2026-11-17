@@ -33,7 +33,7 @@ impl Composer {
             let label: SharedString = reference.label().into();
             row = row.child(
                 crate::components::conversation_skill_chip(theme, index)
-                    .tooltip(move |_, cx| cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference.clone(), cx)).into())
+                    .tooltip(move |_, cx| cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference.clone(), None, cx)).into())
                     .child(label)
                     .child(
                         crate::components::conversation_skill_remove(theme, index)

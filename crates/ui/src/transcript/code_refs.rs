@@ -6,7 +6,29 @@ use super::*;
 const MAX_RESOLUTIONS: usize = 256;
 const MAX_INFLIGHT: usize = 4;
 
+#[derive(Clone)]
+pub(super) struct ReferenceHover {
+    pub row: SharedString,
+    pub range: std::ops::Range<usize>,
+    pub badge_range: Option<std::ops::Range<usize>>,
+    pub key: Option<SharedString>,
+    pub resolution: Option<crate::code_ref::Resolution>,
+    pub view: Entity<crate::components::code_ref::ReferenceCard>,
+}
+
 impl Transcript {
+    pub(super) fn set_reference_hover(&mut self, row: SharedString, span: Option<crate::composer::SentMentionSpan>, cx: &mut Context<Self>) {
+        let Some(span) = span.filter(|span| span.code_ref.is_some()) else {
+            if self.code_ref_hover.take().is_some() { cx.notify(); }
+            return;
+        };
+        if self.code_ref_hover.as_ref().is_some_and(|hover| hover.row == row && hover.range == span.range && hover.key == span.resolution_key && hover.resolution == span.resolution) { return; }
+        let reference = span.code_ref.as_ref().unwrap().as_ref().clone();
+        let resolution = span.resolution;
+        let view = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference, resolution, cx));
+        self.code_ref_hover = Some(ReferenceHover { row, range: span.range, badge_range: span.badge_range, key: span.resolution_key, resolution, view });
+        cx.notify();
+    }
     pub(super) fn resolve_code_refs(
         &mut self,
         spans: &[crate::composer::SentMentionSpan],
@@ -277,6 +299,90 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn hover_reuses_card_and_clears_when_pointer_leaves(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            let reference = crate::code_ref::StagedCodeRef {
+                id: "ref".into(),
+                reference: mast_proto::CodeRef {
+                    version: 1,
+                    location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "src/file.rs".into() },
+                    kind: mast_proto::CodeRefKind::Lines,
+                    range: Some(mast_proto::CodeRefRange { start_line: 1, end_line: 1 }),
+                    symbol: None,
+                    at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+                },
+                snippet: "fn example() {}".into(),
+            };
+            let span = crate::composer::SentMentionSpan {
+                range: 0..9, badge_range: None, path: "src/file.rs:1".into(), is_dir: false,
+                code_ref: Some(Arc::new(reference)), resolution_key: None, resolution: None,
+            };
+            transcript.update(cx, |transcript, cx| {
+                transcript.set_reference_hover("row".into(), Some(span.clone()), cx);
+                let first = transcript.code_ref_hover.as_ref().unwrap().view.entity_id();
+                transcript.set_reference_hover("row".into(), Some(span), cx);
+                assert_eq!(first, transcript.code_ref_hover.as_ref().unwrap().view.entity_id());
+                transcript.set_reference_hover("row".into(), None, cx);
+                assert!(transcript.code_ref_hover.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sent_reference_opens_hover_card(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "ref".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "src/file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange { start_line: 1, end_line: 1 }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "fn example() {}".into(),
+        };
+        let span = crate::composer::SentMentionSpan {
+            range: 0..9, badge_range: None, path: "src/file.rs:1".into(), is_dir: false,
+            code_ref: Some(Arc::new(reference)), resolution_key: None, resolution: None,
+        };
+        struct Fixture(Entity<Transcript>, Entity<AppState>, Arc<Vec<crate::composer::SentMentionSpan>>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let state = self.1.clone();
+                let spans = self.2.clone();
+                let body = self.0.update(cx, |transcript, cx| super::super::user_bubble_text(
+                    &"reference".into(), "file.rs:1".into(), spans, &theme, false,
+                    Rc::new(Cell::new(0.0)), cx.entity_id(), cx.weak_entity(),
+                    transcript.code_ref_hover.clone(), None, state, None,
+                ));
+                div().id("reference-hover-fixture").debug_selector(|| "reference-hover-fixture".into()).child(body)
+            }
+        }
+        let (_, vcx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), state, Arc::new(vec![span])));
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("reference-hover-fixture").unwrap();
+        vcx.simulate_mouse_move(bounds.origin + point(px(5.0), px(5.0)), None, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        transcript.read_with(vcx, |transcript, _| assert!(transcript.code_ref_hover.is_some()));
+    }
 
     #[test]
     fn projects_moved_and_changed_reference_labels() {

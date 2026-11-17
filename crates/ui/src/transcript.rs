@@ -3224,6 +3224,7 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    code_ref_hover: Option<code_refs::ReferenceHover>,
     code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     code_ref_inflight: usize,
     code_ref_generation: u64,
@@ -3585,6 +3586,7 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            code_ref_hover: None,
             code_ref_resolutions: HashMap::new(),
             code_ref_inflight: 0,
             code_ref_generation: 0,
@@ -4748,6 +4750,7 @@ impl Transcript {
         if self.code_ref_context != code_ref_context {
             self.code_ref_context = code_ref_context;
             self.code_ref_resolutions.clear();
+            self.code_ref_hover = None;
             self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             cx.notify();
         }
@@ -4789,6 +4792,7 @@ impl Transcript {
             }
             self.chat_id = selected;
             self.code_ref_resolutions.clear();
+            self.code_ref_hover = None;
             self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
             self.rows.clear();
             self.rows_generation = self.rows_generation.wrapping_add(1);
@@ -5802,6 +5806,8 @@ impl Transcript {
                 compact,
                 measured_h.clone(),
                 cx.entity_id(),
+                cx.weak_entity(),
+                self.code_ref_hover.clone(),
                 self.link_ui(),
                 self.state.clone(),
                 self.chat_id.clone(),
@@ -7667,6 +7673,8 @@ fn user_bubble_text(
     compact: bool,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
+    transcript: gpui::WeakEntity<Transcript>,
+    reference_hover: Option<code_refs::ReferenceHover>,
     link_ui: Option<render::LinkUi>,
     state: Entity<AppState>,
     chat_id: Option<String>,
@@ -7772,8 +7780,51 @@ fn user_bubble_text(
     .absolute()
     .size_full();
     let hit_layout = styled.layout().clone();
+    let hover_layout = styled.layout().clone();
+    let tooltip_layout = styled.layout().clone();
+    let hover_mentions = hit_mentions.clone();
+    let has_code_references = hover_mentions.iter().any(|span| span.code_ref.is_some());
+    let hover_transcript = transcript.clone();
+    let hover_row = row_id.clone();
+    let tooltip_row = row_id.clone();
+    let tooltip = canvas(
+        move |_, window, _| {
+            let Some(hover) = reference_hover.as_ref().filter(|hover| hover.row == tooltip_row) else { return; };
+            let mut rects = render::range_rects(&tooltip_layout, &hover.range, 0.0, 2.0);
+            if let Some(badge) = &hover.badge_range { rects.extend(render::range_rects(&tooltip_layout, badge, 0.0, 2.0)); }
+            let Some(anchor) = rects.first().map(|rect| point(rect.left(), rect.bottom())) else { return; };
+            let owner = transcript.clone();
+            let row = hover.row.clone();
+            let range = hover.range.clone();
+            let key = hover.key.clone();
+            window.set_tooltip(gpui::AnyTooltip {
+                view: hover.view.clone().into(),
+                mouse_position: anchor,
+                check_visible_and_update: Rc::new(move |popup, window, cx| {
+                    let pointer = window.mouse_position();
+                    if rects.iter().any(|rect| rect.contains(&pointer)) || popup.contains(&pointer) { return true; }
+                    let _ = owner.update(cx, |this, cx| {
+                        if this.code_ref_hover.as_ref().is_some_and(|hover| hover.row == row && hover.range == range && hover.key == key) {
+                            this.code_ref_hover = None;
+                            cx.notify();
+                        }
+                    });
+                    false
+                }),
+            });
+        },
+        |_, _, _, _| (),
+    ).absolute().size_full();
     div()
         .relative()
+        .when(has_code_references, |element| element.on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button.is_some() { return; }
+            let span = if hover_layout.bounds().contains(&event.position) {
+                let index = match hover_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
+                hover_mentions.iter().find(|span| span.code_ref.is_some() && (span.range.contains(&index) || span.badge_range.as_ref().is_some_and(|range| range.contains(&index)))).cloned()
+            } else { None };
+            let _ = hover_transcript.update(cx, |this, cx| this.set_reference_hover(hover_row.clone(), span, cx));
+        }))
         .on_mouse_up(gpui::MouseButton::Left, move |event, window, cx| {
             if !hit_layout.bounds().contains(&event.position) { return; }
             let index = match hit_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
@@ -7787,6 +7838,7 @@ fn user_bubble_text(
         })
         .child(underlay)
         .child(styled)
+        .when(has_code_references, |element| element.child(tooltip))
         .into_any_element()
 }
 
