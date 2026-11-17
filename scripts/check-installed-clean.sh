@@ -33,7 +33,7 @@ fi
 
 # Fail closed if the host refuses to lower the build priority.
 python3 -c 'import os; os.nice(10); os.execvp("cargo", ["cargo", "build", "--profile", "installed", "-p", "mast", "--bin", "mast", "--locked"])'
-binary=target/installed/mast
+binary="${CARGO_TARGET_DIR:-$PWD/target}/installed/mast"
 nm "$binary" > "$symbol_file"
 strings "$binary" >> "$symbol_file"
 if grep -iE 'mast[_-]ui[_-]driver|cue[_-]harness|world[_-]generator|ui[_-]drive' "$symbol_file"; then
