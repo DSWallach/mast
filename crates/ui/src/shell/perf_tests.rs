@@ -28,7 +28,7 @@ fn working_heartbeat_notifies_transcript_without_notifying_sidebar(cx: &mut Test
         state.sessions = vec![mast_proto::Session {
             chat_id: "c0".into(), device_id: "local".into(),
             status: mast_proto::SessionStatus::Working, started_at: Some(now), updated_at: now,
-            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None,
+            last_completed_turn: None, awaiting_input: None, last_turn_tool_failures: None, todo_progress: None,
         }];
     });
     let shell = cx.new(|cx| Shell::new(state, EngineBootConfig {
@@ -77,7 +77,7 @@ fn sidebar_frame_cost(cx: &mut TestAppContext) {
         state.sessions = (395..400).map(|index| mast_proto::Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: format!("c{index}"),
             device_id: "local".into(),
             status: mast_proto::SessionStatus::Working,
@@ -324,7 +324,7 @@ fn streaming_one_chat_among_many_notifies_few_views(cx: &mut TestAppContext) {
             state.sessions = vec![mast_proto::Session {
                 last_completed_turn: None,
                 awaiting_input: None,
-                last_turn_tool_failures: None,
+                last_turn_tool_failures: None, todo_progress: None,
                 chat_id: "c1".into(),
                 device_id: "local".into(),
                 status: mast_proto::SessionStatus::Working,
@@ -839,7 +839,7 @@ fn sidebar_budget_fixture(
             .map(|index| mast_proto::Session {
                 last_completed_turn: None,
                 awaiting_input: None,
-                last_turn_tool_failures: None,
+                last_turn_tool_failures: None, todo_progress: None,
                 chat_id: format!("c{index}"),
                 device_id: "local".into(),
                 status: mast_proto::SessionStatus::Working,

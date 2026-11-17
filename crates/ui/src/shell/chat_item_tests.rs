@@ -1095,7 +1095,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                     state.sessions.push(mast_proto::Session {
                         last_completed_turn: None,
                         awaiting_input: None,
-                        last_turn_tool_failures: None,
+                        last_turn_tool_failures: None, todo_progress: None,
                         chat_id: id.clone(),
                         device_id: "device".into(),
                         status: mast_proto::SessionStatus::Working,

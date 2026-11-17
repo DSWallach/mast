@@ -75,6 +75,8 @@ impl WorkerState {
 pub(crate) struct WorkerPr {
     pub additions: Option<u64>,
     pub deletions: Option<u64>,
+    pub branch: Option<String>,
+    pub head_sha: Option<String>,
     pub number: u64,
     pub url: String,
     pub checks: Option<ChecksStatus>,
@@ -89,6 +91,8 @@ impl WorkerPr {
         Self {
             additions: detail.and_then(|pr| pr.additions),
             deletions: detail.and_then(|pr| pr.deletions),
+            branch: detail.and_then(|pr| pr.branch.clone()),
+            head_sha: detail.and_then(|pr| pr.head_sha.clone()),
             number,
             url,
             checks: detail.and_then(|pr| pr.checks),
@@ -546,7 +550,7 @@ mod tests {
     #[test]
     fn pr_chips_carry_checks_and_review() {
         let pr = WorkerPr {
-            additions: Some(312), deletions: Some(48),
+            branch: None, head_sha: None, additions: Some(312), deletions: Some(48),
             number: 12,
             url: "u".into(),
             checks: Some(ChecksStatus::Passing),
@@ -577,7 +581,7 @@ mod tests {
             review: false, merged: false,
         });
         worker.diff = Some((2, 0));
-        worker.prs.push(WorkerPr { additions: None, deletions: None, number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
+        worker.prs.push(WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
             review: Some("approved"), draft: false, state: "OPEN".into() });
         assert_eq!(worker.tracker_stages(), TrackerStages {
             chat_started: true, changes: true, pr_open: true, checks: true,

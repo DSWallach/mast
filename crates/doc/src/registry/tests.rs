@@ -343,7 +343,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
@@ -1381,7 +1381,9 @@ fn completion_marker_replicates_and_survives_next_turn() {
     row.last_completed_turn = Some("turn-one".into());
     row.awaiting_input = Some(mast_proto::AwaitingInput { request_id: "r1".into(), questions: vec![mast_proto::UserInputQuestion { command_approval: None, allow_custom: false, id: "q1".into(), header: "Approval".into(), question: "Run build?".into(), options: vec![], multi_select: false }] });
     row.last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 2, tools: vec!["bind_chat_worktree".into()] });
+    row.todo_progress = Some(mast_proto::TodoProgress { done: 3, total: 7 });
     source.upsert_session(&row).unwrap();
+    assert_eq!(source.session("chat-1").unwrap().todo_progress, row.todo_progress);
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
     row.status = SessionStatus::Working;
