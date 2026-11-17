@@ -7478,7 +7478,7 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
         );
         changes.word_spans.finish((key.clone(), 0, 0), Arc::new(word_diff::spans(&files[0].hunks[0].lines)));
         if let Some(gaps) = expand_context::gaps(&files[0], "// configuration\n// entry point\nfn main() {\n    new();\n}\n// end\n") {
-            changes.expanded_context.entries.insert((key.clone(), 0), expand_context::Entry::ready(gaps, vec![2, 0]));
+            changes.expanded_context.entries.insert((key.clone(), 0), expand_context::Entry::ready(gaps, vec![0, 0]));
             changes.expanded_context.order.push((key.clone(), 0));
         }
         let (rows, indices) = expand_context::add_rows(rows, &files, &key, &changes.expanded_context);

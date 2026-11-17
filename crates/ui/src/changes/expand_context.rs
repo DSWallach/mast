@@ -284,6 +284,14 @@ mod tests {
     }
 
     #[test]
+    fn known_gap_size_uses_the_previous_new_side_range() {
+        let file = super::super::parse_patch("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -3,1 +3,2 @@\n three\n+added\n@@ -8,1 +9,1 @@\n eight\n").remove(0);
+        assert_eq!(known_gap_size(&file, 0), Some(2));
+        assert_eq!(known_gap_size(&file, 1), Some(4));
+        assert_eq!(known_gap_size(&file, 2), None);
+    }
+
+    #[test]
     fn expanding_rows_keeps_hunk_rows_and_uses_one_cached_read() {
         let file =
             super::super::parse_patch("diff --git a/a b/a\n@@ -3 +3 @@\n-old\n+new\n").remove(0);

@@ -330,6 +330,7 @@ impl TourCoverage {
         }
     }
 
+    #[cfg(test)]
     pub fn reviewed_count(&self, viewed: &BTreeSet<String>) -> usize {
         self.steps
             .iter()
@@ -1215,7 +1216,6 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
     }"#).unwrap();
     let (_, review) = document.into_review().unwrap();
     let changes = populated.then(|| super::snapshot_populated_changes(cx));
-    let populated = changes.is_some();
     if let Some(changes) = &changes {
         changes.update(cx, |changes, cx| {
             changes.review_walkthrough = true;
