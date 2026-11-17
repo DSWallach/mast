@@ -611,7 +611,7 @@ async fn an_archived_child_comes_back_when_its_ticket_matches_again() {
         .set(vec![node("ENG-1", "T", "backlog", ME, None)], &["ENG-1"]);
     rig.refresh(SPACE).await.unwrap();
     let item = rig.child(&dest, "ENG-1");
-    assert!(item.archived_at.is_none());
+    assert!(item.archived_at.is_none(), "{item:?}");
     assert!(marker(&item).is_none());
     assert_eq!(rig.children(&dest).len(), 1);
 }

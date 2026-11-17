@@ -27,7 +27,9 @@ impl TokenUsage {
 
     pub fn follow_deletions(&self, workspace: crate::WorkspaceHost) -> tokio::task::JoinHandle<()> {
         let usage = self.clone();
-        let mut changes = workspace.watch_chats();
+        // The deduplicated chat list can stay empty across a rapid create/delete.
+        // Registry revisions retain that deletion signal even when no list changed.
+        let mut changes = workspace.watch_changes();
         tokio::spawn(async move {
             loop {
                 let usage = usage.clone();
