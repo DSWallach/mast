@@ -61,7 +61,7 @@ impl SmallWorld {
             value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
             format!("{kind}-{:016x}", value ^ (value >> 31))
         };
-        let spaces: Vec<_> = (0..2)
+        let spaces: Vec<_> = (0..1)
             .map(|index| SpaceFixture {
                 id: id("space"),
                 repository: format!("space-{index}"),
@@ -127,7 +127,7 @@ mod tests {
                 first.items.len(),
                 first.requests.len()
             ),
-            (2, 3, 5, 12, 2)
+            (1, 3, 5, 12, 2)
         );
         for request in &first.requests {
             let item = first

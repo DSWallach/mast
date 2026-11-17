@@ -94,7 +94,9 @@ impl ScratchDirectories {
         std::fs::write(&stub_log, b"")?;
         // Keep git disabled until its confinement checks cover every repository
         // indirection. The prototype guard is tested separately below.
-        for program in ["gh", "claude", "codex", "git"] {
+        for program in [
+            "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh", "git",
+        ] {
             let path = shims.join(program);
             // The log location comes from the cleared child environment, not a
             // caller-supplied command argument.
@@ -194,6 +196,8 @@ impl ScratchDirectories {
             .env("MAST_DRIVER_ROOT", &self.paths.root)
             .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
             .env("MAST_DRIVER_STUB_LOG", &self.stub_log)
+            .env("MAST_SOAK", "1")
+            .env("MAST_SOAK_SHIM_DIR", &self.shims)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("PATH", path)
             .output()
