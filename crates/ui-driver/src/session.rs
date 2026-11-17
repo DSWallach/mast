@@ -22,8 +22,16 @@ use mast_ui::{
 use crate::tree::{Frame, Rect};
 
 pub const VIEWPORT: (f32, f32) = (1200.0, 800.0);
-/// Draws per settle, so a never-quiet UI cannot hang a step.
-const MAX_DRAWS: u32 = 24;
+/// Draws per settle, so a never-quiet UI cannot hang a step. Sized for the
+/// own-send glide, which eases the prompt up over several dozen frames.
+const MAX_DRAWS: u32 = 90;
+/// Real time given to each frame that ran `on_next_frame` callbacks; the
+/// scroll glide and spring ease by elapsed wall time.
+const FRAME_SLEEP: Duration = Duration::from_millis(16);
+/// Frame-callback draws with an unchanged tree before the step ends. A glide
+/// changes the tree as soon as rows scroll into view; a spinner never does, so
+/// this stops it costing the full cap on every step.
+const ANIMATION_QUIET_DRAWS: u32 = 20;
 /// Time given to engine replies (tokio threads) to land before a step ends.
 const QUIET_CHECKS: u32 = 3;
 const QUIET_SLEEP: Duration = Duration::from_millis(30);
@@ -35,6 +43,8 @@ pub struct Timing {
     /// Summed wall time of `Window::draw` over the step.
     pub draw_ms: f64,
     pub draws: u32,
+    /// Of `draws`, how many ran a next-frame callback (glide, spring, spinner).
+    pub animated: u32,
     pub nodes: usize,
     /// Not counted: gpui exposes no cheap notify counter.
     pub notifies: Option<u64>,
@@ -193,20 +203,27 @@ impl Session {
         self.cx.run_until_parked();
     }
 
-    fn draw(&mut self) -> Duration {
+    /// Draw once and deliver the next frame. Returns the draw time and how
+    /// many `on_next_frame` callbacks ran: a test window has no platform frame
+    /// loop, so without this nothing frame-driven (the own-send glide that
+    /// scrolls the prompt up and the reply into view, the follow spring) ever
+    /// advances.
+    fn draw(&mut self) -> (Duration, usize) {
         self.cx.run_until_parked();
         let started = Instant::now();
-        self.cx
+        let ran = self
+            .cx
             .update_window(self.window, |_, w, c| {
                 // Cached views (the sidebar) reuse their last paint, which
                 // carries no a11y nodes or debug bounds; refreshing makes every
                 // draw a full one, so the tree is complete. Draw timing is
                 // therefore the uncached worst case.
                 w.refresh();
-                w.draw(c).clear()
+                w.draw(c).clear();
+                w.simulate_next_frame(c)
             })
             .expect("draw");
-        started.elapsed()
+        (started.elapsed(), ran)
     }
 
     fn capture(&mut self) -> Result<Frame, String> {
@@ -232,12 +249,30 @@ impl Session {
         let mut last = String::new();
         let mut stable = 0;
         let mut quiet = 0;
+        let mut still = 0;
         while timing.draws < MAX_DRAWS {
-            timing.draw_ms += self.draw().as_secs_f64() * 1000.0;
+            let (drew, animating) = self.draw();
+            timing.draw_ms += drew.as_secs_f64() * 1000.0;
             timing.draws += 1;
             self.frame = self.capture().unwrap_or_default();
             let hash = self.frame.hash();
-            if hash == last {
+            if animating > 0 {
+                // A frame callback ran (glide, spring): the next draw may move
+                // things even when this tree hash matches the last one.
+                timing.animated += 1;
+                if hash != last {
+                    last = hash;
+                    still = 0;
+                } else {
+                    still += 1;
+                }
+                stable = 0;
+                quiet = 0;
+                if still >= ANIMATION_QUIET_DRAWS {
+                    break;
+                }
+                self.pump(FRAME_SLEEP);
+            } else if hash == last {
                 stable += 1;
             } else {
                 stable = 0;

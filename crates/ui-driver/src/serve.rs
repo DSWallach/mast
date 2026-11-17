@@ -68,6 +68,7 @@ fn timing_json(t: &Timing) -> Value {
     json!({
         "wall_ms": round(t.wall_ms),
         "draw_ms": round(t.draw_ms),
+        "animated": t.animated,
         "draws": t.draws,
         "nodes": t.nodes,
         "notifies": t.notifies,
