@@ -22,18 +22,6 @@ fn section_menu_labels(id: &str) -> &'static [&'static str] {
 
 impl Shell {
     pub(super) fn active_sidebar_sections(&self, cx: &App) -> Vec<SidebarSection> {
-        self.sidebar_sections_with_outline(true, cx)
-    }
-
-    pub(super) fn custom_sidebar_sections(&self, cx: &App) -> Vec<SidebarSection> {
-        self.sidebar_sections_with_outline(false, cx)
-    }
-
-    fn sidebar_sections_with_outline(
-        &self,
-        include_outline: bool,
-        cx: &App,
-    ) -> Vec<SidebarSection> {
         let local = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
         let mut sections = if local {
             self.active_sidebar_pin_profile_key(cx)
@@ -50,7 +38,7 @@ impl Shell {
                 change.project_sections(&mut sections);
             }
         }
-        if !include_outline || !self.settings.sidebar_outline_groups {
+        if !self.settings.sidebar_outline_groups {
             return sections;
         }
         let state = self.state.read(cx);
