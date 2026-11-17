@@ -2103,6 +2103,7 @@ pub struct Changes {
     review_tour: bool,
     review_task: Option<Task<()>>,
     review_threads: Vec<mast_proto::ReviewThread>,
+    collapsed_review_threads: std::collections::HashSet<String>,
     review_thread_index: review_drafts::ThreadIndex,
     unplaced_review_threads: Vec<usize>,
     review_threads_task: Option<Task<()>>,
@@ -2401,6 +2402,7 @@ impl Changes {
             review_tour: false,
             review_task: None,
             review_threads: Vec::new(),
+            collapsed_review_threads: std::collections::HashSet::new(),
             review_thread_index: review_drafts::ThreadIndex::default(),
             unplaced_review_threads: Vec::new(),
             review_threads_task: None,
@@ -4740,7 +4742,7 @@ impl Changes {
                 let Some(identity) = self.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.get(file as usize)).and_then(|items| items.get(hunk as usize)) else { return gpui::Empty.into_any_element(); };
                 let viewed = self.review_state.as_ref().is_some_and(|state| state.viewed_hunks.contains(identity));
                 let seen = self.seen_hunks.contains(identity);
-                let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if self.review_state.is_none() { "Loading review…" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
+                let label = if self.review_closed { "PR closed" } else if self.review_error.is_some() { "Review unavailable" } else if viewed { "Viewed" } else if seen { "· Mark viewed" } else { "Mark viewed" };
                 // Latest Turn's deleted-only preimage in the checkout's own repository is a tree snapshot, which CodeRef
                 // cannot yet name. Expanded submodule hunks anchor to the submodule's own commits, so they never hit that.
                 let nested_repository = origins.get(file as usize).is_some_and(|origin| origin.repository_path.is_some());
@@ -4749,16 +4751,16 @@ impl Changes {
                     .when(show_reference, |row| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
-                            .text_size(px(10.0)).text_color(theme.text_muted).child("Add hunk to chat")
+                            .text_size(crate::typography::ui_rems(10.0)).when(true, |el| crate::components::hunk_action(el, &theme)).child("Add hunk to chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
-                    .child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
+                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
                         .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
                         .text_size(px(10.0)).text_color(theme.text_muted)
-                        .when(true, |el| crate::components::review_text_action(el, &theme))
+                        .when(true, |el| crate::components::hunk_action(el, &theme))
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
-                        .child(label))
+                        .child(label)))
                     .into_any_element()
             },
             DiffRow::Line {
@@ -4998,7 +5000,7 @@ impl Changes {
                 }
             }
             DiffRow::ReviewThread { thread, height, .. } => {
-                self.render_review_thread(thread as usize, height, &theme)
+                self.render_review_thread(thread as usize, height, &theme, cx)
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -5227,7 +5229,7 @@ impl Changes {
             chevron.into_any_element()
         };
 
-        // Header row: chevron + mono path (one quiet tone) + right-aligned
+        // Header row: chevron + path + right-aligned
         // +N / −N counts on a slightly raised wash. The header carries the
         // section separator (the per-file wrapper it used to hang on is
         // gone — rows are flat now).
@@ -5272,11 +5274,13 @@ impl Changes {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .flex()
+                    .overflow_hidden()
                     .font_family(theme.font_mono.clone())
                     .text_size(px(12.0))
-                    .text_color(theme.text_dim)
-                    .child(SharedString::from(file.path.clone())),
+                    .text_color(theme.text_faint)
+                    .child(div().truncate().child(SharedString::from(file.path.rsplit_once('/').map_or(String::new(), |(dir, _)| format!("{dir}/")))))
+                    .child(div().flex_none().font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child(SharedString::from(file.path.rsplit('/').next().unwrap_or(&file.path).to_owned()))),
             )
             .when(collapsed && is_large_file(file), |el| {
                 el.child(div().flex_none().text_size(px(10.0)).text_color(theme.text_muted).child("Load diff"))
@@ -6573,10 +6577,9 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .items_center()
         .px(px(Theme::SPACE_LG))
         .bg(theme.diff_hunk_bg)
-        .font_family(theme.font_mono.clone())
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_faint)
-        .child(SharedString::from(header.to_string()))
+        .child(SharedString::from(crate::components::hunk_label(header)))
         .into_any_element()
 }
 

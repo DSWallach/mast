@@ -3,6 +3,40 @@
 use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
+/// Describe the new-side range and optional section without the diff syntax.
+pub(crate) fn hunk_label(header: &str) -> String {
+    let Some((ranges, section)) = header.strip_prefix("@@ ").and_then(|s| s.split_once(" @@")) else {
+        return header.to_owned();
+    };
+    let Some(range) = ranges.split_whitespace().find_map(|part| part.strip_prefix('+')) else {
+        return header.to_owned();
+    };
+    let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+    let (Ok(start), Ok(count)) = (start.parse::<u32>(), count.parse::<u32>()) else {
+        return header.to_owned();
+    };
+    let lines = if count <= 1 {
+        format!("Line {start}")
+    } else {
+        format!("Lines {start}–{}", start.saturating_add(count - 1))
+    };
+    let section = section.trim();
+    if section.is_empty() {
+        lines
+    } else {
+        format!("{lines} · {section}")
+    }
+}
+
+pub(crate) fn hunk_action<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element
+        .px(px(Theme::SPACE_SM))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .border_1()
+        .border_color(theme.border)
+        .text_color(theme.text_muted)
+}
+
 pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
     if super::is_industrial(theme) {
         crate::popover::tracked_upper(label).into()
@@ -666,6 +700,11 @@ pub(crate) fn walkthrough_progress_label(progress: String, theme: &Theme) -> gpu
 
 pub(crate) fn walkthrough_mode<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
+        .px(px(Theme::SPACE_SM))
+        .py(px(Theme::SPACE_XS))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
+        .bg(theme.surface_raised)
+        .text_color(theme.text)
         .when(super::is_industrial(theme), |element| {
             element
                 .px(px(8.0))
