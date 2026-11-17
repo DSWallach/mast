@@ -1219,6 +1219,24 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-16 20:35; coordinator da545eee)
+
+- **Installed: release 98** (84cfe6629), the first install through the enforced perf gate (release-test + soak stamps).
+  Mikey's running Mast is still 96 until he restarts; 97 was installed then superseded by 98 before a restart.
+  - 97: idle git rate fix (spawn-free checkout identity, repair probe re-baselined, diff_sync/diff_targets under the
+    gate) + attach-kick race fix. Soak vs 96: idle git 50 vs 200/min, idle CPU 0.7 vs 3.0%, footprint 390 vs 645 MB.
+  - 98: wave 1 merged from `code-review-nav`: code reference + Add to chat (hidden on expanded submodule hunks and
+    deleted-only Latest Turn hunks; follow-up 0527213f), coordination board + table, inline diagrams (thumbnails on,
+    auto-open off by default), word diff + expand context, review phase 5 (local drafts, suggestions, read-only GitHub
+    threads; no posting). Release tests 2584/2584 + UI; soak vs 97 equal CPU and git rate, footprint 456 vs 347 MB.
+- Gate fixes on the way: quarantined the two mast-preview peer/leak tests that always hang on this Mac (still run
+  under `--quarantine`); perf-soak reads footprint via proc_pid_rusage (vmmap stalled the sampler 10+ min) and
+  invalidates runs whose window overruns; it refuses to start at load > 12.
+- Next: headless UI driver phase 1 (plan mast-artifact:10cf07e3bdb339761d5962e11b1ea3f8, items B0–B5, agent-only,
+  nothing in the installed binary). Then code-ref submodule hunks (0527213f), review phase 6 (needs Mikey's GitHub
+  posting call), sidebar spinner redraw (2694931e), freeze watchdog (17c9d278).
+- Needs Mikey: Perf gate instruction proposal; approval rule for niced cargo commands; older items.
+
 ## In flight (snapshot 2026-11-16 evening; coordinator da545eee)
 
 - **Installed: release 96** = 95 + network git ops skip the spawn gate + post-mortem guardrails P1–P4
