@@ -22,6 +22,12 @@ Budget test `crates/engine/tests/diff_sync_repair_backoff.rs`: 50 idle checkouts
 no repair tick. With the watchers dropped (events never delivered), a HEAD change is published within the
 5-tick bound (observed after 2 ticks, depending on phase).
 
+Undecidable probes (a workspace root with a dirty submodule, e.g. the monorepo roots on real data) ran a
+full capture (~10 spawns, more with submodules) every tick. An unchanged capture now counts as a quiet
+tick, so they back off under the same bound; a changed one resets. `diff_sync_submodule_backoff.rs`: 6
+such checkouts, 15 ticks: 180 spawns vs ~540 unbacked; a missed edit is caught within the bound
+(observed 3 ticks).
+
 ## 2. Post-attach re-probe
 
 The first sync probes (`git status`), captures, and after the watchers attach a second probe closes the
@@ -49,3 +55,18 @@ the ABBA run (not reproduced in the two-run order). The earlier 150 MB gap is th
 order alone; it may be real difference between the candidate and installed builds, or data drift.
 `perf-soak.sh` now defaults to base, cand, cand, base and averages each side (`--order ab|ba` keeps the cheap
 two-run form), prints a per-run table, and keeps the stamp format.
+
+## Soak numbers (real data, 44 checkouts, ~13 min, candidate only)
+
+| Run | steady git/min | git spawns | footprint MB |
+| --- | --- | --- | --- |
+| before (branch tip + ABBA 180 s, candidate) | 39.4 (baseline 41.2) | 254 / 247 | 586 / 568 |
+| after probe backoff, 780 s | 35.6 | 616 | 585 |
+| after + undecidable-probe backoff, 780 s | 35.8 | 573 | 474 |
+
+The real-data soak did **not** show the test-level reduction: steady spawns stayed ~36/min. The 180 s window
+holds a single repair tick, so ABBA 180 s cannot show backoff at all; the 780 s runs do, and still read ~36/min.
+By subcommand the remaining spawns are ~250 `diff`, ~215 `status`, ~80 `rev-parse`, ~35 `config` per 13 min,
+i.e. captures that are not repair ticks. The soak runs against the real checkouts, which other workers were
+building in, so watcher-driven syncs from live edits are the likely floor. Not confirmed; next step is
+tagging spawns by trigger (watcher, repair, attach) in the git guard log.
