@@ -25,6 +25,7 @@ pub(crate) fn code_block(
     first_line: u32,
     document: Option<&HighlightedDocument>,
     theme: &Theme,
+    text_size: gpui::AbsoluteLength,
 ) -> gpui::Div {
     let mono = gpui::font(theme.font_mono.clone());
     let lines = source.split('\n').enumerate().map(|(index, line)| {
@@ -35,7 +36,7 @@ pub(crate) fn code_block(
                 .text_color(theme.text_faint).child(first_line.saturating_add(index as u32).to_string()))
             .child(StyledText::new(line.to_owned()).with_runs(runs))
     });
-    div().font_family(theme.font_mono.clone()).text_size(crate::typography::ui_rems(12.0)).children(lines)
+    div().font_family(theme.font_mono.clone()).text_size(text_size).children(lines)
 }
 
 /// Render inline backtick spans without changing the surrounding prose.

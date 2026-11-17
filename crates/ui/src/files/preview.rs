@@ -1952,7 +1952,7 @@ impl FilesSurface {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         if let Some(reference) = self.pinned_reference.as_ref() {
-            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), &theme, cx);
+            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), &theme, self.preview.editor_text_size(), cx);
         }
         let typography_generation = crate::typography::generation(cx);
         if self.preview.typography_generation != typography_generation {

@@ -10,6 +10,7 @@ pub(crate) struct ReferenceCard {
     label: String,
     source: String,
     first_line: u32,
+    remaining_lines: u32,
     highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
 }
 
@@ -18,7 +19,14 @@ impl ReferenceCard {
         if cx.try_global::<ReferenceHighlightCache>().is_none() {
             cx.set_global(ReferenceHighlightCache::default());
         }
-        let source = super::code_block::bounded_source(&reference.snippet);
+        let bounded = super::code_block::bounded_source(&reference.snippet);
+        let source = bounded.split('\n').take(4).collect::<Vec<_>>().join("\n");
+        let visible_lines = source.split('\n').count() as u32;
+        let total_lines = reference.reference.range.map_or_else(
+            || bounded.lines().count() as u32,
+            |range| range.end_line.saturating_sub(range.start_line).saturating_add(1),
+        );
+        let remaining_lines = total_lines.saturating_sub(visible_lines);
         let path = reference.reference.location.path.clone();
         let key = mast_syntax::language_for_path(&path)
             .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
@@ -41,7 +49,7 @@ impl ReferenceCard {
                 }
             }).detach();
         }
-        Self { label: reference.label(), source, first_line: reference.reference.range.map_or(1, |range| range.start_line), highlight }
+        Self { label: reference.label(), source, first_line: reference.reference.range.map_or(1, |range| range.start_line), remaining_lines, highlight }
     }
 }
 
@@ -52,7 +60,9 @@ impl gpui::Render for ReferenceCard {
             .overflow_hidden().p(px(Theme::SPACE_MD)).rounded(px(Theme::SPACE_SM))
             .border_1().border_color(theme.border).bg(theme.surface_raised).text_color(theme.text)
             .child(div().text_color(theme.text_muted).child(self.label.clone()))
-            .child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme))
+            .child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme, crate::typography::ui_rems(12.0).into()))
+            .when(self.remaining_lines > 0, |card| card.child(div().text_color(theme.text_muted)
+                .child(format!("{} more lines", self.remaining_lines))))
     }
 }
 

@@ -5,6 +5,7 @@ pub(super) fn pinned_view(
     source: &str,
     highlight: Option<&mast_syntax::HighlightedDocument>,
     theme: &crate::theme::Theme,
+    editor_text_size: f32,
     cx: &gpui::Context<super::FilesSurface>,
 ) -> AnyElement {
     let first_line = reference.reference.range.map_or(1, |range| range.start_line);
@@ -24,15 +25,26 @@ pub(super) fn pinned_view(
         .child(
             div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM))
                 .text_color(theme.text_muted)
-                .child(reference.label())
-                .child(div().text_color(theme.danger_muted).child("Changed"))
-                .child(div().id("pinned-add-to-chat").cursor_pointer().child("Add to chat")
-                    .on_click(cx.listener(move |this, _, _, cx| this.stage_reference(staged.clone(), cx))))
-                .child(div().id("pinned-copy-reference").cursor_pointer().child("Copy ref")
-                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone())))),
+                .child(reference.reference.location.workspace_path())
+                .child(reference.reference.range.map(|range| format!("L{}–{}", range.start_line, range.end_line)).unwrap_or_default())
+                .child(div().px(px(crate::theme::Theme::SPACE_SM)).py(px(crate::theme::Theme::SPACE_XS))
+                    .rounded(px(crate::theme::Theme::SPACE_XS)).bg(theme.warning.opacity(0.12))
+                    .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(11.0)).child("Changed"))
+                .child(div().flex_1())
+                .children(mast_syntax::language_for_path(&reference.reference.location.path)
+                    .map(|language| div().text_color(theme.text_faint).child(format!("{language:?}")))),
         )
-        .child(crate::components::code_block::code_block(source, first_line, highlight, theme))
+        .child(div().my(px(crate::theme::Theme::SPACE_SM)).p(px(crate::theme::Theme::SPACE_SM))
+            .rounded(px(crate::theme::Theme::SPACE_XS)).bg(theme.warning.opacity(0.10))
+            .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(12.0))
+            .child("These lines no longer match the file. You are looking at the version that was sent."))
+        .child(crate::components::code_block::code_block(source, first_line, highlight, theme, px(editor_text_size).into()))
         .when(source.len() < reference.snippet.len(), |view| view.child("Excerpt truncated"))
+        .child(div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM)).pt(px(crate::theme::Theme::SPACE_MD))
+            .child(crate::components::button("pinned-add-to-chat", "Add to chat", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+                .on_click(cx.listener(move |this, _, _, cx| this.stage_reference(staged.clone(), cx))))
+            .child(crate::components::button("pinned-copy-reference", "Copy ref", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
+                .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone())))))
         .into_any_element()
 }
 
