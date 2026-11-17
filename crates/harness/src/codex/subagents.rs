@@ -70,11 +70,14 @@ impl Subagents {
         method: &str,
         params: &Value,
     ) -> Vec<AgentEvent> {
-        let events = self
+        let mut events = self
             .streams
             .entry(child.to_owned())
             .or_default()
             .map(child, method, params);
+        if matches!(method,"item/started"|"item/completed") {
+            events.extend(super::usage::tool_diagnostics(method,params.get("item").unwrap_or(&Value::Null)));
+        }
         self.route(child, events)
     }
 

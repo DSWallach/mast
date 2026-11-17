@@ -35,6 +35,7 @@ pub mod capabilities {
     /// The host runs `StartPrReview` (check out a PR like the Cofactr
     /// launcher and start a review Chat). Clients forward a PR review start
     /// only to devices that advertise it.
+    pub const TOKEN_USAGE_V1:&str="token-usage-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
     /// Linear Work Outline operations (`setSpaceLinearEnabled`,
@@ -77,6 +78,7 @@ pub mod capabilities {
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
+        TOKEN_USAGE_V1,
         LINEAR_V1,
         PR_REVIEW_SYNC_V1,
         ARTIFACTS_V1,
@@ -197,6 +199,7 @@ mod tests {
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
                     "pr-review-launch-v1",
+                    "token-usage-v1",
                     "linear-v1",
                     "pr-review-sync-v1",
                     "artifacts-v1",

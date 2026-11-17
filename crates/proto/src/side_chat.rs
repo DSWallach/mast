@@ -64,6 +64,17 @@ pub fn absorb_message(exchanges: &[SideExchange]) -> String {
     )
 }
 
+/// Whether a side chat on `harness` can run in a read-only sandbox.
+/// Antigravity has no read-only mode, so its side chats run with the main
+/// chat's sandbox and the pane shows a warning banner instead.
+pub fn harness_supports_read_only(harness: crate::HarnessId) -> bool {
+    harness != crate::HarnessId::Antigravity
+}
+
+/// Banner shown at the top of a side chat whose harness can't be confined.
+pub const NOT_READ_ONLY_WARNING: &str = "This harness has no read-only mode: this side chat is not \
+    read-only and may modify files or run commands.";
+
 /// A side chat's first prompt when its harness can't fork the main chat's
 /// session: the main chat's recent transcript, then the user's question.
 pub fn context_seed(transcript: &[(Speaker, String)], question: &str) -> String {

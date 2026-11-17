@@ -184,17 +184,44 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
+                "outline-shortcuts" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| shell.fixture_snapshot_outline_shortcuts(cx));
+                    shell.into()
+                }
+                "create-item" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| {
+                        shell.fixture_snapshot_create_item(window, cx)
+                    });
+                    shell.into()
+                }
+                "overview-column" => {
+                    let shell = mast_ui::snapshot::chat_fixture(data_dir, cx);
+                    shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
+                    shell.into()
+                }
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
+                "token-usage" => mast_ui::snapshot::token_usage_fixture(0,cx).into(),
+                "token-usage-tools" => mast_ui::snapshot::token_usage_fixture(1,cx).into(),
+                "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
+                "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
                 "question" => mast_ui::snapshot::question_fixture(data_dir, cx).into(),
-                "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
-                "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
-                "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),
+                "changes-expanded" => {
+                    mast_ui::snapshot::changes_fixture(false, false, window, cx).into()
+                }
+                "changes-collapsed" => {
+                    mast_ui::snapshot::changes_fixture(true, false, window, cx).into()
+                }
+                "changes-focus-resize" => {
+                    mast_ui::snapshot::changes_fixture(false, true, window, cx).into()
+                }
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

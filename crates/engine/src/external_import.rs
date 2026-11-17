@@ -1436,6 +1436,7 @@ fn scheduled_metadata(
         task_name: name.to_owned(),
         run_id: session_id.to_owned(),
         session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
+        ..Default::default()
     })
 }
 

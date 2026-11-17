@@ -170,6 +170,7 @@ pub fn preview(
                     schedule,
                     enabled: false,
                     cutover_confirmed: false,
+                    work_item_id: None,
                     grace_minutes: if id.contains("stall-watch") { 30 } else { 360 },
                 },
                 warnings,

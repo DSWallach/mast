@@ -2017,6 +2017,7 @@ impl AppState {
         use std::hash::{Hash, Hasher};
         use std::mem::discriminant;
         let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.personal_assistant.hash_designation(&mut h);
         self.chats.len().hash(&mut h);
         for chat in &self.chats {
             chat.id.hash(&mut h);
@@ -6432,6 +6433,7 @@ mod tests {
                 task_name: "Briefing".into(),
                 run_id: id.into(),
                 session_created_at: Some(created),
+                ..Default::default()
             });
             c
         };

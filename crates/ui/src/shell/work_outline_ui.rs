@@ -94,6 +94,7 @@ pub(super) struct DriftDialog {
 }
 
 pub(super) enum WorkOutlineModal {
+    CreateItem(super::create_item_ui::CreateItemDialog),
     Confirm(ConfirmDialog),
     Archive(ArchiveDialog),
     Drift(DriftDialog),
@@ -471,56 +472,73 @@ pub(crate) fn log_restructure_keystroke(
 /// the actions of `work_outline::outline_view`.
 pub(crate) fn bind_work_outline_navigation(cx: &mut App, keymap: &KeymapConfig) {
     use crate::work_outline::outline_view::{
-        Collapse, CreateChild, CreateSibling, Expand, IndentItem, MoveItemDown, MoveItemUp,
-        OpenDetailsSelected, OpenSelected, OutdentItem, RedoChange, RenameSelected, SelectFirst,
-        SelectLast, SelectNext, SelectNextSibling, SelectPrevious, SelectPreviousSibling,
-        GroupSelected, StartChatSelected, UndoChange,
+        Collapse, CreateChild, CreateSibling, Expand, GroupSelected, IndentItem, MoveItemDown,
+        MoveItemUp, OpenDetailsSelected, OpenSelected, OutdentItem, RedoChange, RenameSelected,
+        SelectFirst, SelectLast, SelectNext, SelectNextSibling, SelectPrevious,
+        SelectPreviousSibling, StartChatSelected, UndoChange,
     };
     let context = Some(OUTLINE_NAVIGATION_CONTEXT);
     cx.bind_keys(OutlineNavKey::ALL.into_iter().flat_map(|key| {
-        keymap.combos(key.shortcut_id()).into_iter().filter_map(move |combo| {
-        let combo = crate::work_outline::hints::validated_combo(combo, key.shortcut_id())?;
-        let keys = platform_combo(&combo);
-        let keys = keys.as_str();
-        Some(match key {
-            OutlineNavKey::SelectNext => KeyBinding::new(keys, SelectNext, context),
-            OutlineNavKey::SelectPrevious => KeyBinding::new(keys, SelectPrevious, context),
-            OutlineNavKey::SelectFirst => KeyBinding::new(keys, SelectFirst, context),
-            OutlineNavKey::SelectLast => KeyBinding::new(keys, SelectLast, context),
-            OutlineNavKey::SelectNextSibling => KeyBinding::new(keys, SelectNextSibling, context),
-            OutlineNavKey::SelectPreviousSibling => {
-                KeyBinding::new(keys, SelectPreviousSibling, context)
-            }
-            OutlineNavKey::Expand => KeyBinding::new(keys, Expand, context),
-            OutlineNavKey::Collapse => KeyBinding::new(keys, Collapse, context),
-            OutlineNavKey::OpenSelected => KeyBinding::new(keys, OpenSelected, context),
-            OutlineNavKey::OpenDetails => KeyBinding::new(keys, OpenDetailsSelected, context),
-            OutlineNavKey::StartChat => KeyBinding::new(keys, StartChatSelected, context),
-            OutlineNavKey::RenameSelected => KeyBinding::new(keys, RenameSelected, context),
-            OutlineNavKey::CreateSibling => KeyBinding::new(keys, CreateSibling, context),
-            OutlineNavKey::CreateChild => KeyBinding::new(keys, CreateChild, context),
-            OutlineNavKey::MoveItemUp => KeyBinding::new(keys, MoveItemUp, context),
-            OutlineNavKey::MoveItemDown => KeyBinding::new(keys, MoveItemDown, context),
-            OutlineNavKey::IndentItem => KeyBinding::new(keys, IndentItem, context),
-            OutlineNavKey::OutdentItem => KeyBinding::new(keys, OutdentItem, context),
-            OutlineNavKey::GroupInto => KeyBinding::new(keys, GroupSelected, context),
-            OutlineNavKey::Undo => KeyBinding::new(keys, UndoChange, context),
-            OutlineNavKey::Redo => KeyBinding::new(keys, RedoChange, context),
-            OutlineNavKey::OpenContextMenu => KeyBinding::new(keys, crate::work_outline::outline_view::context_menu::OpenContextMenu, context),
-            OutlineNavKey::ShowShortcuts => KeyBinding::new(
-                keys,
-                RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
-                context,
-            ),
-        })
-        })
+        keymap
+            .combos(key.shortcut_id())
+            .into_iter()
+            .filter_map(move |combo| {
+                let combo = crate::work_outline::hints::validated_combo(combo, key.shortcut_id())?;
+                let keys = platform_combo(&combo);
+                let keys = keys.as_str();
+                Some(match key {
+                    OutlineNavKey::SelectNext => KeyBinding::new(keys, SelectNext, context),
+                    OutlineNavKey::SelectPrevious => KeyBinding::new(keys, SelectPrevious, context),
+                    OutlineNavKey::SelectFirst => KeyBinding::new(keys, SelectFirst, context),
+                    OutlineNavKey::SelectLast => KeyBinding::new(keys, SelectLast, context),
+                    OutlineNavKey::SelectNextSibling => {
+                        KeyBinding::new(keys, SelectNextSibling, context)
+                    }
+                    OutlineNavKey::SelectPreviousSibling => {
+                        KeyBinding::new(keys, SelectPreviousSibling, context)
+                    }
+                    OutlineNavKey::Expand => KeyBinding::new(keys, Expand, context),
+                    OutlineNavKey::Collapse => KeyBinding::new(keys, Collapse, context),
+                    OutlineNavKey::OpenSelected => KeyBinding::new(keys, OpenSelected, context),
+                    OutlineNavKey::OpenDetails => {
+                        KeyBinding::new(keys, OpenDetailsSelected, context)
+                    }
+                    OutlineNavKey::StartChat => KeyBinding::new(keys, StartChatSelected, context),
+                    OutlineNavKey::RenameSelected => KeyBinding::new(keys, RenameSelected, context),
+                    OutlineNavKey::CreateSibling => KeyBinding::new(keys, CreateSibling, context),
+                    OutlineNavKey::CreateChild => KeyBinding::new(keys, CreateChild, context),
+                    OutlineNavKey::MoveItemUp => KeyBinding::new(keys, MoveItemUp, context),
+                    OutlineNavKey::MoveItemDown => KeyBinding::new(keys, MoveItemDown, context),
+                    OutlineNavKey::IndentItem => KeyBinding::new(keys, IndentItem, context),
+                    OutlineNavKey::OutdentItem => KeyBinding::new(keys, OutdentItem, context),
+                    OutlineNavKey::GroupInto => KeyBinding::new(keys, GroupSelected, context),
+                    OutlineNavKey::Undo => KeyBinding::new(keys, UndoChange, context),
+                    OutlineNavKey::Redo => KeyBinding::new(keys, RedoChange, context),
+                    OutlineNavKey::OpenContextMenu => KeyBinding::new(
+                        keys,
+                        crate::work_outline::outline_view::context_menu::OpenContextMenu,
+                        context,
+                    ),
+                    OutlineNavKey::ShowShortcuts => KeyBinding::new(
+                        keys,
+                        RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts),
+                        context,
+                    ),
+                })
+            })
     }));
 }
 
 /// The shortcut reference card: Outline keys (Navigate, Edit, Restructure)
 /// beside the Work Outline commands, every binding read from the live
 /// keymap. Read-only; Esc or Close dismisses it.
-fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) -> AnyElement {
+fn shortcuts_card(
+    theme: &Theme,
+    viewport: gpui::Size<gpui::Pixels>,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let width = (f32::from(viewport.width) - 32.0).clamp(0.0, 600.0);
+    let stacked = width < 560.0;
     let keymap = crate::settings::current(cx).keymap;
     let groups = crate::work_outline::hints::shortcut_reference(&keymap);
     let group_el = |group: &crate::work_outline::hints::ShortcutGroup| {
@@ -529,6 +547,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
             .debug_selector(move || selector.clone())
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(1.0))
             .child(
                 div()
@@ -541,6 +560,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
             .children(group.rows.iter().map(|row| {
                 div()
                     .h(px(20.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -549,19 +569,22 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                     .text_color(theme.text)
                     .child(div().min_w_0().truncate().child(row.label))
                     .when_some(row.keys.clone(), |el, keys| {
-                        el.child(popover::kbd_hint(theme, &keys))
+                        el.child(popover::kbd_hint(theme, &keys).flex_none())
                     })
             }))
     };
     let (outline_groups, command_groups) = groups.split_at(3);
     popover::dialog_card(theme)
-        .w(px(600.0))
-        .max_h(px(viewport_height * 0.7))
+        .w(px(width))
+        .max_h(px(f32::from(viewport.height) * 0.7))
+        .overflow_hidden()
         .debug_selector(|| "work-outline-shortcuts".into())
-        .child(popover::dialog_title(theme, "Outline shortcuts"))
+        .child(popover::dialog_title(theme, "Outline shortcuts").flex_none())
         .child(
             div()
                 .id("work-outline-shortcuts-scroll")
+                .debug_selector(|| "work-outline-shortcuts-scroll".into())
+                .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .flex()
@@ -570,10 +593,13 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                     div()
                         .mt(px(12.0))
                         .flex()
+                        .flex_none()
+                        .when(stacked, |el| el.flex_col())
                         .gap(px(24.0))
                         .child(
                             div()
                                 .flex_1()
+                                .when(stacked, |el| el.flex_none())
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
@@ -583,6 +609,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                         .child(
                             div()
                                 .flex_1()
+                                .when(stacked, |el| el.flex_none())
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
@@ -590,20 +617,24 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
                                 .children(command_groups.iter().map(group_el)),
                         ),
                 )
-                .child(icon_legend(theme)),
+                .child(icon_legend(theme, stacked)),
         )
         .child(
             div()
                 .mt(px(14.0))
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
                 .child(
-                    crate::components::shell_parts::shortcuts_footer(theme, &keymap),
+                    crate::components::shell_parts::shortcuts_footer(theme, &keymap)
+                        .flex_1()
+                        .min_w_0(),
                 )
                 .child(
                     popover::btn_ghost(theme, "Close", "work-outline-shortcuts-close")
+                        .flex_none()
                         .id("work-outline-shortcuts-close")
                         .debug_selector(|| "work-outline-shortcuts-close".into())
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -615,7 +646,7 @@ fn shortcuts_card(theme: &Theme, viewport_height: f32, cx: &mut Context<Shell>) 
 }
 
 /// The icon legend of PR and Linear rows (two columns under the shortcuts).
-fn icon_legend(theme: &Theme) -> AnyElement {
+fn icon_legend(theme: &Theme, stacked: bool) -> AnyElement {
     use crate::github::row_icons::{self, Mark};
     let rows: Vec<_> = row_icons::legend_rows();
     let half = rows.len().div_ceil(2);
@@ -640,6 +671,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
         };
         div()
             .h(px(20.0))
+            .flex_none()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -659,6 +691,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
     let column = |rows: &[row_icons::LegendRow]| {
         div()
             .flex_1()
+            .when(stacked, |el| el.flex_none())
             .min_w_0()
             .flex()
             .flex_col()
@@ -666,6 +699,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
     };
     div()
         .debug_selector(|| "work-outline-shortcuts-icons".into())
+        .flex_none()
         .mt(px(12.0))
         .flex()
         .flex_col()
@@ -681,6 +715,7 @@ fn icon_legend(theme: &Theme) -> AnyElement {
         .child(
             div()
                 .flex()
+                .when(stacked, |el| el.flex_col())
                 .gap(px(24.0))
                 .child(column(&rows[..half]))
                 .child(column(&rows[half..])),
@@ -707,7 +742,8 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
                 callback(accept, window, cx);
             }
         }
-        WorkOutlineModal::Compare(_)
+        WorkOutlineModal::CreateItem(_)
+        | WorkOutlineModal::Compare(_)
         | WorkOutlineModal::FromChat(_)
         | WorkOutlineModal::StartChat(_)
         | WorkOutlineModal::HandOff(_)
@@ -718,7 +754,12 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
 impl Shell {
     /// Whether a Work Outline modal is open.
     pub(super) fn work_outline_modal_open(&self) -> bool {
-        self.work_outline_modal.is_some() && !(matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))))
+        self.work_outline_modal.is_some()
+            && !(matches!(self.route, Route::Settings(SettingsSection::Agents))
+                && matches!(
+                    self.work_outline_modal,
+                    Some(WorkOutlineModal::StartChat(_))
+                ))
     }
 
     /// Escape inside a modal closes its open `/` skill popup or Start Chat's
@@ -726,7 +767,7 @@ impl Shell {
     /// cancel the whole modal before the input sees the key). `true` when a
     /// popup was closed.
     pub(super) fn dismiss_work_outline_modal_skills(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.close_start_chat_picker(cx) {
+        if self.dismiss_create_item_picker(cx) || self.close_start_chat_picker(cx) {
             return true;
         }
         let skills = match self.work_outline_modal.as_ref() {
@@ -925,6 +966,10 @@ impl Shell {
         modal: WorkOutlineModal,
         cx: &mut Context<Self>,
     ) {
+        if matches!(&self.work_outline_modal, Some(WorkOutlineModal::CreateItem(dialog)) if dialog.saving())
+        {
+            return;
+        }
         // A newer request supersedes an open one, which reports a cancel. No
         // window is at hand here, so the report is delivered on the next
         // render (`render_work_outline_modal`).
@@ -943,7 +988,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting()) {
+        if matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::CreateItem(dialog)) if dialog.saving())
+            || matches!(self.work_outline_modal.as_ref(), Some(WorkOutlineModal::HandOff(dialog)) if dialog.is_submitting())
+        {
             return true;
         }
         self.resolve_work_outline_modal(false, window, cx)
@@ -1009,6 +1056,7 @@ impl Shell {
         // Linear on: it never leaves the current route just to explain.
         if command == WorkOutlineCommand::OpenLinear
             && !matches!(self.route, Route::Overview)
+            && !self.overview_navigation_visible()
             && !crate::linear::panel::palette_visible(self.state.read(cx))
         {
             self.sidebar_notice = Some(crate::linear::LINEAR_OFF_NOTICE.into());
@@ -1074,7 +1122,7 @@ impl Shell {
     /// composer draft are never touched on the way out.
     pub(crate) fn toggle_outline_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_palette = None;
-        let tree_focused = matches!(self.route, Route::Overview)
+        let tree_focused = self.overview_navigation_visible()
             && self
                 .overview_page
                 .as_ref()
@@ -1102,12 +1150,19 @@ impl Shell {
     /// already showing, or no Overview Chat is in play).
     pub(crate) fn open_full_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_palette = None;
-        if !matches!(self.route, Route::Overview) {
+        if !matches!(self.route, Route::Overview) && !self.overview_navigation_visible() {
             return;
         }
         let Some(page) = self.overview_page.clone() else {
             return;
         };
+        if self.route == Route::Chat
+            && !page.read(cx).outline_tree_focused(window, cx)
+            && !page.read(cx).navigation_list_focused(window)
+        {
+            self.focus_composer(cx);
+            return;
+        }
         let Some(chat_id) = page.read(cx).full_chat_target(window, cx) else {
             page.update(cx, |overview, cx| overview.show_full_chat_notice(cx));
             return;
@@ -1155,7 +1210,14 @@ impl Shell {
                 deliver_decision(superseded, false, window, cx)
             });
         }
-        if matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))) { return None; }
+        if matches!(self.route, Route::Settings(SettingsSection::Agents))
+            && matches!(
+                self.work_outline_modal,
+                Some(WorkOutlineModal::StartChat(_))
+            )
+        {
+            return None;
+        }
         let theme = Theme::of(cx).for_popup();
         self.refresh_hand_off_details(cx);
         // Start Chat's picker closed (Esc / its chip): back to the prompt.
@@ -1175,6 +1237,7 @@ impl Shell {
                     .filter(|focused| *focused != self.work_outline_modal_focus);
             }
             match modal {
+                WorkOutlineModal::CreateItem(dialog) => window.focus(&dialog.focus(cx), cx),
                 WorkOutlineModal::FromChat(dialog) => {
                     let handle = dialog.input_focus(cx);
                     window.focus(&handle, cx);
@@ -1188,6 +1251,9 @@ impl Shell {
             }
         }
         let card = match modal {
+            WorkOutlineModal::CreateItem(dialog) => {
+                super::create_item_ui::create_item_card(dialog, self, viewport, &theme, cx)
+            }
             WorkOutlineModal::Drift(dialog) => {
                 let impact_line = format!(
                     "{} \u{b7} {}",
@@ -1257,8 +1323,10 @@ impl Shell {
                 &theme,
                 cx,
             ),
-            WorkOutlineModal::HandOff(dialog) => super::hand_off_ui::hand_off_card(dialog, &theme, cx),
-            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, f32::from(viewport.height), cx),
+            WorkOutlineModal::HandOff(dialog) => {
+                super::hand_off_ui::hand_off_card(dialog, &theme, cx)
+            }
+            WorkOutlineModal::Shortcuts => shortcuts_card(&theme, viewport, cx),
             WorkOutlineModal::Confirm(dialog) => {
                 let accept = if dialog.destructive {
                     popover::btn_danger(&theme, &dialog.confirm_label)
@@ -1655,6 +1723,7 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            crate::motion::set_reduced_motion(cx, true);
         });
         let data_dir = dir.to_path_buf();
         cx.add_window_view(move |_, cx| {
@@ -1866,13 +1935,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn commands_route_to_the_overview(cx: &mut gpui::TestAppContext) {
+    fn commands_reveal_the_overview_column(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         shell.update_in(cx, |shell, window, cx| {
             assert!(!matches!(shell.route, Route::Overview));
             shell.run_work_outline_command(WorkOutlineCommand::OpenOutline, window, cx);
-            assert!(matches!(shell.route, Route::Overview));
+            assert!(shell.overview_navigation_visible());
             assert!(shell.overview_page.is_some());
         });
     }
@@ -1971,7 +2040,10 @@ mod tests {
             window.draw(cx).clear();
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
     }
 
     #[gpui::test]
@@ -1985,7 +2057,42 @@ mod tests {
         let button = cx.debug_bounds("overview-pull-requests").unwrap().center();
         cx.simulate_click(button, gpui::Modifiers::default());
         cx.run_until_parked();
-        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::PrReviewChats)));
+        shell.read_with(cx, |shell, _| {
+            assert!(matches!(shell.route, Route::PrReviewChats))
+        });
+    }
+
+    #[gpui::test]
+    fn shortcut_popup_keeps_scroll_content_and_close_inside_small_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        shell.update(cx, |shell, cx| shell.open_outline_shortcuts(cx));
+        for (width, height) in [
+            (360.0, 420.0),
+            (600.0, 600.0),
+            (1200.0, 900.0),
+            (1200.0, 2400.0),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            redraw(cx);
+            let card = cx.debug_bounds("work-outline-shortcuts").unwrap();
+            let scroll = cx.debug_bounds("work-outline-shortcuts-scroll").unwrap();
+            let close = cx.debug_bounds("work-outline-shortcuts-close").unwrap();
+            assert!(card.left() >= px(0.0) && card.right() <= px(width));
+            assert!(card.top() >= px(0.0) && card.bottom() <= px(height));
+            assert!(scroll.top() >= card.top() && scroll.bottom() <= close.top());
+            assert!(close.left() >= card.left() && close.right() <= card.right());
+            assert!(close.top() >= card.top() && close.bottom() <= card.bottom());
+            assert!(scroll.size.height > px(0.0));
+            if height == 2400.0 {
+                assert!(
+                    card.size.height < px(height * 0.7),
+                    "tall windows size to content"
+                );
+            }
+        }
     }
 
     #[gpui::test]
@@ -2004,7 +2111,11 @@ mod tests {
         assert!(shortcuts_open(&shell, cx));
         redraw(cx);
         assert!(cx.debug_bounds("work-outline-shortcuts").is_some());
-        let height = cx.debug_bounds("work-outline-shortcuts").unwrap().size.height;
+        let height = cx
+            .debug_bounds("work-outline-shortcuts")
+            .unwrap()
+            .size
+            .height;
         cx.update(|window, _| assert!(height <= window.viewport_size().height * 0.7));
         for group in ["navigate", "edit", "restructure", "commands"] {
             let selector: &'static str =
@@ -2240,23 +2351,37 @@ mod tests {
                 OutlineNavKey::GroupInto => Box::new(GroupSelected),
                 OutlineNavKey::Undo => Box::new(UndoChange),
                 OutlineNavKey::Redo => Box::new(RedoChange),
-                OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(WorkOutlineCommand::ShowOutlineShortcuts)),
-                OutlineNavKey::OpenContextMenu => Box::new(crate::work_outline::outline_view::context_menu::OpenContextMenu),
+                OutlineNavKey::ShowShortcuts => Box::new(RunWorkOutlineCommand(
+                    WorkOutlineCommand::ShowOutlineShortcuts,
+                )),
+                OutlineNavKey::OpenContextMenu => {
+                    Box::new(crate::work_outline::outline_view::context_menu::OpenContextMenu)
+                }
             };
             let key = Keystroke::parse(&platform_combo(combo)).unwrap();
             let bindings = cx.update(|_, cx| cx.all_bindings_for_input(&[key]));
-            assert!(bindings.iter().any(|binding| binding.action().partial_eq(expected.as_ref())
-                && binding.predicate().is_some_and(|p| p.to_string() == OUTLINE_NAVIGATION_CONTEXT)), "{combo}");
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.action().partial_eq(expected.as_ref())
+                        && binding
+                            .predicate()
+                            .is_some_and(|p| p.to_string() == OUTLINE_NAVIGATION_CONTEXT)),
+                "{combo}"
+            );
         }
     }
 
     #[gpui::test]
-    fn outline_rebind_replaces_default_and_editing_excludes_navigation(cx: &mut gpui::TestAppContext) {
+    fn outline_rebind_replaces_default_and_editing_excludes_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (_, _, outline, cx) = toggle_shell(cx, dir.path());
         let mut keymap = KeymapConfig::default();
         keymap.set(OutlineNavKey::SelectNext.shortcut_id(), "x".into());
-        let restored: KeymapConfig = serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        let restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
         cx.update(|_, cx| crate::shell::apply_keymap(cx, &restored, Default::default()));
         redraw(cx);
         let before = outline_selection(&outline, cx);
@@ -2267,7 +2392,15 @@ mod tests {
         redraw(cx);
         let selected = outline_selection(&outline, cx);
         assert_ne!(selected, before);
-        outline.update(cx, |outline, cx| outline.select(&crate::work_outline::model::row_key::item("s1", crate::work_outline::store::fixture_ids::LAUNCH), cx));
+        outline.update(cx, |outline, cx| {
+            outline.select(
+                &crate::work_outline::model::row_key::item(
+                    "s1",
+                    crate::work_outline::store::fixture_ids::LAUNCH,
+                ),
+                cx,
+            )
+        });
         let selected = outline_selection(&outline, cx);
         cx.simulate_keystrokes("r");
         redraw(cx);
@@ -2291,7 +2424,7 @@ mod tests {
         use crate::work_outline::store::fixture_ids::*;
 
         let dir = tempfile::tempdir().unwrap();
-        let (shell, overview, outline, cx) = toggle_shell(cx, dir.path());
+        let (shell, _overview, outline, cx) = toggle_shell(cx, dir.path());
         let chat_key = row_key::chat(CHAT_AUTH);
         let launch = row_key::item("s1", LAUNCH);
 
@@ -2308,10 +2441,7 @@ mod tests {
             shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()),
             Some(CHAT_AUTH.to_owned())
         );
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_AUTH.to_owned())
-        );
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_AUTH.to_owned()));
         assert!(composer_focused(&shell, cx), "Enter focuses the composer");
         cx.simulate_input("half-written prompt");
         redraw(cx);
@@ -2355,11 +2485,8 @@ mod tests {
         cx.simulate_keystrokes(&toggle_key());
         redraw(cx);
         assert!(composer_focused(&shell, cx), "back in the composer");
-        assert!(shell.read_with(cx, |shell, _| matches!(shell.route, Route::Overview)));
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_AUTH.to_owned())
-        );
+        assert!(shell.read_with(cx, |shell, _| shell.overview_navigation_visible()));
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_AUTH.to_owned()));
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft_text(cx)),
             "half-written prompt",
@@ -2390,7 +2517,7 @@ mod tests {
         assert!(composer_focused(&shell, cx));
         cx.simulate_keystrokes(&toggle_key());
         redraw(cx);
-        assert!(shell.read_with(cx, |shell, _| matches!(shell.route, Route::Overview)));
+        assert!(shell.read_with(cx, |shell, _| shell.overview_navigation_visible()));
         assert!(tree_focused(&outline, cx));
         assert_eq!(
             outline_selection(&outline, cx),
@@ -2419,7 +2546,7 @@ mod tests {
         cx.simulate_keystrokes(&toggle_key());
         redraw(cx);
         assert!(tree_focused(&outline, cx));
-        assert!(shell.read_with(cx, |shell, _| matches!(shell.route, Route::Overview)));
+        assert!(shell.read_with(cx, |shell, _| shell.overview_navigation_visible()));
         assert_eq!(
             outline.read_with(cx, |outline, _| outline.notice().map(str::to_owned)),
             Some("Open a Chat from the Outline first".to_owned())
@@ -2462,10 +2589,7 @@ mod tests {
         redraw(cx);
         cx.simulate_keystrokes("enter");
         redraw(cx);
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_AUTH.to_owned())
-        );
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_AUTH.to_owned()));
         assert!(composer_focused(&shell, cx));
         cx.simulate_input("half-written prompt");
         redraw(cx);
@@ -2490,7 +2614,7 @@ mod tests {
         // Full chat -> its Outline row -> back to the full chat.
         cx.simulate_keystrokes(&toggle_key());
         redraw(cx);
-        assert!(shell.read_with(cx, |shell, _| matches!(shell.route, Route::Overview)));
+        assert!(shell.read_with(cx, |shell, _| shell.overview_navigation_visible()));
         assert!(tree_focused(&outline, cx));
         assert_eq!(outline_selection(&outline, cx), Some(chat_key));
         cx.simulate_keystrokes(&toggle_key());
@@ -2519,7 +2643,7 @@ mod tests {
         use crate::work_outline::store::fixture_ids::*;
 
         let dir = tempfile::tempdir().unwrap();
-        let (shell, overview, outline, cx) = toggle_shell(cx, dir.path());
+        let (shell, _overview, outline, cx) = toggle_shell(cx, dir.path());
         let focus_tree = |cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| {
                 let handle = gpui::Focusable::focus_handle(outline.read(cx), cx);
@@ -2535,7 +2659,7 @@ mod tests {
         focus_tree(cx);
         cx.simulate_keystrokes(&full_chat_key());
         redraw(cx);
-        assert!(!route_is_chat(&shell, cx));
+        assert!(route_is_chat(&shell, cx));
         assert!(tree_focused(&outline, cx));
         assert_eq!(
             outline.read_with(cx, |outline, _| outline.notice().map(str::to_owned)),
@@ -2549,10 +2673,7 @@ mod tests {
         focus_tree(cx);
         cx.simulate_keystrokes("enter");
         redraw(cx);
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_API.to_owned())
-        );
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_API.to_owned()));
         outline.update(cx, |outline, cx| {
             outline.select(&row_key::chat(CHAT_UI), cx)
         });
@@ -2577,10 +2698,7 @@ mod tests {
             overview.show_list_with_panel_for_test(CHAT_API.into(), cx)
         });
         redraw(cx);
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_API.to_owned())
-        );
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_API.to_owned()));
         cx.update(|window, cx| {
             let search = overview.read(cx).search_focus_handle(cx);
             window.focus(&search, cx)
@@ -2632,188 +2750,34 @@ mod tests {
         redraw(cx);
     }
 
-    fn panel_chat(
-        overview: &Entity<crate::overview::Overview>,
-        cx: &mut gpui::VisualTestContext,
-    ) -> Option<String> {
-        overview.read_with(cx, |o, cx| o.shown_panel_chat(cx))
-    }
-
-    /// The selected row's Chat, if it is a live Chat row.
-    fn selected_row_chat(
-        outline: &Entity<crate::work_outline::outline_view::OutlineView>,
-        cx: &mut gpui::VisualTestContext,
-    ) -> Option<String> {
-        outline.read_with(cx, |outline, _| outline.selected_chat())
-    }
-
-    /// Select the row just above `key` and focus the tree, so one Down
-    /// arrow lands on `key` through the real keymap.
-    fn park_above(
-        outline: &Entity<crate::work_outline::outline_view::OutlineView>,
-        key: &str,
-        cx: &mut gpui::VisualTestContext,
-    ) {
-        let above = outline.read_with(cx, |outline, _| {
-            let ix = outline.model().position(key).expect("row shown");
-            outline.model().rows[ix - 1].key.clone()
-        });
-        outline.update(cx, |outline, cx| outline.select(&above, cx));
-        cx.update(|window, cx| {
-            let handle = gpui::Focusable::focus_handle(outline.read(cx), cx);
-            window.focus(&handle, cx)
-        });
-        redraw(cx);
-    }
-
-    /// Press `key` until the selection is a live Chat row other than
-    /// `from`; every step waits `step_ms`. Returns that Chat.
-    fn arrow_to_next_chat(
-        outline: &Entity<crate::work_outline::outline_view::OutlineView>,
-        key: &str,
-        from: Option<&str>,
-        step_ms: u64,
-        cx: &mut gpui::VisualTestContext,
-    ) -> String {
-        for _ in 0..20 {
-            cx.simulate_keystrokes(key);
-            wait_ms(cx, step_ms);
-            if let Some(chat) = selected_row_chat(outline, cx)
-                && Some(chat.as_str()) != from
-            {
-                return chat;
-            }
-        }
-        panic!("no further Chat row with {key}");
-    }
-
-    /// Arrowing onto Chat rows previews each one in the chat panel after the
-    /// debounce while the tree keeps focus (the composer never takes it and
-    /// the route never changes); arrowing onto a work item row leaves the
-    /// last preview; keys keep working; Enter then focuses the composer.
+    /// Browsing the column changes selection; Enter opens the workspace.
     #[gpui::test]
-    fn arrowing_onto_chat_rows_previews_them_while_the_tree_keeps_focus(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn arrow_navigation_preserves_the_workspace_until_enter(cx: &mut gpui::TestAppContext) {
         use crate::work_outline::model::row_key;
         use crate::work_outline::store::fixture_ids::*;
-
         let dir = tempfile::tempdir().unwrap();
         let (shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-        park_above(&outline, &row_key::chat(CHAT_API), cx);
-        assert_eq!(panel_chat(&overview, cx), None);
-
-        cx.simulate_keystrokes("down");
-        redraw(cx);
-        assert_eq!(selected_row_chat(&outline, cx), Some(CHAT_API.to_owned()));
-        assert_eq!(panel_chat(&overview, cx), None, "not before the debounce");
-        assert!(overview.read_with(cx, |o, _| o.outline_preview_pending()));
-        wait_ms(cx, 120);
-        assert_eq!(panel_chat(&overview, cx), Some(CHAT_API.to_owned()));
-        assert!(tree_focused(&outline, cx), "the tree keeps focus");
-        assert!(!composer_focused(&shell, cx));
-        assert!(!route_is_chat(&shell, cx), "never the full chat route");
-        assert_eq!(selected_chat(&shell, cx), Some(CHAT_API.to_owned()));
-
-        // The next Chat row: the panel follows, focus stays.
-        let next = arrow_to_next_chat(&outline, "down", Some(CHAT_API), 120, cx);
-        assert_eq!(panel_chat(&overview, cx), Some(next.clone()));
-        assert!(tree_focused(&outline, cx));
-        assert!(!composer_focused(&shell, cx));
-
-        // Up onto a work item row: the panel keeps the last preview.
-        for _ in 0..20 {
-            cx.simulate_keystrokes("up");
-            wait_ms(cx, 120);
-            if outline.read_with(cx, |o, _| o.selected_item().is_some()) {
-                break;
-            }
-        }
-        assert!(outline.read_with(cx, |o, _| o.selected_item().is_some()));
-        assert_eq!(panel_chat(&overview, cx), Some(next.clone()));
-        assert!(tree_focused(&outline, cx));
-
-        // Keys still work after previews: back down to a Chat row, Enter
-        // opens it beside the Outline with the composer focused.
-        let chat = arrow_to_next_chat(&outline, "down", None, 120, cx);
-        assert_eq!(panel_chat(&overview, cx), Some(chat.clone()));
-        cx.simulate_keystrokes("enter");
-        redraw(cx);
-        assert!(composer_focused(&shell, cx), "Enter focuses the composer");
-        assert_eq!(panel_chat(&overview, cx), Some(chat.clone()));
-        assert!(!route_is_chat(&shell, cx));
-        // And the toggle from the composer lands back on that row.
-        cx.simulate_keystrokes(&toggle_key());
-        redraw(cx);
-        assert!(tree_focused(&outline, cx));
-        assert_eq!(selected_row_chat(&outline, cx), Some(chat));
-    }
-
-    /// Moves faster than the debounce coalesce: crossing several Chat rows
-    /// never shows an intermediate one, and only the resting row is shown.
-    #[gpui::test]
-    fn outline_preview_debounce_coalesces_rapid_moves(cx: &mut gpui::TestAppContext) {
-        use crate::work_outline::model::row_key;
-        use crate::work_outline::store::fixture_ids::*;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-        park_above(&outline, &row_key::chat(CHAT_API), cx);
-        cx.simulate_keystrokes("down");
-        wait_ms(cx, 40);
-        assert_eq!(selected_row_chat(&outline, cx), Some(CHAT_API.to_owned()));
-        // Keep moving every 40 ms, across at least one more Chat row.
-        let last = arrow_to_next_chat(&outline, "down", Some(CHAT_API), 40, cx);
-        assert_ne!(last, CHAT_API);
-        assert_eq!(panel_chat(&overview, cx), None, "nothing shown mid-burst");
-        wait_ms(cx, 120);
-        assert_eq!(panel_chat(&overview, cx), Some(last));
-    }
-
-    /// A click on a Chat row previews it too (focus in the tree); with Work
-    /// Item Details in the panel slot, browsing Chat rows leaves Details
-    /// open and does not switch the selected Chat.
-    #[gpui::test]
-    fn clicks_preview_and_work_item_details_keep_the_slot(cx: &mut gpui::TestAppContext) {
-        use crate::work_outline::model::row_key;
-        use crate::work_outline::store::fixture_ids::*;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-        let row = cx
-            .debug_bounds("outline-row-chat:chat-ui")
-            .unwrap()
-            .center();
-        cx.simulate_click(row, gpui::Modifiers::default());
-        redraw(cx);
-        assert_eq!(selected_row_chat(&outline, cx), Some(CHAT_UI.to_owned()));
-        wait_ms(cx, 120);
-        assert_eq!(panel_chat(&overview, cx), Some(CHAT_UI.to_owned()));
-        assert!(tree_focused(&outline, cx));
-        assert!(!composer_focused(&shell, cx));
-
-        // Details for a work item: Enter on its row.
+        shell.update(cx, |shell, cx| shell.open_chat(CHAT_UI.into(), cx));
         outline.update(cx, |outline, cx| {
-            outline.select(&row_key::item("s1", LAUNCH), cx)
+            outline.reveal(&row_key::chat(CHAT_API), cx);
         });
         cx.update(|window, cx| {
-            let handle = gpui::Focusable::focus_handle(outline.read(cx), cx);
-            window.focus(&handle, cx)
+            window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx)
         });
         redraw(cx);
+        cx.simulate_keystrokes("down");
+        wait_ms(cx, 200);
+        assert!(!overview.read_with(cx, |o, _| o.outline_preview_pending()));
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_UI.into()));
+        assert!(tree_focused(&outline, cx));
+        outline.update(cx, |outline, cx| {
+            outline.select(&row_key::chat(CHAT_API), cx)
+        });
         cx.simulate_keystrokes("enter");
         redraw(cx);
-        assert!(overview.read_with(cx, |o, _| o.has_work_item_details()));
-        park_above(&outline, &row_key::chat(CHAT_API), cx);
-        cx.simulate_keystrokes("down");
-        wait_ms(cx, 120);
-        assert_eq!(selected_row_chat(&outline, cx), Some(CHAT_API.to_owned()));
-        assert!(
-            overview.read_with(cx, |o, _| o.has_work_item_details()),
-            "Details stay open"
-        );
-        assert_eq!(selected_chat(&shell, cx), Some(CHAT_UI.to_owned()));
-        assert!(tree_focused(&outline, cx));
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_API.into()));
+        assert!(composer_focused(&shell, cx));
+        assert!(route_is_chat(&shell, cx));
     }
 
     // ----- Find (⌘F) in the Overview ------------------------------------
@@ -2926,7 +2890,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (_shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-        for mode in [OverviewMode::List, OverviewMode::Outline] {
+        for mode in [OverviewMode::Outline] {
             set_mode(&overview, mode, cx);
             cx.simulate_keystrokes(&find_key());
             cx.simulate_keystrokes("z q");
@@ -2948,40 +2912,14 @@ mod tests {
         }
     }
 
-    /// Enter and Down from the search select the first matching row (List
-    /// and Outline) so the arrows work immediately.
+    /// Enter and Down select the first matching Outline row so the arrows
+    /// work immediately in the persistent navigation column.
     #[gpui::test]
     fn enter_and_down_from_search_move_to_the_first_row(cx: &mut gpui::TestAppContext) {
         use crate::overview::OverviewMode;
 
         let dir = tempfile::tempdir().unwrap();
         let (_shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-
-        for key in ["down", "enter"] {
-            set_mode(&overview, OverviewMode::List, cx);
-            overview.update(cx, |overview, cx| {
-                overview.set_list_selection_for_test(None, cx)
-            });
-            cx.simulate_keystrokes(&find_key());
-            cx.simulate_keystrokes(key);
-            redraw(cx);
-            let (selected, order) = overview.read_with(cx, |o, _| o.list_selection_for_test());
-            assert!(order.len() > 1, "fixture shows several chats");
-            assert_eq!(selected.as_ref(), order.first(), "List {key}");
-            assert!(body_focused(&overview, cx));
-            assert!(!search_focused(&overview, cx));
-            // Arrows work immediately.
-            cx.simulate_keystrokes("down");
-            redraw(cx);
-            let (selected, _) = overview.read_with(cx, |o, _| o.list_selection_for_test());
-            assert_eq!(selected.as_ref(), order.get(1), "List down after {key}");
-            cx.simulate_keystrokes("up up");
-            redraw(cx);
-            assert!(
-                search_focused(&overview, cx),
-                "Up from the first row returns"
-            );
-        }
 
         for key in ["down", "enter"] {
             set_mode(&overview, OverviewMode::Outline, cx);
@@ -3008,24 +2946,6 @@ mod tests {
                 "arrow after {key}"
             );
         }
-    }
-
-    /// Enter on a selected List row opens the chat beside the Overview.
-    #[gpui::test]
-    fn enter_on_a_selected_list_row_opens_the_chat_panel(cx: &mut gpui::TestAppContext) {
-        use crate::overview::OverviewMode;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_shell, overview, _outline, cx) = toggle_shell(cx, dir.path());
-        set_mode(&overview, OverviewMode::List, cx);
-        cx.simulate_keystrokes(&find_key());
-        cx.simulate_keystrokes("down");
-        redraw(cx);
-        let (selected, _) = overview.read_with(cx, |o, _| o.list_selection_for_test());
-        cx.simulate_keystrokes("enter");
-        redraw(cx);
-        assert_eq!(panel_chat(&overview, cx), selected);
-        assert!(panel_chat(&overview, cx).is_some());
     }
 
     /// The Toggle Linear Panel key as the app binds it on this platform.
@@ -3088,71 +3008,37 @@ mod tests {
     /// moves focus back to the search; from the search it closes the panel
     /// and returns focus to the tree. The chat panel stays up throughout.
     #[gpui::test]
-    fn linear_key_toggles_the_panel_beside_the_chat_panel(cx: &mut gpui::TestAppContext) {
+    fn linear_key_opens_the_workspace_and_preserves_the_chat_draft(cx: &mut gpui::TestAppContext) {
         use crate::work_outline::model::row_key;
         use crate::work_outline::store::fixture_ids::*;
-
         let dir = tempfile::tempdir().unwrap();
         let (shell, overview, outline, cx) = toggle_shell(cx, dir.path());
-        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-        cx.simulate_resize(gpui::size(px(1900.0), px(900.0)));
         set_linear(&shell, &overview, true, cx);
-
-        // Enter on a Chat row: the chat panel opens, composer focused.
         outline.update(cx, |outline, cx| {
             outline.select(&row_key::chat(CHAT_AUTH), cx)
         });
         cx.update(|window, cx| {
-            let handle = gpui::Focusable::focus_handle(outline.read(cx), cx);
-            window.focus(&handle, cx)
+            window.focus(&gpui::Focusable::focus_handle(outline.read(cx), cx), cx)
         });
         redraw(cx);
         cx.simulate_keystrokes("enter");
         redraw(cx);
-        assert!(composer_focused(&shell, cx));
         cx.simulate_input("draft");
-        redraw(cx);
-
-        // Composer -> open + search focused; the chat panel stays.
-        cx.simulate_keystrokes(&linear_key());
-        redraw(cx);
-        assert!(overview.read_with(cx, |o, _| o.linear_panel().is_some()));
-        assert!(linear_search_focused(&overview, cx), "the search has focus");
-        assert!(cx.debug_bounds("linear-panel").is_some());
-        assert!(
-            cx.debug_bounds("overview-chat-panel").is_some(),
-            "both open"
-        );
-        assert_eq!(
-            overview.read_with(cx, |o, cx| o.shown_panel_chat(cx)),
-            Some(CHAT_AUTH.to_owned())
-        );
         let composer = shell.read_with(cx, |shell, _| shell.composer.clone());
-        assert_eq!(composer.read_with(cx, |c, cx| c.draft_text(cx)), "draft");
-
-        // The chat composer is still focusable beside the panel, and the
-        // key from there goes back to the search without closing.
-        cx.update(|window, cx| window.focus(&composer.focus_handle(cx), cx));
-        redraw(cx);
-        assert!(composer_focused(&shell, cx));
         cx.simulate_keystrokes(&linear_key());
         redraw(cx);
         assert!(overview.read_with(cx, |o, _| o.linear_panel().is_some()));
         assert!(linear_search_focused(&overview, cx));
+        assert!(cx.debug_bounds("overview-navigation").is_some());
+        assert!(cx.debug_bounds("overview-chat-panel").is_none());
+        assert_eq!(selected_chat(&shell, cx), Some(CHAT_AUTH.into()));
         assert_eq!(composer.read_with(cx, |c, cx| c.draft_text(cx)), "draft");
-
-        // Search -> closed, focus back on the tree.
         cx.simulate_keystrokes(&linear_key());
         redraw(cx);
         assert!(overview.read_with(cx, |o, _| o.linear_panel().is_none()));
-        assert!(cx.debug_bounds("linear-panel").is_none());
-        assert!(tree_focused(&outline, cx), "the tree has focus again");
-        assert!(cx.debug_bounds("overview-chat-panel").is_some());
-
-        // From the tree it opens again.
-        cx.simulate_keystrokes(&linear_key());
-        redraw(cx);
-        assert!(linear_search_focused(&overview, cx));
+        assert!(route_is_chat(&shell, cx));
+        assert!(tree_focused(&outline, cx));
+        assert_eq!(composer.read_with(cx, |c, cx| c.draft_text(cx)), "draft");
     }
 
     /// No Space with Linear on: the key does nothing but explain, on the

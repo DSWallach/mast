@@ -195,9 +195,12 @@ mod tests {
         let calls: Calls = Arc::default();
         let sink = calls.clone();
         let target = mast_proto::ReviewTarget::Branch {
-            repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
-            branch: Some("feature".into()), base_ref: Some("main".into()),
-            base_sha: Some("base".into()), head_sha: "head".into(),
+            repo: Some("acme/repo".into()),
+            checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()),
+            base_ref: Some("main".into()),
+            base_sha: Some("base".into()),
+            head_sha: "head".into(),
         };
         let reply_target = target.clone();
         shell.update(cx, |shell, cx| {
@@ -234,12 +237,23 @@ mod tests {
     #[gpui::test]
     fn branch_review_opens_existing_review_without_launching(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
-        cx.update(|cx| crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx));
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            )
+        });
         let (shell, cx) = test_shell(cx, directory.path());
         let target = mast_proto::ReviewTarget::Branch {
-            repo: Some("acme/repo".into()), checkout_path: Some("/repo/worktree".into()),
-            branch: Some("feature".into()), base_ref: Some("main".into()),
-            base_sha: Some("base".into()), head_sha: "head".into(),
+            repo: Some("acme/repo".into()),
+            checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()),
+            base_ref: Some("main".into()),
+            base_sha: Some("base".into()),
+            head_sha: "head".into(),
         };
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -269,16 +283,28 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, directory.path());
         shell.update(cx, |shell, cx| {
-            shell.chat_menu.open(ChatMenuState { chat_id: "worker".into(), position: gpui::point(px(20.0), px(20.0)), page: ChatMenuPage::Root, closeable: false });
+            shell.chat_menu.open(ChatMenuState {
+                chat_id: "worker".into(),
+                position: gpui::point(px(20.0), px(20.0)),
+                page: ChatMenuPage::Root,
+                closeable: false,
+            });
             cx.notify();
         });
         draw(cx);
         assert!(cx.debug_bounds("chat-menu-review-work").is_none());
         shell.update(cx, |shell, cx| {
-            shell.branch_review_targets.insert("worker".into(), mast_proto::ReviewTarget::Branch {
-                repo: Some("acme/repo".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()),
-                base_ref: Some("main".into()), base_sha: Some("base".into()), head_sha: "head".into(),
-            });
+            shell.branch_review_targets.insert(
+                "worker".into(),
+                mast_proto::ReviewTarget::Branch {
+                    repo: Some("acme/repo".into()),
+                    checkout_path: Some("/repo".into()),
+                    branch: Some("feature".into()),
+                    base_ref: Some("main".into()),
+                    base_sha: Some("base".into()),
+                    head_sha: "head".into(),
+                },
+            );
             cx.notify();
         });
         draw(cx);
@@ -1058,7 +1084,10 @@ mod tests {
         assert_eq!(calls.lock().unwrap()[0]["tab"], "authored");
         assert_eq!(calls.lock().unwrap()[0]["force"], false);
         // Off the page the timer fetches nothing.
-        shell.update(cx, |shell, cx| shell.open_overview(cx));
+        shell.update(cx, |shell, cx| {
+            shell.open_new_session(cx);
+            shell.open_overview(cx);
+        });
         draw(cx);
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(61));
@@ -1092,11 +1121,12 @@ mod tests {
         script_dash(&shell, cx);
         draw(cx);
         for combo in ["mod-p", "mod-shift-p"] {
-            shell.update(cx, |shell, cx| shell.open_overview(cx));
-            draw(cx);
-            shell.read_with(cx, |shell, _| {
-                assert!(matches!(shell.route, Route::Overview))
+            shell.update(cx, |shell, cx| {
+                shell.open_new_session(cx);
+                shell.open_overview(cx);
             });
+            draw(cx);
+            shell.read_with(cx, |shell, _| assert!(shell.overview_navigation_visible()));
             cx.simulate_keystrokes(&platform_combo(combo));
             draw(cx);
             shell.read_with(cx, |shell, _| {
@@ -1616,7 +1646,10 @@ mod tests {
         let before = lines(&page, cx, PrDashTab::Authored);
         assert!(!before.is_empty());
         let (calls, _rows) = script_dash(&shell, cx);
-        shell.update(cx, |shell, cx| shell.open_overview(cx));
+        shell.update(cx, |shell, cx| {
+            shell.open_new_session(cx);
+            shell.open_overview(cx);
+        });
         draw(cx);
         shell.update(cx, |shell, cx| shell.open_pr_review_chats(cx));
         cx.update(|window, cx| {

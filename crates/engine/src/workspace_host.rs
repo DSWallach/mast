@@ -1820,7 +1820,10 @@ impl WorkspaceHost {
             // Read-only with approvals off: nobody answers a side chat's
             // prompts (dispatch re-applies this on every run).
             config: main.config.clone().map(|mut config| {
-                config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                // Antigravity has no read-only mode: keep the main sandbox.
+                if mast_proto::side_chat::harness_supports_read_only(config.harness) {
+                    config.sandbox = mast_proto::SandboxLevel::ReadOnly;
+                }
                 config.auto_approve = true;
                 config
             }),
@@ -2022,6 +2025,24 @@ impl WorkspaceHost {
         task: &mast_proto::ScheduledChat,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_scheduled_task_info(chat_id, task))?)
+    }
+
+    /// [`Self::set_chat_scheduled_task_info`] for many chats in one registry
+    /// write. Returns how many rows existed.
+    pub fn set_chats_scheduled_task_info(
+        &self,
+        updates: &[(String, mast_proto::ScheduledChat)],
+    ) -> Result<usize, EngineError> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.mutate(|doc| {
+            let mut written = 0;
+            for (chat_id, task) in updates {
+                written += usize::from(doc.set_chat_scheduled_task_info(chat_id, task)?);
+            }
+            Ok::<_, mast_doc::DocError>(written)
+        })?)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

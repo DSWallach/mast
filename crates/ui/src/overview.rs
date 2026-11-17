@@ -59,7 +59,11 @@ use crate::work_outline::{WorkOutlineCommand, WorkOutlineLoad};
 /// The Linear panel host (`overview/linear_host.rs`).
 mod details_width;
 mod github_host;
+mod layout;
+mod sidebar;
+pub(crate) use sidebar::OverviewNavigation;
 mod linear_host;
+mod top_sessions;
 
 /// A chat with no activity for longer than this, and not currently
 /// working/awaiting input, reads as stale. Adapted from
@@ -74,6 +78,8 @@ const STALE_AFTER: chrono::Duration = chrono::Duration::days(7);
 /// it — independent of the server's own cache TTL, just how often the UI
 /// bothers to poll for a fresher answer.
 const LINK_STATUS_REFRESH: Duration = Duration::from_secs(45);
+/// How long a host's scheduled-task list (schedule, next run, outcome) stays fresh.
+const SCHEDULED_TASKS_REFRESH: Duration = Duration::from_secs(60);
 
 /// Subagent scans are settled-ish once a transcript exists, but an imported
 /// chat that keeps running elsewhere (or gets resumed here) grows new
@@ -1467,12 +1473,17 @@ pub struct Overview {
     /// scroll container)`, headers counted. Rebuilt every List render.
     list_order: Vec<(String, usize)>,
     view_mode: OverviewMode,
+    pub(crate) in_sidebar: bool,
+    sidebar_scope: Option<String>,
     /// Rows currently showing their expanded detail (toggled by a click,
     /// matching the reference's `expandedIds`/`toggleExpanded`). Never causes
     /// navigation; only the explicit "Open chat" affordance does that.
     expanded: HashSet<String>,
     link_status: HashMap<String, LinkStatusEntry>,
     link_status_pending: HashSet<String>,
+    /// Each host device's scheduled tasks, for task rows.
+    scheduled_tasks: HashMap<String, (Instant, std::sync::Arc<mast_proto::ScheduledTasksSnapshot>)>,
+    scheduled_tasks_pending: HashSet<String>,
     /// Subagents per chat id. Fetched once per chat (not refreshed on an
     /// interval like `link_status` — a session's own subagent set is
     /// settled once its transcript exists, unlike a PR's live checks/review
@@ -1525,6 +1536,7 @@ pub struct Overview {
     /// close-then-reopening).
     repo_filter: popover::Popup<()>,
     filter_menu: popover::Popup<()>,
+    assistant_chooser: popover::Popup<()>,
     /// Rows before any filter (archived-inclusion aside) — lets the empty
     /// state tell "no chats at all" from "everything filtered out".
     unfiltered_count: usize,
@@ -1726,6 +1738,12 @@ impl Overview {
     ) -> Self {
         let observe = cx.observe(&state, |this, state, cx| {
             this.perf.observer_calls += 1;
+            if this.assistant_chooser.is_open() {
+                let state = state.read(cx);
+                if state.personal_assistant.current(&state.chats).is_some() {
+                    this.close_assistant_chooser(cx);
+                }
+            }
             // Only a change to something the rows or render read marks them
             // dirty and repaints; streaming transcript frames and the like
             // leave the fingerprint alone.
@@ -1780,6 +1798,10 @@ impl Overview {
             OutlineEvent::OpenChat(chat_id) => {
                 this.outline_preview = None;
                 this.leave_work_item_details(DetailsExit::OpenChat(chat_id.clone()), cx);
+            }
+            OutlineEvent::OpenChatFromClick(chat_id) => {
+                this.outline_preview = None;
+                this.leave_work_item_details(DetailsExit::OpenChatFromClick(chat_id.clone()), cx);
             }
             OutlineEvent::SelectionMoved => this.schedule_outline_preview(cx),
             OutlineEvent::RenameChat(chat_id) => {
@@ -1845,9 +1867,13 @@ impl Overview {
             list_selected: None,
             list_order: Vec::new(),
             view_mode: OverviewMode::Outline,
+            in_sidebar: false,
+            sidebar_scope: None,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
             link_status_pending: HashSet::new(),
+            scheduled_tasks: HashMap::new(),
+            scheduled_tasks_pending: HashSet::new(),
             subagents: HashMap::new(),
             subagent_pending: HashSet::new(),
             hovered_row: None,
@@ -1864,6 +1890,7 @@ impl Overview {
             repo_filter_needs_validation: false,
             repo_filter: popover::Popup::default(),
             filter_menu: popover::Popup::default(),
+            assistant_chooser: popover::Popup::default(),
             unfiltered_count: 0,
             refresh_ticks: 0,
             _refresh_task: refresh_task,
@@ -1944,7 +1971,6 @@ impl Overview {
     }
 
     /// Whether the toolbar search field holds focus.
-    #[cfg(test)]
     pub(crate) fn search_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         gpui::Focusable::focus_handle(self.search.read(cx), cx).is_focused(window)
     }
@@ -2216,10 +2242,10 @@ impl Overview {
     /// staleness re-derive) — a fetch that lands with changed data does that
     /// itself.
     fn refresh_tick(&mut self, cx: &mut Context<Self>) {
-        let visible = self
-            .shell
-            .upgrade()
-            .is_some_and(|shell| shell.read(cx).is_overview_route());
+        let visible = self.shell.upgrade().is_some_and(|shell| {
+            let shell = shell.read(cx);
+            shell.is_overview_route() || shell.overview_navigation_visible()
+        });
         if !visible {
             return;
         }
@@ -2372,6 +2398,11 @@ impl Overview {
                 state
                     .overview_chats_with_archived(now, self.show_archived)
                     .into_iter()
+                    .filter(|(_, chat)| {
+                        self.sidebar_scope
+                            .as_deref()
+                            .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
+                    })
                     .map(|(status, chat)| {
                         let failures = state
                             .session_for(&chat.id)
@@ -2572,15 +2603,17 @@ impl Overview {
                 let stale = row.map_or_else(|| is_stale(chat, status, now), |r| r.stale);
                 let shown_by_toggles =
                     (self.show_archived || !chat.archived) && !(self.hide_stale && stale);
-                let tool_failures = row
-                    .and_then(|r| r.tool_failures.clone())
-                    .or_else(|| {
-                        state
-                            .session_for(&chat.id)
-                            .and_then(|s| s.last_turn_tool_failures.clone())
-                    });
+                let tool_failures = row.and_then(|r| r.tool_failures.clone()).or_else(|| {
+                    state
+                        .session_for(&chat.id)
+                        .and_then(|s| s.last_turn_tool_failures.clone())
+                });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 let visible = shown_by_toggles
+                    && self
+                        .sidebar_scope
+                        .as_deref()
+                        .is_none_or(|scope| chat.space_id.as_deref() == Some(scope))
                     && {
                         let repo = match row {
                             Some(row) => row.repo.clone(),
@@ -2638,7 +2671,15 @@ impl Overview {
     /// All-spaces view), in display order, with its current load.
     fn outline_spaces(&self, cx: &gpui::App) -> Vec<OutlineSpace> {
         let state = self.state.read(cx);
-        let mut spaces: Vec<&Space> = state.spaces.iter().collect();
+        let mut spaces: Vec<&Space> = state
+            .spaces
+            .iter()
+            .filter(|space| {
+                self.sidebar_scope
+                    .as_deref()
+                    .is_none_or(|scope| space.id == scope)
+            })
+            .collect();
         spaces.sort_by_cached_key(|space| (space.display_name().to_lowercase(), space.id.clone()));
         spaces
             .into_iter()
@@ -2690,6 +2731,16 @@ impl Overview {
     }
 
     pub(crate) fn open_chat_panel(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.in_sidebar {
+            self.subagent_peek = None;
+            self.chat_panel_open = false;
+            self.outline_chat_return = Some(OutlineChatReturn {
+                chat_id: chat_id.clone(),
+                full_route: true,
+            });
+            self.open(chat_id, cx);
+            return;
+        }
         // Web `openTranscriptPanel` → `acknowledgeDone`.
         self.acknowledge_done(&chat_id, cx);
         let _ = self.shell.update(cx, |shell, cx| {
@@ -2715,6 +2766,7 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         self.peek_request_seq += 1;
         let request_id = self.peek_request_seq;
         self.chat_panel_open = false;
@@ -2779,6 +2831,7 @@ impl Overview {
     /// ✕ / Escape on a peek: back to the bare list.
     fn close_subagent_peek(&mut self, cx: &mut Context<Self>) {
         if self.subagent_peek.take().is_some() {
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -2847,6 +2900,63 @@ impl Overview {
         let _ = self.shell.update(cx, |shell, cx| {
             shell.set_chat_archived(chat_id, archived, cx);
         });
+    }
+
+    /// Refresh `device`'s scheduled-task list (its owner answers through the
+    /// existing device routing) for the task rows' schedule and next run.
+    fn ensure_scheduled_tasks(&mut self, device: &str, cx: &mut Context<Self>) {
+        let fresh = self
+            .scheduled_tasks
+            .get(device)
+            .is_some_and(|(at, _)| at.elapsed() < SCHEDULED_TASKS_REFRESH);
+        if fresh || self.scheduled_tasks_pending.contains(device) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let device = device.to_owned();
+        self.scheduled_tasks_pending.insert(device.clone());
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<mast_proto::ScheduledTasksSnapshot>(
+                    methods::SCHEDULED_TASKS,
+                    serde_json::json!({ "action": "list", "targetDeviceId": device }),
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.scheduled_tasks_pending.remove(&device);
+                // A host that cannot answer keeps its rows, without schedule
+                // details, and is retried after the same interval.
+                let snapshot = result.map(std::sync::Arc::new).unwrap_or_else(|_| {
+                    this.scheduled_tasks
+                        .get(&device)
+                        .map(|(_, s)| s.clone())
+                        .unwrap_or_default()
+                });
+                // Task rows read this live, like badges: repaint only.
+                this.scheduled_tasks
+                    .insert(device, (Instant::now(), snapshot));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The task definition behind a scheduled run, when its host reported it.
+    fn task_for(
+        &self,
+        chat: &Chat,
+    ) -> Option<(&mast_proto::ScheduledTask, &[mast_proto::ScheduledRun])> {
+        let info = chat.scheduled_task_info.as_ref()?;
+        let (_, snapshot) = self.scheduled_tasks.get(&chat.device_id)?;
+        let task = snapshot
+            .tasks
+            .iter()
+            .find(|t| t.id == info.task_id && t.device_id == chat.device_id)?;
+        Some((task, snapshot.runs.as_slice()))
     }
 
     fn ensure_link_status(&mut self, chat_id: String, cx: &mut Context<Self>) {
@@ -2937,6 +3047,8 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
+        self.outline_focus_pending = false;
         if self.expanded.insert(chat_id.clone()) {
             self.acknowledge_done(&chat_id, cx);
         }
@@ -2965,6 +3077,7 @@ impl Overview {
                 self.link_error = None;
             }
             self.link_submitting = false;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -3664,7 +3777,8 @@ impl Overview {
                 .id("overview-chat-panel")
                 .debug_selector(|| "overview-chat-panel".into())
                 .flex_none()
-                .w(px(CHAT_PANEL_W))
+                .when(self.in_sidebar, |el| el.flex_1().min_w_0())
+                .when(!self.in_sidebar, |el| el.w(px(CHAT_PANEL_W)))
                 .h_full()
                 .flex()
                 .flex_col()
@@ -3895,7 +4009,8 @@ impl Overview {
                     }
                 }))
                 .flex_none()
-                .w(px(CHAT_PANEL_W))
+                .when(self.in_sidebar, |el| el.flex_1().min_w_0())
+                .when(!self.in_sidebar, |el| el.w(px(CHAT_PANEL_W)))
                 .h_full()
                 .flex()
                 .flex_col()
@@ -4652,353 +4767,12 @@ impl Overview {
 
 impl Render for Overview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
-        self.ensure_prefs_loaded(cx);
-        if std::mem::take(&mut self.outline_focus_pending)
-            && self.view_mode == OverviewMode::Outline
-        {
-            let handle = gpui::Focusable::focus_handle(self.outline.read(cx), cx);
-            window.focus(&handle, cx);
-        }
-        // The chat open in the side panel — or, in peek mode, the parent of
-        // the subagent being peeked.
-        self.panel_highlight = self
-            .subagent_peek
-            .as_ref()
-            .map(|p| p.chat_id.clone())
-            .or_else(|| self.panel_chat_id(cx));
-        let rows = self.rows(cx);
-        self.declare_outline_spaces(cx);
-        if self.view_mode == OverviewMode::Outline {
-            self.sync_outline(cx);
-        }
-
-        let new_chat_button = self.render_new_chat_button(&theme, cx);
-
-        let title_row = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from("Overview")),
-                    )
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("{} chats", rows.len()))),
-                    )
-                    .when(
-                        self.needs_interaction_count > 0
-                            || self.attention_filter == AttentionFilter::NeedsInteraction,
-                        |el| {
-                            let active = self.attention_filter == AttentionFilter::NeedsInteraction;
-                            let color = crate::status_style::status_style(
-                                crate::status_style::Status::Waiting,
-                                theme.appearance,
-                            )
-                            .color;
-                            let label = if self.needs_interaction_count == 1 {
-                                "1 needs interaction".to_string()
-                            } else {
-                                format!("{} need interaction", self.needs_interaction_count)
-                            };
-                            el.child(
-                                div()
-                                    .id("overview-filter-needs-interaction")
-                                    .debug_selector(|| "overview-filter-needs-interaction".into())
-                                    .px(px(7.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(if active {
-                                        color
-                                    } else {
-                                        color.opacity(0.3)
-                                    })
-                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(color)
-                                    .child(SharedString::from(label))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.attention_filter = if this.attention_filter
-                                            == AttentionFilter::NeedsInteraction
-                                        {
-                                            AttentionFilter::All
-                                        } else {
-                                            AttentionFilter::NeedsInteraction
-                                        };
-                                        this.rows_dirty = true;
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    )
-                    .when(
-                        self.stalled_count > 0
-                            || self.attention_filter == AttentionFilter::Stalled,
-                        |el| {
-                            let active = self.attention_filter == AttentionFilter::Stalled;
-                            let color = crate::status_style::status_style(
-                                crate::status_style::Status::Errored,
-                                theme.appearance,
-                            )
-                            .color;
-                            let label = format!("{} stalled", self.stalled_count);
-                            el.child(
-                                div()
-                                    .id("overview-filter-stalled")
-                                    .debug_selector(|| "overview-filter-stalled".into())
-                                    .px(px(7.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(if active {
-                                        color
-                                    } else {
-                                        color.opacity(0.3)
-                                    })
-                                    .bg(color.opacity(if active { 0.25 } else { 0.12 }))
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(color)
-                                    .child(SharedString::from(label))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.attention_filter =
-                                            if this.attention_filter == AttentionFilter::Stalled {
-                                                AttentionFilter::All
-                                            } else {
-                                                AttentionFilter::Stalled
-                                            };
-                                        this.rows_dirty = true;
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .id("overview-search")
-                            .w(px(260.0))
-                            .on_key_down(cx.listener(
-                                |this, event: &gpui::KeyDownEvent, window, cx| {
-                                    this.search_key_down(event, window, cx)
-                                },
-                            ))
-                            .hint("Search", HintKey::Find)
-                            .child(crate::components::toolbar_search_frame(
-                                &theme,
-                                self.search.clone().into_any_element(),
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    // Leftmost of the header's action cluster — the overview's
-                    // one clearly-primary button (see `render_new_chat_button`).
-                    .child(new_chat_button)
-                    .child(
-                        div()
-                            .id("overview-pull-requests")
-                            .debug_selector(|| "overview-pull-requests".into())
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.text_color(theme.text))
-                            .when(true, |el| {
-                                crate::components::toolbar_control(el, &theme, false)
-                            })
-                            .child("Pull requests")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(shell) = this.shell.upgrade() {
-                                    shell.update(cx, |shell, cx| {
-                                        shell.open_pr_review_chats_focused(window, cx)
-                                    });
-                                }
-                            })),
-                    ),
-            );
-
-        let filters = self.render_filter_menu(&theme, cx);
-        let repo_filter = self.render_repo_filter(&theme, cx);
-        let outline_mode = self.view_mode == OverviewMode::Outline;
-        let work_item_filter = (!outline_mode).then(|| self.render_work_item_filter(&theme, cx));
-        let mut toolbar = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.0))
-            .child(filters)
-            .child(repo_filter)
-            .when_some(work_item_filter, |el, filter| el.child(filter));
-        if outline_mode {
-            toolbar = toolbar.children(self.render_outline_toolbar(&theme, cx));
+        if self.in_sidebar {
+            self.render_sidebar_workspace(window, cx)
         } else {
-            // Composable dimension chips: click toggles membership, order
-            // clicked = nesting order (`self.active_groups`). A chip shows
-            // its position in that order (1-based) while active, so the
-            // nesting is legible without opening a menu.
-            let dims: [(GroupDimension, &'static str); 2] = [
-                (GroupDimension::Repo, "Repo"),
-                (GroupDimension::Ticket, "PR / ticket"),
-            ];
-            let chips = dims.into_iter().map(|(dim, label)| {
-                let order = self.active_groups.iter().position(|&d| d == dim);
-                let active = order.is_some();
-                let text = match order {
-                    Some(ix) => format!("{label} {}", ix + 1),
-                    None => label.to_string(),
-                };
-                crate::components::overview_group_button(SharedString::from(format!("overview-group-{label}")), active, &theme)
-                .child(SharedString::from(text))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.toggle_group(dim, cx);
-                        cx.notify();
-                    }),
-                )
-            });
-            toolbar = toolbar.child(
-                crate::components::overview_group_frame(&theme)
-                .child(
-                    div()
-                        .px(px(5.0))
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child(SharedString::from("Group by")),
-                )
-                .children(chips),
-            );
+            let navigation = self.render_navigation(window, cx);
+            self.render_workspace(navigation, window, cx)
         }
-
-        let header = crate::components::outline_overview_header(&theme)
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(16.0))
-            .py(px(12.0))
-            .child(title_row)
-            .child(toolbar);
-
-        let body = match self.view_mode {
-            OverviewMode::List => {
-                let body = self.render_list_body(&rows, &theme, cx);
-                self.surface_focus_wrapper(body, cx)
-            }
-            OverviewMode::Outline => self.render_outline_body(cx),
-        };
-        // A focus the body couldn't use (target filtered out / not a row)
-        // is dropped, never replayed on a later frame.
-        self.focus_due = None;
-
-        let main = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(body);
-
-        // One right-side panel. Work Item Details, while open, renders in the
-        // slot without touching the chat panel / peek state underneath, so
-        // closing it brings back exactly what was there.
-        // The Linear panel is NOT in this slot: it has its own left column
-        // (below), so it shows alongside whichever of these is up.
-        let (panel, right_w) = if let Some(details) = self.work_item_details.clone() {
-            let space_id = details.read(cx).space_id.clone();
-            let snapshot = self.outline_snapshot(&space_id, cx);
-            let chats = self.outline_chats.clone();
-            details.update(cx, |details, _| details.set_data(snapshot, chats));
-            let width = self.shown_details_width();
-            let panel = self.details_slot(details.into_any_element(), width, &theme, cx);
-            (Some(panel), width)
-        } else if let Some(list) = self.required_actions_panel.clone() {
-            let spaces = self.required_action_spaces(cx);
-            let chats = self.outline_chats.clone();
-            list.update(cx, |list, _| list.set_data(spaces, chats));
-            let width = self.shown_details_width();
-            let panel = self.details_slot(list.into_any_element(), width, &theme, cx);
-            (Some(panel), width)
-        } else {
-            let panel = if self.subagent_peek.is_some() {
-                self.render_subagent_peek(&theme, cx)
-            } else {
-                self.render_chat_panel(&theme, cx)
-            };
-            let width = if panel.is_some() { CHAT_PANEL_W } else { 0.0 };
-            (panel, width)
-        };
-        let linear = self.render_linear_column(right_w, window, cx);
-        let (linear_inline, linear_overlay) = match linear {
-            Some(linear_host::LinearSlot::Inline(el)) => (Some(el), None),
-            Some(linear_host::LinearSlot::Overlay(el)) => (None, Some(el)),
-            None => (None, None),
-        };
-
-        // `[Linear | main | right panel]`: the side panels are
-        // `flex_none` widths and `main` is `flex_1().min_w_0()`, so the
-        // list/Outline is what shrinks. The Linear column yields
-        // first (down to its minimum, then it overlays `main`) so the body
-        // keeps `linear_host::OVERVIEW_BODY_MIN_W`.
-        div()
-            .size_full()
-            .relative()
-            .flex()
-            .child(self.linear_width_capture())
-            .on_drag_move(cx.listener(
-                |this, event: &gpui::DragMoveEvent<details_width::DetailsPanelResize>, _, cx| {
-                    this.details_resize_drag(f32::from(event.event.position.x), cx)
-                },
-            ))
-            .on_drag_move(cx.listener(
-                |this, event: &gpui::DragMoveEvent<linear_host::LinearPanelResize>, _, cx| {
-                    this.linear_resize_drag(f32::from(event.event.position.x), cx)
-                },
-            ))
-            // Escape closes a subagent peek from anywhere in the overview
-            // (the peek panel's own handler covers focus inside it; this
-            // covers focus elsewhere here, e.g. the search box).
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key != "escape" {
-                    return;
-                }
-                if let Some(details) = this.work_item_details.clone() {
-                    details.update(cx, |details, cx| details.request_close(cx));
-                    cx.stop_propagation();
-                } else if this.required_actions_panel.is_some() {
-                    this.close_required_actions(cx);
-                    cx.stop_propagation();
-                } else if this.subagent_peek.is_some() {
-                    this.close_subagent_peek(cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .when_some(linear_inline, |el, linear| el.child(linear))
-            .child(main)
-            .when_some(panel, |el, panel| el.child(panel))
-            .when_some(linear_overlay, |el, linear| {
-                el.child(div().absolute().top_0().bottom_0().left_0().child(linear))
-            })
-            .children(self.render_project_issue_picker(cx))
     }
 }
 
@@ -5383,6 +5157,8 @@ impl Overview {
         let new_chat_button = truly_empty.then(|| self.render_new_chat_button(theme, cx));
         div()
             .flex_1()
+            .min_w_0()
+            .w_full()
             .flex()
             .flex_col()
             .items_center()
@@ -5391,6 +5167,11 @@ impl Overview {
             .p(px(24.0))
             .child(
                 div()
+                    .debug_selector(|| "overview-empty-headline".into())
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_center()
                     .text_size(crate::typography::ui_rems(13.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(headline)),
@@ -5398,6 +5179,11 @@ impl Overview {
             .when_some(detail, |el, detail| {
                 el.child(
                     div()
+                        .debug_selector(|| "overview-empty-detail".into())
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_center()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(detail)),
@@ -5642,6 +5428,150 @@ impl Overview {
             .into_any_element()
     }
 
+    /// A scheduled task's row: the task, not its run. Name, schedule, next
+    /// run and last outcome, with the dot of its latest run. Clicking opens
+    /// that run; History opens the task's run history.
+    fn render_task_row(
+        &mut self,
+        ix: usize,
+        row: &OverviewRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let chat = &row.chat;
+        let Some(info) = chat.scheduled_task_info.clone() else {
+            return div().into_any_element();
+        };
+        self.ensure_scheduled_tasks(&chat.device_id, cx);
+        let chat_id = chat.id.clone();
+        let task = self.task_for(chat);
+        let name = task.map_or(info.task_name.clone(), |(t, _)| t.draft.name.clone());
+        let mut meta = Vec::new();
+        if let Some((task, runs)) = task {
+            meta.push(crate::scheduled_tasks::schedule_label(&task.draft.schedule));
+            meta.push(
+                crate::scheduled_tasks::next_run_label(task).unwrap_or_else(|| {
+                    if task.draft.enabled {
+                        "No next run"
+                    } else {
+                        "Paused"
+                    }
+                    .into()
+                }),
+            );
+            meta.push(format!(
+                "Last: {}",
+                crate::scheduled_tasks::last_outcome_label(runs, &task.id)
+            ));
+        } else {
+            let (_, label) = status_style(row.status);
+            meta.push(format!("Last: {label}"));
+        }
+        let last_run = format!(
+            "Latest run {}",
+            format_time_ago(
+                chrono::DateTime::from_timestamp_millis(mast_proto::task_chat_order(chat).0)
+                    .unwrap_or(chat.created_at),
+                Utc::now()
+            )
+        );
+        let dot = crate::status_style::status_style(row.status.into(), theme.appearance).color;
+        let indicator = crate::components::outline_chat_indicator(
+            row.status.into(),
+            format!("overview-task-status-{chat_id}"),
+            dot,
+            theme,
+            cx.entity_id(),
+            cx,
+        );
+        let open_id = chat_id.clone();
+        let history_task = info.task_id.clone();
+        let history_device = chat.device_id.clone();
+        let row_selector = format!("overview-task-row-{}", info.task_id);
+        let history_selector = format!("overview-task-history-{}", info.task_id);
+        crate::components::scheduled_task_parts::task_row()
+            .id(("overview-task-row", ix))
+            .debug_selector(move || row_selector.clone())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(
+                self.panel_highlight.as_deref() == Some(chat_id.as_str()),
+                |el| el.border_color(theme.accent),
+            )
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_chat_panel(open_id.clone(), cx)))
+            .child(indicator)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                crate::components::scheduled_task_parts::task_kind()
+                                    .flex_none()
+                                    .text_color(theme.text_muted)
+                                    .child("Scheduled task"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.text)
+                                    .child(name),
+                            ),
+                    )
+                    .child(
+                        crate::components::scheduled_task_parts::task_details()
+                            .truncate()
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(meta.join(" · ")),
+                    ),
+            )
+            .child(
+                crate::components::scheduled_task_parts::task_time()
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child(last_run),
+            )
+            .child(
+                crate::components::scheduled_task_parts::task_history()
+                    .id(SharedString::from(history_selector.clone()))
+                    .debug_selector(move || history_selector.clone())
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .bg(theme.accent.opacity(0.1))
+                    .hover(|el| el.bg(theme.accent.opacity(0.2)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let (task, device) = (history_task.clone(), history_device.clone());
+                        let _ = this.shell.update(cx, |shell, cx| {
+                            shell.open_scheduled_task_history(task, device, cx)
+                        });
+                    }))
+                    .child("History"),
+            )
+            .into_any_element()
+    }
+
     /// One List-mode row. Same click split as the web's `renderTile`: clicking the row toggles its expanded detail in place
     /// (and acknowledges an unread done); the explicit "View full chat →"
     /// control opens the interactive chat panel. Neither navigates away
@@ -5653,6 +5583,9 @@ impl Overview {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if row.chat.scheduled_task_info.is_some() {
+            return self.render_task_row(ix, row, theme, cx);
+        }
         let now = Utc::now();
         let chat_id = row.chat.id.clone();
         let title: SharedString = row
@@ -5690,9 +5623,8 @@ impl Overview {
         );
         let (dim, ribbon) = card_dimming(row.chat.archived, row.stale, unread);
         // A chat needing interaction or stalled stays at full opacity.
-        let dim = dim.filter(|_| {
-            row.chat.archived || !(row.needs_interaction() || row.is_stalled())
-        });
+        let dim =
+            dim.filter(|_| row.chat.archived || !(row.needs_interaction() || row.is_stalled()));
         let needs_input_pill = (row.status == ChatIndicator::AwaitingInput).then(|| {
             let color = crate::status_style::status_style(
                 crate::status_style::Status::Waiting,
@@ -5801,11 +5733,21 @@ impl Overview {
             has_subagent_overflow && self.hovered_row.as_deref() == Some(chat_id.as_str());
         let subagent_tiles = self.subagent_tiles_for(&chat_id, theme, show_all_subagents, cx);
         let detail = is_expanded.then(|| self.expanded_detail_for(row, theme, chat_id.clone(), cx));
+        let session_badge =
+            crate::personal_assistant::session_badge(self.state.read(cx), &chat_id, theme);
+        let menu_id = chat_id.clone();
         let toggle_id = chat_id.clone();
         let row_selector = format!("overview-list-chat-{chat_id}");
         let hover_id = chat_id.clone();
         div()
             .id(("overview-row", ix))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.open_session_menu(menu_id.clone(), event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .debug_selector(|| "overview-list-row".into())
             .relative()
             // Never shrink inside the scrolling list column. The row is
@@ -5887,6 +5829,7 @@ impl Overview {
                                             .text_color(theme.text)
                                             .child(title),
                                     )
+                                    .children(session_badge)
                                     .children(drift_mark)
                                     .children(exception_mark)
                                     .when_some(needs_input_pill, |el, pill| el.child(pill))
@@ -5987,6 +5930,11 @@ impl Overview {
     }
 
     #[cfg(test)]
+    pub(crate) fn work_item_details_for_test(&self) -> Option<Entity<WorkItemDetails>> {
+        self.work_item_details.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_work_item_details(&self) -> bool {
         self.work_item_details.is_some()
     }
@@ -6074,7 +6022,17 @@ impl Overview {
                     HintKey::Command(WorkOutlineCommand::CreateWorkItem),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.run_work_outline_command(WorkOutlineCommand::CreateWorkItem, window, cx);
+                    let selected = this.outline.read(cx).selected_item();
+                    let space = selected
+                        .as_ref()
+                        .map(|(space, _)| space.clone())
+                        .or_else(|| this.sidebar_scope.clone());
+                    let parent = selected.map(|(_, item)| item);
+                    if let Some(shell) = this.shell.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.open_create_work_item(space, parent, window, cx)
+                        });
+                    }
                 }))
                 .into_any_element(),
         ];
@@ -6384,6 +6342,7 @@ impl Overview {
         item_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         if self.work_item_details.as_ref().is_some_and(|details| {
             let details = details.read(cx);
             details.space_id == space_id && details.item_id == item_id
@@ -6472,6 +6431,12 @@ impl Overview {
     fn apply_details_exit(&mut self, exit: DetailsExit, cx: &mut Context<Self>) {
         match exit {
             DetailsExit::Close => self.close_work_item_details(cx),
+            DetailsExit::OpenChatFromClick(chat_id) => {
+                self.apply_details_exit(DetailsExit::OpenChat(chat_id), cx);
+                let _ = self
+                    .shell
+                    .update(cx, |shell, cx| shell.keep_outline_navigation_focus(cx));
+            }
             DetailsExit::OpenChat(chat_id) => {
                 self.close_work_item_details(cx);
                 self.close_required_actions(cx);
@@ -6480,6 +6445,12 @@ impl Overview {
                     full_route: false,
                 });
                 self.open_chat_panel(chat_id, cx);
+            }
+            DetailsExit::OpenFullChat(chat_id) => {
+                self.close_work_item_details(cx);
+                self.close_required_actions(cx);
+                self.prepare_full_chat(&chat_id, cx);
+                self.open(chat_id, cx);
             }
             DetailsExit::OpenItem { space_id, item_id } => {
                 self.replace_work_item_details(space_id, item_id, cx)
@@ -6493,6 +6464,7 @@ impl Overview {
         item_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.show_sidebar_workspace(cx);
         let key = row_key::item(&space_id, &item_id);
         let chat_ids = self
             .state
@@ -6618,6 +6590,7 @@ impl Overview {
     pub(crate) fn close_work_item_details(&mut self, cx: &mut Context<Self>) {
         if self.work_item_details.take().is_some() {
             self._details_events = None;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -6813,6 +6786,10 @@ impl Overview {
     /// any other row, cancel a pending switch: the panel keeps the last
     /// previewed Chat.
     fn schedule_outline_preview(&mut self, cx: &mut Context<Self>) {
+        // Browsing the persistent column must not replace the open workspace.
+        if self.in_sidebar {
+            return;
+        }
         if self.outline.read(cx).selected_open_chat().is_none() {
             self.outline_preview = None;
             return;
@@ -7093,6 +7070,7 @@ impl Overview {
     /// Outline toolbar). Work Item Details close first (through the discard
     /// policy) so the surface is visible.
     pub(crate) fn open_required_actions(&mut self, cx: &mut Context<Self>) {
+        self.show_sidebar_workspace(cx);
         if self.required_actions_panel.is_none() {
             use crate::work_outline::required_actions_view::{
                 RequiredActionsEvent, RequiredActionsList,
@@ -7155,6 +7133,7 @@ impl Overview {
     pub(crate) fn close_required_actions(&mut self, cx: &mut Context<Self>) {
         if self.required_actions_panel.take().is_some() {
             self._required_actions_events = None;
+            self.return_from_sidebar_workspace(cx);
             cx.notify();
         }
     }
@@ -7207,6 +7186,26 @@ impl Overview {
     }
 
     #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_attention_empty(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.apply_work_outline_frame(
+                "fixture-space",
+                mast_proto::WorkOutlineSnapshot {
+                    space_id: "fixture-space".into(),
+                    available: true,
+                    synced: true,
+                    ..Default::default()
+                },
+            );
+            cx.notify();
+        });
+        self.attention_filter = AttentionFilter::NeedsInteraction;
+        self.rows_dirty = true;
+        self.outline_dirty = true;
+        cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
     pub(crate) fn show_snapshot_outline(&mut self, cx: &mut Context<Self>) {
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
@@ -7221,7 +7220,9 @@ impl Overview {
         );
         self.set_mode(OverviewMode::Outline, cx);
         self.sync_outline(cx);
-        self.outline.update(cx, |outline, cx| outline.select(&row_key::item("fixture-space", "w-api"), cx));
+        self.outline.update(cx, |outline, cx| {
+            outline.select(&row_key::item("fixture-space", "w-api"), cx)
+        });
     }
 
     #[cfg(feature = "snapshot")]
@@ -7229,7 +7230,15 @@ impl Overview {
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
         snapshot.space_settings.linear_enabled = true;
-        self.set_outline_loads([("fixture-space".into(), WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)))].into_iter().collect(), cx);
+        self.set_outline_loads(
+            [(
+                "fixture-space".into(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+            )]
+            .into_iter()
+            .collect(),
+            cx,
+        );
         self.set_mode(OverviewMode::Outline, cx);
         self.sync_outline(cx);
         self.open_snapshot_linear(cx);
@@ -7254,6 +7263,8 @@ pub(crate) struct OutlineChatReturn {
 enum DetailsExit {
     Close,
     OpenChat(String),
+    OpenChatFromClick(String),
+    OpenFullChat(String),
     OpenItem { space_id: String, item_id: String },
 }
 
@@ -8164,6 +8175,106 @@ mod logic_tests {
     }
 
     #[gpui::test]
+    fn sidebar_scope_filters_navigation_without_changing_the_open_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_repos(cx, dir.path(), &["alpha", "beta"]);
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("c1".into());
+            state.spaces = ["alpha", "beta"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "local", "path": format!("/work/{id}"), "createdAt": "2026-11-01T00:00:00Z"
+            })).unwrap()).collect();
+            state.chats[0].space_id = Some("alpha".into());
+            state.chats[1].space_id = Some("beta".into());
+        });
+        let (overview, vcx) = overview_over(cx, &state);
+        overview.update(vcx, |overview, cx| {
+            overview.set_sidebar_scope(Some("alpha".into()), cx);
+            let rows = overview.rows(cx);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.chat.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["c0"]
+            );
+            assert!(
+                overview
+                    .outline_chats
+                    .iter()
+                    .filter(|chat| chat.visible)
+                    .all(|chat| chat.space_id.as_deref() == Some("alpha"))
+            );
+            assert_eq!(overview.state.read(cx).selected_chat.as_deref(), Some("c1"));
+        });
+    }
+
+    /// A shell can mount navigation without also mounting the live chat.
+    struct OverviewLayoutHost {
+        overview: Entity<Overview>,
+        workspace: bool,
+    }
+
+    impl Render for OverviewLayoutHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.overview.update(cx, |overview, cx| {
+                let navigation = overview.render_navigation(window, cx);
+                if self.workspace {
+                    overview.render_workspace(navigation, window, cx)
+                } else {
+                    navigation
+                }
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn navigation_surface_can_host_chat_panels_separately(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_repos(cx, dir.path(), &["alpha"]);
+        state.update(cx, |state, _| state.selected_chat = Some("c0".into()));
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let overview = cx.new(|cx| {
+            Overview::new(
+                state,
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            )
+        });
+        overview.update(cx, |overview, _| overview.chat_panel_open = true);
+        let view = overview.clone();
+        let (host, vcx) = cx.add_window_view(move |_, _| OverviewLayoutHost {
+            overview: view,
+            workspace: false,
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("outline-new-item").is_some());
+        assert!(vcx.debug_bounds("overview-chat-panel").is_none());
+        overview.read_with(vcx, |overview, _| assert!(overview.chat_panel_open));
+
+        // Moving between hosts must not require a new controller or reset
+        // the open chat, filters, selection, or persisted view state.
+        for workspace in [true, false, true] {
+            host.update(vcx, |host, cx| {
+                host.workspace = workspace;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear());
+            assert_eq!(vcx.debug_bounds("overview-chat-panel").is_some(), workspace);
+            assert!(vcx.debug_bounds("outline-new-item").is_some());
+            overview.read_with(vcx, |overview, cx| {
+                assert!(overview.chat_panel_open);
+                assert_eq!(overview.state.read(cx).selected_chat.as_deref(), Some("c0"));
+            });
+        }
+    }
+
+    #[gpui::test]
     fn filter_menu_toggles_and_persists_both_options(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let state = state_with_repos(cx, dir.path(), &["alpha"]);
@@ -8642,7 +8753,8 @@ mod logic_tests {
     fn card_model_label_uses_explicit_id_or_honest_default() {
         let mut chat = row("c", "/r/zeron", None).chat;
         assert_eq!(chat_model_label(&chat), "default model");
-        chat.config = Some(mast_proto::ChatConfig { approval_rules: false,
+        chat.config = Some(mast_proto::ChatConfig {
+            approval_rules: false,
             harness: mast_proto::HarnessId::Codex,
             model: Some("gpt-6-codex".into()),
             reasoning: None,
@@ -9041,6 +9153,136 @@ mod logic_tests {
     }
 
     #[gpui::test]
+    fn scheduled_tasks_render_as_one_task_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let run = |id: &str, task: &str, created: i64, retired: bool| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "host", "archived": false, "cwd": "/work/alpha",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "scheduledTaskInfo": {
+                    "taskId": task, "taskName": "stall-watch", "runId": id,
+                    "sessionCreatedAt": created, "retired": retired
+                }
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                run("older", "watch", 1, false),
+                run("latest", "watch", 2, false),
+                run("gone", "retired-routine", 3, true),
+                row("plain", "/work/alpha", None).chat,
+            ];
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let (overview, vcx) = cx.add_window_view(|_, cx| {
+            let mut overview = Overview::new(
+                state.clone(),
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            );
+            overview.view_mode = OverviewMode::List;
+            let task: mast_proto::ScheduledTask = serde_json::from_value(serde_json::json!({
+                "id": "watch", "revision": 1, "deviceId": "host", "createdAt": 0,
+                "updatedAt": 0, "nextDue": 1_800_000_000_000i64,
+                "draft": {
+                    "name": "Codespace Stall Watch", "prompt": "p", "cwd": "/work",
+                    "spaceId": null, "enabled": true, "graceMinutes": 30,
+                    "schedule": {"type": "cron", "expression": "*/30 9-17 * * 1-5",
+                        "timezone": "America/New_York"},
+                    "config": {"harness": "mock", "sandbox": "workspace-write"}
+                }
+            }))
+            .unwrap();
+            overview.scheduled_tasks.insert(
+                "host".into(),
+                (
+                    Instant::now(),
+                    std::sync::Arc::new(mast_proto::ScheduledTasksSnapshot {
+                        device_id: "host".into(),
+                        tasks: vec![task],
+                        ..Default::default()
+                    }),
+                ),
+            );
+            overview
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        overview.read_with(vcx, |o, _| {
+            let ids: Vec<&str> = o.list_order.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids.len(), 2, "one task row and the plain chat: {ids:?}");
+            assert!(ids.contains(&"latest") && ids.contains(&"plain"));
+            let latest = &o
+                .list_rows
+                .iter()
+                .find(|r| r.chat.id == "latest")
+                .unwrap()
+                .chat;
+            let (task, _) = o.task_for(latest).expect("the host reported the task");
+            assert_eq!(task.draft.name, "Codespace Stall Watch");
+        });
+        assert!(vcx.debug_bounds("overview-task-row-watch").is_some());
+        assert!(vcx.debug_bounds("overview-task-history-watch").is_some());
+        assert!(vcx.debug_bounds("overview-list-chat-latest").is_none());
+        assert!(vcx.debug_bounds("overview-list-chat-plain").is_some());
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
+        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+            for width in [640.0, 1440.0] {
+                crate::snapshot::render_to_png(
+                    &format!("scheduled-task-rows-{name}-{}", width as u32),
+                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    |_, cx| {
+                        let _ = crate::typography::register_fonts(cx);
+                        let state = cx.new(|_| AppState::new());
+                        state.update(cx, |s, _| {
+                            s.chats = vec![serde_json::from_value(serde_json::json!({
+                                "id":"latest", "deviceId":"host", "archived":false,
+                                "cwd":"/work/alpha", "createdAt":"2026-11-16T12:00:00Z",
+                                "scheduledTaskInfo":{"taskId":"watch", "taskName":"Routine", "runId":"latest"}
+                            })).unwrap()];
+                        });
+                        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        cx.new(|cx| {
+                            let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
+                            overview.view_mode = OverviewMode::List;
+                            let task = serde_json::from_value(serde_json::json!({
+                                "id":"watch", "revision":1, "deviceId":"host", "createdAt":0, "updatedAt":0,
+                                "nextDue":1_800_000_000_000i64,
+                                "draft":{"name":"Workspace health check", "prompt":"p", "cwd":"/work",
+                                "enabled":true, "graceMinutes":30,
+                                "schedule":{"type":"cron", "expression":"*/30 9-17 * * 1-5", "timezone":"America/New_York"},
+                                "config":{"harness":"mock", "sandbox":"workspace-write"}}
+                            })).unwrap();
+                            overview.scheduled_tasks.insert("host".into(), (Instant::now(), std::sync::Arc::new(mast_proto::ScheduledTasksSnapshot {
+                                device_id:"host".into(), tasks:vec![task], ..Default::default()
+                            })));
+                            overview
+                        })
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[gpui::test]
     fn grouped_list_keeps_selection_expansion_and_scroll_targets(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -9220,9 +9462,7 @@ mod logic_tests {
     }
 
     #[gpui::test]
-    fn overview_indicates_sessions_needing_interaction_or_stalled(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -9294,10 +9534,19 @@ mod logic_tests {
         };
         draw(vcx);
 
-        assert!(vcx.debug_bounds("overview-row-needs-input-c-awaiting").is_some());
-        assert!(vcx.debug_bounds("overview-row-stalled-c-failed-tools").is_some());
+        assert!(
+            vcx.debug_bounds("overview-row-needs-input-c-awaiting")
+                .is_some()
+        );
+        assert!(
+            vcx.debug_bounds("overview-row-stalled-c-failed-tools")
+                .is_some()
+        );
         assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
-        assert!(vcx.debug_bounds("overview-row-needs-input-c-idle").is_none());
+        assert!(
+            vcx.debug_bounds("overview-row-needs-input-c-idle")
+                .is_none()
+        );
         assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
 
         overview.read_with(vcx, |o, _| {
@@ -9307,7 +9556,9 @@ mod logic_tests {
         });
 
         // Clicking the "need interaction" pill filters to just c-awaiting.
-        let needs_pill = vcx.debug_bounds("overview-filter-needs-interaction").unwrap();
+        let needs_pill = vcx
+            .debug_bounds("overview-filter-needs-interaction")
+            .unwrap();
         vcx.simulate_click(needs_pill.center(), gpui::Modifiers::default());
         draw(vcx);
         overview.read_with(vcx, |o, _| {
@@ -11508,6 +11759,10 @@ mod logic_tests {
     }
     mod template_review_tests {
         include!("work_outline/template_review_tests.rs");
+    }
+
+    mod top_sessions_tests {
+        include!("overview/top_sessions_tests.rs");
     }
 
     /// First-use empty state of the Outline; shares this module's fixtures.

@@ -15,6 +15,11 @@ Choose an **Agent** from the same enabled, installed agents offered in your
 sessions, then choose its **Model**, **Thinking level**, and **Context window**.
 Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
+Choose a **Work item** within the selected Space to attach each run to that item
+and deliver its inherited instructions. Changing the Space clears the work item.
+The execution device must support task-to-item attachment. Older engines ignore
+the work-item field when saving a task, so they run without the item association
+or its inherited instructions; update the execution device before using it.
 Each run captures its configuration, so editing a task changes future editions.
 You can change the model or switch agents, including Claude Code to Codex, after
 a task has run. Past editions retain their original agent and model.
@@ -49,8 +54,11 @@ session. **Delete** removes the schedule while retaining its run history.
 
 ## Read editions
 
-The sidebar and Overview show the latest unarchived session per task. Reading
-or replying to an older edition does not promote it. The task manager lists
+The sidebar, Overview, and Work Outline show only the latest unarchived run per
+task on each device. In Overview list mode, each task has a row with its name,
+schedule, next run, and last outcome. Click the row to open the latest run or
+choose **History** to see past runs. Reading or replying to an older edition
+does not promote it. The task manager lists
 configured schedules. Choose **Edit** to see a task's settings, with its own
 **Run history** at the bottom of that page. A scheduled session's **Run history**
 button opens the same task page. Choose an edition there to open its transcript.
@@ -59,7 +67,10 @@ edition you are reading.
 
 Imported Claude editions use their original transcript timestamps when choosing
 the latest edition. Task identity includes source provenance; identical display
-names do not merge unrelated tasks.
+names do not merge unrelated tasks. Imported runs join their native task once
+the matching source is imported. Deleted tasks and source tasks never imported
+into Mast appear under **Retired tasks** in Scheduled tasks; their runs stay
+readable in history and are hidden from the sidebar, Overview, and Work Outline.
 
 ## Import Claude schedules
 

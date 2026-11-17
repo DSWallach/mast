@@ -1,5 +1,6 @@
 //! Profile-local scheduler. Only the owning engine claims occurrences.
 pub mod evaluator;
+mod identity;
 pub(crate) mod import;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
@@ -8,6 +9,9 @@ use mast_proto::*;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
+/// How often run identities are rechecked without a task change (new
+/// imported runs keep arriving until a task is cut over).
+const IDENTITY_RECHECK_MS: i64 = 10 * 60_000;
 pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
     EngineError::Other(e.to_string())
 }
@@ -20,6 +24,8 @@ struct Inner {
     registry: Arc<crate::HarnessRegistry>,
     gate: tokio::sync::Mutex<()>,
     cancel: CancellationToken,
+    /// When run identities were last reconciled; `None` = due now.
+    identities_checked: std::sync::Mutex<Option<i64>>,
 }
 #[derive(Clone)]
 pub struct ScheduledTasks(Arc<Inner>);
@@ -39,6 +45,7 @@ impl ScheduledTasks {
             registry,
             gate: tokio::sync::Mutex::new(()),
             cancel: CancellationToken::new(),
+            identities_checked: std::sync::Mutex::new(None),
         })))
     }
     pub fn start(&self) {
@@ -71,6 +78,7 @@ impl ScheduledTasks {
             | ScheduledTasksRequest::Import { operation_id, .. } => Some(operation_id),
             _ => None,
         };
+        let mutates = operation.is_some();
         if let Some(operation) = operation {
             if self.0.store.replay(operation, &input)? {
                 response.tasks = self
@@ -253,6 +261,14 @@ impl ScheduledTasks {
                     .save(t, expected_revision, &operation_id, &input)?;
             }
         }
+        // A saved, deleted or imported task can change which runs it owns.
+        if mutates {
+            *self
+                .0
+                .identities_checked
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
         response.tasks = self
             .0
             .store
@@ -262,6 +278,28 @@ impl ScheduledTasks {
             .collect();
         response.runs = self.0.store.runs(None, None)?;
         Ok(response)
+    }
+    /// Rewrite this device's run identities to match its task ledger, in one
+    /// registry write. Gated on a synced registry like the orphan sweep in
+    /// `spaces.rs`: a replica that has not heard from the server this boot
+    /// may hold stale rows, and writing over them would win by LWW.
+    pub fn reconcile_run_identities(&self, now: i64) -> Result<usize, EngineError> {
+        if !self.0.workspace.registry_synced() {
+            return Ok(0);
+        }
+        let checked = || self.0.identities_checked.lock().unwrap_or_else(|e| e.into_inner());
+        if checked().is_some_and(|at| now - at < IDENTITY_RECHECK_MS) {
+            return Ok(0);
+        }
+        let chats = self.0.workspace.read_chats()?;
+        let tasks = self.0.store.tasks()?;
+        let updates = identity::plan(&chats, &tasks, self.0.workspace.device_id());
+        let written = self.0.workspace.set_chats_scheduled_task_info(&updates)?;
+        *checked() = Some(now);
+        if written > 0 {
+            tracing::info!(runs = written, "reconciled scheduled run identities");
+        }
+        Ok(written)
     }
     fn find(&self, id: &str) -> Result<ScheduledTask, EngineError> {
         self.0
@@ -297,6 +335,20 @@ impl ScheduledTasks {
                 .ok_or_else(|| fail("Space no longer exists"))?;
             if s.device_id != self.0.workspace.device_id() {
                 return Err(fail("Task Space belongs to another device"));
+            }
+        }
+        if let Some(item) = &d.work_item_id {
+            let space = d
+                .space_id
+                .as_deref()
+                .filter(|s| self.0.workspace.work_item_space(item).as_deref() == Some(*s))
+                .ok_or_else(|| fail("The work item is not in this task's Space"))?;
+            let snapshot = mast_doc::materialize_work_outline(
+                space,
+                &self.0.workspace.work_outline_inputs(space),
+            );
+            if snapshot.item(item).is_none_or(|i| i.archived_at.is_some()) {
+                return Err(fail("The task's work item is archived or deleted"));
             }
         }
         evaluator::validate(&d.schedule).map_err(fail)
@@ -336,6 +388,9 @@ impl ScheduledTasks {
         let _guard = self.0.gate.lock().await;
         if self.0.cancel.is_cancelled() {
             return Ok(());
+        }
+        if let Err(e) = self.reconcile_run_identities(now) {
+            tracing::warn!(error = %e, "scheduled run identity reconcile failed");
         }
         // Reconcile before claiming so finished runs do not block the next occurrence.
         for mut r in self.0.store.active()? {
@@ -527,6 +582,11 @@ impl ScheduledTasks {
             }
         }
 
-        crate::work_outline_launch::launch_scheduled_chat(&self.0.workspace, &self.0.host, r)
+        crate::work_outline_launch::launch_scheduled_chat(
+            &self.0.workspace,
+            &self.0.host,
+            &self.0.sessions,
+            r,
+        )
     }
 }

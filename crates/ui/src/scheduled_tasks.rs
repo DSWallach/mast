@@ -430,6 +430,7 @@ impl ScheduledTasksPage {
                     enabled: false,
                     grace_minutes: 360,
                     cutover_confirmed: false,
+                    work_item_id: None,
                 },
             )
         };
@@ -559,6 +560,9 @@ impl ScheduledTasksPage {
                     }
                 }
                 "space" => {
+                    if e.draft.space_id.as_deref() != Some(value.as_str()) {
+                        e.draft.work_item_id = None;
+                    }
                     e.draft.space_id = (!value.is_empty()).then_some(value.clone());
                     if let Some(space) = self.state.read(cx).spaces.iter().find(|s| s.id == value) {
                         let path = space.path.clone();
@@ -606,6 +610,7 @@ impl ScheduledTasksPage {
                             serde_json::from_value(serde_json::json!(value)).ok();
                     }
                 }
+                "workItem" => e.draft.work_item_id = (!value.is_empty()).then_some(value.clone()),
                 "contextWindow" => {
                     e.draft
                         .config
@@ -684,6 +689,75 @@ impl ScheduledTasksPage {
     fn open_chat(&mut self, id: String, cx: &mut Context<Self>) {
         cx.emit(TaskPageEvent::OpenChat(id));
     }
+}
+
+/// "cron · timezone" or "Once · date": the task page and Overview task rows.
+pub(crate) fn schedule_label(schedule: &TaskSchedule) -> String {
+    match schedule {
+        TaskSchedule::Cron {
+            expression,
+            timezone,
+        } => format!("{expression} · {timezone}"),
+        TaskSchedule::Once { at } => format!(
+            "Once · {}",
+            chrono::DateTime::from_timestamp_millis(*at)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default()
+        ),
+    }
+}
+
+/// "Next: …" in the schedule's own timezone, when the task will run again.
+pub(crate) fn next_run_label(task: &ScheduledTask) -> Option<String> {
+    task.next_due.map(|at| {
+        format!(
+            "Next: {}",
+            mast_engine::scheduled_tasks::evaluator::display_time(&task.draft.schedule, at)
+        )
+    })
+}
+
+/// The newest run's state and detail (`runs` come newest first).
+pub(crate) fn last_outcome_label(runs: &[ScheduledRun], task_id: &str) -> String {
+    runs.iter()
+        .find(|r| r.task_id == task_id)
+        .map(|r| {
+            format!(
+                "{:?}{}",
+                r.state,
+                r.detail
+                    .as_ref()
+                    .map(|d| format!(" · {d}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or("No sessions yet".into())
+}
+
+/// Retired task identities on `device`, newest run first: (task id, name, runs).
+fn retired_identities<'a>(chats: &'a [Chat], device: &str) -> Vec<(&'a str, &'a str, usize)> {
+    let mut found: Vec<(&str, &str, usize, (i64, &str))> = Vec::new();
+    for chat in chats.iter().filter(|c| c.device_id == device) {
+        let Some(info) = chat.scheduled_task_info.as_ref().filter(|i| i.retired) else {
+            continue;
+        };
+        let order = mast_proto::task_chat_order(chat);
+        match found.iter_mut().find(|f| f.0 == info.task_id) {
+            Some(entry) => {
+                entry.2 += 1;
+                if order > entry.3 {
+                    entry.1 = &info.task_name;
+                    entry.3 = order;
+                }
+            }
+            None => found.push((&info.task_id, &info.task_name, 1, order)),
+        }
+    }
+    found.sort_by(|a, b| b.3.cmp(&a.3));
+    found
+        .into_iter()
+        .map(|(id, name, n, _)| (id, name, n))
+        .collect()
 }
 
 fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>) -> AnyElement {
@@ -872,6 +946,22 @@ impl Render for ScheduledTasksPage {
                 .and_then(|id| self.state.read(cx).spaces.iter().find(|s| s.id == id))
                 .map(|s| s.name.clone().unwrap_or_else(|| s.path.clone()))
                 .unwrap_or("No Space".into());
+            let work_items = e
+                .draft
+                .space_id
+                .as_deref()
+                .and_then(|space| self.state.read(cx).work_outline(space).snapshot().cloned());
+            let work_item_label = e
+                .draft
+                .work_item_id
+                .as_deref()
+                .map(|id| {
+                    work_items
+                        .as_ref()
+                        .and_then(|s| s.item(id))
+                        .map_or_else(|| id.to_owned(), |item| item.title.clone())
+                })
+                .unwrap_or("None".into());
             let harness_label = self
                 .harnesses
                 .iter()
@@ -881,6 +971,7 @@ impl Render for ScheduledTasksPage {
             for (key, label, value) in [
                 ("harness", "Agent", harness_label.as_str()),
                 ("space", "Space", space_label.as_str()),
+                ("workItem", "Work item", work_item_label.as_str()),
                 ("model", "Model", model_label.as_str()),
                 ("thinking", "Thinking level", thinking_label.as_str()),
                 ("contextWindow", "Context window", context_label),
@@ -910,6 +1001,13 @@ impl Render for ScheduledTasksPage {
                 );
             }
             content = content.child(selects);
+            if e.draft.work_item_id.is_some() {
+                content = content.child(
+                    div().text_size(px(12.0)).text_color(theme.text_muted).child(
+                        "Each run is attached to this work item and receives its instructions. The item lists the latest run; older runs stay in Run history.",
+                    ),
+                );
+            }
             if let Some(key) = self.choices {
                 let choices: Vec<(String, String)> = match key {
                     "harness" => self
@@ -940,6 +1038,16 @@ impl Render for ScheduledTasksPage {
                                     )
                                 }),
                         )
+                        .collect(),
+                    "workItem" => std::iter::once((String::new(), "None".into()))
+                        .chain(work_items.iter().flat_map(|s| {
+                            s.items.iter().filter(|i| i.archived_at.is_none()).map(|i| {
+                                (
+                                    i.id.clone(),
+                                    format!("{}{}", "  ".repeat(i.depth as usize), i.title),
+                                )
+                            })
+                        }))
                         .collect(),
                     "model" => self
                         .models
@@ -1190,31 +1298,8 @@ impl Render for ScheduledTasksPage {
                 let toggle = task.clone();
                 let delete = task.clone();
                 let run_id = task.id.clone();
-                let recent = self.snapshot.runs.iter().find(|r| r.task_id == task.id);
-                let detail = recent
-                    .map(|r| {
-                        format!(
-                            "{:?}{}",
-                            r.state,
-                            r.detail
-                                .as_ref()
-                                .map(|d| format!(" · {d}"))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .unwrap_or("No sessions yet".into());
-                let schedule = match &task.draft.schedule {
-                    TaskSchedule::Cron {
-                        expression,
-                        timezone,
-                    } => format!("{expression} · {timezone}"),
-                    TaskSchedule::Once { at } => format!(
-                        "Once · {}",
-                        chrono::DateTime::from_timestamp_millis(*at)
-                            .map(|d| d.to_rfc3339())
-                            .unwrap_or_default()
-                    ),
-                };
+                let detail = last_outcome_label(&self.snapshot.runs, &task.id);
+                let schedule = schedule_label(&task.draft.schedule);
                 let latest = self
                     .state
                     .read(cx)
@@ -1247,14 +1332,8 @@ impl Render for ScheduledTasksPage {
                                 } else {
                                     "Paused"
                                 },
-                                task.next_due
-                                    .map(|at| format!(
-                                        " · Next: {}",
-                                        mast_engine::scheduled_tasks::evaluator::display_time(
-                                            &task.draft.schedule,
-                                            at
-                                        )
-                                    ))
+                                next_run_label(&task)
+                                    .map(|next| format!(" · {next}"))
                                     .unwrap_or_default()
                             )),
                     );
@@ -1336,6 +1415,46 @@ impl Render for ScheduledTasksPage {
                     );
                 row = row.child(actions);
                 content = content.child(row);
+            }
+            let retired: Vec<(String, String, usize)> = self
+                .target
+                .as_deref()
+                .map(|device| {
+                    retired_identities(&self.state.read(cx).chats, device)
+                        .into_iter()
+                        .map(|(id, name, n)| (id.to_owned(), name.to_owned(), n))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !retired.is_empty() {
+                content = content.child(
+                    div()
+                        .id("retired-tasks")
+                        .debug_selector(|| "retired-tasks".into())
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .mt(px(16.0))
+                        .child(div().text_size(px(16.0)).child("Retired tasks"))
+                        .child(div().text_size(px(12.0)).text_color(theme.text_muted).child(
+                            "Runs of deleted tasks and Claude tasks never imported into Mast. They are hidden from the sidebar, Overview and Work Outline.",
+                        ))
+                        .children(retired.into_iter().map(|(id, name, runs)| {
+                            let open = id.clone();
+                            let selector = id.clone();
+                            popover::btn_ghost(
+                                &theme,
+                                &format!("{name} · {runs} run{}", if runs == 1 { "" } else { "s" }),
+                                format!("retired-{id}"),
+                            )
+                            .id(SharedString::from(format!("retired-{id}")))
+                            .debug_selector(move || format!("retired-task-{selector}").into())
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                let device = p.target.clone();
+                                p.show_task(open.clone(), device, cx)
+                            }))
+                        })),
+                );
             }
             for candidate in self.snapshot.candidates.clone() {
                 let draft = candidate.clone();
@@ -1548,6 +1667,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn retired_runs_leave_default_views_but_keep_their_history(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let run = |id: &str, task: &str, created: i64| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "host", "archived": false,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "scheduledTaskInfo": {"taskId": task, "taskName": "daily-priority-briefing",
+                    "runId": id, "sessionCreatedAt": created, "retired": true}
+            }))
+            .unwrap()
+        };
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            state.update(cx, |s, _| {
+                s.chats = vec![run("first", "retired", 1), run("second", "retired", 2)];
+                assert!(s.overview_chats(chrono::Utc::now()).is_empty());
+            });
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("host".into());
+            p.show_tasks(cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(1600.0)));
+        cx.run_until_parked();
+        let retired = cx
+            .debug_bounds("retired-task-retired")
+            .expect("retired identities are listed")
+            .center();
+        cx.simulate_click(retired, gpui::Modifiers::default());
+        page.update(cx, |p, cx| {
+            assert_eq!(p.requested_task.as_deref(), Some("retired"));
+            p.error = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-run-first").is_some());
+        assert!(cx.debug_bounds("task-run-second").is_some());
+    }
+
+    #[gpui::test]
     fn native_editor_preserves_instructions_and_constrains_model_options(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1745,8 +1905,37 @@ mod tests {
                         p.editor.as_mut().unwrap().revision = 2;
                         let e = p.editor.as_ref().unwrap();
                         e.name.update(cx, |i,cx|i.set_text("Morning engineering briefing",cx));
-                        e.cwd.update(cx, |i,cx|i.set_text("/Users/david/Work/mast/.worktrees/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
+                        e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
                         e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
+                        p.editor.as_mut().unwrap().draft.work_item_id = Some("morning-briefings".into());
+                        p.error = None;
+                        p
+                    });
+                    cx.new(|_| Fixture(page))
+                },
+            )?;
+            crate::snapshot::render_to_png(
+                &format!("scheduled-task-list-retired-{name}"),
+                gpui::size(px(850.0), px(700.0)),
+                crate::ui_style::UiStyleId::Default,
+                appearance,
+                |_, cx| {
+                    let _ = crate::typography::register_fonts(cx);
+                    let state = cx.new(|_| AppState::new());
+                    let retired = |id: &str, task: &str, name: &str| -> Chat {
+                        serde_json::from_value(serde_json::json!({"id":id,"deviceId":"host","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":task,"taskName":name,"runId":id,"retired":true}})).unwrap()
+                    };
+                    state.update(cx, |s, _| {
+                        s.chats = vec![
+                            retired("a", "old-briefing", "daily-priority-briefing"),
+                            retired("b", "old-briefing", "daily-priority-briefing"),
+                            retired("c", "flip-check", "allocation-flip-check-morning"),
+                        ];
+                    });
+                    let page = cx.new(|cx| {
+                        let mut p = ScheduledTasksPage::new(state.clone(), cx);
+                        p.target = Some("host".into());
+                        p.show_tasks(cx);
                         p.error = None;
                         p
                     });

@@ -1,8 +1,8 @@
 //! Account-synced sections; local workspaces keep their settings on this device.
-use std::collections::HashSet;
 use super::*;
 use crate::settings::SidebarSection;
 use mast_proto::{SidebarPinChange, SidebarSectionChange};
+use std::collections::HashSet;
 
 pub(super) struct SectionDialog {
     profile: String,
@@ -22,6 +22,18 @@ fn section_menu_labels(id: &str) -> &'static [&'static str] {
 
 impl Shell {
     pub(super) fn active_sidebar_sections(&self, cx: &App) -> Vec<SidebarSection> {
+        self.sidebar_sections_with_outline(true, cx)
+    }
+
+    pub(super) fn custom_sidebar_sections(&self, cx: &App) -> Vec<SidebarSection> {
+        self.sidebar_sections_with_outline(false, cx)
+    }
+
+    fn sidebar_sections_with_outline(
+        &self,
+        include_outline: bool,
+        cx: &App,
+    ) -> Vec<SidebarSection> {
         let local = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
         let mut sections = if local {
             self.active_sidebar_pin_profile_key(cx)
@@ -38,17 +50,24 @@ impl Shell {
                 change.project_sections(&mut sections);
             }
         }
-        if !self.settings.sidebar_outline_groups {
+        if !include_outline || !self.settings.sidebar_outline_groups {
             return sections;
         }
         let state = self.state.read(cx);
         let pins = self.raw_sidebar_pins(cx);
         let mut managed = Vec::new();
         for space in &state.spaces {
-            if self.settings.space_filter.as_ref().is_some_and(|id| id != &space.id) {
+            if self
+                .settings
+                .space_filter
+                .as_ref()
+                .is_some_and(|id| id != &space.id)
+            {
                 continue;
             }
-            if let crate::work_outline::WorkOutlineLoad::Ready(snapshot) = state.work_outline(&space.id) {
+            if let crate::work_outline::WorkOutlineLoad::Ready(snapshot) =
+                state.work_outline(&space.id)
+            {
                 for mut section in mast_proto::outline_sidebar_sections(&snapshot) {
                     section.session_ids.retain(|id| !pins.contains(id));
                     section.collapsed = self.sidebar_collapsed_groups.contains(&section.id);
@@ -56,7 +75,10 @@ impl Shell {
                 }
             }
         }
-        let assigned: HashSet<_> = managed.iter().flat_map(|section| section.session_ids.iter()).collect();
+        let assigned: HashSet<_> = managed
+            .iter()
+            .flat_map(|section| section.session_ids.iter())
+            .collect();
         for section in &mut sections {
             section.session_ids.retain(|id| !assigned.contains(id));
         }
@@ -445,7 +467,11 @@ impl Shell {
                         .items_center()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.5))
-                        .child(if managed { "Manage sessions in Work Outline" } else { "Drop sessions here" }),
+                        .child(if managed {
+                            "Manage sessions in Work Outline"
+                        } else {
+                            "Drop sessions here"
+                        }),
                 )
             })
             .children(rows.into_iter().map(|(_, _, row)| row))

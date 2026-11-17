@@ -67,6 +67,7 @@ pub(crate) fn scheduled_id(operation: &str, role: &str) -> String {
 pub(crate) fn launch_scheduled_chat(
     workspace: &WorkspaceHost,
     host: &DocHost,
+    sessions: &SessionsEngine,
     run: &mast_proto::ScheduledRun,
 ) -> Result<(), EngineError> {
     let chat_id = run
@@ -88,13 +89,14 @@ pub(crate) fn launch_scheduled_chat(
             task_name: draft.name.clone(),
             session_created_at: Some(run.created_at),
             run_id: run.id.clone(),
+            ..Default::default()
         },
     )?;
     if workspace.chat(chat_id)?.is_some_and(|c| c.title.is_none()) {
         workspace.rename_chat(chat_id, &draft.name)?;
     }
-    let message_id = scheduled_id(&run.id, "message");
-    let command_id = scheduled_id(&run.id, "command");
+    let message_id = scheduled_id(&run.id, roles::MESSAGE);
+    let command_id = scheduled_id(&run.id, roles::COMMAND);
     let request = prompt_request(
         &WorkItemPrompt {
             text: draft.prompt.clone(),
@@ -103,15 +105,127 @@ pub(crate) fn launch_scheduled_chat(
         Some(&draft.config),
         &draft.cwd,
     );
-    host.queue_command_with_id(
-        chat_id,
-        &command_id,
-        SessionCommandPayload::Run {
+    let payload = match draft.work_item_id.as_deref() {
+        Some(item) => scheduled_item_payload(
+            workspace, host, sessions, run, chat_id, item, &message_id, request,
+        )?,
+        None => SessionCommandPayload::Run {
             request,
             message_id,
         },
-    )?;
+    };
+    host.queue_command_with_id(chat_id, &command_id, payload)?;
     Ok(())
+}
+
+/// Attach a scheduled run to its task's work item (steps 4 and 6 of the item
+/// launch, with the run as the operation) and pick the first Turn's payload:
+/// pinned to the item's instructions when it has any. Replay-safe: a retry
+/// finds the assignment, revision and application it already wrote.
+#[allow(clippy::too_many_arguments)]
+fn scheduled_item_payload(
+    workspace: &WorkspaceHost,
+    host: &DocHost,
+    sessions: &SessionsEngine,
+    run: &mast_proto::ScheduledRun,
+    chat_id: &str,
+    work_item_id: &str,
+    message_id: &str,
+    request: RunRequest,
+) -> Result<SessionCommandPayload, EngineError> {
+    let failed = |e: WorkOutlineError| EngineError::Other(e.message);
+    if crate::work_outline::writes_disabled() {
+        return Err(EngineError::Other(
+            "Work Outline changes are turned off on this device".into(),
+        ));
+    }
+    let actor = WorkOutlineActor {
+        kind: WorkOutlineActorKind::User,
+        device_id: workspace.device_id().to_owned(),
+        chat_id: None,
+        message_id: None,
+    };
+    let assigned = workspace
+        .registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
+        .is_some_and(|row| !row.deleted);
+    if !assigned {
+        workspace
+            .work_outline_mutate(
+                &WorkOutlineMutation::AssignChatToWorkItem(AssignChatToWorkItemParams {
+                    chat_id: chat_id.to_owned(),
+                    work_item_id: work_item_id.to_owned(),
+                    operation_id: derive_id(&run.id, roles::ASSIGNMENT),
+                }),
+                &actor,
+                &[],
+            )
+            .map_err(failed)?;
+    }
+    // Same stable decision as an item launch: a revision this run already
+    // created means it delivers instructions, whatever the item holds now.
+    let space = workspace
+        .work_item_space(work_item_id)
+        .ok_or_else(|| EngineError::Other("The task's work item was deleted".into()))?;
+    let deliver = workspace.registry_row_state(
+        mast_doc::KIND_INSTRUCTION_REVISIONS,
+        &derive_id(&run.id, roles::REVISION),
+    ) != RowState::Absent
+        || !mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space))
+            .effective_instructions(work_item_id)
+            .entries
+            .is_empty();
+    if !deliver {
+        return Ok(SessionCommandPayload::Run {
+            request,
+            message_id: message_id.to_owned(),
+        });
+    }
+    let harness = host.harness_for_request(chat_id, &request);
+    if let mast_harness::InstructionSupport::Unsupported { reason, .. } =
+        sessions.instruction_support(harness)?
+    {
+        return Err(EngineError::Other(format!(
+            "This harness cannot receive the work item's instructions: {reason}"
+        )));
+    }
+    let revision_id = workspace
+        .work_outline_mutate(
+            &WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+                work_item_id: work_item_id.to_owned(),
+                operation_id: run.id.clone(),
+            }),
+            &actor,
+            &[],
+        )
+        .and_then(|reply| reply.into_revision_id())
+        .map_err(failed)?;
+    workspace
+        .work_outline_mutate(
+            &WorkOutlineMutation::ApplyInstructionRevision(ApplyInstructionRevisionParams {
+                chat_id: chat_id.to_owned(),
+                revision_id: revision_id.clone(),
+                reason: InstructionApplicationReason::Launch,
+                turn_boundary: Some(InstructionTurnBoundary {
+                    message_id: Some(message_id.to_owned()),
+                }),
+                operation_id: run.id.clone(),
+            }),
+            &actor,
+            &[],
+        )
+        .map_err(failed)?;
+    let revision = workspace
+        .instruction_revision(&revision_id)
+        .ok_or_else(|| EngineError::Other("The launch instruction revision is missing".into()))?;
+    Ok(SessionCommandPayload::RunWithInstructions {
+        request,
+        message_id: message_id.to_owned(),
+        instructions: InstructionRevisionPin {
+            revision_id,
+            revision_hash: revision.body.hash.clone(),
+        },
+        context_reset_confirmed: false,
+    })
 }
 
 /// Ledger key: this device accepted `operationId` for a launch.

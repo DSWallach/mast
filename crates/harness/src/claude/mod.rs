@@ -36,6 +36,7 @@ mod discovery;
 pub mod instructions;
 mod normalize;
 mod wire;
+mod usage;
 
 pub use normalize::decode_tool_use;
 
@@ -773,6 +774,7 @@ impl ClaudeHarness {
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         let session = run_session(Session {
+            resumed: request.resume.is_some() || request.fork_from.is_some(),
             title_only,
             rules_mode: request.approval_rules && !request.auto_approve,
             child,
@@ -903,6 +905,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 }
 
 struct Session {
+    resumed: bool,
     title_only: bool,
     /// Rules mode: tool requests go to the engine instead of being allowed.
     rules_mode: bool,
@@ -922,6 +925,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        resumed,
         title_only,
         rules_mode,
         mut child,
@@ -942,6 +946,7 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     let mut norm = Normalizer::new();
+    norm.set_resumed(resumed);
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;

@@ -457,16 +457,33 @@ mod tests {
         review.space_id = "s1".into();
         review.chat_id = Some("c1".into());
         let content = r#"{"schema":"mast.review/v1","pr":{"repo":"o/r","number":1,"headSha":"a","baseSha":"b"},"summary":"Summary","steps":[],"highlights":[],"questions":[],"suggestedComments":[]}"#;
-        let reply: Reply = Arc::new(move |_, _| Ok(content_reply(ArtifactKind::Review, 1, content, ArtifactContentEncoding::Utf8)));
+        let reply: Reply = Arc::new(move |_, _| {
+            Ok(content_reply(
+                ArtifactKind::Review,
+                1,
+                content,
+                ArtifactContentEncoding::Utf8,
+            ))
+        });
         let (shell, _, _, vcx) = artifact_shell(cx, dir.path(), vec![review], reply);
         shell.update(vcx, |shell, cx| {
-            assert!(shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            assert!(
+                shell
+                    .right_surface_rows(cx)
+                    .iter()
+                    .any(|row| row.0 == RightSurface::Review)
+            );
             let pane = shell.review_host(cx).unwrap();
             shell.route = Route::Review;
             let full = shell.review_host(cx).unwrap();
             assert_eq!(pane.entity_id(), full.entity_id());
             shell.active_chat = "other".into();
-            assert!(!shell.right_surface_rows(cx).iter().any(|row| row.0 == RightSurface::Review));
+            assert!(
+                !shell
+                    .right_surface_rows(cx)
+                    .iter()
+                    .any(|row| row.0 == RightSurface::Review)
+            );
             shell.active_chat = "c1".into();
         });
         vcx.run_until_parked();
@@ -679,7 +696,17 @@ mod tests {
         // On the Overview the key is still the outline search.
         shell.update(vcx, |shell, cx| shell.open_overview(cx));
         vcx.run_until_parked();
-        vcx.update(|window, _| window.blur());
+        let navigation = shell.read_with(vcx, |shell, cx| {
+            shell
+                .overview_page
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .outline_entity()
+        });
+        vcx.update(|window, cx| {
+            window.focus(&gpui::Focusable::focus_handle(navigation.read(cx), cx), cx)
+        });
         vcx.simulate_keystrokes(&combo);
         vcx.run_until_parked();
         let overview = shell

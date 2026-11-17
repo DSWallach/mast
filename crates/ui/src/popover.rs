@@ -554,6 +554,17 @@ pub fn anchored_menu_right(
 /// A nested menu beside its trigger. Callers choose the side that has room;
 /// vertical placement still stays within the window's eight-pixel gutter.
 pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {
+    nested_menu_layer(id, content, left, 2)
+}
+
+/// [`nested_menu`] for a parent menu painted above modal dialogs (priority
+/// 3): the child must sit above its parent, or the dialog layer covers it
+/// and swallows its clicks.
+pub fn nested_menu_over_modal(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {
+    nested_menu_layer(id, content, left, 4)
+}
+
+fn nested_menu_layer(id: impl Into<SharedString>, content: AnyElement, left: bool, priority: usize) -> AnyElement {
     // A nested menu shares the parent's interaction surface. Its outside
     // clicks must reach sibling controls and its trigger; the top-level menu
     // still consumes dismissal clicks before they reach the app underneath.
@@ -576,7 +587,7 @@ pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool)
                     .snap_to_window_with_margin(px(8.0))
                     .child(menu_motion(id.into(), None, div().occlude().child(content))),
             )
-            .priority(2),
+            .priority(priority),
         )
         .into_any_element()
 }

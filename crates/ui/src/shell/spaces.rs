@@ -109,14 +109,23 @@ mod visible_row_tests {
         struct Host(gpui::ScrollHandle);
         impl Render for Host {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().id("visible-row-test").w(px(200.0)).h(px(100.0))
-                    .overflow_y_scroll().track_scroll(&self.0).flex().flex_col()
+                div()
+                    .id("visible-row-test")
+                    .w(px(200.0))
+                    .h(px(100.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.0)
+                    .flex()
+                    .flex_col()
                     .children((0..20).map(|index| {
                         let selector = format!("visible-row-{index}");
                         VisibleSidebarRow {
                             height: 25.0,
-                            child: div().w_full().h(px(25.0))
-                                .debug_selector(move || selector.clone()).into_any_element(),
+                            child: div()
+                                .w_full()
+                                .h(px(25.0))
+                                .debug_selector(move || selector.clone())
+                                .into_any_element(),
                             on_slot: None,
                         }
                     }))
@@ -128,7 +137,10 @@ mod visible_row_tests {
         assert!(vcx.debug_bounds("visible-row-0").is_some());
         assert!(vcx.debug_bounds("visible-row-19").is_none());
         scroll.set_offset(gpui::point(px(0.0), px(-400.0)));
-        vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
         assert!(vcx.debug_bounds("visible-row-0").is_none());
         assert!(vcx.debug_bounds("visible-row-19").is_some());
     }
@@ -446,6 +458,7 @@ mod pinned_session_tests {
                 shell.update(cx, |shell, cx| {
                     shell.space_menu = popover::Popup::default();
                     shell.group_menu = None;
+                    shell.settings.sidebar_overview = false;
                     shell.settings.sidebar_organization = organization;
                     shell.state.update(cx, |state, _| {
                         state.chats[0].space_id = project.then(|| "project".into());
@@ -509,6 +522,7 @@ mod pinned_session_tests {
         let shell = window
             .update(cx, |shell, _, cx| {
                 shell.settings.space_filter = None;
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -620,6 +634,7 @@ mod pinned_session_tests {
                     .sidebar_pins_mut("local".into())
                     .push("run-pinned".into());
                 shell.settings.space_filter = None;
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1297,6 +1312,7 @@ mod pinned_session_tests {
         let window = pin_test_shell(cx, dir.path());
         window
             .update(cx, |shell, _, cx| {
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 shell
                     .settings
@@ -1372,8 +1388,10 @@ mod pinned_session_tests {
                 shell.scheduled_tasks_open = true;
                 let open = ids(&["run-pinned", "a-chat", "b-chat", "run-new", "run-old", "other-run"]);
                 assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 assert_eq!(shell.sidebar_visible_order(cx), open);
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
                 assert_eq!(shell.sidebar_visible_order(cx), open);
                 shell
@@ -1583,12 +1601,22 @@ mod pinned_session_tests {
     #[test]
     fn sidebar_rows_cull_only_beyond_one_viewport_of_overscan() {
         use super::sidebar_row_offscreen;
-        assert!(!sidebar_row_offscreen(None, 0.0, 800.0), "unmeasured rows render");
+        assert!(
+            !sidebar_row_offscreen(None, 0.0, 800.0),
+            "unmeasured rows render"
+        );
         assert!(!sidebar_row_offscreen(Some((1590.0, 1620.0)), 0.0, 800.0));
         assert!(sidebar_row_offscreen(Some((1610.0, 1640.0)), 0.0, 800.0));
-        assert!(!sidebar_row_offscreen(Some((1000.0, 1030.0)), 1800.0, 800.0));
+        assert!(!sidebar_row_offscreen(
+            Some((1000.0, 1030.0)),
+            1800.0,
+            800.0
+        ));
         assert!(sidebar_row_offscreen(Some((960.0, 990.0)), 1800.0, 800.0));
-        assert!(!sidebar_row_offscreen(Some((5000.0, 5030.0)), 0.0, 0.0), "unmeasured viewport");
+        assert!(
+            !sidebar_row_offscreen(Some((5000.0, 5030.0)), 0.0, 0.0),
+            "unmeasured viewport"
+        );
     }
 
     /// Off-screen sessions keep their slot height but build no row content, and
@@ -1638,6 +1666,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_compact = true;
                 shell.state.update(cx, |state, _| {
@@ -1665,7 +1694,10 @@ mod pinned_session_tests {
 
         assert_eq!(COUNT, 200, "ids below name the last row");
         assert!(cx.debug_bounds("chat-s0").is_some(), "visible rows render");
-        assert!(cx.debug_bounds("chat-s199").is_none(), "far rows are culled");
+        assert!(
+            cx.debug_bounds("chat-s199").is_none(),
+            "far rows are culled"
+        );
         // Unlaid-out slots still report where they sit, so far rows are not built.
         shell.read_with(cx, |shell, _| {
             let (_, top, bottom) = shell.sidebar_row_extents.borrow()["s199"];
@@ -1678,29 +1710,49 @@ mod pinned_session_tests {
 
         shell.update(cx, |shell, cx| {
             let bottom = shell.sidebar_scroll.max_offset().y;
-            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), -bottom));
+            shell
+                .sidebar_scroll
+                .set_offset(gpui::point(px(0.0), -bottom));
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-s199").is_some(), "scrolled-to rows render");
-        assert!(cx.debug_bounds("chat-s0").is_none(), "rows scrolled far away are culled");
+        assert!(
+            cx.debug_bounds("chat-s199").is_some(),
+            "scrolled-to rows render"
+        );
+        assert!(
+            cx.debug_bounds("chat-s0").is_none(),
+            "rows scrolled far away are culled"
+        );
 
         // A far row that re-sorts to the top fills in without another prompt.
         // Reduced motion lands the re-sort glide at once on the frozen test clock.
         cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
         shell.update(cx, |shell, cx| {
-            shell.sidebar_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            shell
+                .sidebar_scroll
+                .set_offset(gpui::point(px(0.0), px(0.0)));
             shell.state.update(cx, |state, _| {
-                let chat = state.chats.iter_mut().find(|chat| chat.id == "s150").unwrap();
+                let chat = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "s150")
+                    .unwrap();
                 chat.created_at = Utc::now() + chrono::Duration::minutes(5);
             });
             cx.notify();
         });
         cx.run_until_parked();
         shell.update(cx, |shell, cx| {
-            assert_eq!(shell.sidebar_visible_order(cx).first().map(String::as_str), Some("s150"));
+            assert_eq!(
+                shell.sidebar_visible_order(cx).first().map(String::as_str),
+                Some("s150")
+            );
         });
-        assert!(cx.debug_bounds("chat-s150").is_some(), "re-sorted row renders");
+        assert!(
+            cx.debug_bounds("chat-s150").is_some(),
+            "re-sorted row renders"
+        );
     }
 
     /// The sidebar chat row wears the account pill only for a chat pinned to
@@ -1749,6 +1801,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1861,6 +1914,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
+                shell.settings.sidebar_overview = false;
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_show_branch = true;
                 shell.settings.sidebar_compact = compact;
@@ -1955,7 +2009,13 @@ mod pinned_session_tests {
         assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
         assert_eq!(
             f32::from(dragged_card.size.height),
-            super::super::sidebar_row_height(compact, show_label, true, false, crate::ui_style::UiStyle::MINIMAL.tokens)
+            super::super::sidebar_row_height(
+                compact,
+                show_label,
+                true,
+                false,
+                crate::ui_style::UiStyle::MINIMAL.tokens
+            )
         );
         // Even a sub-row move follows the pointer immediately, before a drop slot changes.
         let pointer = from + gpui::point(px(8.0), px(7.0));
@@ -2590,30 +2650,6 @@ impl Render for SidebarViewOptionsTooltip {
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text)
             .child("Sidebar view options")
-    }
-}
-
-struct SidebarOverviewTooltip;
-
-impl Render for SidebarOverviewTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let shortcut = if cfg!(target_os = "macos") {
-            "⌘⇧O"
-        } else {
-            "Ctrl+Shift+O"
-        };
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text)
-            .child(format!("Overview  {shortcut}"))
     }
 }
 
@@ -3398,12 +3434,18 @@ impl Shell {
         }
         let sections = self.active_sidebar_sections(cx);
         let managed_source = sections.iter().any(|section| {
-            section.id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
+            section
+                .id
+                .starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX)
                 && section.session_ids.contains(&payload.chat_id)
         });
         let managed_target = matches!(&target, SidebarSessionDrop::Section(id)
             if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX));
-        if managed_target || (managed_source && !matches!(target, SidebarSessionDrop::Pinned(_))) {
+        if managed_target
+            || (managed_source
+                && !self.settings.sidebar_overview
+                && !matches!(target, SidebarSessionDrop::Pinned(_)))
+        {
             self.sidebar_notice = Some("Move grouped sessions in Work Outline.".into());
             self.cancel_sidebar_session_transfer(cx);
             cx.notify();
@@ -4517,61 +4559,70 @@ impl Shell {
         let view_open = self.sidebar_view_menu.is_open();
         let sidebar_width = self.sidebar_shown_width();
         let view_focus = self.sidebar_view_trigger_focus.clone();
-        let view_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-view-options", theme, sidebar_width)
-            .role(gpui::Role::Button)
-            .aria_label("Sidebar view options")
-            .aria_expanded(view_open)
-            .track_focus(&view_focus)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border.opacity(0.0))
-            .focus_visible(|el| el.border_color(theme.border_strong))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .bg(if view_open {
-                theme.glass_hover()
+        let view_trigger = crate::components::shell_parts::sidebar_action_frame(
+            "sidebar-view-options",
+            theme,
+            sidebar_width,
+        )
+        .role(gpui::Role::Button)
+        .aria_label("Sidebar view options")
+        .aria_expanded(view_open)
+        .track_focus(&view_focus)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.border.opacity(0.0))
+        .focus_visible(|el| el.border_color(theme.border_strong))
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .bg(if view_open {
+            theme.glass_hover()
+        } else {
+            theme.glass_hover().opacity(0.0)
+        })
+        .hover(|el| el.bg(theme.glass_hover()))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, _| this.sidebar_view_menu.note_trigger_press()),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this.sidebar_view_menu.take_press_was_open() {
+                this.close_sidebar_view_menu(cx);
             } else {
-                theme.glass_hover().opacity(0.0)
-            })
-            .hover(|el| el.bg(theme.glass_hover()))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.sidebar_view_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                if this.sidebar_view_menu.take_press_was_open() {
+                this.open_sidebar_view_menu(window, cx);
+            }
+        }))
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            if matches!(
+                event.keystroke.key.to_ascii_lowercase().as_str(),
+                "enter" | "space" | "arrowdown"
+            ) {
+                cx.stop_propagation();
+                if this.sidebar_view_menu.is_open()
+                    && !event.keystroke.key.eq_ignore_ascii_case("arrowdown")
+                {
                     this.close_sidebar_view_menu(cx);
-                } else {
+                } else if !this.sidebar_view_menu.is_open() {
                     this.open_sidebar_view_menu(window, cx);
                 }
-            }))
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if matches!(
-                    event.keystroke.key.to_ascii_lowercase().as_str(),
-                    "enter" | "space" | "arrowdown"
-                ) {
-                    cx.stop_propagation();
-                    if this.sidebar_view_menu.is_open()
-                        && !event.keystroke.key.eq_ignore_ascii_case("arrowdown")
-                    {
-                        this.close_sidebar_view_menu(cx);
-                    } else if !this.sidebar_view_menu.is_open() {
-                        this.open_sidebar_view_menu(window, cx);
-                    }
-                }
-            }))
-            .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(
-                icon(icons::MORE_HORIZONTAL)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.6)),
-            )
-            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "View options", None));
+            }
+        }))
+        .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .child(
+            icon(icons::MORE_HORIZONTAL)
+                .size(px(16.0))
+                .text_color(theme.text_muted.opacity(0.6)),
+        )
+        .children(crate::components::shell_parts::sidebar_action_label(
+            theme,
+            sidebar_width,
+            "View options",
+            None,
+        ));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -4584,40 +4635,6 @@ impl Shell {
             view_trigger
         };
 
-        // Multi-chat overview entry point — sits beside the view-options
-        // trigger since it's the other "how do I look at my chats" control.
-        // Same 29px glass-hover button idiom; lit while the overview is the
-        // current route.
-        let overview_active = self.is_overview_route();
-        let overview_trigger = crate::components::shell_parts::sidebar_action_frame("sidebar-open-overview", theme, sidebar_width)
-            .role(gpui::Role::Button)
-            .aria_label("Open overview")
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .bg(if overview_active {
-                theme.glass_hover()
-            } else {
-                theme.glass_hover().opacity(0.0)
-            })
-            .hover(|el| el.bg(theme.glass_hover()))
-            .on_click(cx.listener(|this, _, _, cx| this.open_overview(cx)))
-            .tooltip(|_, cx| cx.new(|_| SidebarOverviewTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(
-                icon(icons::WIDGET)
-                    .size(px(15.0))
-                    .text_color(if overview_active {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.6)
-                    }),
-            )
-            .children(crate::components::shell_parts::sidebar_action_label(theme, sidebar_width, "Overview", Some(theme.text_muted)));
-
         div()
             .flex_none()
             .flex()
@@ -4628,7 +4645,6 @@ impl Shell {
             .pt(px(8.0))
             .pb(px(4.0))
             .child(trigger)
-            .child(overview_trigger)
             .child(
                 crate::components::shell_parts::scheduled_tasks_navigation(theme)
                     .on_click(cx.listener(|this, _, _, cx| this.open_scheduled_tasks(None, cx))),
@@ -5003,6 +5019,15 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
+        self.render_sidebar_collection_rows(theme, false, cx)
+    }
+
+    pub(super) fn render_sidebar_collection_rows(
+        &mut self,
+        theme: &Theme,
+        shortcuts_only: bool,
+        cx: &mut Context<Self>,
+    ) -> SidebarSessionRows {
         #[cfg(test)]
         let measurement_started = std::time::Instant::now();
         let now = Utc::now();
@@ -5021,8 +5046,38 @@ impl Shell {
             let mut chats: Vec<_> = state
                 .sidebar_chats(now, filter.as_deref())
                 .into_iter()
+                .filter(|(_, chat)| {
+                    !shortcuts_only
+                        || self
+                            .overview_visible_chat_ids
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&chat.id))
+                })
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
+            // Search must include matching historical task runs, not only
+            // the latest run normally projected into the sidebar.
+            if let Some(ids) = self
+                .overview_visible_chat_ids
+                .as_ref()
+                .filter(|_| shortcuts_only)
+            {
+                let present: std::collections::HashSet<_> =
+                    chats.iter().map(|(_, chat)| chat.id.clone()).collect();
+                chats.extend(
+                    state
+                        .chats
+                        .iter()
+                        .filter(|chat| {
+                            ids.contains(&chat.id)
+                                && !present.contains(&chat.id)
+                                && !chat.archived
+                                && chat.scheduled_task_info.is_some()
+                                && !state.personal_assistant.covers(chat)
+                        })
+                        .map(|chat| (state.display_status_for(chat, now), chat.clone())),
+                );
+            }
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
@@ -5073,7 +5128,11 @@ impl Shell {
                 .collect::<Vec<_>>(),
         );
 
-        let custom_sections = self.active_sidebar_sections(cx);
+        let custom_sections = if shortcuts_only {
+            self.custom_sidebar_sections(cx)
+        } else {
+            self.active_sidebar_sections(cx)
+        };
         let custom_count = custom_sections.len();
         let mut custom_groups: Vec<_> = custom_sections
             .iter()
@@ -5105,6 +5164,13 @@ impl Shell {
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
+        }
+        if shortcuts_only {
+            regular_groups.retain(|(group, _)| {
+                group
+                    .as_ref()
+                    .is_some_and(|(key, _)| key == SCHEDULED_GROUP_KEY)
+            });
         }
         move_scheduled_group_last(&mut regular_groups);
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
@@ -5256,7 +5322,9 @@ impl Shell {
                 Some("pinned".to_owned())
             } else if let Some((key, _)) = &group {
                 if let Some(id) = key.strip_prefix("section:") {
-                    custom_sections.iter().find(|section| section.id == id)
+                    custom_sections
+                        .iter()
+                        .find(|section| section.id == id)
                         .filter(|section| section.collapsed)
                         .map(|_| format!("custom:{id}"))
                 } else {
@@ -5266,7 +5334,8 @@ impl Shell {
                         SidebarOrganization::InOneList => "list",
                     };
                     let collapse_key = format!("{organization}:{key}");
-                    self.sidebar_collapsed_groups.contains(&collapse_key)
+                    self.sidebar_collapsed_groups
+                        .contains(&collapse_key)
                         .then(|| format!("group:{collapse_key}"))
                 }
             } else if !pinned_group
@@ -5281,7 +5350,10 @@ impl Shell {
                 && self.sidebar_session_return.is_none()
                 && self.pinned_session_drag.is_none()
                 && closed_motion_key.as_ref().is_some_and(|key| {
-                    !self.sidebar_disclosure_motion.get(key).is_some_and(|motion| motion.animating())
+                    !self
+                        .sidebar_disclosure_motion
+                        .get(key)
+                        .is_some_and(|motion| motion.animating())
                 });
             let drag_group = if pinned_group {
                 "pinned".to_owned()
@@ -5496,7 +5568,9 @@ impl Shell {
                             let top =
                                 f32::from(bounds.top() - scroll.bounds().top() - scroll.offset().y);
                             let extent = (top, top + f32::from(bounds.size.height));
-                            extents.borrow_mut().insert(id, (ordinal, extent.0, extent.1));
+                            extents
+                                .borrow_mut()
+                                .insert(id, (ordinal, extent.0, extent.1));
                             // A re-sort can move a culled row into view; fill it next frame.
                             if offscreen
                                 && !sidebar_row_offscreen(
@@ -5699,28 +5773,28 @@ impl Shell {
             theme,
             menu_open,
         )
-            .debug_selector(move || format!("sidebar-group-menu-{selector}"))
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    this.section_menu = None;
-                    this.close_sidebar_view_menu(cx);
-                    if let Some(id) = &space_id {
-                        this.group_menu = None;
-                        this.space_menu.open((id.clone(), event.position()));
-                    } else {
-                        this.close_space_menu(cx);
-                        this.group_menu = Some((target.clone(), event.position()));
-                        window.focus(&this.group_menu_focus, cx);
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .child(
-                icon(icons::MORE_HORIZONTAL)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
+        .debug_selector(move || format!("sidebar-group-menu-{selector}"))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                this.section_menu = None;
+                this.close_sidebar_view_menu(cx);
+                if let Some(id) = &space_id {
+                    this.group_menu = None;
+                    this.space_menu.open((id.clone(), event.position()));
+                } else {
+                    this.close_space_menu(cx);
+                    this.group_menu = Some((target.clone(), event.position()));
+                    window.focus(&this.group_menu_focus, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(
+            icon(icons::MORE_HORIZONTAL)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
     }
 
     /// Scheduled-task runs: one disclosure, closed by default, holding a nested
@@ -5977,11 +6051,7 @@ impl Shell {
                 .selected_chat_row()
                 .filter(|open| assistant_id != Some(open.id.as_str()))
                 .map(|open| {
-                    self.sidebar_chat_data(
-                        state.display_status_for(open, now),
-                        open.clone(),
-                        state,
-                    )
+                    self.sidebar_chat_data(state.display_status_for(open, now), open.clone(), state)
                 });
             let assistant_data = assistant_chat.map(|chat| {
                 let selected = state
@@ -6118,7 +6188,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.settings.sidebar_organization != SidebarOrganization::InOneList {
+        if self.settings.sidebar_overview
+            || self.settings.sidebar_organization != SidebarOrganization::InOneList
+        {
             return content;
         }
         let open = self.sessions_open;
@@ -6206,6 +6278,11 @@ impl Shell {
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+                .filter(|c| {
+                    self.overview_visible_chat_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&c.id))
+                })
                 .filter(|c| !state.personal_assistant.covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
@@ -6234,7 +6311,13 @@ impl Shell {
         // "Show more" matches the row slot: compact rows are 29px, so the
         // button shrinks with them instead of towering over the list.
         let more_height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false, crate::ui_style::current(cx).tokens)
+            super::sidebar_row_height(
+                true,
+                true,
+                false,
+                false,
+                crate::ui_style::current(cx).tokens,
+            )
         } else {
             36.0
         };

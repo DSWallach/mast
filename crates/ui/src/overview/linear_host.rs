@@ -27,7 +27,8 @@ use crate::work_outline::model::{OutlineRowKind, row_key};
 
 /// The narrowest the Outline/List body gets while the Linear column
 /// is inline; past that the column shrinks, then overlays.
-pub(crate) const OVERVIEW_BODY_MIN_W: f32 = crate::components::linear_parts::OVERVIEW_BODY_MIN_WIDTH;
+pub(crate) const OVERVIEW_BODY_MIN_W: f32 =
+    crate::components::linear_parts::OVERVIEW_BODY_MIN_WIDTH;
 /// Hit target of the column's right-edge resize grabber.
 const RESIZE_HANDLE_W: f32 = crate::components::linear_parts::RESIZE_HANDLE_WIDTH;
 
@@ -153,9 +154,10 @@ impl Overview {
                 crate::linear::fixture::issue("ENG-42", "Review the workspace"),
                 crate::linear::fixture::issue("ENG-43", "Validate the release"),
             ]);
-            panel.my_projects = crate::linear::panel::Load::Ready(vec![
-                crate::linear::fixture::project("p-launch", "Launch"),
-            ]);
+            panel.my_projects =
+                crate::linear::panel::Load::Ready(vec![crate::linear::fixture::project(
+                    "p-launch", "Launch",
+                )]);
         });
         self.linear_column.open = true;
     }
@@ -325,6 +327,7 @@ impl Overview {
         if spaces.is_empty() && !github {
             return Err(crate::linear::LINEAR_OFF_NOTICE);
         }
+        self.show_sidebar_workspace(cx);
         let was_shown = self.column_shown();
         if github {
             self.sync_github_panel(space_id.clone(), true, cx);
@@ -386,6 +389,10 @@ impl Overview {
         }
         self.linear_column.return_focus |= return_focus;
         self.linear_column.focus_search = false;
+        if self.in_sidebar {
+            self.outline_focus_pending |= return_focus;
+            self.return_from_sidebar_workspace(cx);
+        }
         cx.notify();
     }
 
@@ -398,6 +405,9 @@ impl Overview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
+        if self.in_sidebar {
+            self.outline_focus_pending = false;
+        }
         if self.column_shown() {
             let focused = self
                 .linear_panel
