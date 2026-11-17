@@ -67,6 +67,11 @@ fn tracker_counts(workers: &[&WorkerFacts], tickets_done: usize) -> [usize; 6] {
         pr_count("open"), pr_count("merged"), tickets_done]
 }
 
+fn tracker_ticket_label(ticket: &crate::chat_metadata::HeaderTicket) -> String {
+    ticket.title.as_deref().filter(|title| !title.is_empty())
+        .map(|title| format!("{} · {title}", ticket.identifier)).unwrap_or_else(|| ticket.identifier.clone())
+}
+
 fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
     let labels = ["Chat started", "Changes", "PR open", "Checks", "Review", "Merged"];
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
@@ -96,16 +101,24 @@ mod tracker_tests {
     fn tracker_rollup_counts_unique_pull_requests() {
         let mut first = worker("first", WorkerState::Working);
         let mut second = worker("second", WorkerState::Waiting);
-        let pr = WorkerPr { number: 1, url: "https://example.com/1".into(), checks: None,
+        let pr = WorkerPr { additions: None, deletions: None, number: 1, url: "https://example.com/1".into(), checks: None,
             review: None, draft: false, state: "OPEN".into() };
         first.prs.push(pr.clone());
         second.prs.push(pr);
-        second.prs.push(WorkerPr { number: 2, url: "https://example.com/2".into(), checks: None,
+        second.prs.push(WorkerPr { additions: None, deletions: None, number: 2, url: "https://example.com/2".into(), checks: None,
             review: None, draft: false, state: "MERGED".into() });
         assert_eq!(tracker_counts(&[&first, &second], 3), [1, 1, 0, 1, 1, 3]);
         assert!(tracker_matches(&first, TrackerFilter::OpenPrs));
         assert!(!tracker_matches(&first, TrackerFilter::NeedsYou));
         assert!(tracker_matches(&second, TrackerFilter::MergedPrs));
+    }
+
+    #[test]
+    fn tracker_ticket_label_includes_available_title() {
+        let mut ticket = crate::chat_metadata::HeaderTicket { identifier: "ENG-42".into(), title: Some("Review changes".into()), ..Default::default() };
+        assert_eq!(tracker_ticket_label(&ticket), "ENG-42 · Review changes");
+        ticket.title = None;
+        assert_eq!(tracker_ticket_label(&ticket), "ENG-42");
     }
 }
 
@@ -225,6 +238,7 @@ impl Shell {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
             let pr = (index < 4).then(|| PrStatus {
+                additions: None, deletions: None,
                 number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
@@ -550,7 +564,7 @@ impl Shell {
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty());
         if let Some(ticket) = &worker.ticket {
             let url = ticket.url.clone();
-            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), ticket.identifier.clone(), ChipTone::Link)
+            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), tracker_ticket_label(ticket), ChipTone::Link)
                 .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(url) = &url { this.open_web_reference(url, window.modifiers().secondary(), window, cx); }

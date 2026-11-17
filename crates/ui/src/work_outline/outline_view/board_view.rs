@@ -35,6 +35,7 @@ impl OutlineView {
             "reviewer".into(),
             mast_engine::pr_ticket_cache::ChatLinkStatus {
                 pr: Some(mast_engine::pr_ticket_cache::PrStatus {
+                    additions: None, deletions: None,
                     number: 41,
                     url: None,
                     state: "OPEN".into(),
@@ -1056,6 +1057,7 @@ mod tests {
             outline.board_mode = BoardMode::Board;
             for i in 0..50 {
                 let pr = mast_engine::pr_ticket_cache::PrStatus {
+                    additions: None, deletions: None,
                     number: i + 1,
                     url: None,
                     state: "OPEN".into(),

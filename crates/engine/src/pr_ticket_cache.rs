@@ -53,7 +53,7 @@ const KEYS_PER_SWEEP: usize = 3;
 
 /// `gh pr view --json` field set, matching `PR_VIEW_JSON_FIELDS` in
 /// `session_canvas_server.py:1399`.
-const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author,mergedAt";
+const PR_VIEW_JSON_FIELDS: &str = "number,url,state,isDraft,reviewDecision,statusCheckRollup,reviews,title,headRefName,headRefOid,mergeable,reviewRequests,author,mergedAt,additions,deletions";
 
 /// Checks-rollup summary, matching `summarize_checks` (`session_canvas_server.py:1377`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +81,10 @@ pub enum PrAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatus {
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
     #[serde(default)]
     pub merged_at: Option<String>,
     pub number: u64,
@@ -970,6 +974,8 @@ fn pr_json_to_status(data: &Value) -> PrStatus {
     reviewers.dedup();
 
     PrStatus {
+        additions: data.get("additions").and_then(Value::as_u64),
+        deletions: data.get("deletions").and_then(Value::as_u64),
         merged_at: data.get("mergedAt").and_then(Value::as_str).map(str::to_owned),
         number: data.get("number").and_then(Value::as_u64).unwrap_or(0),
         url: data.get("url").and_then(Value::as_str).map(str::to_string),
@@ -1399,8 +1405,21 @@ mod tests {
     }
 
     #[test]
+    fn pr_status_preserves_optional_change_counts() {
+        let status = pr_json_to_status(&serde_json::json!({"additions": 312, "deletions": 48}));
+        assert_eq!((status.additions, status.deletions), (Some(312), Some(48)));
+        let decoded: PrStatus = serde_json::from_value(serde_json::to_value(status).unwrap()).unwrap();
+        assert_eq!((decoded.additions, decoded.deletions), (Some(312), Some(48)));
+        let missing = pr_json_to_status(&serde_json::json!({}));
+        assert_eq!((missing.additions, missing.deletions), (None, None));
+        assert!(PR_VIEW_JSON_FIELDS.split(',').any(|field| field == "additions"));
+        assert!(PR_VIEW_JSON_FIELDS.split(',').any(|field| field == "deletions"));
+    }
+
+    #[test]
     fn action_reasons_matches_reference_classification() {
         let mut pr = PrStatus {
+            additions: None, deletions: None,
             merged_at: None,
             number: 1,
             url: None,
@@ -1487,6 +1506,7 @@ mod tests {
             },
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 7,
                     url: None,
@@ -1588,6 +1608,7 @@ mod tests {
             PrKey::Url(links[1].url.clone()),
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 8,
                     url: Some(links[1].url.clone()),
@@ -1960,6 +1981,7 @@ mod tests {
             ("acme/widgets".to_string(), 1),
             Entry {
                 data: Some(PrStatus {
+                    additions: None, deletions: None,
                     merged_at: None,
                     number: 1,
                     url: Some("https://github.com/acme/widgets/pull/1".into()),
