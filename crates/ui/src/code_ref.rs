@@ -91,7 +91,7 @@ pub fn with_code_refs(text: &str, references: &[StagedCodeRef]) -> String {
         let _ = write!(
             output,
             "\n\n<!-- mast-code-ref:{} -->\n{}{} @ {}\n{}\n{}\n{}\n<!-- /mast-code-ref -->",
-            encoded, reference.location.path, range, revision, fence, staged.snippet, fence
+            encoded, reference.location.workspace_path(), range, revision, fence, staged.snippet, fence
         );
     }
     output
@@ -149,8 +149,12 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         result.push_str(&staged.label());
         let end = result.len();
         let path = match staged.reference.range {
-            Some(range) => format!("{}:{}", staged.reference.location.path, range.start_line),
-            None => staged.reference.location.path.clone(),
+            Some(range) => format!(
+                "{}:{}",
+                staged.reference.location.workspace_path(),
+                range.start_line
+            ),
+            None => staged.reference.location.workspace_path(),
         };
         spans.push(crate::composer::SentMentionSpan {
             range: start..end,
@@ -310,6 +314,7 @@ mod tests {
                 location: mast_proto::CodeRefLocation {
                     repo_id: "repo".into(),
                     worktree_id: None,
+                    repo_root: None,
                     path: "src/main.rs".into(),
                 },
                 kind: mast_proto::CodeRefKind::Lines,

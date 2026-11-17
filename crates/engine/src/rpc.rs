@@ -4586,13 +4586,18 @@ impl RpcService for EngineRpc {
             methods::RESOLVE_CODE_REF_SOURCE => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
-                struct P { cwd: String, checkout_id: Option<String>, base_ref: String, head_ref: String, path: String, head: bool }
+                struct P { cwd: String, checkout_id: Option<String>, #[serde(default)] base_ref: String, #[serde(default)] head_ref: String, path: String, #[serde(default)] head: bool, #[serde(default)] repo_root: Option<String>, #[serde(default)] revision: Option<String> }
                 let p: P = parse_params(params)?;
                 let identity = self.repos.checkout_identity(std::path::Path::new(&p.cwd)).await.map_err(|e| RpcError::Failed(e.to_string()))?;
                 if p.checkout_id.as_deref().is_some_and(|expected| expected != identity.id) {
                     return Err(RpcError::Failed("checkoutId does not match canonical cwd".into()));
                 }
-                let (revision_sha, text) = crate::diff_sync::resolve_code_ref_source(&identity.root, &p.base_ref, &p.head_ref, &p.path, p.head).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let resolved = match (p.repo_root.as_deref(), p.revision.as_deref()) {
+                    (Some(repo_root), Some(revision)) => crate::diff_sync::resolve_nested_code_ref_source(&identity.root, repo_root, revision, &p.path).await,
+                    (None, None) => crate::diff_sync::resolve_code_ref_source(&identity.root, &p.base_ref, &p.head_ref, &p.path, p.head).await,
+                    _ => return Err(RpcError::Failed("repoRoot and revision must be given together".into())),
+                };
+                let (revision_sha, text) = resolved.map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "revisionSha": revision_sha, "text": text }))
             }
             methods::GET_CHECKOUT_DIFF => {

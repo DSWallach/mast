@@ -164,6 +164,7 @@ impl super::FilesSurface {
                 location: mast_proto::CodeRefLocation {
                     repo_id: member.repo_id,
                     worktree_id: member.checkout_id,
+                    repo_root: None,
                     path,
                 },
                 kind: mast_proto::CodeRefKind::Lines,
