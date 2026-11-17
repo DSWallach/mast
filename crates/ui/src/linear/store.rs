@@ -271,7 +271,7 @@ pub(crate) fn request_issue(state: &Entity<AppState>, space_id: &str, identifier
         if store.issue_in_scope(&scope, &key).is_none() {
             store.issues.insert(cache_key.clone(), IssueEntry::Loading);
         }
-        Some(state.work_outline_actions().linear_issue(space_id, &key, force))
+        Some(state.work_outline_actions().linear_issue(space_id, &scope, &key, force))
     }) else {
         return;
     };
@@ -334,13 +334,13 @@ pub(crate) fn request_project_detail(
         }
         let first = store.project_detail(&scope, &key).is_none();
         let actions = state.work_outline_actions();
-        let stored = first.then(|| actions.linear_project_detail(space_id, &key, ListRead::Stored));
+        let stored = first.then(|| actions.linear_project_detail(space_id, &scope, &key, ListRead::Stored));
         let read = if force {
             ListRead::Force
         } else {
             ListRead::Cached
         };
-        let fresh = actions.linear_project_detail(space_id, &key, read);
+        let fresh = actions.linear_project_detail(space_id, &scope, &key, read);
         if first {
             state
                 .linear

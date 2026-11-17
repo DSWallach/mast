@@ -151,7 +151,7 @@ impl ProjectIssuePicker {
         let scope = self.snapshot.as_deref().map(super::store::account_scope).unwrap_or("default").to_owned();
         let cached = self.state.read(cx).linear.projects.get(&scope).cloned();
         let lookup = (cached.is_none() && !looks_like_uuid(&self.reference.external_id))
-            .then(|| actions.linear_my_projects(&self.space_id, ListRead::Cached));
+            .then(|| actions.linear_my_projects(&self.space_id, &scope, ListRead::Cached));
         let reference = self.reference.clone();
         self.issues = Load::Loading;
         cx.notify();
@@ -174,7 +174,7 @@ impl ProjectIssuePicker {
                             }
                         });
                     }
-                    actions.linear_project_issues(&this.space_id, &project_id, ListRead::Cached)
+                    actions.linear_project_issues(&this.space_id, &scope, &project_id, ListRead::Cached)
                 })
                 .ok();
             let Some(task) = fetched else {

@@ -378,6 +378,9 @@ pub struct LinearClearApiKeyParams {}
 pub struct LinearIssueParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub identifier: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub force_refresh: bool,
@@ -391,6 +394,9 @@ pub struct LinearIssueParams {
 pub struct LinearMyIssuesParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     /// Skip the engine's list cache.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -406,6 +412,9 @@ pub struct LinearMyIssuesParams {
 pub struct LinearMyProjectsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -419,6 +428,9 @@ pub struct LinearMyProjectsParams {
 pub struct LinearProjectIssuesParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -434,6 +446,9 @@ pub struct LinearProjectIssuesParams {
 pub struct LinearProjectDetailParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,

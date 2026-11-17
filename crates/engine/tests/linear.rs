@@ -1392,6 +1392,10 @@ async fn issue_queries_resolve_space_account_and_isolate_cached_results() {
     let cached = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
     assert_eq!(cached["title"], "Default issue");
     assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+    let error = rig.linear_err(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE,
+        "expectedAccountId": "default", "identifier": "ENG-1"})).await;
+    assert_eq!(error.code, LinearErrorCode::Network);
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

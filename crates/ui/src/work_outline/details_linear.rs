@@ -113,8 +113,8 @@ impl WorkItemDetails {
             return;
         }
         let actions = self.state.read(cx).work_outline_actions();
-        let scope = self.snapshot.as_deref().map(crate::linear::store::account_scope).unwrap_or("default");
-        let cached = self.state.read(cx).linear.projects.get(scope).cloned();
+        let scope = self.snapshot.as_deref().map(crate::linear::store::account_scope).unwrap_or("default").to_owned();
+        let cached = self.state.read(cx).linear.projects.get(&scope).cloned();
         let item_id = self.item_id.clone();
         let space_id = self.space_id.clone();
         self.error = None;
@@ -122,7 +122,7 @@ impl WorkItemDetails {
         cx.spawn(async move |this, cx| {
             let projects = match cached {
                 Some(projects) => Some(projects),
-                None => actions.linear_my_projects(&space_id, ListRead::Cached).await.ok(),
+                None => actions.linear_my_projects(&space_id, &scope, ListRead::Cached).await.ok(),
             };
             let short = project_short_id(&slug).map(str::to_owned);
             let matched = projects.and_then(|projects| {

@@ -443,17 +443,17 @@ impl LinearPanel {
         let scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned()).unwrap_or_else(|| "default".into());
         let actions = self.state.read(cx).work_outline_actions();
         let stored_issues =
-            (!self.my_issues.is_ready()).then(|| actions.linear_my_issues(&self.space_id, ListRead::Stored));
+            (!self.my_issues.is_ready()).then(|| actions.linear_my_issues(&self.space_id, &scope, ListRead::Stored));
         let stored_projects =
-            (!self.my_projects.is_ready()).then(|| actions.linear_my_projects(&self.space_id, ListRead::Stored));
+            (!self.my_projects.is_ready()).then(|| actions.linear_my_projects(&self.space_id, &scope, ListRead::Stored));
         if !self.my_issues.is_ready() {
             self.my_issues = Load::Loading;
         }
         if !self.my_projects.is_ready() {
             self.my_projects = Load::Loading;
         }
-        let issues = actions.linear_my_issues(&self.space_id, read);
-        let projects = actions.linear_my_projects(&self.space_id, read);
+        let issues = actions.linear_my_issues(&self.space_id, &scope, read);
+        let projects = actions.linear_my_projects(&self.space_id, &scope, read);
         cx.spawn(async move |this, cx| {
             if let Some(stored) = stored_issues
                 && let Ok(stored) = stored.await
@@ -541,8 +541,8 @@ impl LinearPanel {
             .get(&project_id)
             .is_some_and(Load::is_ready);
         let stored =
-            (!has_list).then(|| actions.linear_project_issues(&self.space_id, &project_id, ListRead::Stored));
-        let task = actions.linear_project_issues(&self.space_id, &project_id, read);
+            (!has_list).then(|| actions.linear_project_issues(&self.space_id, &scope, &project_id, ListRead::Stored));
+        let task = actions.linear_project_issues(&self.space_id, &scope, &project_id, read);
         if !has_list {
             self.project_issues
                 .insert(project_id.clone(), Load::Loading);
