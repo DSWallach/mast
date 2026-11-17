@@ -36,6 +36,29 @@ pub(crate) enum WorkerState {
     Done,
 }
 
+/// Display order for the Tracker's worker groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TrackerGroup {
+    NeedsYou,
+    ReadyToMerge,
+    Errored,
+    Working,
+    Idle,
+    NotStarted,
+    Done,
+}
+
+/// Evidence for each stage, in display order. Missing evidence stays unlit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrackerStages {
+    pub chat_started: bool,
+    pub changes: bool,
+    pub pr_open: bool,
+    pub checks: bool,
+    pub review: bool,
+    pub merged: bool,
+}
+
 impl WorkerState {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -131,16 +154,31 @@ pub(crate) struct WorkerFacts {
 }
 
 impl WorkerFacts {
+    pub(crate) fn tracker_group(&self) -> TrackerGroup {
+        match (self.state, self.ready.is_some()) {
+            (WorkerState::Waiting, _) => TrackerGroup::NeedsYou,
+            (WorkerState::Done, _) => TrackerGroup::Done,
+            (_, true) => TrackerGroup::ReadyToMerge,
+            (WorkerState::Errored, _) => TrackerGroup::Errored,
+            (WorkerState::Working, _) => TrackerGroup::Working,
+            (WorkerState::Idle, _) => TrackerGroup::Idle,
+        }
+    }
+
+    pub(crate) fn tracker_stages(&self) -> TrackerStages {
+        TrackerStages {
+            chat_started: true,
+            changes: self.diff.is_some_and(|(added, removed)| added > 0 || removed > 0),
+            pr_open: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("open")),
+            checks: self.prs.iter().any(|pr| pr.checks.is_some()),
+            review: self.prs.iter().any(|pr| pr.review.is_some()),
+            merged: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
+        }
+    }
+
     /// Sort rank: waiting on you, ready to merge, errored, working, idle, done.
     fn rank(&self) -> u8 {
-        match (self.state, self.ready.is_some()) {
-            (WorkerState::Waiting, _) => 0,
-            (WorkerState::Done, _) => 5,
-            (_, true) => 1,
-            (WorkerState::Errored, _) => 2,
-            (WorkerState::Working, _) => 3,
-            (WorkerState::Idle, _) => 4,
-        }
+        self.tracker_group() as u8
     }
 }
 
@@ -487,5 +525,36 @@ mod tests {
             state: "OPEN".into(),
         };
         assert_eq!(pr.label(), "PR #12 \u{b7} checks passing \u{b7} approved");
+    }
+
+    #[test]
+    fn tracker_groups_prioritize_requests_and_completed_items() {
+        use WorkerState::*;
+        let facts = facts_of(&[(Waiting, true), (Idle, true), (Errored, false),
+            (Working, false), (Idle, false), (Done, true)]);
+        let groups: Vec<_> = facts.workers.iter().map(WorkerFacts::tracker_group).collect();
+        assert_eq!(groups, [TrackerGroup::NeedsYou, TrackerGroup::ReadyToMerge,
+            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done]);
+        assert!(TrackerGroup::Idle < TrackerGroup::NotStarted);
+        assert!(TrackerGroup::NotStarted < TrackerGroup::Done);
+    }
+
+    #[test]
+    fn tracker_stages_require_observed_facts() {
+        let mut worker = facts_of(&[(WorkerState::Working, false)]).workers.remove(0);
+        assert_eq!(worker.tracker_stages(), TrackerStages {
+            chat_started: true, changes: false, pr_open: false, checks: false,
+            review: false, merged: false,
+        });
+        worker.diff = Some((2, 0));
+        worker.prs.push(WorkerPr { number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
+            review: Some("approved"), draft: false, state: "OPEN".into() });
+        assert_eq!(worker.tracker_stages(), TrackerStages {
+            chat_started: true, changes: true, pr_open: true, checks: true,
+            review: true, merged: false,
+        });
+        worker.prs[0].state = "MERGED".into();
+        assert!(worker.tracker_stages().merged);
+        assert!(!worker.tracker_stages().pr_open);
     }
 }
