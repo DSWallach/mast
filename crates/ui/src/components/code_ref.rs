@@ -26,6 +26,15 @@ pub(crate) fn cache_highlight(key: crate::syntax_cache::DocumentHighlightKey, do
     cx.global_mut::<ReferenceHighlightCache>().0.insert(key, document);
 }
 
+/// Copy only the bounded excerpt needed by a preview card.
+pub(crate) fn preview_reference(reference: &crate::code_ref::StagedCodeRef) -> crate::code_ref::StagedCodeRef {
+    crate::code_ref::StagedCodeRef {
+        id: reference.id.clone(),
+        reference: reference.reference.clone(),
+        snippet: super::code_block::bounded_source(&reference.snippet),
+    }
+}
+
 pub(crate) struct ReferenceCard {
     label: String,
     source: String,
@@ -36,6 +45,9 @@ pub(crate) struct ReferenceCard {
 }
 
 impl ReferenceCard {
+    pub(crate) fn unavailable() -> Self {
+        Self { label: "Reference unavailable".into(), source: String::new(), first_line: 1, remaining_lines: 0, resolution: None, highlight: None }
+    }
     pub(crate) fn new(reference: crate::code_ref::StagedCodeRef, resolution: Option<crate::code_ref::Resolution>, cx: &mut gpui::Context<Self>) -> Self {
         let (source, remaining_lines) = reference_card_source(&reference);
         let path = reference.reference.location.path.clone();
@@ -94,7 +106,7 @@ impl gpui::Render for ReferenceCard {
                     Some(crate::code_ref::Resolution::Changed) => Some(div().px(px(Theme::SPACE_SM)).rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12)).text_color(theme.warning_muted).child("Changed")),
                     _ => None,
                 }))
-            .child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme, crate::typography::ui_rems(12.0).into()))
+            .when(!self.source.is_empty(), |card| card.child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme, crate::typography::ui_rems(12.0).into())))
             .when(self.remaining_lines > 0, |card| card.child(div().text_color(theme.text_muted)
                 .child(format!("{} more lines", self.remaining_lines))))
     }

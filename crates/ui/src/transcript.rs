@@ -3226,6 +3226,7 @@ pub struct Transcript {
     state: Entity<AppState>,
     code_ref_hover: Option<code_refs::ReferenceHover>,
     code_ref_focus: HashMap<(SharedString, usize), code_refs::ReferenceFocusState>,
+    code_ref_focus_top: usize,
     code_ref_focus_pending: Option<(SharedString, usize)>,
     code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     code_ref_inflight: usize,
@@ -3590,6 +3591,7 @@ impl Transcript {
             state,
             code_ref_hover: None,
             code_ref_focus: HashMap::new(),
+            code_ref_focus_top: 0,
             code_ref_focus_pending: None,
             code_ref_resolutions: HashMap::new(),
             code_ref_inflight: 0,
@@ -7748,7 +7750,11 @@ fn user_bubble_text(
         move |_, _, window, cx| {
             let mut focus_geometry_changed = false;
             for target in &focus_geometry {
-                let bounds = render::range_rects(&layout, &target.span.range, 0.0, 2.0).first().map(|rect| {
+                let visible = window.content_mask().bounds;
+                let bounds = render::range_rects(&layout, &target.span.range, 0.0, 2.0).into_iter().find(|rect| {
+                    let intersection = rect.intersect(&visible);
+                    intersection.size.width > px(0.0) && intersection.size.height > px(0.0)
+                }).map(|rect| {
                     Bounds::new(point(rect.origin.x - layout.bounds().origin.x, rect.origin.y - layout.bounds().origin.y), rect.size)
                 });
                 if target.bounds.get() != bounds { target.bounds.set(bounds); focus_geometry_changed = true; }
@@ -7849,7 +7855,8 @@ fn user_bubble_text(
             if focused_reference.as_ref().is_some_and(|focus| focus.is_focused(window)) { return; }
             let span = if hover_layout.bounds().contains(&event.position) {
                 let index = match hover_layout.index_for_position(event.position) { Ok(index) | Err(index) => index };
-                hover_mentions.iter().find(|span| span.code_ref.is_some() && (span.range.contains(&index) || span.badge_range.as_ref().is_some_and(|range| range.contains(&index)))).cloned()
+                let position = hover_mentions.partition_point(|span| span.badge_range.as_ref().map_or(span.range.end, |range| range.end) <= index);
+                hover_mentions.get(position).filter(|span| span.code_ref.is_some() && (span.range.contains(&index) || span.badge_range.as_ref().is_some_and(|range| range.contains(&index)))).cloned()
             } else { None };
             let _ = hover_transcript.update(cx, |this, cx| this.set_reference_hover(hover_row.clone(), span, None, cx));
         }))

@@ -10,7 +10,6 @@ pub(super) fn pinned_view(
     cx: &gpui::Context<super::FilesSurface>,
 ) -> AnyElement {
     let first_line = reference.reference.range.map_or(1, |range| range.start_line);
-    let staged = reference.clone();
     let copied = reference.reference.location.workspace_path();
     let copied = match reference.reference.range {
         Some(range) => format!("{}:{}-{}", copied, range.start_line, range.end_line),
@@ -66,7 +65,7 @@ pub(super) fn pinned_view(
             .child(crate::components::button("pinned-open-current", "Open current file", crate::components::ButtonVariant::Ghost, crate::components::ButtonSize::Sm, theme)
                 .on_click(cx.listener(|this, _, _, cx| this.clear_pinned_reference(cx))))
             .child(crate::components::button("pinned-add-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
-                .on_click(cx.listener(move |this, _, _, cx| this.stage_reference(staged.clone(), cx))))
+                .on_click(cx.listener(|this, _, _, cx| this.add_pinned_reference_to_chat(cx))))
             .child(crate::components::button("pinned-copy-reference", "Copy ref", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                 .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone())))))
         .into_any_element()
@@ -75,14 +74,31 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
+    fn add_pinned_reference_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(mut reference) = self.pinned_reference.clone() else { return; };
+        reference.id = uuid::Uuid::new_v4().to_string();
+        let key = self.chat_id.clone();
+        self.state.update(cx, |state, cx| {
+            state.add_code_ref(&key, reference);
+            cx.notify();
+        });
+    }
+
     fn show_reference_diff(&mut self, cx: &mut gpui::Context<Self>) {
         let (Some(reference), Some(context), Some(engine)) = (
-            self.pinned_reference.clone(), self.request_context.clone(), self.state.read(cx).engine().cloned(),
+            self.pinned_reference.as_ref(), self.request_context.clone(), self.state.read(cx).engine().cloned(),
         ) else {
             self.pinned_diff = Some(super::PinnedDiff::Error("Current file is unavailable.".into()));
             cx.notify();
             return;
         };
+        let bounded = crate::components::code_ref::preview_reference(reference);
+        if bounded.snippet.len() != reference.snippet.len() {
+            self.pinned_diff = Some(super::PinnedDiff::Error("The saved excerpt is too large to compare.".into()));
+            cx.notify();
+            return;
+        }
+        let reference = bounded;
         let Some(queue_permit) = crate::code_ref::try_queue_io() else {
             self.pinned_diff = Some(super::PinnedDiff::Error("Too many code references are loading.".into()));
             cx.notify();
@@ -302,6 +318,36 @@ fn reference_diff(reference: &crate::code_ref::StagedCodeRef, contents: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn restaging_pinned_reference_preserves_origin_and_assigns_unique_ids(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
+        let state = cx.new(|_| crate::state::AppState::new());
+        let surface = cx.new(|cx| super::super::FilesSurface::new(state.clone(), "chat".into(), false, 1000, 13.0, false, false, cx));
+        let reference = crate::code_ref::StagedCodeRef {
+            id: String::new(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "original-repo".into(), worktree_id: Some("original-checkout".into()), repo_root: None, path: "file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange { start_line: 1, end_line: 1 }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "saved".into(),
+        };
+        surface.update(cx, |surface, cx| {
+            surface.pinned_reference = Some(reference.clone());
+            surface.add_pinned_reference_to_chat(cx);
+            surface.add_pinned_reference_to_chat(cx);
+        });
+        state.read_with(cx, |state, _| {
+            let staged = state.code_refs("chat");
+            assert_eq!(staged.len(), 2);
+            assert_ne!(staged[0].id, staged[1].id);
+            assert!(staged.iter().all(|item| item.reference == reference.reference && item.snippet == reference.snippet));
+        });
+    }
 
     #[test]
     fn comparison_uses_original_range_and_preserves_empty_lines() {

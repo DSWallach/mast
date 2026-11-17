@@ -880,7 +880,7 @@ impl Render for Walkthrough {
                                 .min_w_0()
                                 .when(true, |el| crate::components::walkthrough_title(el, &theme))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(crate::components::code_block::inline_code(&crate::components::walkthrough_heading(&step.title, &theme), &theme, theme.text)),
+                                .child(crate::components::code_block::inline_code_weighted(&crate::components::walkthrough_heading(&step.title, &theme), &theme, theme.text, gpui::FontWeight::SEMIBOLD)),
                         )
                         .child(
                             div()

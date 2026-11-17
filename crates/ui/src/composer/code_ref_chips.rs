@@ -18,9 +18,9 @@ impl Composer {
             .code_refs(&self.current_key)
             .iter()
             .filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File)
-            .cloned()
+            .map(|reference| (reference.id.clone(), reference.label()))
             .collect();
-        let ids: HashSet<_> = references.iter().map(|reference| reference.id.as_str()).collect();
+        let ids: HashSet<_> = references.iter().map(|(id, _)| id.as_str()).collect();
         self.code_ref_focus.retain(|id, _| ids.contains(id.as_str()));
         if self.code_ref_focus_card.as_ref().is_some_and(|(id, _)| !ids.contains(id.as_str())) {
             self.code_ref_focus_card = None;
@@ -39,9 +39,8 @@ impl Composer {
             .overflow_hidden()
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
-        for (index, reference) in references.into_iter().enumerate() {
-            let id = reference.id.clone();
-            let label: SharedString = reference.label().into();
+        for (index, (id, label)) in references.into_iter().enumerate() {
+            let label: SharedString = label.into();
             if !self.code_ref_focus.contains_key(&id) {
                 let handle = cx.focus_handle().tab_stop(true).tab_index(0);
                 self.code_ref_focus.insert(id.clone(), ReferenceChipFocus { handle });
@@ -53,22 +52,31 @@ impl Composer {
                 self.code_ref_focus_pending = Some(id.clone());
                 let pending_id = id.clone();
                 let pending_focus = focus.clone();
-                let pending_reference = reference.clone();
+                let pending_key = self.current_key.clone();
                 cx.defer_in(window, move |this, window, cx| {
                     if this.code_ref_focus_pending.as_ref() != Some(&pending_id) { return; }
                     this.code_ref_focus_pending = None;
                     if pending_focus.is_focused(window) && this.code_ref_focus.contains_key(&pending_id) {
-                        let card = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(pending_reference, None, cx));
-                        this.code_ref_focus_card = Some((pending_id, card));
-                        cx.notify();
+                        let reference = this.state.read(cx).code_refs(&pending_key).iter().find(|reference| reference.id == pending_id).map(crate::components::code_ref::preview_reference);
+                        if let Some(reference) = reference {
+                            let card = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference, None, cx));
+                            this.code_ref_focus_card = Some((pending_id, card));
+                            cx.notify();
+                        }
                     }
                 });
             }
             let card = self.code_ref_focus_card.as_ref().filter(|(active, _)| focused && active == &id).map(|(_, card)| card.clone());
             let focus_for_tooltip = focus.clone();
+            let hover_state = self.state.clone();
+            let hover_key = self.current_key.clone();
+            let hover_id = id.clone();
             row = row.child(
                 crate::components::conversation_skill_chip(theme, index)
-                    .tooltip(move |_, cx| cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference.clone(), None, cx)).into())
+                    .tooltip(move |_, cx| {
+                        let reference = hover_state.read(cx).code_refs(&hover_key).iter().find(|reference| reference.id == hover_id).map(crate::components::code_ref::preview_reference);
+                        cx.new(|cx| reference.map_or_else(crate::components::code_ref::ReferenceCard::unavailable, |reference| crate::components::code_ref::ReferenceCard::new(reference, None, cx))).into()
+                    })
                     .relative().track_focus(&focus).tab_index(0).role(gpui::Role::Group).aria_label(label.clone())
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .child(label)

@@ -5,6 +5,7 @@ use gpui_base::input::{Editor, EditorState};
 pub struct CodeReferenceFixture {
     editor: Entity<EditorState>,
     pinned: Entity<crate::files::FilesSurface>,
+    card: Entity<crate::components::code_ref::ReferenceCard>,
     focus_pending: bool,
 }
 
@@ -25,15 +26,17 @@ impl Render for CodeReferenceFixture {
             .unwrap_or((px(90.0), px(30.0)));
         div()
             .size_full()
-            .flex()
+            .flex().flex_col()
             .bg(theme.surface)
             .child(
-                div().flex_1().min_w_0().relative()
-                    .child(Editor::new(&self.editor))
-                    .child(crate::components::code_ref::selection_action_bar(theme, top, left)
-                        .child("Add to chat").child("Copy ref")),
+                div().flex().flex_1().min_h_0()
+                    .child(div().flex_1().min_w_0().relative()
+                        .child(Editor::new(&self.editor))
+                        .child(crate::components::code_ref::selection_action_bar(theme, top, left)
+                            .child("Add to chat").child("Copy ref")))
+                    .child(div().flex_1().min_w_0().child(self.pinned.clone())),
             )
-            .child(div().flex_1().min_w_0().child(self.pinned.clone()))
+            .child(div().flex_none().child(self.card.clone()))
     }
 }
 
@@ -62,10 +65,15 @@ pub fn fixture(window: &mut Window, cx: &mut App) -> Entity<CodeReferenceFixture
         },
         snippet: "fn review() {\n    let first = 1;\n    inspect(first);\n}".into(),
     };
+    let mut card_reference = reference.clone();
+    card_reference.reference.range = Some(mast_proto::CodeRefRange { start_line: 12, end_line: 18 });
+    card_reference.snippet = "fn review() {\n    let first = 1;\n    inspect(first);\n    let second = 2;\n    inspect(second);\n    finish();\n}".into();
+    let card = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(card_reference, Some(crate::code_ref::Resolution::Changed), cx));
     pinned.update(cx, |pinned, cx| pinned.show_pinned_reference(reference, cx));
     cx.new(|_| CodeReferenceFixture {
         editor,
         pinned,
+        card,
         focus_pending: true,
     })
 }

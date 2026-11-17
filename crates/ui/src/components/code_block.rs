@@ -41,11 +41,15 @@ pub(crate) fn code_block(
 
 /// Render inline backtick spans without changing the surrounding prose.
 pub(crate) fn inline_code(source: &str, theme: &Theme, color: gpui::Hsla) -> StyledText {
+    inline_code_weighted(source, theme, color, gpui::FontWeight::NORMAL)
+}
+
+pub(crate) fn inline_code_weighted(source: &str, theme: &Theme, color: gpui::Hsla, weight: gpui::FontWeight) -> StyledText {
     let mut text = String::new();
     let mut runs = Vec::new();
     for (part, code) in inline_code_parts(source) {
         text.push_str(part);
-        if !part.is_empty() { runs.push(inline_run(part.len(), code, theme, color)); }
+        if !part.is_empty() { runs.push(inline_run(part.len(), code, theme, color, weight)); }
     }
     StyledText::new(text).with_runs(runs)
 }
@@ -80,10 +84,12 @@ fn inline_code_parts(source: &str) -> Vec<(&str, bool)> {
     parts
 }
 
-fn inline_run(len: usize, code: bool, theme: &Theme, color: gpui::Hsla) -> gpui::TextRun {
+fn inline_run(len: usize, code: bool, theme: &Theme, color: gpui::Hsla, weight: gpui::FontWeight) -> gpui::TextRun {
+    let mut font = gpui::font(if code { theme.font_mono.clone() } else { theme.font_sans.clone() });
+    font.weight = weight;
     gpui::TextRun {
         len,
-        font: gpui::font(if code { theme.font_mono.clone() } else { theme.font_sans.clone() }),
+        font,
         color: if code { theme.code_text } else { color },
         background_color: code.then_some(theme.code_wash),
         underline: None,

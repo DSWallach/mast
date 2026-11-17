@@ -43,7 +43,7 @@ impl Transcript {
             if focus.is_some() { hover.focus = focus; cx.notify(); }
             return;
         }
-        let reference = span.code_ref.as_ref().unwrap().as_ref().clone();
+        let reference = crate::components::code_ref::preview_reference(span.code_ref.as_ref().unwrap());
         let resolution = span.resolution;
         let view = cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference, resolution, cx));
         self.code_ref_hover = Some(ReferenceHover { row, range: span.range, badge_range: span.badge_range, key: span.resolution_key, resolution, view, focus });
@@ -51,14 +51,20 @@ impl Transcript {
     }
 
     pub(super) fn reference_focus_targets(&mut self, row: &SharedString, spans: &[crate::composer::SentMentionSpan], window: &Window, cx: &mut Context<Self>) -> Vec<ReferenceFocus> {
+        let top = self.list.logical_scroll_top().item_ix;
+        // Never evict targets while a viewport is being rendered: a message
+        // with hundreds of references would otherwise recreate handles and
+        // invalidate layout on every frame. Reclaim after scrolling instead.
+        if self.code_ref_focus.len() >= MAX_FOCUS_TARGETS && self.code_ref_focus_top != top {
+            self.code_ref_focus.retain(|_, target| target.handle.is_focused(window));
+        }
+        self.code_ref_focus_top = top;
         let mut targets = Vec::new();
         for (index, span) in spans.iter().enumerate().filter(|(_, span)| span.code_ref.is_some()) {
             let key = (row.clone(), index);
             if !self.code_ref_focus.contains_key(&key) {
                 if self.code_ref_focus.len() >= MAX_FOCUS_TARGETS {
-                    if let Some(evict) = self.code_ref_focus.iter().find(|((cached_row, _), target)| cached_row != row && !target.handle.is_focused(window)).map(|(key, _)| key.clone()) {
-                        self.code_ref_focus.remove(&evict);
-                    } else { continue; }
+                    continue;
                 }
                 self.code_ref_focus.insert(key.clone(), ReferenceFocusState { range: span.range.clone(), reference_key: span.resolution_key.clone(), handle: cx.focus_handle().tab_stop(true).tab_index(0), bounds: Rc::new(Cell::new(None)) });
             }
@@ -437,7 +443,9 @@ mod tests {
                 div().id("reference-hover-fixture").debug_selector(|| "reference-hover-fixture".into()).child(body)
             }
         }
-        let (fixture, vcx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), state, Arc::new(vec![span])));
+        let fixture_span = span.clone();
+        let fixture_transcript = transcript.clone();
+        let (fixture, vcx) = cx.add_window_view(move |_, _| Fixture(fixture_transcript, state, Arc::new(vec![fixture_span])));
         vcx.run_until_parked();
         let bounds = vcx.debug_bounds("reference-hover-fixture").unwrap();
         vcx.simulate_mouse_move(bounds.origin + point(px(5.0), px(5.0)), None, gpui::Modifiers::default());
@@ -467,6 +475,19 @@ mod tests {
         vcx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
         assert!(crate::markdown::selection::selected_text().is_some_and(|text| !text.is_empty() && "file.rs:1".contains(&text)), "focus target must not block text selection");
         crate::markdown::selection::clear_if_owner("reference:u");
+        vcx.update(|window, cx| transcript.update(cx, |transcript, cx| {
+            transcript.code_ref_focus.clear();
+            let spans: Vec<_> = (0..300).map(|index| {
+                let mut item = span.clone();
+                item.range = index..index + 1;
+                item
+            }).collect();
+            let first = transcript.reference_focus_targets(&"large".into(), &spans, window, cx);
+            assert_eq!(first.len(), MAX_FOCUS_TARGETS);
+            let again = transcript.reference_focus_targets(&"large".into(), &spans, window, cx);
+            assert_eq!(again.len(), MAX_FOCUS_TARGETS);
+            assert!(first.iter().zip(again.iter()).all(|(a, b)| a.handle == b.handle), "a full viewport must not churn focus handles");
+        }));
     }
 
     #[test]
