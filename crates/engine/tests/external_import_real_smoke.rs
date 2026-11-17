@@ -51,6 +51,3 @@ async fn imports_a_small_synthetic_session() {
 async fn imports_a_large_synthetic_session() {
     import_history(200).await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

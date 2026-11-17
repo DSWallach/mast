@@ -4311,8 +4311,6 @@ async fn friction_captures_errored_turn() {
     rig.core.shutdown().await;
 }
 
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn prefixes_and_truncated_request_fields_are_accepted() {

@@ -7116,7 +7116,6 @@ impl Overview {
         &mut self,
         request_id: String,
         decision: crate::menu_bar::RequestDecision,
-        via: &'static str,
         cx: &mut Context<Self>,
     ) {
         self.open_required_actions(cx);
@@ -7126,7 +7125,7 @@ impl Overview {
             panel.update(cx, |panel, cx| {
                 panel.set_data(spaces, chats);
                 panel.select_request(request_id.clone(), cx);
-                panel.external_decision(request_id, decision, via, cx);
+                panel.external_decision(request_id, decision, cx);
             });
         }
     }

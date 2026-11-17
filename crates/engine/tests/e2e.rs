@@ -2024,7 +2024,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
 /// color — it can only know it by SEEING the inline image block (the sandbox
 /// prompt forbids opening the file). Ignored by default: needs an installed,
 /// authenticated `claude` CLI and spends real tokens.
-/// Run with: `cargo test -p mast-engine --test e2e -- --ignored`
+/// Run with: `cargo test -p mast-engine --test engine e2e:: -- --ignored`
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed+authenticated claude CLI; spends tokens"]
 async fn real_claude_sees_uploaded_image_inline() {
@@ -2872,6 +2872,3 @@ async fn real_image_generation_profile_smoke() {
     );
     core.sessions.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
