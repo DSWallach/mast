@@ -17,7 +17,6 @@
 //!   bundle directory, relaunch. Driven by the UI.
 //! - **Unmanaged** (source builds, hand-copied binaries): report only.
 
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (3 non-test sites) through mast_harness::command / git_command
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -393,7 +392,7 @@ pub async fn download_release_file(
 }
 
 fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let output = std::process::Command::new(program)
+    let output = mast_harness::command(program)
         .args(args)
         .output()
         .with_context(|| format!("running {program}"))?;
@@ -522,7 +521,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
 pub fn restart_service() -> anyhow::Result<()> {
     require_managed_update_platform()?;
     if cfg!(target_os = "macos") {
-        let output = std::process::Command::new("id").arg("-u").output()?;
+        let output = mast_harness::command("id").arg("-u").output()?;
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
@@ -615,7 +614,7 @@ pub fn relaunch_app_after_exit(bundle: &Path) {
             "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"{}\"",
             bundle.display()
         );
-        let mut command = std::process::Command::new("/bin/sh");
+        let mut command = mast_harness::command("/bin/sh");
         command
             .args(["-c", &script])
             .stdin(std::process::Stdio::null())

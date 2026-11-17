@@ -16,7 +16,6 @@
 //! a chat that already has a harness session keeps the Default login (its
 //! history lives there), a brand-new chat takes its project's default.
 
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (3 non-test sites) through mast_harness::command / git_command
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -91,7 +90,7 @@ impl HomeCredentialStore for SystemCredentialStore {
             return None;
         }
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-        let out = std::process::Command::new("security")
+        let out = mast_harness::command("security")
             .args(["find-generic-password", "-a", &user, "-s", service, "-w"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -116,7 +115,7 @@ impl HomeCredentialStore for SystemCredentialStore {
 fn run_security(script: &str) -> Result<(), EngineError> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = std::process::Command::new("security")
+    let mut child = mast_harness::command("security")
         .arg("-i")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -844,6 +843,9 @@ impl ManagedAccounts {
         Ok((login_id, url))
     }
 
+    // `process::Command` is the cross-platform alias (a different type on Windows
+    // than `command_async` returns); `exe` is a configured executable path.
+    #[allow(clippy::disallowed_methods)]
     fn login_command(
         &self,
         harness: HarnessId,

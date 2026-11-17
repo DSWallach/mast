@@ -1,6 +1,5 @@
 //! Observe only this user's listeners. HTTP probes run only after project
 //! ownership has been established from the process's actual working directory.
-#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (3 non-test sites) through mast_harness::command / git_command
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 use std::{
@@ -318,7 +317,7 @@ fn parse_lstart(parts: &[&str]) -> u64 {
 /// passes and a full `ps -ax` per proxied connection.
 #[cfg(target_os = "macos")]
 pub fn same_process(pid: u32, started_at: u64) -> bool {
-    let Ok(output) = std::process::Command::new("/bin/ps")
+    let Ok(output) = mast_harness::command("/bin/ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
         .output()
@@ -332,10 +331,9 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn listeners() -> Vec<Listener> {
-    use std::process::Command;
     let uid = unsafe { libc::geteuid() }.to_string();
     let fields = |arguments: &[&str]| -> Vec<(u32, String)> {
-        let Ok(output) = Command::new("/usr/sbin/lsof").args(arguments).output() else {
+        let Ok(output) = mast_harness::command("/usr/sbin/lsof").args(arguments).output() else {
             return Vec::new();
         };
         let mut pid = 0;
@@ -357,7 +355,7 @@ pub fn listeners() -> Vec<Listener> {
         .collect();
     let mut parents = HashMap::new();
     let mut processes = HashMap::new();
-    if let Ok(output) = Command::new("/bin/ps")
+    if let Ok(output) = mast_harness::command("/bin/ps")
         .args(["-axo", "pid=,ppid=,lstart=,command="])
         .env("LC_ALL", "C")
         .output()
@@ -468,7 +466,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn same_process_matches_the_scanner_start_time() {
-        let child = std::process::Command::new("sleep")
+        let child = mast_harness::command("sleep")
             .arg("30")
             .spawn()
             .unwrap();
@@ -493,7 +491,7 @@ mod tests {
         };
         #[cfg(target_os = "macos")]
         let started_at = {
-            let output = std::process::Command::new("/bin/ps")
+            let output = mast_harness::command("/bin/ps")
                 .args(["-axo", "pid=,ppid=,lstart=,command="])
                 .env("LC_ALL", "C")
                 .output()
