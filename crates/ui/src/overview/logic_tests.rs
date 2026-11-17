@@ -2240,6 +2240,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
             .is_some()
     );
 
+    assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
     assert!(
         vcx.debug_bounds("overview-row-needs-input-c-idle")
             .is_none()

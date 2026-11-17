@@ -59,6 +59,10 @@ fn presentation_literals_and_branches_do_not_increase() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         &mut counts,
     );
+    // November upstream integration retains the local quota-account controls,
+    // Overview navigation/layout and top-session cards, quiet outline metadata,
+    // and assistant/harness controls. Their existing metrics account for the
+    // combined baseline; style/layout branch limits remain unchanged.
     let baseline: Vec<usize> = include_str!("component_lint_baseline.txt")
         .lines()
         .map(|line| line.parse().expect("numeric baseline"))
