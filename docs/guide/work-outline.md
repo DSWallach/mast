@@ -2,6 +2,16 @@
 
 The outline arranges a project's chats under work items. An item can be a workstream, a ticket, a PR or an investigation. Every key, menu and rule is in the [reference](../work-outline.md). This page covers what you use every day.
 
+New chats get a work item automatically. A chat started from an item, a child
+chat, or a side chat keeps its existing work ownership. Folderless chats appear
+in the host device's **Personal** Space, with a separate working directory for
+each chat. An automatically created item's title follows its original chat
+until you rename the item yourself.
+
+Choose **Hand off to new chat…** from a chat's menu to continue its work in a
+fresh conversation. This works for solo chats too. Older chats without an item
+get one as part of the handoff.
+
 ## Overview and Sessions
 
 Overview now occupies the left column beside your chat. Search, repository and

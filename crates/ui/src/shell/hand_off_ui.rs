@@ -1,4 +1,4 @@
-//! Coordinator hand-off dialog.
+//! Continue work in a fresh chat.
 use super::*;
 use super::work_outline_ui::WorkOutlineModal;
 use crate::work_outline::actions::OperationSlot;
@@ -7,6 +7,7 @@ use crate::pickers::Pickers;
 pub(super) struct HandOffDialog {
     chat_id: String,
     input: Entity<ComposerInput>,
+    default_summary: String,
     pickers: Entity<Pickers>,
     _picker_observe: Subscription,
     workers: Vec<String>,
@@ -28,8 +29,13 @@ impl Shell {
     #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_snapshot_hand_off(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, _| {
-            if let Some(worker) = state.chats.iter_mut().find(|chat| chat.id == "fixture-design") {
-                worker.parent_chat_id = Some("fixture-chat".into());
+            let solo = std::env::var("MAST_PREVIEW_HANDOFF_SOLO").is_ok_and(|value| value == "1");
+            for chat in &mut state.chats {
+                if solo && chat.parent_chat_id.as_deref() == Some("fixture-chat") {
+                    chat.parent_chat_id = None;
+                } else if !solo && chat.id == "fixture-design" {
+                    chat.parent_chat_id = Some("fixture-chat".into());
+                }
             }
         });
         self.open_hand_off("fixture-chat".into(), cx);
@@ -42,18 +48,18 @@ impl Shell {
         }
     }
 
-    pub(super) fn has_hand_off_workers(&self, chat_id: &str, cx: &App) -> bool {
-        self.state.read(cx).chats.iter().any(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+    pub(super) fn can_hand_off(&self, chat_id: &str, cx: &App) -> bool {
+        self.state.read(cx).chats.iter().any(|chat| chat.id == chat_id && !chat.archived)
     }
 
     pub(super) fn open_hand_off(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else { return };
+        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id && !chat.archived) else { return };
         let load = chat.space_id.as_deref().map(|space_id| state.work_outline(space_id));
         let snapshot = load.as_ref().and_then(|load| load.snapshot());
         let item = snapshot.and_then(|snapshot| crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id)
             .and_then(|id| snapshot.item(&id)));
-        let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.map(|item| item.title.as_str()).unwrap_or("this work item"));
+        let summary = hand_off_summary(item.map(|item| item.title.as_str()).or(chat.title.as_deref()));
         let details_available = item.is_some();
         let config = chat.config.clone();
         let device = chat.space_id.as_deref().and_then(|id| state.space_row(id)).map(|space| space.device_id.clone());
@@ -69,7 +75,6 @@ impl Shell {
             let requests = requests.map(|count| format!("{count} open requests")).unwrap_or_else(|| "Request count unavailable".into());
             format!("{} · {} · {}", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
         }).collect();
-        if workers.is_empty() { return; }
         let composer_pickers = self.composer.read(cx).pickers().clone();
         let pickers = cx.new(|cx| {
             let mut pickers = Pickers::new_chat_launcher(&composer_pickers, device, cx);
@@ -79,7 +84,7 @@ impl Shell {
         let picker_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Summary", cx).with_text_metrics(12.5, 18.0).with_auto_grow();
-            input.set_text(summary, cx);
+            input.set_text(summary.clone(), cx);
             input
         });
         if !details_available {
@@ -87,8 +92,8 @@ impl Shell {
             self.open_chat(chat_id.clone(), cx);
         }
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
-            chat_id, input, pickers, _picker_observe: picker_observe, workers, details_available, archive: false, submitting: false,
-            error: (!details_available).then(|| "Work item details are unavailable. Open the chat and try again.".into()),
+            chat_id, input, default_summary: summary, pickers, _picker_observe: picker_observe, workers, details_available, archive: false, submitting: false,
+            error: None,
             operation: OperationSlot::default(),
         }), cx);
     }
@@ -102,7 +107,7 @@ impl Shell {
         let load = state.work_outline(space_id);
         let Some(snapshot) = load.snapshot() else { return };
         let Some(item) = crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id).and_then(|id| snapshot.item(&id)) else { return };
-        let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.title);
+        let summary = hand_off_summary(Some(&item.title));
         let workers = state.chats.iter().filter(|worker| !worker.archived && worker.parent_chat_id.as_deref() == Some(chat_id.as_str())).map(|worker| {
             let status = state.sessions.iter().find(|session| session.chat_id == worker.id).map(|session| match session.status {
                 mast_proto::SessionStatus::Idle => "Idle", mast_proto::SessionStatus::Working => "Working",
@@ -114,23 +119,18 @@ impl Shell {
         let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else { return };
         dialog.workers = workers;
         dialog.details_available = true;
-        dialog.error = None;
         dialog.input.update(cx, |input, cx| {
-            if input.text() == "Continue as coordinator for this work item. Read the work item, its instructions, and the worker list below." {
-                input.set_text(summary, cx);
+            if input.text() == dialog.default_summary {
+                input.set_text(summary.clone(), cx);
             }
         });
+        dialog.default_summary = summary;
     }
 
     fn submit_hand_off(&mut self, cx: &mut Context<Self>) {
         let actions = self.state.read(cx).work_outline_actions();
         let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else { return };
         if dialog.submitting { return; }
-        if !dialog.details_available {
-            dialog.error = Some("Work item details are unavailable. Open the chat and try again.".into());
-            cx.notify();
-            return;
-        }
         let summary = dialog.input.read(cx).text().trim().to_owned();
         if summary.is_empty() { dialog.error = Some("Enter a summary".into()); cx.notify(); return; }
         let source = dialog.chat_id.clone();
@@ -166,6 +166,10 @@ impl Shell {
     }
 }
 
+fn hand_off_summary(title: Option<&str>) -> String {
+    format!("Continue {}. Read the source chat and work item for context, instructions, and any active workers.", title.unwrap_or("this work"))
+}
+
 pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let mut workers = div().flex().flex_col().gap(px(4.0));
     for worker in &dialog.workers { workers = workers.child(div().child(SharedString::from(worker.clone()))); }
@@ -174,8 +178,9 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         .child(popover::dialog_title(theme, "Hand off to new chat"))
         .child(div().mt(px(12.0)).child(popover::dialog_field(theme, dialog.input.clone().into_any_element())))
         .child(div().mt(px(12.0)).child(dialog.pickers.clone()))
-        .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
-        .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers))
+        .when(!dialog.workers.is_empty(), |card| card
+            .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
+            .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers)))
         .child(div().id("hand-off-archive").mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
             if let Some(WorkOutlineModal::HandOff(dialog)) = this.work_outline_modal.as_mut() { dialog.archive = !dialog.archive; cx.notify(); }
         })).child(SharedString::from(if dialog.archive { "☑ Archive this chat after hand-off" } else { "☐ Archive this chat after hand-off" })))
@@ -193,19 +198,65 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[gpui::test]
+    fn solo_chat_can_hand_off_without_loaded_item_details(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(
+            move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params));
+                Err(mast_rpc::RpcError::Failed("host unavailable".into()))
+            },
+        ));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.set_work_outline_for_test(mast_proto::WorkOutlineSnapshot::unavailable(
+                    "s1", false, 0,
+                ));
+                state.work_outline_actions_override = Some(actions);
+            });
+            assert!(shell.can_hand_off(CHAT_API, cx));
+            shell.open_hand_off(CHAT_API.into(), cx);
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else {
+                panic!()
+            };
+            assert!(dialog.workers.is_empty());
+            assert!(!dialog.details_available);
+            assert!(dialog.error.is_none());
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        shell.update(cx, |shell, cx| {
+            shell.work_outline_modal = None;
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == CHAT_API)
+                    .unwrap()
+                    .archived = true;
+            });
+            assert!(!shell.can_hand_off(CHAT_API, cx));
+            shell.open_hand_off(CHAT_API.into(), cx);
+            assert!(shell.work_outline_modal.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn dialog_lists_live_workers_and_prefills_summary(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
         shell.update(cx, |shell, cx| {
-            assert!(!shell.has_hand_off_workers(CHAT_API, cx));
+            assert!(shell.can_hand_off(CHAT_API, cx));
             shell.state.update(cx, |state, _| {
                 let worker = state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap();
                 worker.parent_chat_id = Some(CHAT_API.into());
             });
-            assert!(shell.has_hand_off_workers(CHAT_API, cx));
+            assert!(shell.can_hand_off(CHAT_API, cx));
             shell.open_hand_off(CHAT_API.into(), cx);
             let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!("hand-off dialog not opened") };
-            assert!(dialog.input.read(cx).text().starts_with("Continue as coordinator for "));
-            assert!(dialog.input.read(cx).text().ends_with("Read the work item, its instructions, and the worker list below."));
+            assert!(dialog.input.read(cx).text().starts_with("Continue "));
+            assert!(dialog.input.read(cx).text().ends_with("Read the source chat and work item for context, instructions, and any active workers."));
             assert_eq!(dialog.workers.len(), 1);
             assert!(dialog.workers[0].contains("Title of"));
             assert!(dialog.workers[0].contains("0 open requests"));

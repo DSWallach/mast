@@ -4,7 +4,11 @@ use mast_proto::{
 };
 use serde_json::Value;
 
-pub(super) fn tool_diagnostics(method: &str, item: &Value) -> Vec<AgentEvent> {
+fn tool_diagnostics(
+    method: &str,
+    item: &Value,
+    fingerprints: &crate::usage_fingerprint::UsageFingerprint,
+) -> Vec<AgentEvent> {
     use mast_proto::token_usage::UsageDiagnostic;
     let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
     let channel = match kind {
@@ -31,10 +35,7 @@ pub(super) fn tool_diagnostics(method: &str, item: &Value) -> Vec<AgentEvent> {
     let Some(payload) = payload.filter(|p| !p.is_null()) else {
         return Vec::new();
     };
-    let bytes = payload
-        .as_str()
-        .map(|s| s.len())
-        .unwrap_or_else(|| payload.to_string().len()) as u64;
+    let (bytes, signature) = fingerprints.measure(payload);
     let arguments = method == "item/started";
     vec![AgentEvent::UsageDiagnostic {
         diagnostic: UsageDiagnostic {
@@ -48,6 +49,7 @@ pub(super) fn tool_diagnostics(method: &str, item: &Value) -> Vec<AgentEvent> {
             label: "Tool payload".into(),
             channel: Some(channel.into()),
             bytes,
+            signature: Some(signature),
             stage: if arguments {
                 "harnessCall"
             } else {
@@ -64,6 +66,7 @@ pub(super) fn tool_diagnostics(method: &str, item: &Value) -> Vec<AgentEvent> {
 
 #[derive(Default)]
 pub(super) struct UsageTracker {
+    fingerprints: crate::usage_fingerprint::UsageFingerprint,
     turn: String,
     baseline: Option<TokenCounts>,
 }
@@ -97,6 +100,9 @@ fn subtract(a: &TokenCounts, b: &TokenCounts) -> TokenCounts {
     }
 }
 impl UsageTracker {
+    pub(super) fn tool_diagnostics(&self, method: &str, item: &Value) -> Vec<AgentEvent> {
+        tool_diagnostics(method, item, &self.fingerprints)
+    }
     pub(super) fn observe(&mut self, params: &Value) -> Option<AgentEvent> {
         let usage = params
             .get("tokenUsage")
@@ -131,6 +137,33 @@ impl UsageTracker {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn raw_tool_results_are_fingerprinted_without_copying_the_body() {
+        let tracker = UsageTracker::default();
+        let item = json!({"type":"commandExecution", "id":"call", "aggregatedOutput":"private result", "status":"completed"});
+        let first = tracker.tool_diagnostics("item/completed", &item);
+        let second = tracker.tool_diagnostics("item/completed", &item);
+        let AgentEvent::UsageDiagnostic { diagnostic: a } = &first[0] else {
+            panic!()
+        };
+        let AgentEvent::UsageDiagnostic { diagnostic: b } = &second[0] else {
+            panic!()
+        };
+        assert!(a.signature.is_some());
+        assert_eq!(a.signature, b.signature);
+        assert_eq!(a.bytes, 14);
+        assert!(
+            !serde_json::to_string(&first)
+                .unwrap()
+                .contains("private result")
+        );
+        let independent = UsageTracker::default().tool_diagnostics("item/completed", &item);
+        let AgentEvent::UsageDiagnostic { diagnostic: c } = &independent[0] else {
+            panic!()
+        };
+        assert_ne!(a.signature, c.signature);
+    }
     fn event(turn: &str, total: u64, last: u64) -> Value {
         json!({"turnId":turn,"tokenUsage":{"last":{"inputTokens":last,"outputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"reasoningOutputTokens":0},"total":{"inputTokens":total,"outputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"reasoningOutputTokens":0}}})
     }

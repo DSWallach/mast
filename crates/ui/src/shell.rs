@@ -10028,7 +10028,7 @@ impl Shell {
                 .get(&chat_id)
                 .and_then(|target| self.existing_branch_review(&chat_id, target, cx))
                 .is_some();
-            let has_workers = self.has_hand_off_workers(&chat_id, cx);
+            let can_hand_off = self.can_hand_off(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
             let assistant_id = chat_id.clone();
@@ -10065,7 +10065,7 @@ impl Shell {
                             )),
                         )
                     })
-                    .when(has_workers, |menu| {
+                    .when(can_hand_off, |menu| {
                         menu.child(
                             popover::menu_row(
                                 &theme,

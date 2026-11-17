@@ -33,6 +33,7 @@ struct World {
     working: bool,
     /// Chats the engine says sit inside the agent's project scope.
     project_chats: Vec<&'static str>,
+    handoff_sources: Vec<&'static str>,
     /// The engine's finished-worker verdicts for the agent's archive scope.
     archive_info: Vec<(&'static str, Value)>,
     pending_questions: Option<Value>,
@@ -200,7 +201,7 @@ impl RpcService for World {
                     }));
                 }
                 if params["tool"] == agent_tool_names::PROJECT_SCOPE_CHATS {
-                    return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats })));
+                    return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats, "handoffSourceChatIds": self.handoff_sources })));
                 }
                 if params["tool"] == agent_tool_names::CHAT_ARCHIVE_INFO {
                     let ids = params["arguments"]["chatIds"]
@@ -2321,3 +2322,49 @@ async fn friction_tools_are_agent_scoped_and_forwarded() {
     assert_eq!(dismiss.input_schema["required"], json!(["id", "reason"]));
     assert_eq!(definitions[0].input_schema["properties"]["links"]["items"]["properties"]["target"]["oneOf"].as_array().unwrap().len(), 6);
 }
+
+#[tokio::test]
+async fn handoff_predecessors_remain_readable_after_archiving()        let world = Arc::new(World {
+        alpha_archived: true,
+        handoff_sources: vec!["chat-alpha-1"],
+        ..World::default()
+    });
+    let successor = tools(world, Some(BETA_TOKEN));
+    let read = successor
+        .call("read_chat", json!({"chat":"chat-alpha-1"}))
+        .await
+        .unwrap();
+    assert_eq!(read["returned"], 2);
+    for name in [
+        "get_chat",
+        "send_message",
+        "wait_for_turn",
+        "interrupt_chat",
+    ] {
+        assert!(
+            successor
+                .call(
+                    name,
+                    json!({"chat":"chat-alpha-1", "text":"Hello", "timeout_secs":1})
+                )
+                .await
+                .is_err(),
+            "{name}"
+        );
+    }
+    let unrelated = tools(
+        Arc::new(World {
+            alpha_archived: true,
+            project_chats: vec!["chat-alpha-1"],
+            ..World::default()
+        }),
+        Some(BETA_TOKEN),
+    );
+    assert!(
+        unrelated
+            .call("read_chat", json!({"chat":"chat-alpha-1"}))
+            .await
+            .is_err()
+    );
+}
+

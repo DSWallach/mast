@@ -918,3 +918,5 @@ pub fn antigravity_cli_path() -> Option<std::path::PathBuf> {
     }
     executable::find_on_paths("agy", acp::agy_install_paths())
 }
+
+mod usage_fingerprint;

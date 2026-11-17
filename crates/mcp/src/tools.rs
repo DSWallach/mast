@@ -1539,15 +1539,16 @@ impl Tools {
                     .and_then(|c| c.parent_chat_id.clone())
             })
             .flatten();
-        let project_chats: Vec<String> = if matches!(
-            reach,
-            Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope
-        ) {
+        let mut handoff_sources: Vec<String> = Vec::new();
+        let project_chats: Vec<String> = if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
             self.zeron
                 .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
                 .await
                 .ok()
-                .and_then(|v| serde_json::from_value(v["chatIds"].clone()).ok())
+                .and_then(|v| {
+                    handoff_sources = serde_json::from_value(v["handoffSourceChatIds"].clone()).unwrap_or_default();
+                    serde_json::from_value(v["chatIds"].clone()).ok()
+                })
                 .unwrap_or_default()
         } else if reach == Reach::ArchiveScope {
             self.archive_info(&[])
@@ -1571,6 +1572,9 @@ impl Tools {
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
                         && parent.as_deref() == Some(c.id.as_str()))
                     || (!c.archived && project_chats.contains(&c.id))
+                    || (reach == Reach::ReadScope
+                        && c.space_id.as_deref() == Some(origin.space_id.as_str())
+                        && handoff_sources.contains(&c.id))
             })
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {

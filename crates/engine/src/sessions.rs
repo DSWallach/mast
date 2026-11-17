@@ -554,6 +554,13 @@ impl SessionsEngine {
         }
     }
 
+    pub(crate) fn chat_account_pin(&self, chat_id: &str, harness: HarnessId) -> Option<String> {
+        self.inner
+            .managed_accounts
+            .get()?
+            .chat_pin(chat_id, harness)
+    }
+
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
@@ -3077,13 +3084,15 @@ async fn drive_run(
         Ok(())
     };
     if let Some(usage) = inner.token_usage.get() {
-        let links=inner.workspace().and_then(|ws|ws.chat_pr_links(&chat_id).ok()).unwrap_or_default();
-        let worker=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).is_some_and(|chat|chat.parent_chat_id.is_some());
-        let activity=crate::token_usage::classify_activity(&request,&links,worker);
+        let origin = inner.workspace()
+            .ok_or_else(|| EngineError::Other("usage origin workspace is unavailable".into()))
+            .and_then(|ws| crate::token_usage::read_origin(&ws, &chat_id));
+        let (activity, agent_type, parent) = crate::token_usage::classify_origin(&request, origin);
         usage.begin(&chat_id, &run_id, &request, activity);
         let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
         usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()));
+        usage.set_attribution(&chat_id, agent_type.into(), parent);
         if let Some(delivery) = &request.instructions
             && let Some(revision) = inner.workspace().and_then(|ws| ws.instruction_revision(&delivery.envelope.revision_id)) {
             for entry in revision.body.entries {

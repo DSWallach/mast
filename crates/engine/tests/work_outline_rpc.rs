@@ -88,12 +88,10 @@ async fn watch_and_mutate_round_trip_over_rpc() {
         )
         .await
         .unwrap();
+    // Seed legacy chats so this test exercises explicit association and
+    // the projectless validation boundary, independent of creation defaults.
     for (chat, space) in [("chat-1", Some("space-1")), ("chat-np", None)] {
-        let mut params = json!({ "op": "createChat", "chatId": chat, "deviceId": "dev-a" });
-        if let Some(space) = space {
-            params["spaceId"] = json!(space);
-        }
-        client.call(methods::MUTATE, params).await.unwrap();
+        core.workspace.create_chat(chat, space, Some("dev-a"), None, None).unwrap();
     }
     let open = frame_until(&mut stream, |s| {
         s.available && !s.unassociated_chat_ids.is_empty()

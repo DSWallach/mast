@@ -677,7 +677,7 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
 /// runs on (`Agent · haiku`) without the reader opening the subagent tab.
 ///
 /// Everything else — the prompt above all — stays in the host's run journal,
-/// so this stays a whitelist of short identifiers rather than a size cap.
+/// so kept values must be short identifiers without control characters.
 /// `None` for anything that is not a spawn, and for a spawn that named
 /// neither, which keeps it idempotent: re-sanitizing a sanitized call is a
 /// fixpoint (the kept keys are themselves kept).
@@ -693,7 +693,8 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
         .iter()
         .filter_map(|key| {
             let value = input.get(key)?.as_str()?.trim();
-            (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+            (!value.is_empty() && value.len() <= 80 && !value.chars().any(char::is_control))
+                .then(|| ((*key).to_owned(), serde_json::Value::from(value)))
         })
         .collect();
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
@@ -976,6 +977,46 @@ mod tests {
             }
         );
         assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    #[test]
+    fn sanitize_preserves_explicit_agent_types_without_the_prompt() {
+        for key in ["agent_type", "agentType", "subagent_type"] {
+            let call = ToolCall::Unknown {
+                name: "Agent".into(),
+                input: Some(serde_json::json!({key:"pr-review", "prompt":"private instructions"})),
+            };
+            let clean = sanitize_tool_call(&call);
+            let ToolCall::Unknown {
+                input: Some(input), ..
+            } = &clean
+            else {
+                panic!()
+            };
+            assert_eq!(input[key], "pr-review");
+            assert!(input.get("prompt").is_none());
+            assert_eq!(sanitize_tool_call(&clean), clean);
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_oversized_or_control_character_spawn_identifiers() {
+        for key in SUBAGENT_INPUT_KEEP {
+            for value in [
+                "x".repeat(81),
+                "worker\nprivate prompt".into(),
+                "\u{0007}worker".into(),
+            ] {
+                let call = ToolCall::Unknown {
+                    name: "Agent".into(),
+                    input: Some(serde_json::json!({key: value})),
+                };
+                let ToolCall::Unknown { input, .. } = sanitize_tool_call(&call) else {
+                    panic!()
+                };
+                assert!(input.is_none(), "{key}");
+            }
+        }
     }
 
     /// A spawn keeps the two short identifiers its chip names the child by and

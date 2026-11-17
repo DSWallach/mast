@@ -16,9 +16,15 @@ fn git(args: &[&str]) -> Option<String> {
 /// The commit and git dir this binary was built from, embedded so a running
 /// Mast can tell which build is installed and list the merges between them.
 fn emit_build_id() {
-    let sha = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let git_dir = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=MAST_USAGE_BUILD_REVISION");
+    let sha = std::env::var("MAST_USAGE_BUILD_REVISION")
+        .ok()
+        .map(|revision| revision.trim_end_matches("-dirty").to_owned())
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit()))
+        .or_else(|| git(&["rev-parse", "HEAD"]))
+        .unwrap_or_else(|| "unknown".into());
+    let git_dir =
+        git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).unwrap_or_default();
     println!("cargo:rustc-env=MAST_BUILD_SHA={sha}");
     println!("cargo:rustc-env=MAST_BUILD_GIT_DIR={git_dir}");
     // Rebuild the (tiny) build script output when the checked-out commit moves.

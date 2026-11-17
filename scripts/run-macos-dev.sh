@@ -28,6 +28,7 @@ if pgrep -f -x "$CONTENTS/MacOS/mast" >/dev/null 2>&1 || \
 fi
 
 cd "$ROOT"
+export MAST_USAGE_BUILD_REVISION="$(sh "$ROOT/scripts/build-revision.sh")"
 cargo build -p mast
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"

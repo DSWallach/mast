@@ -1351,6 +1351,20 @@ impl EngineRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
+        if method == methods::HAND_OFF_ORCHESTRATOR {
+            let supported = self.workspace.read_devices().ok().is_some_and(|devices| {
+                devices.iter().any(|device| {
+                    device.id == target
+                        && device.supports(mast_proto::capabilities::CHAT_HANDOFF_V1)
+                })
+            });
+            if !supported {
+                return Err(RpcError::Failed(format!(
+                    "Update Mast on {} and reconnect to hand off this chat.",
+                    self.device_label(target)
+                )));
+            }
+        }
         let Some(links) = &self.links else {
             return Err(RpcError::Failed(format!(
                 "cannot reach device {target}: remote routing unavailable (offline)"
@@ -1445,6 +1459,13 @@ impl EngineRpc {
                         tracing::warn!(chat = %chat_id, main = %main_id, error = %err,
                             "side chat account pin failed");
                     }
+                    if !crate::work_outline::writes_disabled()
+                        && (side.device_id == self.workspace.device_id()
+                            || side.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&side.device_id)))
+                    {
+                        self.workspace.ensure_chat_work_item_best_effort(&main_id);
+                        self.workspace.ensure_chat_work_item_best_effort(&chat_id);
+                    }
                     return Ok(());
                 }
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
@@ -1476,13 +1497,35 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
-                if let Some(parent) = parent_chat_id
-                    && let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent)
+                if let Some(parent) = self.workspace.chat(&chat_id).ok().flatten().and_then(|chat| chat.parent_chat_id)
+                    && let Some(usage) = self.sessions.token_usage()
                 {
-                    // The Chat exists; a failed inheritance must not make a
-                    // caller retry into a duplicate Chat.
-                    tracing::warn!(chat = %chat_id, parent = %parent, error = %err,
-                        "child chat work-outline inheritance failed");
+                    usage.promote_orchestrator(&parent);
+                }
+                if let Some(parent) = parent_chat_id {
+                    if !crate::work_outline::writes_disabled()
+                        && let Some(source) = self.workspace.chat(&parent).map_err(failed)?
+                        && source.space_id == space_id
+                        && (source.device_id == self.workspace.device_id()
+                            || source.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&source.device_id)))
+                    {
+                        self.workspace.ensure_chat_work_item_best_effort(&parent);
+                    }
+                    if let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent) {
+                        // The Chat exists; a failed inheritance must not make a
+                        // caller retry into a duplicate Chat.
+                        tracing::warn!(chat = %chat_id, parent = %parent, error = %err,
+                            "child chat work-outline inheritance failed");
+                    }
+                }
+                // Remote folderless chats are assigned by their hosting device
+                // when the first command arrives.
+                if !crate::work_outline::writes_disabled()
+                    && let Some(chat) = self.workspace.chat(&chat_id).map_err(failed)?
+                    && (chat.device_id == self.workspace.device_id()
+                        || chat.space_id.as_deref().is_some_and(|id| id != mast_proto::Space::personal_id(&chat.device_id)))
+                {
+                    self.workspace.ensure_chat_work_item_best_effort(&chat_id);
                 }
                 Ok(())
             }
@@ -1712,6 +1755,7 @@ fn forwardable(method: &str) -> bool {
             | methods::QUEUE_MESSAGE
             // Reads the side chat and queues into its main chat on their host.
             | methods::ABSORB_SIDE_CHAT
+            | methods::HAND_OFF_ORCHESTRATOR
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -2115,8 +2159,17 @@ impl RpcService for EngineRpc {
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
-            if method==methods::TOKEN_USAGE && self.workspace.read_devices().ok().and_then(|devices|devices.into_iter().find(|device|device.id==target)).is_some_and(|device|!device.supports(mast_proto::capabilities::TOKEN_USAGE_V1)) {
-                return Err(RpcError::Failed("Update Mast on the selected device to view token usage.".into()));
+            if method == methods::TOKEN_USAGE {
+                let required = if params.get("agentType").is_some_and(|value| !value.is_null()) {
+                    mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
+                } else {
+                    mast_proto::capabilities::TOKEN_USAGE_V1
+                };
+                if self.workspace.read_devices().ok().and_then(|devices| devices.into_iter().find(|device| device.id == target))
+                    .is_some_and(|device| !device.supports(required))
+                {
+                    return Err(RpcError::Failed("Update Mast on the selected device to view the requested token-usage breakdown.".into()));
+                }
             }
             let target = target.to_string();
             return self.forward(&target, method, params).await;
@@ -3429,6 +3482,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::HAND_OFF_ORCHESTRATOR => {
+                let routed = params.get("targetDeviceId").is_some();
                 let p: mast_proto::HandOffOrchestratorParams = parse_params(params)?;
                 let source = self
                     .workspace
@@ -3440,24 +3494,17 @@ impl RpcService for EngineRpc {
                         "An archived chat cannot hand off orchestration".into(),
                     ));
                 }
-                let space_id = source
-                    .space_id
-                    .as_deref()
-                    .ok_or_else(|| RpcError::Failed("Chat has no Space".into()))?;
-                let item = self
-                    .workspace
-                    .chat_assigned_work_item(&p.chat_id, space_id)
-                    .ok_or_else(|| RpcError::Failed("Chat has no work item".into()))?;
-                let config = hand_off_config(
-                    &self.registry,
-                    self.repos.data_dir(),
-                    source.config,
-                    self.doc_host.harness_for(&p.chat_id),
-                    p.harness,
-                    p.model,
-                    p.reasoning,
-                )
-                .await?;
+                if source.device_id != self.workspace.device_id() {
+                    if routed {
+                        return Err(RpcError::Failed("The chat's host changed. Reconnect and try the handoff again.".into()));
+                    }
+                    let mut forwarded = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    forwarded["targetDeviceId"] = serde_json::json!(source.device_id);
+                    return self.forward(&source.device_id, methods::HAND_OFF_ORCHESTRATOR, forwarded).await;
+                }
+                let item = self.workspace.ensure_chat_work_item(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
                     initial_prompt: mast_proto::WorkItemPrompt {

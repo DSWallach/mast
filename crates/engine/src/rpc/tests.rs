@@ -614,6 +614,8 @@ fn local_device_is_not_forwardable() {
     assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
     assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
     assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
+    assert!(forwardable(methods::HAND_OFF_ORCHESTRATOR));
+    assert!(!is_stream_method(methods::HAND_OFF_ORCHESTRATOR));
     assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
     assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
     assert!(forwardable(methods::WATCH_WORKSPACE_SEARCH_FILES));
