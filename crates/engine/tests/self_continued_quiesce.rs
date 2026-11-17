@@ -315,6 +315,3 @@ async fn steered_turn_keeps_the_normal_window() {
 
     rig.core.sessions.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

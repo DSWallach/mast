@@ -58,6 +58,13 @@ impl Watcher {
 }
 
 fn watcher_limit() -> usize {
+    // FSEvents registration serializes through the macOS daemon. Most isolated
+    // tests only need the repair path; watcher coverage keeps native watching.
+    if std::env::var_os("MAST_TEST_ORIGINAL_HOME").is_some()
+        && std::env::var("MAST_TEST_DISABLE_NATIVE_WATCHERS").as_deref() == Ok("1")
+    {
+        return 0;
+    }
     #[cfg(unix)]
     {
         let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();

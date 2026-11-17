@@ -137,6 +137,3 @@ async fn blank_journaled_chat_recovers_entries_from_fat_rollback() {
     );
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

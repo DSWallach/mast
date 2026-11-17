@@ -2482,8 +2482,6 @@ async fn request_link_and_fact_limits() {
     }
 }
 
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn decision_sheet_publish_validates_before_recording_revisions() {

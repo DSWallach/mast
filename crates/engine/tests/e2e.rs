@@ -2872,6 +2872,3 @@ async fn real_image_generation_profile_smoke() {
     );
     core.sessions.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

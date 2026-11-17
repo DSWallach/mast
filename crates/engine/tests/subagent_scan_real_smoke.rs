@@ -16,6 +16,3 @@ fn scans_a_session_with_subagents() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].description.as_deref(), Some("Synthetic child"));
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

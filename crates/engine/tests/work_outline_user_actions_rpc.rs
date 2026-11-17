@@ -344,6 +344,3 @@ async fn agent_surface_authorizes_reads_and_writes_as_the_chat() {
     assert_eq!(created_by.message_id.as_deref(), Some("m-7"));
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

@@ -82,6 +82,3 @@ async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_
     );
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
