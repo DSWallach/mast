@@ -160,6 +160,7 @@ pub(crate) fn artifact_card(
                         .w_full()
                         .aspect_ratio(736.0 / 420.0)
                         .bg(theme.surface_raised)
+                        .when(crate::components::is_horizon(theme), |el| el.bg(theme.accent_wash))
                         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
                         .border_1()
                         .border_color(theme.border)
