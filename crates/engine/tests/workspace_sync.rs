@@ -900,6 +900,3 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
         "legacy snapshot retained for rollback"
     );
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

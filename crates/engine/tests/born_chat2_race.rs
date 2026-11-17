@@ -203,6 +203,3 @@ async fn transcript_survives_open_racing_create_chat() {
     );
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

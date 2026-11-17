@@ -45,6 +45,28 @@ build); the binary is `target/release-build/installed/zeron`. Install from there
 `cargo nextest run --profile release -p mast-engine` (add `-p` per crate, or
 `--workspace --exclude mast-ui --exclude mast`).
 
+### Engine integration tests
+
+The engine's integration files are modules in one `engine` test binary, registered
+in `crates/engine/tests/it/main.rs`. Register each new integration file there;
+`scripts/check_test_isolation.py` (Python 3.11 or newer) checks for omitted files. The shared home-isolation
+initializer runs once per binary. nextest still launches a separate process for each
+test, preserving isolation for tests that change environment variables.
+
+Run a module with `cargo nextest run -p mast-engine -E 'test(/^agent_tools::/)'`.
+For libtest, use `cargo test -p mast-engine --test engine agent_tools:: -- --test-threads=1`.
+The single thread matters because some integration tests change process-wide state.
+Self-executing tests must pass the full module-qualified test name to `--exact`.
+
+On macOS, nextest's setup script selects the engine's periodic-repair fallback for
+tests that do not exercise native file watching. Native watcher and file-search tests,
+and the diff-publication watcher regression, retain FSEvents. This avoids contention
+in the macOS watcher daemon without changing application defaults or ordinary
+`cargo test` runs. The test-only switch `MAST_TEST_DISABLE_NATIVE_WATCHERS=1` takes
+effect only in a process with the home-isolation marker. To exercise every test with
+native watchers, use libtest with one test thread. Setup scripts require nextest
+0.9.98 or newer and are enabled by the repository configuration.
+
 ### Quarantine
 
 The list is the "Known test failures" section of `HANDOFF.md`, written as `test(~name)`
