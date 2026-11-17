@@ -157,6 +157,7 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         };
         spans.push(crate::composer::SentMentionSpan {
             range: start..end,
+            badge_range: None,
             path: path.into(),
             is_dir: false,
             resolution_key: Some(resolution_key(&staged).into()),

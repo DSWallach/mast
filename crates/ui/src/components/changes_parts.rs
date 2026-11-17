@@ -544,9 +544,9 @@ pub(crate) fn walkthrough_note_content(
 ) -> gpui::AnyElement {
     let why = format!("Why: {why}");
     if super::is_industrial(theme) {
-        let what = gpui::StyledText::new(what);
-        let why = gpui::StyledText::new(why);
-        let risk = gpui::StyledText::new(risk);
+        let what = super::code_block::inline_code(&what, theme, theme.text);
+        let why = super::code_block::inline_code(&why, theme, theme.text_muted);
+        let risk = super::code_block::inline_code(&risk, theme, theme.text_muted);
         let layouts = [
             what.layout().clone(),
             why.layout().clone(),
@@ -591,9 +591,9 @@ pub(crate) fn walkthrough_note_content(
             .flex()
             .flex_col()
             .gap_1()
-            .child(what)
-            .child(gpui::div().text_color(theme.text_muted).child(why))
-            .child(gpui::div().text_color(theme.text_muted).child(risk))
+            .child(super::code_block::inline_code(&what, theme, theme.text))
+            .child(gpui::div().text_color(theme.text_muted).child(super::code_block::inline_code(&why, theme, theme.text_muted)))
+            .child(gpui::div().text_color(theme.text_muted).child(super::code_block::inline_code(&risk, theme, theme.text_muted)))
             .into_any_element()
     }
 }

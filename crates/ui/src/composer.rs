@@ -1355,6 +1355,7 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentMentionSpan {
     pub range: Range<usize>,
+    pub badge_range: Option<Range<usize>>,
     /// Full workspace-relative path (labels can be shortened to basenames).
     pub path: SharedString,
     pub is_dir: bool,
@@ -1381,6 +1382,7 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
         .iter()
         .map(|(link, display)| SentMentionSpan {
             range: display.clone(),
+            badge_range: None,
             path: SharedString::from(format!(
                 "{}{}",
                 link.path,
@@ -4471,6 +4473,9 @@ pub struct Composer {
     /// send — the model keeps a loaded skill in context for the rest of the
     /// chat, so nothing persists per chat.
     skills: HashMap<String, Vec<String>>,
+    code_ref_focus: HashMap<String, code_ref_chips::ReferenceChipFocus>,
+    code_ref_focus_card: Option<(String, Entity<crate::components::code_ref::ReferenceCard>)>,
+    code_ref_focus_pending: Option<String>,
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
@@ -4802,6 +4807,9 @@ impl Composer {
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             skills: HashMap::new(),
+            code_ref_focus: HashMap::new(),
+            code_ref_focus_card: None,
+            code_ref_focus_pending: None,
             appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
@@ -8677,7 +8685,7 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
-        let code_refs = self.render_code_refs(&theme, cx);
+        let code_refs = self.render_code_refs(&theme, window, cx);
         let skill_chips = self.render_skill_chips(&theme, cx);
 
         // A translucent cool silver/slate edge sits more naturally on frost

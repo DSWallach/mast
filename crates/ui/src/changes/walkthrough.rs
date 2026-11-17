@@ -775,7 +775,7 @@ impl Render for Walkthrough {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(format!(
+                            .child(crate::components::code_block::inline_code(&format!(
                                 "{}. {}{}",
                                 index + 1,
                                 step.title,
@@ -784,7 +784,7 @@ impl Render for Walkthrough {
                                 } else {
                                     ""
                                 }
-                            )),
+                            ), &theme, theme.text)),
                     )
                     .child(
                         div()
@@ -880,7 +880,7 @@ impl Render for Walkthrough {
                                 .min_w_0()
                                 .when(true, |el| crate::components::walkthrough_title(el, &theme))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(crate::components::walkthrough_heading(&step.title, &theme)),
+                                .child(crate::components::code_block::inline_code_weighted(&crate::components::walkthrough_heading(&step.title, &theme), &theme, theme.text, gpui::FontWeight::SEMIBOLD)),
                         )
                         .child(
                             div()
@@ -939,7 +939,7 @@ impl Render for Walkthrough {
                     .children(self.review.highlights.iter().map(|highlight| {
                         div()
                             .text_color(theme.text_muted)
-                            .child(highlight.text.clone())
+                            .child(crate::components::code_block::inline_code(&highlight.text, &theme, theme.text_muted))
                     }))
                 })
                 .when(!self.review.questions.is_empty(), |el| {
@@ -954,7 +954,7 @@ impl Render for Walkthrough {
                             .questions
                             .iter()
                             .filter_map(review_question_text)
-                            .map(|question| div().text_color(theme.text_muted).child(question)),
+                            .map(|question| div().text_color(theme.text_muted).child(crate::components::code_block::inline_code(&question, &theme, theme.text_muted))),
                     )
                 })
                 .when_some(self.step_input.clone(), |el, input| {
