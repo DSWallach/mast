@@ -327,6 +327,20 @@ mod tests {
         assert!(run(&linked, &["rev-parse", "--show-toplevel"])
             .status
             .success());
+        let outside = scratch.paths.data.join("outside-worktree");
+        assert!(!run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                outside.to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        assert!(!outside.exists());
         assert!(!run(&repo, &["-C", "/", "status"]).status.success());
         assert!(!run(&repo, &["--git-dir=/", "status"]).status.success());
         assert!(!run(&repo, &["status", "--output=/tmp/out"])
@@ -334,7 +348,7 @@ mod tests {
             .success());
         let log = fs::read_to_string(scratch.paths.root.join("git.log")).unwrap();
         assert!(log.contains("A init\n"));
-        assert_eq!(log.lines().filter(|line| line.starts_with("R ")).count(), 3);
+        assert_eq!(log.lines().filter(|line| line.starts_with("R ")).count(), 4);
         fs::remove_dir_all(&scratch.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
     }
