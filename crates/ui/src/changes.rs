@@ -457,6 +457,51 @@ thread_local! {
     pub(crate) static SHAPED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Font lookups (`resolve_font` + `ch_advance`) performed by `diff_ch_advance`.
+    pub(crate) static CH_ADVANCE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    static CH_ADVANCE_CACHE: std::cell::RefCell<Option<((u32, u32, u32, SharedString), f32)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Width of one monospace column at the diff text size. Resolving the font
+/// and asking the shaper is done once per typography/theme change, not once
+/// per rendered row.
+fn diff_ch_advance(
+    text_system: &gpui::WindowTextSystem,
+    theme: &Theme,
+    typography_generation: u32,
+) -> f32 {
+    let size = px(diff_text_size(theme));
+    let key = (
+        typography_generation,
+        crate::theme::style_generation(),
+        diff_text_size(theme).to_bits(),
+        theme.font_mono.clone(),
+    );
+    CH_ADVANCE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((cached_key, advance)) = cache.as_ref() {
+            if *cached_key == key {
+                return *advance;
+            }
+        }
+        #[cfg(test)]
+        CH_ADVANCE_LOOKUPS.with(|count| count.set(count.get() + 1));
+        let mono = font(theme.font_mono.clone());
+        let advance = text_system
+            .ch_advance(text_system.resolve_font(&mono), size)
+            .unwrap_or(size * 0.6)
+            .as_f32();
+        *cache = Some((key, advance));
+        advance
+    })
+}
+
 /// Measure the same runs the row paints. Color boundaries can break kerning
 /// and ligatures on native platforms even when every run uses the same font.
 fn max_shaped_text_width(
@@ -464,13 +509,10 @@ fn max_shaped_text_width(
     highlights: Option<&DiffHighlights>,
     theme: &Theme,
     text_system: &gpui::WindowTextSystem,
+    generation: u32,
 ) -> f32 {
-    let mono = font(theme.font_mono.clone());
     let size = px(diff_text_size(theme));
-    let column_width = text_system
-        .ch_advance(text_system.resolve_font(&mono), size)
-        .unwrap_or(size * 0.6)
-        .as_f32();
+    let column_width = diff_ch_advance(text_system, theme, generation);
     #[cfg(test)]
     SHAPED_LINES.with(|count| {
         count.set(count.get() + file.hunks.iter().map(|hunk| hunk.lines.len()).sum::<usize>())
@@ -1430,6 +1472,7 @@ impl FileHorizontalState {
                     highlights.map(AsRef::as_ref),
                     theme,
                     text_system,
+                    generation,
                 ),
             });
         }
@@ -2183,6 +2226,16 @@ impl Render for DiffHeaderTooltip {
 }
 
 impl Changes {
+    /// Test hook: mark file 0 as having loaded (empty) expanded context, so
+    /// every row render takes the expanded-context width path.
+    #[cfg(test)]
+    pub(crate) fn test_mark_context_ready(&mut self) {
+        let key = self.parsed.as_ref().unwrap().key.clone();
+        self.expanded_context
+            .entries
+            .insert((key, 0), expand_context::Entry::ready(Vec::new(), Vec::new()));
+    }
+
     pub(crate) fn diff_is_focused(&self, window: &Window, _cx: &App) -> bool {
         self.diff_focus.is_focused(window)
     }
@@ -4607,9 +4660,7 @@ impl Changes {
                 crate::typography::generation(cx),
                 );
                 if let Some(expand_context::Entry::Ready { max_columns, max_line, .. }) = self.expanded_context.entries.get(&(parsed_key.clone(), file_ix as u32)) {
-                    let mono = font(theme.font_mono.clone());
-                    let size = px(diff_text_size(&theme));
-                    let advance = window.text_system().ch_advance(window.text_system().resolve_font(&mono), size).unwrap_or(size * 0.6).as_f32();
+                    let advance = diff_ch_advance(window.text_system(), &theme, crate::typography::generation(cx));
                     metrics.max_text_width = metrics.max_text_width.max(*max_columns as f32 * advance);
                     let digits = (*max_line).max(1).ilog10() + 1;
                     metrics.max_gutter_width = metrics.max_gutter_width.max((digits as f32 * 6.6 + 14.0).max(GUTTER_WIDTH));

@@ -253,3 +253,63 @@ fn bench_chat(index: usize) -> mast_proto::Chat {
         linked_ticket_source: None,
     }
 }
+
+/// Rendering rows of a file with loaded expanded context must resolve the
+/// monospace advance once per typography/theme state, not once per row.
+#[gpui::test]
+fn font_advance_is_not_looked_up_per_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let (changes, vcx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        Changes::for_checkout(state, "/work/repo".into(), cx)
+    });
+    let mut patch = String::from(
+        "diff --git a/large.rs b/large.rs\n--- a/large.rs\n+++ b/large.rs\n@@ -1,400 +1,400 @@\n",
+    );
+    for line in 0..400 {
+        patch.push_str(&format!("+let value_{line} = {line};\n"));
+    }
+    changes.update(vcx, |c, cx| {
+        c.scoped = Some(CheckoutDiff {
+            checkout_id: "co".into(),
+            device_id: "local".into(),
+            cwd: "/work/repo".into(),
+            patch,
+            files: Vec::new(),
+            submodules: Vec::new(),
+            additions: 400,
+            deletions: 0,
+            truncated: false,
+            checksum: "advance".into(),
+            updated_at: chrono::Utc::now(),
+        });
+        c.scoped_for = Some(format!("local|||/work/repo|{}||", c.scope.mode()) + "|");
+        c.sync(cx);
+    });
+    vcx.run_until_parked();
+    changes.update(vcx, |c, _| c.test_mark_context_ready());
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    };
+    let first = crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get());
+    draw(vcx);
+    assert!(
+        crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get()) > first,
+        "the expanded-context width path never ran; the budget is vacuous"
+    );
+    let before = crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get());
+    for _ in 0..10 {
+        draw(vcx);
+    }
+    let lookups = crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get()) - before;
+    eprintln!("BUDGET diff font advance lookups over 10 redraws: {lookups}");
+    assert!(lookups <= 1, "advance looked up per row: {lookups} lookups over 10 redraws");
+}
