@@ -110,6 +110,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "linear-settings",
         "workflow-pack",
         "team",
+        "tracker-expanded",
         "code-reference",
         "changes-expanded",
         "changes-collapsed",

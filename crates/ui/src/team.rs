@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use mast_engine::archivable::{Archivable, ArchivableInput, archivable, requests_of};
+use mast_engine::archivable::{Archivable, ArchivableInput, archivable};
 use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, PrStatus};
 use mast_proto::{Chat, ChatIndicator, WorkItemEffectiveStatus, WorkOutlineSnapshot};
 
@@ -34,6 +34,29 @@ pub(crate) enum WorkerState {
     Idle,
     /// Its item is completed or the chat is archived.
     Done,
+}
+
+/// Display order for the Tracker's worker groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TrackerGroup {
+    NeedsYou,
+    ReadyToMerge,
+    Errored,
+    Working,
+    Idle,
+    NotStarted,
+    Done,
+}
+
+/// Evidence for each stage, in display order. Missing evidence stays unlit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrackerStages {
+    pub chat_started: bool,
+    pub changes: bool,
+    pub pr_open: bool,
+    pub checks: bool,
+    pub review: bool,
+    pub merged: bool,
 }
 
 impl WorkerState {
@@ -131,16 +154,31 @@ pub(crate) struct WorkerFacts {
 }
 
 impl WorkerFacts {
+    pub(crate) fn tracker_group(&self) -> TrackerGroup {
+        match (self.state, self.ready.is_some()) {
+            (WorkerState::Waiting, _) => TrackerGroup::NeedsYou,
+            (_, true) => TrackerGroup::ReadyToMerge,
+            (WorkerState::Done, _) => TrackerGroup::Done,
+            (WorkerState::Errored, _) => TrackerGroup::Errored,
+            (WorkerState::Working, _) => TrackerGroup::Working,
+            (WorkerState::Idle, _) => TrackerGroup::Idle,
+        }
+    }
+
+    pub(crate) fn tracker_stages(&self) -> TrackerStages {
+        TrackerStages {
+            chat_started: true,
+            changes: self.diff.is_some_and(|(added, removed)| added > 0 || removed > 0),
+            pr_open: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("open")),
+            checks: self.prs.iter().any(|pr| pr.checks.is_some()),
+            review: self.prs.iter().any(|pr| pr.review.is_some()),
+            merged: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
+        }
+    }
+
     /// Sort rank: waiting on you, ready to merge, errored, working, idle, done.
     fn rank(&self) -> u8 {
-        match (self.state, self.ready.is_some()) {
-            (WorkerState::Waiting, _) => 0,
-            (WorkerState::Done, _) => 5,
-            (_, true) => 1,
-            (WorkerState::Errored, _) => 2,
-            (WorkerState::Working, _) => 3,
-            (WorkerState::Idle, _) => 4,
-        }
+        self.tracker_group() as u8
     }
 }
 
@@ -255,21 +293,54 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
             Some(crate::work_outline::model::descendants(snapshot, item))
         })
         .unwrap_or_default();
+    // Index the snapshot once. A worker must not search the entire snapshot
+    // for its assignment, requests and inherited ticket.
+    let mut assignments = HashMap::new();
+    let mut items = HashMap::new();
+    let mut requests: HashMap<&str, Vec<&mast_proto::UserActionRequestView>> = HashMap::new();
+    let mut tickets: HashMap<&str, Option<HeaderTicket>> = HashMap::new();
+    if let Some(snapshot) = input.snapshot {
+        let dangling: HashSet<_> = snapshot.assignments.iter()
+            .filter(|a| a.state == mast_proto::WorkItemChatAssignmentState::DanglingChat)
+            .map(|a| a.chat_id.as_str()).collect();
+        let mut direct = HashMap::new();
+        for reference in &snapshot.external_references {
+            if reference.provider == mast_proto::linear::LINEAR_PROVIDER && reference.reference_type == mast_proto::linear::LINEAR_ISSUE_REFERENCE {
+                direct.entry(reference.work_item_id.as_str()).and_modify(|prior: &mut &mast_proto::WorkItemExternalReferenceView| {
+                    if (reference.created_at, &reference.id) < (prior.created_at, &prior.id) { *prior = reference; }
+                }).or_insert(reference);
+            }
+        }
+        for item in &snapshot.items {
+            items.insert(item.id.as_str(), item);
+            for id in &item.chat_ids {
+                if !dangling.contains(id.as_str()) { assignments.entry(id.as_str()).or_insert(item.id.as_str()); }
+            }
+            let inherited = item.parent_work_item_id.as_deref().and_then(|id| tickets.get(id)).cloned().flatten();
+            let ticket = direct.get(item.id.as_str()).map(|reference| HeaderTicket {
+                identifier: reference.external_id.clone(), title: None, url: Some(reference.url.clone()), state: None,
+            }).or(inherited);
+            tickets.insert(item.id.as_str(), ticket);
+        }
+        for request in &snapshot.user_action_requests {
+            if !request.deduped { requests.entry(request.chat_id.as_str()).or_default().push(request); }
+        }
+    }
     let mut workers = Vec::new();
     for chat in input.chats {
         if chat.id == input.chat_id {
             continue;
         }
-        let item_id = input
-            .snapshot
-            .filter(|_| chat.space_id == me.space_id)
-            .and_then(|snapshot| crate::chat_work_context::assigned_item(snapshot, &chat.id));
+        let item_id = (chat.space_id == me.space_id).then(|| assignments.get(chat.id.as_str()).copied()).flatten();
         let under_item = item_id.is_some_and(|id| below.contains(id));
         let child_chat = chat.parent_chat_id.as_deref() == Some(input.chat_id);
         if !(under_item || child_chat) {
             continue;
         }
-        workers.push(worker(chat, item_id, input));
+        let item = item_id.and_then(|id| items.get(id).copied());
+        let worker_requests = requests.get(chat.id.as_str()).map(Vec::as_slice).unwrap_or_default();
+        let inherited_ticket = item_id.and_then(|id| tickets.get(id)).cloned().flatten();
+        workers.push(worker_with_index(chat, item, input, worker_requests, inherited_ticket));
     }
     workers.sort_by(|a, b| {
         (a.rank(), std::cmp::Reverse(a.last_active), &a.chat_id).cmp(&(
@@ -279,17 +350,6 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
         ))
     });
     TeamFacts { workers }
-}
-
-pub(crate) fn worker(chat: &Chat, item_id: Option<&str>, input: &TeamInput<'_>) -> WorkerFacts {
-    let item = item_id.and_then(|id| input.snapshot.and_then(|snapshot| snapshot.item(id)));
-    let requests = input.snapshot.map(|snapshot| requests_of(snapshot, &chat.id)).unwrap_or_default();
-    let ticket = if input.links.get(&chat.id).and_then(|status| status.ticket.as_ref()).is_some() {
-        None
-    } else {
-        input.snapshot.and_then(|snapshot| crate::chat_work_context::ticket(snapshot, item_id?)).map(|found| HeaderTicket { identifier:found.identifier, title:None, url:Some(found.url), state:None })
-    };
-    worker_with_index(chat, item, input, &requests, ticket)
 }
 
 /// Build a worker from already indexed item, requests and inherited ticket.
@@ -329,10 +389,10 @@ pub(crate) fn worker_with_index(
         .copied()
         .unwrap_or(ChatIndicator::Idle);
     let item_done = item.is_some_and(|i| matches!(i.effective_status, WorkItemEffectiveStatus::Completed));
-    let state = if item_done || chat.archived {
-        WorkerState::Done
-    } else if asks || indicator == ChatIndicator::AwaitingInput {
+    let state = if !chat.archived && (asks || indicator == ChatIndicator::AwaitingInput) {
         WorkerState::Waiting
+    } else if item_done || chat.archived {
+        WorkerState::Done
     } else {
         match indicator {
             ChatIndicator::Working => WorkerState::Working,
@@ -487,5 +547,36 @@ mod tests {
             state: "OPEN".into(),
         };
         assert_eq!(pr.label(), "PR #12 \u{b7} checks passing \u{b7} approved");
+    }
+
+    #[test]
+    fn tracker_groups_prioritize_requests_and_completed_items() {
+        use WorkerState::*;
+        let facts = facts_of(&[(Waiting, true), (Idle, true), (Errored, false),
+            (Working, false), (Idle, false), (Done, false), (Done, true)]);
+        let groups: Vec<_> = facts.workers.iter().map(WorkerFacts::tracker_group).collect();
+        assert_eq!(groups, [TrackerGroup::NeedsYou, TrackerGroup::ReadyToMerge,
+            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done, TrackerGroup::ReadyToMerge]);
+        assert!(TrackerGroup::Idle < TrackerGroup::NotStarted);
+        assert!(TrackerGroup::NotStarted < TrackerGroup::Done);
+    }
+
+    #[test]
+    fn tracker_stages_require_observed_facts() {
+        let mut worker = facts_of(&[(WorkerState::Working, false)]).workers.remove(0);
+        assert_eq!(worker.tracker_stages(), TrackerStages {
+            chat_started: true, changes: false, pr_open: false, checks: false,
+            review: false, merged: false,
+        });
+        worker.diff = Some((2, 0));
+        worker.prs.push(WorkerPr { number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
+            review: Some("approved"), draft: false, state: "OPEN".into() });
+        assert_eq!(worker.tracker_stages(), TrackerStages {
+            chat_started: true, changes: true, pr_open: true, checks: true,
+            review: true, merged: false,
+        });
+        worker.prs[0].state = "MERGED".into();
+        assert!(worker.tracker_stages().merged);
+        assert!(!worker.tracker_stages().pr_open);
     }
 }

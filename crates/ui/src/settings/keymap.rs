@@ -228,8 +228,8 @@ impl ShortcutId {
             ShortcutId::OutdentWorkItem => "Outdent work item",
             ShortcutId::ShowOutlineShortcuts => "Show Outline shortcuts",
             ShortcutId::OpenLinear => "Toggle Inbox column (Linear, GitHub)",
-            ShortcutId::OpenTeamTab => "Open Team tab",
-            ShortcutId::OpenTeamTabFromPanel => "Open Team tab from side panel",
+            ShortcutId::OpenTeamTab => "Open Tracker tab",
+            ShortcutId::OpenTeamTabFromPanel => "Open Tracker tab from side panel",
             ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL
                 .get(index)
                 .map_or("", |key| key.label()),

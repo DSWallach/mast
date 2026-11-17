@@ -1104,6 +1104,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                     });
                 }
             }
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         for i in 0..n {
             shell.chat_header_links.insert(
@@ -1118,6 +1119,74 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
         cx.notify();
     });
     draw(vcx);
+}
+
+#[gpui::test]
+fn tracker_does_not_rebuild_on_unchanged_frames(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let before = shell.read_with(vcx, |shell, _| shell.tracker.rebuilds);
+    for _ in 0..5 {
+        shell.update(vcx, |shell, cx| { let _ = shell.render_team_tab(cx); });
+        draw(vcx);
+    }
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.tracker.rebuilds, before));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.revision += 1;
+            snapshot.items[0].title.push_str(" updated");
+            state.set_work_outline_for_test(snapshot);
+        });
+        cx.notify();
+    });
+    shell.update(vcx, |shell, cx| { shell.team_facts(CHAT_API, cx); });
+    shell.read_with(vcx, |shell, _| assert_eq!(shell.tracker.rebuilds, before + 1));
+}
+
+#[gpui::test]
+fn tracker_filters_workers_by_rollup(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 4);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    let position = vcx.debug_bounds("tracker-filter-Working").unwrap().center();
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(!has(vcx, "team-worker-w-1"));
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-1"));
+}
+
+#[gpui::test]
+fn tracker_lists_unassigned_descendants_without_workers(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        let item = snapshot.items.iter_mut().find(|item| item.id == API_AUTH).unwrap();
+        item.chat_ids.clear();
+        item.effective_status = mast_proto::WorkItemEffectiveStatus::Active;
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+}
+
+#[gpui::test]
+fn tracker_remains_selected_when_expanded(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| { shell.open_team_tab(cx); shell.toggle_right_pane_expand(cx); });
+    draw(vcx);
+    shell.read_with(vcx, |shell, cx| {
+        assert!(shell.right_pane_expanded);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team);
+    });
+    assert!(has(vcx, "team-worker-w-0"));
 }
 
 fn worker_asks(snapshot: &mut WorkOutlineSnapshot) {
@@ -1437,6 +1506,8 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
+    assert!(!has(vcx, "team-wake-toggle-enabled"));
+    click_selector(vcx, "tracker-wake-settings");
     for key in ["enabled", "required-actions", "errors", "worker-reports", "awaiting-input", "tool-calls-failed", "auto-continue", "turn-finished", "prs"] {
         let selector: &'static str = Box::leak(format!("team-wake-toggle-{key}").into_boxed_str());
         assert!(has(vcx, selector), "{selector}");
@@ -1474,6 +1545,7 @@ fn team_rows_mark_waiting_and_failed_workers(cx: &mut TestAppContext) {
         waiting.last_turn_tool_failures = None;
         waiting.status = mast_proto::SessionStatus::AwaitingInput;
         state.sessions.push(waiting);
+        state.board_status_revision = state.board_status_revision.wrapping_add(1);
     });
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
@@ -1698,6 +1770,7 @@ fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAp
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
             state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         shell.open_team_tab(cx);
     });
@@ -1726,6 +1799,7 @@ fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
             state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         shell.open_team_tab(cx);
         shell.wakes.show_archived.insert(CHAT_API.into());

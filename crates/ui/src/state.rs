@@ -1122,7 +1122,11 @@ impl AppState {
         title: Option<String>,
     ) -> Option<Option<String>> {
         let chat = self.chats.iter_mut().find(|chat| chat.id == chat_id)?;
-        Some(std::mem::replace(&mut chat.title, title))
+        let previous = std::mem::replace(&mut chat.title, title);
+        if chat.title != previous {
+            self.board_status_revision = self.board_status_revision.wrapping_add(1);
+        }
+        Some(previous)
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {

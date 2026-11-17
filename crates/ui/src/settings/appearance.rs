@@ -2638,12 +2638,12 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_1()
-                        .child(widgets::row_title(&theme, "Team tab"))
+                        .child(widgets::row_title(&theme, "Tracker tab"))
                         .child(widgets::meta_line(
                             &theme,
                             vec![
                                 div()
-                                    .child("Choose when the Team tab appears.")
+                                    .child("Choose when the Tracker tab appears.")
                                     .into_any_element(),
                             ],
                         )),
