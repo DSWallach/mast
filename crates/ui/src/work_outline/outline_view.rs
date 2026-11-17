@@ -2906,25 +2906,14 @@ impl OutlineView {
                 theme,
             ),
             OutlineRowKind::Unassociated { label, .. } if self.sidebar => {
-                let summary = format!(
-                    "{} {}",
-                    row.child_count,
-                    if row.child_count == 1 {
-                        "entry"
-                    } else {
-                        "entries"
-                    }
-                );
+                let summary = quiet_tree::entries_label(row.child_count);
                 self.quiet_group_body(&key, label, summary, theme.text_muted, theme)
             }
             OutlineRowKind::Notice { text, tone, .. } if self.sidebar => self.quiet_group_body(
                 &key,
                 text,
                 String::new(),
-                match tone {
-                    NoticeTone::Warning => theme.warning,
-                    NoticeTone::Muted => theme.text_muted,
-                },
+                quiet_tree::notice_color(*tone, theme),
                 theme,
             ),
             OutlineRowKind::Space {

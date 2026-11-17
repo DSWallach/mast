@@ -62,6 +62,17 @@ fn count_label(count: impl Into<u64>, name: &str) -> String {
     format!("{count} {name}{}", if count == 1 { "" } else { "s" })
 }
 
+pub(super) fn entries_label(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "entry" } else { "entries" })
+}
+
+pub(super) fn notice_color(tone: NoticeTone, theme: &Theme) -> gpui::Hsla {
+    match tone {
+        NoticeTone::Warning => theme.warning,
+        NoticeTone::Muted => theme.text_muted,
+    }
+}
+
 fn title_line(key: &str, title: &str, item: bool, theme: &Theme) -> AnyElement {
     div()
         .id(SharedString::from(format!("outline-title-{key}")))
@@ -130,7 +141,7 @@ fn two_lines(key: &str, title: AnyElement, metadata: AnyElement, tip: SharedStri
 
 impl OutlineView {
     pub(super) fn quiet_space_summary(&self, space_id: &str, count: usize) -> String {
-        let mut text = format!("{count} {}", if count == 1 { "entry" } else { "entries" });
+        let mut text = entries_label(count);
         if let Some(summary) = self
             .sidebar_metadata
             .space_summaries
@@ -329,7 +340,11 @@ impl OutlineView {
             details.push("Current".into());
         }
         let summary: SharedString = details.join(" · ").into();
-        let mut tip = format!("{title} · {status_label} · {summary}");
+        let mut tip = if drift {
+            format!("{title} · {status_label} · {summary}")
+        } else {
+            format!("{title} · {summary}")
+        };
         if let Some(model) = &chat.harness {
             tip.push_str(&format!(" · {model}"));
         }
@@ -378,5 +393,39 @@ impl OutlineView {
             metadata.into_any_element(),
             tip,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_metadata_preserves_attention_and_warning_meaning() {
+        let inputs = OutlineInputs {
+            spaces: vec![model::tests::ready(
+                "s1",
+                "Repo",
+                super::super::super::store::fixture_snapshot("s1"),
+            )],
+            chats: Vec::new(),
+            options: OutlineOptions::default(),
+        };
+        let metadata = SidebarMetadata::new(&inputs);
+        assert!(metadata.space_summaries["s1"].contains("user action required"));
+        assert_eq!(entries_label(1), "1 entry");
+        assert_eq!(entries_label(2), "2 entries");
+        assert_eq!(
+            format!("{} failed", count_label(1_u64, "tool call")),
+            "1 tool call failed"
+        );
+        for theme in [Theme::light(), Theme::dark()] {
+            assert_eq!(notice_color(NoticeTone::Warning, &theme), theme.warning);
+            assert_eq!(notice_color(NoticeTone::Muted, &theme), theme.text_muted);
+            assert_ne!(
+                notice_color(NoticeTone::Warning, &theme),
+                notice_color(NoticeTone::Muted, &theme)
+            );
+        }
     }
 }
