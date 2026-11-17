@@ -7730,7 +7730,7 @@ fn user_bubble_text(
                 }
                 if let Some(badge) = &span.badge_range {
                     for rect in render::range_rects(&layout, badge, 0.0, 2.0) {
-                        window.paint_quad(quad(rect, px(5.0), wash, px(1.0), border, BorderStyle::default()));
+                        window.paint_quad(quad(rect, px(Theme::SPACE_XS), wash, px(1.0), border, BorderStyle::default()));
                     }
                 }
             }

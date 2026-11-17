@@ -19,7 +19,7 @@ pub(super) fn pinned_view(
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        .p(px(12.0))
+        .p(px(crate::theme::Theme::SPACE_MD))
         .text_color(theme.text)
         .child(
             div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM))

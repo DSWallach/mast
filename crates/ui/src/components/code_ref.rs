@@ -62,8 +62,8 @@ pub(crate) fn selection_action_position(
     selection: gpui::Bounds<gpui::Pixels>,
     viewport: gpui::Bounds<gpui::Pixels>,
 ) -> (gpui::Pixels, gpui::Pixels) {
-    let width = 160.0;
-    let height = 32.0;
+    let width = Theme::SPACE_LG * 10.0;
+    let height = Theme::SPACE_LG * 2.0;
     let x = f32::from(selection.origin.x - viewport.origin.x);
     let y = f32::from(selection.origin.y - viewport.origin.y);
     let below = y + f32::from(selection.size.height);

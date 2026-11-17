@@ -1951,6 +1951,9 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        if let Some(reference) = self.pinned_reference.as_ref() {
+            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), &theme, cx);
+        }
         let typography_generation = crate::typography::generation(cx);
         if self.preview.typography_generation != typography_generation {
             self.preview.typography_generation = typography_generation;
@@ -2509,9 +2512,6 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(reference) = self.pinned_reference.as_ref() {
-            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), theme, cx);
-        }
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
                 "Workspace changed. Image preview suspended.",
