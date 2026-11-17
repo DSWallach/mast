@@ -782,7 +782,10 @@ fn enter_on_empty_composer_during_a_live_run_never_interrupts(cx: &mut gpui::Tes
 
 #[gpui::test]
 fn quitting_a_question_stops_the_run_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let _guard = runtime.enter();
     let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
     let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
