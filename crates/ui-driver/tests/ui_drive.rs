@@ -302,7 +302,10 @@ fn step(name: &str, response: &Value, log: &mut Vec<String>, needles: &[&str]) {
         t["wall_ms"], t["nodes"], excerpt(response, needles)
     ));
     println!("{}", log.last().unwrap());
-    assert!(draws <= STEP_MAX_DRAWS, "{name}: {draws} draws");
+    // Frame-callback draws (glide, spinner) are bounded by the driver; the
+    // guard is on the rest.
+    let animated = t["animated"].as_u64().unwrap_or(0);
+    assert!(draws - animated <= STEP_MAX_DRAWS, "{name}: {draws} draws ({animated} animated)");
     assert!(draw_ms <= STEP_MAX_DRAW_MS, "{name}: {draw_ms}ms of draw time");
 }
 
@@ -341,7 +344,10 @@ fn first_flow_send_approve_finish() {
         std::thread::sleep(Duration::from_millis(100));
         card = d.tree();
     }
-    step("approval card", &card, &mut log, &["run the tests", "question-panel", "Approve", "Deny"]);
+    step("approval card", &card, &mut log, &["run the tests", "question-panel", "Approve", "Deny", "Before I wire"]);
+    // The agent's reply text is in the tree: the own-send glide ran, so the
+    // reply is not parked below the fold.
+    assert!(tree_of(&card).contains("Before I wire the reconciliation path"), "reply text missing:\n{}", tree_of(&card));
     assert!(
         tree_of(&card).lines().any(|l| l.contains("paragraph \"run the tests\"")),
         "user message not in the transcript:\n{}",
@@ -361,9 +367,10 @@ fn first_flow_send_approve_finish() {
         std::thread::sleep(Duration::from_millis(100));
         done = d.tree();
     }
-    step("finished", &done, &mut log, &["run the tests", "composer-send", "composer-input"]);
-    // Idle again: Send is back and Stop is gone. (The agent's own reply text
-    // does not reach the a11y tree in the headless run yet; see the PR note.)
+    step("finished", &done, &mut log, &["run the tests", "composer-send", "composer-input", "Locked in"]);
+    assert!(tree_of(&done).contains("Locked in"), "final reply missing:\n{}", tree_of(&done));
+    assert!(tree_of(&done).contains("Approve"), "chosen answer not in the final reply:\n{}", tree_of(&done));
+    // Idle again: Send is back and Stop is gone.
     assert!(tree_of(&done).contains("sel=composer-send") && !tree_of(&done).contains("sel=composer-stop"), "{}", tree_of(&done));
     assert!(!tree_of(&done).contains("sel=question-panel"), "approval card still showing");
 
