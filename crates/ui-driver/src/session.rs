@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyWindowHandle, Entity, HeadlessAppContext, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta, ScrollWheelEvent,
+    TouchPhase, point, px, size,
 };
 use mast_ui::{
     shell::Shell,
@@ -363,6 +364,49 @@ impl Session {
     pub fn click(&mut self, locator: &str) -> Result<Timing, String> {
         let started = Instant::now();
         self.pointer(locator, &[MouseButton::Left])?;
+        let mut timing = self.settle();
+        timing.wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(timing)
+    }
+
+    /// Move the pointer over the element (no click) and settle.
+    pub fn hover(&mut self, locator: &str) -> Result<Timing, String> {
+        let started = Instant::now();
+        self.pointer(locator, &[])?;
+        let mut timing = self.settle();
+        timing.wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(timing)
+    }
+
+    /// Wheel-scroll over the element by `(dx, dy)` pixels and settle.
+    pub fn scroll(&mut self, locator: &str, dx: f32, dy: f32) -> Result<Timing, String> {
+        let started = Instant::now();
+        let (_, rect) = self
+            .frame
+            .resolve_with_bounds(locator)
+            .map_err(|e| e.to_string())?;
+        let position = point(px(rect[0] + rect[2] / 2.0), px(rect[1] + rect[3] / 2.0));
+        self.cx
+            .update_window(self.window, |_, w, c| {
+                w.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    c,
+                );
+                w.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position,
+                        delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                        modifiers: Modifiers::default(),
+                        touch_phase: TouchPhase::Moved,
+                    }),
+                    c,
+                );
+            })
+            .map_err(|e| e.to_string())?;
         let mut timing = self.settle();
         timing.wall_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(timing)

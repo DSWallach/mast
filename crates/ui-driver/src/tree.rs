@@ -240,8 +240,13 @@ enum Query {
 }
 
 fn parse_quoted(rest: &str) -> Result<(&str, &str), String> {
-    let body = rest.strip_prefix('"').ok_or("expected a quoted string")?;
-    let end = body.find('"').ok_or("unterminated string")?;
+    // Either quote character, so YAML scenarios can write button[name='Approve'].
+    let quote = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => q,
+        _ => return Err("expected a quoted string".into()),
+    };
+    let body = &rest[1..];
+    let end = body.find(quote).ok_or("unterminated string")?;
     Ok((&body[..end], &body[end + 1..]))
 }
 
@@ -522,6 +527,19 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn locators_accept_single_quotes() {
+        assert_eq!(
+            parse("button[name='Approve']").unwrap(),
+            Query::RoleName { role: "button".into(), name: "Approve".into() }
+        );
+        assert_eq!(
+            parse("text='a \"b\"':nth(1)").unwrap(),
+            Query::Text { text: "a \"b\"".into(), nth: Some(1) }
+        );
+        assert!(parse("text='open").is_err());
     }
 
     #[test]

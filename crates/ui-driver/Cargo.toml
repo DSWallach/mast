@@ -11,7 +11,9 @@ mast-engine.workspace = true
 mast-proto.workspace = true
 mast-doc.workspace = true
 mast-rpc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 sha2.workspace = true
 tokio.workspace = true
 mast-ui = { workspace = true, features = ["snapshot"] }
