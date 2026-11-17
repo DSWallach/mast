@@ -39,6 +39,7 @@ pub(super) struct TrackerState {
     review_progress: std::collections::HashMap<String, (usize, usize)>,
     review_loaded: std::collections::HashSet<String>,
     review_generation: u64,
+    review_task: Option<Task<()>>,
     filter: TrackerFilter,
     wake_settings_open: bool,
     #[cfg(test)]
@@ -356,6 +357,7 @@ impl Shell {
         let review_targets: Vec<_> = visible_targets.into_iter().filter(|target| !self.tracker.review_loaded.contains(target)).collect();
         self.tracker.review_generation = self.tracker.review_generation.wrapping_add(1);
         let generation = self.tracker.review_generation;
+        self.tracker.review_task = None;
         self.tracker.key = Some(key);
         self.tracker.facts = facts.clone();
         self.tracker.not_started = not_started;
@@ -369,7 +371,8 @@ impl Shell {
         cx.defer(move |cx| {
             let _ = shell.update(cx, |shell, cx| {
                 for id in shell.board_links_due(&ids, cx) { shell.ensure_chat_header_links(id, cx); }
-                cx.spawn(async move |shell, cx| {
+                if shell.tracker.review_generation != generation { return; }
+                shell.tracker.review_task = Some(cx.spawn(async move |shell, cx| {
                     for target in review_targets {
                         let tasks = shell.update(cx, |shell, cx| {
                             if shell.tracker.review_generation != generation { return None; }
@@ -395,7 +398,7 @@ impl Shell {
                             });
                         }
                     }
-                }).detach();
+                }));
             });
         });
         facts
@@ -649,6 +652,7 @@ impl Shell {
                         this.tracker.review_loaded.clear();
                         this.tracker.review_progress.clear();
                         this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
+                        this.tracker.review_task = None;
                         this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), cx);
                     })))
                 .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Merge…")
