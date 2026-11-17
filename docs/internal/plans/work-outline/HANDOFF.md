@@ -1219,6 +1219,23 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 09:30; coordinator da545eee handing off)
+
+- **Installed: release 103.** Mikey is still on 96 until he restarts. Nothing is building; no workers are running.
+- **Next, Mikey's ask: a design pass** on the wave-1 surfaces. He finds code hard to read: code shows without
+  syntax colour or formatting (e.g. the code-reference file view and its snippets/chips render plain text; check
+  diffs, review drafts, transcript code blocks too). Screenshots (offscreen, release 103):
+  mast-artifact:be0bb4e213364d721971b1f328db7928 (code reference), dbf6e9b4bb78fe69db23cd670a3b7245 (word diff),
+  898b17235424ac5e05a36bce5b2e8d70 (review drafts), 6d12d5360d60446f988b69b8579d329b (board),
+  dbeeaa997abd06365309848e299646cf (table), e5011e217e8bbaf6818fd0740be39996 (diagram card). Known nits: table
+  "Answer" button has no padding; board cards have an empty expand-arrow row; "Review" on in-progress cards is
+  unclear; dark diagram thumbnail sits on a lighter panel. Render with `scripts/ui-preview.sh --screens
+  code-reference,changes-expanded,walkthrough,board,board-table,diagram-card` (set MAST_PREVIEW_CODE_REF=1 and
+  MAST_SNAPSHOT_POPULATED_CHANGES=1), and the UI driver (`scripts/ui-drive`) for flows.
+- Tooling now available: headless UI driver with YAML scenarios (crates/ui-driver, scripts/ui-drive), enforced perf
+  gate on install, perf-soak with ABBA order. Xcode git hangs on `git submodule`: use
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools` until Mikey opens Xcode or reboots.
+
 ## In flight (snapshot 2026-11-17 07:00; coordinator da545eee, overnight run)
 
 - **Installed: release 103** (16afa8cf7, 08:16; = 102 + UI driver YAML scenarios + cleanup pass 2). Mikey's running Mast is still 96 (up since 2026-11-16 17:20); one restart picks
