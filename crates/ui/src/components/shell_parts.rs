@@ -1710,7 +1710,7 @@ pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui
 
 pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
     div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
-        .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM))
+        .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM)).pr(px(Theme::SPACE_SM))
         .border_b_1().border_color(theme.border).cursor_pointer()
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
 }
