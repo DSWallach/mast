@@ -30,6 +30,7 @@ pub mod chat_type_view;
 mod chat_work_context;
 mod comment_ui;
 pub mod comments;
+pub mod code_ref;
 pub mod composer;
 pub mod components;
 pub mod stories;
@@ -46,6 +47,7 @@ pub mod edge_fade;
 mod error_notice;
 pub mod file_icons;
 pub mod files;
+pub mod freeze_watchdog;
 pub mod frost;
 pub(crate) mod github;
 pub mod history;
@@ -88,6 +90,7 @@ mod review_chats;
 pub mod running_chats;
 pub mod settings;
 pub mod shell;
+mod board;
 mod team;
 #[cfg(test)]
 #[global_allocator]
@@ -178,6 +181,32 @@ struct ReopenState {
 
 impl gpui::Global for ReopenState {}
 
+/// Main-thread freeze watchdog: the main-thread executor answers the watchdog
+/// thread's pings (no timer on the main thread); a stall of 2 s or more leaves
+/// a `warn` and a `freeze-<timestamp>.txt` stack sample in the logs dir.
+/// `MAST_FREEZE_WATCHDOG=0` turns it off.
+fn start_freeze_watchdog(data_dir: &std::path::Path, cx: &mut App) {
+    if std::env::var("MAST_FREEZE_WATCHDOG").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let heartbeat = freeze_watchdog::Heartbeat::new();
+    cx.spawn({
+        let heartbeat = heartbeat.clone();
+        async move |_| heartbeat.serve().await
+    })
+    .detach();
+    match freeze_watchdog::start(
+        freeze_watchdog::Config::default(),
+        heartbeat,
+        data_dir.join("logs"),
+        Box::new(freeze_watchdog::SampleCapturer),
+    ) {
+        // Runs for the life of the process.
+        Ok(handle) => std::mem::forget(handle),
+        Err(error) => tracing::warn!(%error, "freeze watchdog did not start"),
+    }
+}
+
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
@@ -213,6 +242,7 @@ pub fn run_app(config: UiConfig) {
     });
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, runtime_handle);
+        start_freeze_watchdog(&data_dir, cx);
         gpui_base::init(cx);
         #[cfg(feature = "dev-inspector")]
         dev_inspector::init(cx);
@@ -272,7 +302,7 @@ pub fn run_app(config: UiConfig) {
         let click_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(chat_id) = click_rx.next().await {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if let Some((space_id, request_id, decision)) = notify::parse_decision_target(&chat_id) {
                         #[cfg(any(target_os = "macos", target_os = "linux"))]
                         handle_menu_bar_event(menu_bar::MenuEvent::Action(
@@ -323,7 +353,7 @@ pub fn run_app(config: UiConfig) {
             let menu_state = state.clone();
             cx.spawn(async move |cx| {
                 while let Some(event) = events.next().await {
-                    let _ = cx.update(|cx| handle_menu_bar_event(event, &menu_state, cx));
+                    cx.update(|cx| handle_menu_bar_event(event, &menu_state, cx));
                 }
             })
             .detach();

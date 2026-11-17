@@ -463,6 +463,7 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::CaptureAppshot => "Appshots",
         ShortcutId::SaveFile
         | ShortcutId::QuickOpen
+        | ShortcutId::AddCodeToChat
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
         | ShortcutId::ReplaceFile => "Files",
@@ -512,6 +513,7 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::QuickOpen => "Open a workspace file by name.",
+        ShortcutId::AddCodeToChat => "Add selected code to the chat.",
         ShortcutId::ReviewNextStep => "Next review step.",
         ShortcutId::ReviewPreviousStep => "Previous review step.",
         ShortcutId::ReviewNextStepArrow => "Next review step (arrow).",
@@ -731,7 +733,7 @@ impl Render for ShortcutsPage {
             }
             groups.push(
                 div()
-                    .debug_selector(move || format!("shortcuts-group-{name}").into())
+                    .debug_selector(move || format!("shortcuts-group-{name}"))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))

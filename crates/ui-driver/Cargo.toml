@@ -1,0 +1,30 @@
+[package]
+name = "mast-ui-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mast-harness.workspace = true
+mast-engine.workspace = true
+mast-proto.workspace = true
+mast-doc.workspace = true
+mast-rpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2.workspace = true
+tokio.workspace = true
+mast-ui = { workspace = true, features = ["snapshot"] }
+# Test-only crate (never a normal dependency of mast or mast-ui), so the
+# test-support features stay out of the installed graph.
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+gpui_tokio.workspace = true
+gpui-base.workspace = true
+mast-theme.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -226,3 +226,107 @@ fn bench_team_300_items_50_chats() {
         std::hint::black_box(crate::team::team(&input));
     });
 }
+
+/// A large Work Outline: ~500 items (167 roots, each with a PR and a Linear
+/// child). Expand/collapse and a status change, each followed by a draw.
+/// `BENCH_ROOTS` overrides the root count.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_outline_500_items_actions(cx: &mut gpui::TestAppContext) {
+    let roots = std::env::var("BENCH_ROOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(167);
+    let (overview, vcx) = outline_fixture_overview(cx, roots);
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    };
+    measure("outline", "first draw (Outline, 500 items)", || draw(vcx));
+    measure_n("outline", "redraw (clean)", 20, |_| draw(vcx));
+    let keys: Vec<String> = (0..20)
+        .map(|i| crate::work_outline::model::row_key::item(SPACE, &format!("w-bench-{i}")))
+        .collect();
+    measure_n("outline", "collapse + draw", keys.len(), |i| {
+        overview.update(vcx, |o, cx| {
+            o.outline
+                .update(cx, |outline, cx| outline.set_collapsed(&keys[i], true, cx))
+        });
+        draw(vcx);
+    });
+    measure_n("outline", "expand + draw", keys.len(), |i| {
+        overview.update(vcx, |o, cx| {
+            o.outline
+                .update(cx, |outline, cx| outline.set_collapsed(&keys[i], false, cx))
+        });
+        draw(vcx);
+    });
+    // Status change: a new snapshot with one item completed.
+    measure_n("outline", "status change (new snapshot) + draw", 10, |i| {
+        let mut next = snapshot(roots);
+        let id = format!("w-bench-{i}");
+        if let Some(item) = next.items.iter_mut().find(|item| item.id == id) {
+            item.status = WorkItemStatus::Completed;
+        }
+        overview.update(vcx, |o, cx| {
+            let mut map = HashMap::new();
+            map.insert(
+                SPACE.to_string(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(next)),
+            );
+            o.outline_fixture = Some(map);
+            o.rows_dirty = true;
+            cx.notify();
+        });
+        draw(vcx);
+    });
+}
+
+fn outline_fixture_overview(
+    cx: &mut gpui::TestAppContext,
+    roots: usize,
+) -> (Entity<Overview>, &mut gpui::VisualTestContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.data_dir = Some(dir.path().to_path_buf());
+        state.chats = (0..roots * 3).map(chat_row).collect();
+        state.spaces = vec![mast_proto::Space {
+            id: SPACE.into(),
+            device_id: "local".into(),
+            path: "/work".into(),
+            name: Some("Bench".into()),
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        }];
+    });
+    let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+    let st = state.clone();
+    let (overview, vcx) = cx.add_window_view(move |_, cx| {
+        Overview::new(st, gpui::WeakEntity::new_invalid(), transcript, composer, cx)
+    });
+    vcx.run_until_parked();
+    overview.update(vcx, |o, cx| {
+        let mut map = HashMap::new();
+        map.insert(
+            SPACE.to_string(),
+            WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot(roots))),
+        );
+        o.outline_fixture = Some(map);
+        o.view_mode = OverviewMode::Outline;
+        o.rows_dirty = true;
+        cx.notify();
+    });
+    std::mem::forget(dir);
+    (overview, vcx)
+}

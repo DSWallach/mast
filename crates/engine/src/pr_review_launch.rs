@@ -102,14 +102,8 @@ impl PrReviewTools {
             )
         };
         let mut command = match &self.gh {
-            Some(path) => Command::new(path),
-            None => {
-                let executable =
-                    mast_harness::resolve_login_shell_executable("gh").ok_or_else(unavailable)?;
-                let mut command = Command::new(executable);
-                mast_harness::compose_login_shell_path_std(&mut command);
-                command
-            }
+            Some(path) => mast_harness::command(path),
+            None => mast_harness::gh_command().ok_or_else(unavailable)?,
         };
         command
             .env("GH_PROMPT_DISABLED", "1")
@@ -749,11 +743,10 @@ impl PrReviewLauncher {
             }
             _ => return Err(invalid("a branch target is required")),
         };
-        if let Some(item) = &p.work_item_id {
-            if self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
+        if let Some(item) = &p.work_item_id
+            && self.workspace.work_item_space(item).as_deref() != Some(space.id.as_str()) {
                 return Err(invalid("work item is not in the selected Space"));
             }
-        }
         let mut inputs = p.clone();
         inputs.target_device_id = None;
         let hash = mast_doc::registry::work_outline::inputs_hash(&inputs);

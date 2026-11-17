@@ -15,17 +15,25 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
-    StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
-    size,
+    AnyElement, App, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render,
+    SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point,
+    prelude::*, px, quad, size,
 };
 use mast_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
 use crate::theme::Theme;
 
+use super::link_presentation;
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::question::{QuestionCard, QuestionStatus};
 use super::veil::{RowVeil, apply_veil, slice_spans};
+
+mod code_block_render;
+mod table_render;
+#[cfg(test)]
+mod tests;
+use code_block_render::*;
+pub use table_render::*;
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
@@ -492,7 +500,9 @@ pub fn render_tree(
     div()
         .flex()
         .flex_col()
-        .gap(crate::typography::ui_rems(crate::components::conversation_markdown_gap(theme, MD_BLOCK_GAP)))
+        .gap(crate::typography::ui_rems(
+            crate::components::conversation_markdown_gap(theme, MD_BLOCK_GAP),
+        ))
         .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
             let document = highlight(ix);
             render_block(
@@ -566,7 +576,11 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                 crate::components::conversation_answer_button(
                     SharedString::from(format!("{row_key}-answer-{id}")),
                     format!("question-answer-{id}"),
-                    if ui.drafts.contains_key(id) { "Change answer" } else { "Answer" },
+                    if ui.drafts.contains_key(id) {
+                        "Change answer"
+                    } else {
+                        "Answer"
+                    },
                     false,
                     theme,
                 )
@@ -575,10 +589,16 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
             .when(ui.drafts.contains_key(id), |row| {
                 let undo = ui.undo.clone();
                 let target = id.to_owned();
-                row.child(crate::components::conversation_answer_button(
-                    SharedString::from(format!("{row_key}-answer-undo-{id}")),
-                    format!("question-answer-undo-{id}"), "Undo", false, theme,
-                ).on_click(move |_, window, cx| undo(target.clone(), window, cx)))
+                row.child(
+                    crate::components::conversation_answer_button(
+                        SharedString::from(format!("{row_key}-answer-undo-{id}")),
+                        format!("question-answer-undo-{id}"),
+                        "Undo",
+                        false,
+                        theme,
+                    )
+                    .on_click(move |_, window, cx| undo(target.clone(), window, cx)),
+                )
             })
             .into_any_element();
     }
@@ -589,12 +609,15 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
         .flex_col()
         .gap(crate::typography::ui_rems(6.0))
         .child(
-            crate::components::conversation_answer_input(theme, format!("question-answer-input-{id}"))
-                // The preview root focuses itself on mouse-down; without this
-                // it runs after the input's own handler and steals focus, so a
-                // click into the field left keystrokes with nothing.
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .children(ui.input.clone()),
+            crate::components::conversation_answer_input(
+                theme,
+                format!("question-answer-input-{id}"),
+            )
+            // The preview root focuses itself on mouse-down; without this
+            // it runs after the input's own handler and steals focus, so a
+            // click into the field left keystrokes with nothing.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(ui.input.clone()),
         )
         .child(
             div()
@@ -645,7 +668,10 @@ fn render_question(
         .zip(answer_ui)
         .and_then(|(id, ui)| ui.answers.get(id))
         .filter(|_| card.status != QuestionStatus::Resolved);
-    let draft_text = card.id.as_ref().zip(answer_ui)
+    let draft_text = card
+        .id
+        .as_ref()
+        .zip(answer_ui)
         .and_then(|(id, ui)| ui.drafts.get(id))
         .filter(|_| card.status == QuestionStatus::Open);
     // An answer on the row makes an open question read Answered; a resolved
@@ -674,13 +700,24 @@ fn render_question(
         .gap(crate::typography::ui_rems(6.0))
         .flex_wrap();
     if let Some(id) = &card.id {
-        header = header.child(
-            crate::components::conversation_question_id(theme, id.clone().into()),
-        );
+        header = header.child(crate::components::conversation_question_id(
+            theme,
+            id.clone().into(),
+        ));
     }
-    header = header.child(crate::components::conversation_question_pill(theme, status.label(), status_color, true));
+    header = header.child(crate::components::conversation_question_pill(
+        theme,
+        status.label(),
+        status_color,
+        true,
+    ));
     if card.blocking {
-        header = header.child(crate::components::conversation_question_pill(theme, "Blocking", theme.danger, false));
+        header = header.child(crate::components::conversation_question_pill(
+            theme,
+            "Blocking",
+            theme.danger,
+            false,
+        ));
     }
     if collapsible {
         let ui = opts.question.clone().expect("collapsible implies an owner");
@@ -783,7 +820,11 @@ fn render_question(
     }
 
     if let Some(draft) = draft_text {
-        body = body.child(div().text_color(theme.text_muted).child(format!("Not sent: {draft}")));
+        body = body.child(
+            div()
+                .text_color(theme.text_muted)
+                .child(format!("Not sent: {draft}")),
+        );
     }
 
     if let Some(answer) = answer_text {
@@ -836,11 +877,14 @@ fn render_question(
     } else {
         status_color
     };
-    crate::components::conversation_question_card(theme,
-        SharedString::from(format!("{}-question", opts.row_key)), accent,
-        status == QuestionStatus::Resolved && !expanded)
-        .child(body)
-        .into_any_element()
+    crate::components::conversation_question_card(
+        theme,
+        SharedString::from(format!("{}-question", opts.row_key)),
+        accent,
+        status == QuestionStatus::Resolved && !expanded,
+    )
+    .child(body)
+    .into_any_element()
 }
 
 fn quote_child_ix(ix: usize, child_ix: usize) -> usize {
@@ -854,7 +898,15 @@ fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
 /// Element discriminators for every code block below `block`. Transcript rows
 /// use this to provision one independent scroll handle per nested fence before
 /// the renderer recursively reaches it.
+#[cfg(test)]
+thread_local! {
+    /// Calls to [`code_block_indices`] on this thread (budget tests).
+    pub(crate) static CODE_BLOCK_INDEX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
+    #[cfg(test)]
+    CODE_BLOCK_INDEX_CALLS.with(|count| count.set(count.get() + 1));
     fn collect(block: &Block, ix: usize, out: &mut Vec<usize>) {
         match block {
             Block::CodeBlock { .. } => out.push(ix),
@@ -1049,7 +1101,9 @@ pub fn render_block(
                                         crate::components::conversation_markdown_bullet_size(theme),
                                     ))
                                     .rounded_full()
-                                    .bg(crate::components::conversation_markdown_bullet_color(theme)),
+                                    .bg(crate::components::conversation_markdown_bullet_color(
+                                        theme,
+                                    )),
                             )
                             .into_any_element(),
                     }
@@ -1114,199 +1168,6 @@ fn heading_metrics(level: u8) -> (f32, f32) {
         3 => (15.0, 22.0),
         _ => (14.0, 22.0),
     }
-}
-
-/// Shared per-column table geometry (port of mugen `tableColumns`).
-pub struct TableColumns {
-    /// Per-column max-content width, padding included.
-    pub naturals: Vec<f32>,
-    /// Per-column minimum width, padding included = `min(natural, minColumnWidth)`.
-    pub minimums: Vec<f32>,
-    /// Σ minimums — the width below which the table stops shrinking and scrolls.
-    pub min_table_width: f32,
-}
-
-/// Resolve column geometry from measured per-column max-content widths
-/// (content only — padding is added here, as the source adds `2 * cellPadding`).
-pub fn table_columns(content_widths: &[f32]) -> TableColumns {
-    let naturals: Vec<f32> = content_widths
-        .iter()
-        .map(|w| w.max(TABLE_MIN_COLUMN_CONTENT) + 2.0 * TABLE_CELL_PADDING)
-        .collect();
-    let minimums: Vec<f32> = naturals
-        .iter()
-        .map(|n| n.min(TABLE_MIN_COLUMN_WIDTH))
-        .collect();
-    let min_table_width = minimums.iter().sum();
-    TableColumns {
-        naturals,
-        minimums,
-        min_table_width,
-    }
-}
-
-/// Element/cache discriminator for a table cell (row-major under the block ix).
-fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
-    ix * 100_000 + r * 100 + c
-}
-
-/// A GFM table — a port of mugen-markdown's `TableBlock` under zeron's md
-/// theme (see the `TABLE_*` constants).
-///
-/// Column widths resolve exactly the way the source's CSS does: each cell is
-/// `flex: <max-content> <max-content> 0; min-width: min(max-content, 96px)`,
-/// so widths are content-proportional with a readable per-column floor.
-/// Naturals come from shaping each cell's runs unwrapped (gpui's line-layout
-/// cache makes repeat frames cheap); the flex resolution itself is Taffy's —
-/// the same algorithm as the web's. When even the floors no longer fit, the
-/// rows overflow the viewport and the table scrolls horizontally instead of
-/// crushing every column into per-character wrapping.
-#[allow(clippy::too_many_arguments)]
-fn render_table(
-    header: &[Vec<InlineRun>],
-    rows: &[Vec<Vec<InlineRun>>],
-    align: &[TableAlign],
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
-    window: &Window,
-) -> AnyElement {
-    // Header row first, mirroring the source's `rows` shape (rows may be ragged).
-    let all: Vec<&[Vec<InlineRun>]> = std::iter::once(header)
-        .filter(|h| !h.is_empty())
-        .map(|h| h as &[Vec<InlineRun>])
-        .chain(rows.iter().map(|r| r.as_slice()))
-        .collect();
-    let cols = all.iter().map(|r| r.len()).max().unwrap_or(0);
-    if cols == 0 {
-        return gpui::Empty.into_any_element();
-    }
-    let has_header = !header.is_empty();
-
-    // Flatten every cell (cache-aware) and take per-column max-content widths.
-    let text_system = window.text_system();
-    let mut flats: Vec<Vec<Option<Rc<FlatText>>>> = Vec::with_capacity(all.len());
-    let mut content = vec![0.0f32; cols];
-    for (r, row) in all.iter().enumerate() {
-        let weight = if has_header && r == 0 {
-            TABLE_HEADER_WEIGHT
-        } else {
-            FontWeight::NORMAL
-        };
-        let mut out: Vec<Option<Rc<FlatText>>> = Vec::with_capacity(cols);
-        for (c, natural) in content.iter_mut().enumerate() {
-            let Some(runs) = row.get(c) else {
-                out.push(None);
-                continue;
-            };
-            let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
-            if !flat.text.is_empty() {
-                // Intrinsic table proportions use the same bounded link presentation;
-                // each cell then resolves its exact width during measured layout.
-                let measured = opts
-                    .link
-                    .as_ref()
-                    .filter(|ui| ui.source_session.is_some())
-                    .map(|_| {
-                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
-                    });
-                let flat = measured.as_ref().unwrap_or(&flat);
-                // Cell sources are single-line; guard anyway (same byte count,
-                // so the runs still cover the text exactly).
-                let line: SharedString = if flat.text.contains('\n') {
-                    flat.text.replace('\n', " ").into()
-                } else {
-                    flat.text.clone()
-                };
-                let width = f32::from(
-                    text_system
-                        .shape_line(line, px(MD_TEXT_SIZE), &flat.runs, None)
-                        .width(),
-                );
-                if width > *natural {
-                    *natural = width;
-                }
-            }
-            out.push(Some(flat));
-        }
-        flats.push(out);
-    }
-    let mut geo = table_columns(&content);
-    // Minimums are laid-out pixels, so they follow the zoomed rem like the
-    // cell padding inside them.
-    let scale = f32::from(crate::typography::ui_rems(1.0).to_pixels(window.rem_size()));
-    for minimum in &mut geo.minimums {
-        *minimum *= scale;
-    }
-    geo.min_table_width *= scale;
-
-    // Frameless flat-hairline chrome: 1px rules under the header and between
-    // rows are the only paint (`table.gap` = 1, borderColor white@10%); the
-    // theme's headerBackground is transparent and its radius 0, so there is no
-    // header fill, outer box, or rounding.
-    let hairline = table_hairline();
-    let mut inner = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .min_w(px(geo.min_table_width));
-    for (r, row) in flats.iter().enumerate() {
-        if r > 0 {
-            inner = inner.child(div().flex_none().h(px(TABLE_DIVIDER)).w_full().bg(hairline));
-        }
-        let mut row_el = div().flex().flex_row();
-        for (c, cell_flat) in row.iter().enumerate() {
-            let mut cell = div()
-                .flex_grow(geo.naturals[c])
-                .flex_shrink(geo.naturals[c])
-                .flex_basis(px(0.0))
-                .min_w(px(geo.minimums[c]))
-                .p(crate::typography::ui_rems(TABLE_CELL_PADDING))
-                .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
-                .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT));
-            cell = match align.get(c).copied().unwrap_or_default() {
-                TableAlign::Left => cell,
-                TableAlign::Center => cell.text_center(),
-                TableAlign::Right => cell.text_right(),
-            };
-            if opts.media.is_some()
-                && all[r]
-                    .get(c)
-                    .is_some_and(|runs| runs.iter().any(|run| run.style.image.is_some()))
-            {
-                cell = cell.child(text_element(
-                    &all[r][c],
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    has_header && r == 0,
-                    top_ix,
-                    table_cell_ix(ix, r, c),
-                    opts,
-                    theme,
-                ));
-            } else if let Some(flat) = cell_flat {
-                cell = cell.child(flat_text_element(
-                    flat,
-                    table_cell_ix(ix, r, c),
-                    opts,
-                    theme,
-                ));
-            }
-            row_el = row_el.child(cell);
-        }
-        inner = inner.child(row_el);
-    }
-
-    // The horizontal scroller — when the floors exceed the viewport the inner
-    // block keeps `min_table_width` and this viewport scrolls it.
-    let scroll_id: SharedString = format!("{}-table{ix}", opts.row_key).into();
-    div()
-        .id(scroll_id)
-        .w_full()
-        .overflow_x_scroll()
-        .child(inner)
-        .into_any_element()
 }
 
 /// Flattened inline runs: one string + gpui `TextRun`s + clickable link ranges
@@ -1598,9 +1459,9 @@ pub(super) fn flat_text_presented_element(
         .child(underlay)
         .child(text_el)
         .into_any_element();
-    let child = crate::text_menu::read_only(
-        SharedString::from(menu_key.to_string()), menu_text, child,
-    ).into_any_element();
+    let child =
+        crate::text_menu::read_only(SharedString::from(menu_key.to_string()), menu_text, child)
+            .into_any_element();
     if flat.links.is_empty() {
         return child;
     }
@@ -2351,7 +2212,9 @@ fn text_element(
         inner
     };
     div()
-        .text_size(crate::typography::ui_rems(crate::components::conversation_markdown_text_size(theme, size, MD_TEXT_SIZE)))
+        .text_size(crate::typography::ui_rems(
+            crate::components::conversation_markdown_text_size(theme, size, MD_TEXT_SIZE),
+        ))
         .line_height(crate::typography::ui_rems(line_height))
         .child(content)
         .into_any_element()
@@ -2466,472 +2329,6 @@ fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<Strin
         .or_else(|| sole_plain_file_reference(runs, workspace_root))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_code_block(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
-    highlight: CodeHighlight,
-) -> AnyElement {
-    let panel_theme = crate::components::conversation_code_theme(theme);
-    let theme = &panel_theme;
-    if is_mermaid(language)
-        && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
-    {
-        let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-        let diagram = handler(code, frame_id.clone(), theme);
-        let toggle = diagram.toggle_source.clone();
-        let toggle_action = code_icon_action(
-            format!("{frame_id}-source-toggle").into(),
-            if diagram.show_source {
-                "Show diagram"
-            } else {
-                "Show source"
-            },
-            if diagram.show_source {
-                crate::icons::EYE
-            } else {
-                crate::icons::FILE_CODE
-            },
-            Rc::new(move |window, cx| toggle(window, cx)),
-            theme,
-        );
-        let mut actions = vec![toggle_action];
-        if let Some(toggle_edit) = diagram.toggle_edit.clone() {
-            if diagram.is_editing {
-                if let Some(save_edit) = diagram.save_edit.clone() {
-                    actions.push(code_icon_action(
-                        format!("{frame_id}-save").into(),
-                        "Save diagram to file",
-                        crate::icons::CHECK,
-                        save_edit,
-                        theme,
-                    ));
-                }
-                actions.push(code_icon_action(
-                    format!("{frame_id}-cancel").into(),
-                    "Cancel editing",
-                    crate::icons::CLOSE,
-                    toggle_edit,
-                    theme,
-                ));
-            } else {
-                actions.push(code_icon_action(
-                    format!("{frame_id}-edit").into(),
-                    "Edit diagram",
-                    crate::icons::PEN,
-                    toggle_edit,
-                    theme,
-                ));
-            }
-        }
-        actions.extend(code_copy_button(code, ix, opts, theme));
-
-        if diagram.is_editing && let Some(input) = diagram.editor_input {
-            let edit_body = div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .p(px(8.0))
-                .child(
-                    div()
-                        .border_1()
-                        .border_color(theme.border)
-                        .rounded(px(6.0))
-                        .p(px(6.0))
-                        .bg(theme.surface)
-                        .child(input),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(4.0))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child("Preview:"),
-                        ),
-                )
-                .child(diagram.body);
-            return crate::components::conversation_code_frame(
-                frame_id,
-                language,
-                actions,
-                edit_body.into_any_element(),
-                theme,
-            )
-            .into_any_element();
-        }
-
-        if diagram.show_source {
-            return render_code_block_source_with_actions(
-                language,
-                code,
-                top_ix,
-                ix,
-                opts,
-                theme,
-                highlight,
-                actions,
-            );
-        }
-        return crate::components::conversation_code_frame(frame_id, language, actions, diagram.body, theme)
-            .into_any_element();
-    }
-    render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
-}
-
-fn code_icon_action(
-    id: SharedString,
-    label: &'static str,
-    icon_path: &'static str,
-    handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
-    theme: &Theme,
-) -> AnyElement {
-    crate::components::conversation_code_icon_action(theme, id, icon_path, CODE_ACTION_SIZE)
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            handler(window, cx);
-        })
-        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
-        .into_any_element()
-}
-
-fn code_copy_button(
-    code: &str,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
-) -> Option<AnyElement> {
-    opts.copy.clone().map(|copy| {
-        let copied = copy.copied_ix == Some(ix);
-        let code_text: SharedString = code.to_string().into();
-        let handler = copy.handler.clone();
-        let fade_key = format!("{}-copy{ix}", opts.row_key);
-        crate::components::conversation_code_copy_action(theme, SharedString::from(fade_key), copied, CODE_ACTION_SIZE)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                handler(ix, code_text.clone(), window, cx);
-            })
-            .into_any_element()
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_code_block_source(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
-    highlight: CodeHighlight,
-) -> AnyElement {
-    render_code_block_source_with_actions(
-        language,
-        code,
-        top_ix,
-        ix,
-        opts,
-        theme,
-        highlight,
-        Vec::new(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_code_block_source_with_actions(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
-    highlight: CodeHighlight,
-    mut extra_actions: Vec<AnyElement>,
-) -> AnyElement {
-    let mono = font(theme.font_mono.clone());
-    // Per-line strings + runs through the cross-frame cache (validity: code
-    // length + highlight slice identity — a fresh highlight Arc re-derives).
-    let hl_key = highlight.map_or((0, 0), |h| (h.as_ptr() as usize, h.len()));
-    let build = || {
-        let lines: Vec<(SharedString, Vec<TextRun>)> = code
-            .split('\n')
-            .enumerate()
-            .map(|(li, line)| {
-                let spans = highlight
-                    .and_then(|h| h.get(li))
-                    .map(|t| &t[..])
-                    .unwrap_or(&[]);
-                (
-                    SharedString::from(line.to_string()),
-                    runs_for_syntax_line(line, spans, &mono, theme),
-                )
-            })
-            .collect();
-        Rc::new(CachedCode {
-            code_len: code.len(),
-            hl_key,
-            lines,
-        })
-    };
-    let cached: Rc<CachedCode> = match &opts.cache {
-        Some(cache) => {
-            let mut cache = cache.borrow_mut();
-            cache.sync_style();
-            let entry = cache
-                .code
-                .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(&build);
-            if entry.code_len != code.len() || entry.hl_key != hl_key {
-                *entry = build();
-            }
-            entry.clone()
-        }
-        None => build(),
-    };
-    // Streaming veil over appended code, tracked on the whole code text and
-    // sliced per line below (paint-only run recolor — heights stay exact).
-    let veil_spans = match &opts.veil {
-        Some(veil) => veil.borrow_mut().advance(ix, code, opts.now),
-        None => Vec::new(),
-    };
-    let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
-    let sel_wash = selection_wash(theme);
-    // Mermaid source is not searchable (its diagram view has no text), so
-    // find never highlights it — the count side skips it too.
-    let find = opts
-        .find
-        .clone()
-        .filter(|_| !is_mermaid(language))
-        .map(|find| FindPaint {
-            find,
-            row_key: opts.row_key.clone(),
-        });
-    let code_ui = opts.code.as_ref().and_then(|code| code.get(&ix)).cloned();
-    let fit_content = code_ui.as_ref().is_some_and(|ui| ui.fit_content);
-
-    let fit_button = code_ui.as_ref().map(|ui| {
-        let toggle = ui.toggle_fit.clone();
-        let fade_key = format!("{}-fit{ix}", opts.row_key);
-        let base = if fit_content {
-            crate::theme::ink(0.09)
-        } else {
-            gpui::transparent_black()
-        };
-        let hover = crate::theme::ink(if fit_content { 0.13 } else { 0.08 });
-        div()
-            .id(SharedString::from(fade_key.clone()))
-            .size(px(CODE_ACTION_SIZE))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(crate::motion::hover_blend(&fade_key, base, hover))
-            .on_hover(crate::motion::hover_listener(fade_key))
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                toggle(window, cx);
-            })
-            .tooltip(move |_, cx| {
-                cx.new(move |_| {
-                    CodeBlockTooltip(if fit_content {
-                        "Use horizontal scrolling"
-                    } else {
-                        "Fit content"
-                    })
-                })
-                .into()
-            })
-            .child(
-                crate::icons::icon(crate::icons::WRAP_TEXT)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted),
-            )
-    });
-    let mut actions = Vec::new();
-    actions.extend(fit_button.map(IntoElement::into_any_element));
-    actions.append(&mut extra_actions);
-    actions.extend(code_copy_button(code, ix, opts, theme));
-
-    let lines = div()
-        .map(|el| {
-            if fit_content {
-                el.w_full().min_w_0()
-            } else {
-                el.min_w_full().flex_none()
-            }
-        })
-        .px(crate::typography::ui_rems(CODE_PADDING_X))
-        .py(crate::typography::ui_rems(CODE_PADDING_Y))
-        .font_family(theme.font_mono.clone())
-        .text_size(px(theme.code_font_size))
-        .line_height(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-        .map(|el| {
-            if fit_content {
-                el.whitespace_normal()
-            } else {
-                el.whitespace_nowrap()
-            }
-        })
-        .flex()
-        .flex_col()
-        .children((0..cached.lines.len()).scan(0usize, move |off, li| {
-            let (line, runs) = &cached.lines[li];
-            let start = *off;
-            *off = start + line.len() + 1; // +1 for the '\n'
-            let local = slice_spans(&veil_spans, start, start + line.len());
-            let runs = apply_veil(runs.clone(), &local);
-            let key = code_line_selection_key(&opts.row_key, ix, li);
-            Some(
-                div()
-                    .map(|el| {
-                        if fit_content {
-                            el.w_full()
-                                .min_w_0()
-                                .min_h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-                        } else {
-                            el.h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-                                .flex_none()
-                        }
-                    })
-                    .child(selectable_text_element(
-                        key,
-                        line.clone(),
-                        runs,
-                        sel_wash,
-                        find.clone(),
-                    )),
-            )
-        }));
-
-    let body: AnyElement = if let Some(ui) = code_ui.as_ref() {
-        if fit_content {
-            div()
-                .w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .child(lines)
-                .into_any_element()
-        } else {
-            let mut scroller = div()
-                .id(scroll_id)
-                .w_full()
-                .min_w_0()
-                .flex()
-                .overflow_x_scroll()
-                .track_scroll(&ui.scroll)
-                .child(lines);
-            // A vertical wheel over code must keep bubbling to the transcript;
-            // only a true horizontal gesture moves this local viewport.
-            scroller.style().restrict_scroll_to_axis = Some(true);
-            scroller.into_any_element()
-        }
-    } else {
-        // Non-transcript previews keep their existing native scroll behavior.
-        div()
-            .id(scroll_id)
-            .w_full()
-            .overflow_x_scroll()
-            .child(lines)
-            .into_any_element()
-    };
-
-    let scrollbar = (!fit_content)
-        .then(|| code_ui.as_ref())
-        .flatten()
-        .and_then(|ui| {
-            let bar = ui.scrollbar.as_ref()?;
-            let metrics = bar.metrics;
-            let hover = bar.hover.clone();
-            let press = bar.press.clone();
-            let release_up = bar.release.clone();
-            let release_out = bar.release.clone();
-            let thumb_height = if bar.active {
-                crate::popover::MENU_SCROLLBAR_HOVER_THUMB_WIDTH
-            } else {
-                crate::popover::MENU_SCROLLBAR_THUMB_WIDTH
-            };
-            Some(
-                div()
-                    .id(SharedString::from(format!("{}-scrollbar", ui.key)))
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .bottom(px(0.0))
-                    .h(px(CODE_SCROLLBAR_HIT_HEIGHT))
-                    .on_hover(move |hovered, window, cx| hover(*hovered, window, cx))
-                    .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                        press(event.position.x, window, cx);
-                    })
-                    .on_drag(
-                        CodeScrollbarDrag {
-                            key: ui.key.clone(),
-                        },
-                        |_, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.new(|_| CodeScrollbarDragGhost)
-                        },
-                    )
-                    .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
-                        release_up(window, cx)
-                    })
-                    .on_mouse_up_out(gpui::MouseButton::Left, move |_, window, cx| {
-                        release_out(window, cx)
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(
-                                crate::popover::MENU_SCROLLBAR_TRACK_INSET + metrics.thumb_left
-                            ))
-                            .bottom(px(2.0))
-                            .w(px(metrics.thumb_width))
-                            .h(px(thumb_height))
-                            .rounded(px(thumb_height / 2.0))
-                            .bg(theme
-                                .text_faint
-                                .opacity(if bar.active { 0.68 } else { 0.5 })),
-                    ),
-            )
-        });
-
-    let frame_body = div().w_full().relative().child(body).children(scrollbar);
-    let mut block = crate::components::conversation_code_frame(
-        format!("{}-code-frame{ix}", opts.row_key).into(),
-        language,
-        actions,
-        frame_body.into_any_element(),
-        theme,
-    );
-    if let Some(ui) = code_ui {
-        let viewport_hover = ui.viewport_hover.clone();
-        let drag_move = ui.drag_move.clone();
-        let drag_key = ui.key;
-        block = block
-            .on_hover(move |hovered, window, cx| viewport_hover(*hovered, window, cx))
-            .on_drag_move(
-                move |event: &gpui::DragMoveEvent<CodeScrollbarDrag>, window, cx| {
-                    let Some(drag) = event.dragged_item().downcast_ref::<CodeScrollbarDrag>()
-                    else {
-                        return;
-                    };
-                    if drag.key == drag_key {
-                        drag_move(event.event.position.x, window, cx);
-                    }
-                },
-            );
-    }
-    block.into_any_element()
-}
-
 /// Paint color for a token class — the soft syntax palette (round 9: the
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
@@ -2982,732 +2379,6 @@ pub fn runs_for_syntax_line_with_plain(
     }
     runs.retain(|run| run.len > 0);
     runs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::markdown::parser::{InlineStyle, parse_full};
-    use gpui::TestAppContext;
-
-    struct HorizonReplyHarness;
-
-    impl Render for HorizonReplyHarness {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let theme = Theme::of(cx).clone();
-            let text = format!(
-                "{}\n\n- {}\n- Another item",
-                "A long assistant reply wraps inside the column. ".repeat(8),
-                "A list item wraps and keeps its hanging indent. ".repeat(5),
-            );
-            let tree = parse_full(&text);
-            let opts = RenderOptions::settled("horizon-reply".into());
-            let blocks = tree.blocks.iter().enumerate().map(|(ix, block)| {
-                let body = render_block(&block.block, ix, ix, &opts, &theme, window, None);
-                crate::components::agent_message_bubble(
-                    &theme, theme.accent, ix == 0, ix == 0, false, false, 0.0, None, body,
-                )
-            }).collect::<Vec<_>>();
-            div()
-                .size_full()
-                .child(selection_frame_reset())
-                .child(div().w_full().flex().flex_col().children(blocks))
-        }
-    }
-
-    #[gpui::test]
-    fn horizon_reply_wraps_and_list_text_keeps_its_indent(cx: &mut TestAppContext) {
-        let _selection = super::super::selection::test_state_lock();
-        cx.update(|cx| cx.set_global(Theme::dark().with_ui_style(crate::ui_style::UiStyle::HORIZON)));
-        let (_, cx) = cx.add_window_view(|_, _| HorizonReplyHarness);
-        for width in [320.0, 1000.0] {
-            cx.simulate_resize(size(px(width), px(900.0)));
-            cx.update(|window, cx| { window.refresh(); let _ = window.draw(cx); });
-            let paragraph = selection_test_bounds("horizon-reply:0");
-            let first = selection_test_bounds("horizon-reply:100");
-            let second = selection_test_bounds("horizon-reply:110");
-            assert!(paragraph.right() <= px(width));
-            assert!(paragraph.size.width <= px(720.0));
-            assert!(first.right() <= px(width));
-            assert_eq!(first.origin.x, second.origin.x);
-            assert!(first.origin.x > paragraph.origin.x);
-            if width == 320.0 {
-                let (text, layout, _) = selection_test_snapshot("horizon-reply:100");
-                let lines = range_rects(&layout, &(0..text.len()), 0.0, 0.0);
-                assert!(lines.len() > 1, "list item should wrap");
-                assert_eq!(lines[0].left(), lines[1].left(), "continuation aligns with the first line");
-            }
-        }
-    }
-
-    #[test]
-    fn horizon_code_tokens_remain_readable_on_inverse_panel() {
-        for id in ["horizon-light", "industrial-light"] {
-        let mut theme = Theme::for_selection(crate::theme::Appearance::Light, id, Default::default(), mast_theme::SurfacePreference::Opaque)
-            .with_ui_style(crate::ui_style::UiStyle::HORIZON);
-        theme.bg = theme.solid;
-        theme.text = theme.identity_text(theme.bg);
-        for kind in [HighlightKind::Comment, HighlightKind::Keyword, HighlightKind::String, HighlightKind::Function] {
-            assert!(crate::theme::contrast_ratio(token_color(kind, &theme), theme.bg) >= 7.0);
-        }
-        }
-    }
-
-    struct CodeSelectionHarness;
-
-    impl Render for CodeSelectionHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let theme = Theme::of(cx).clone();
-            let opts = RenderOptions::settled("code-selection-test".into());
-            let plain = |text: &str| {
-                vec![InlineRun {
-                    text: text.into(),
-                    style: InlineStyle::default(),
-                }]
-            };
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(selection_frame_reset())
-                .child(text_element(
-                    &plain("before"),
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    false,
-                    0,
-                    0,
-                    &opts,
-                    &theme,
-                ))
-                .child(render_code_block_source(
-                    None,
-                    "selectable\n\nsecond",
-                    1,
-                    1,
-                    &opts,
-                    &theme,
-                    None,
-                ))
-                .child(text_element(
-                    &plain("after"),
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    false,
-                    2,
-                    2,
-                    &opts,
-                    &theme,
-                ))
-        }
-    }
-
-    #[gpui::test]
-    fn code_block_lines_participate_in_text_selection(cx: &mut TestAppContext) {
-        let _selection = super::super::selection::test_state_lock();
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness);
-        cx.simulate_resize(size(px(640.0), px(240.0)));
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-
-        let before_key = "code-selection-test:0";
-        let first_key = "code-selection-test-code1-line0";
-        let blank_key = "code-selection-test-code1-line1";
-        let second_key = "code-selection-test-code1-line2";
-        let after_key = "code-selection-test:2";
-        let before_bounds = selection_test_bounds(before_key);
-        let first_bounds = selection_test_bounds(first_key);
-        selection_test_bounds(blank_key);
-        let second_bounds = selection_test_bounds(second_key);
-        let after_bounds = selection_test_bounds(after_key);
-
-        cx.simulate_event(gpui::MouseDownEvent {
-            button: gpui::MouseButton::Left,
-            position: first_bounds.origin + point(px(5.0), px(9.0)),
-            click_count: 2,
-            ..Default::default()
-        });
-        assert_eq!(
-            super::super::selection::selected_text().as_deref(),
-            Some("selectable")
-        );
-        super::super::selection::end_active_drag();
-        super::super::selection::clear_if_owner(first_key);
-
-        cx.simulate_event(gpui::MouseDownEvent {
-            button: gpui::MouseButton::Left,
-            position: first_bounds.origin + point(px(1.0), px(9.0)),
-            click_count: 1,
-            ..Default::default()
-        });
-        cx.simulate_event(gpui::MouseMoveEvent {
-            position: point(second_bounds.right(), second_bounds.top() + px(9.0)),
-            pressed_button: Some(gpui::MouseButton::Left),
-            ..Default::default()
-        });
-        assert_eq!(
-            super::super::selection::selected_text().as_deref(),
-            Some("selectable\n\nsecond")
-        );
-        cx.simulate_event(gpui::MouseUpEvent {
-            button: gpui::MouseButton::Left,
-            position: point(second_bounds.right(), second_bounds.top() + px(9.0)),
-            ..Default::default()
-        });
-        super::super::selection::clear_if_owner(first_key);
-
-        super::super::selection::begin(before_key, 0);
-        assert!(update_drag_at(point(
-            after_bounds.right(),
-            after_bounds.top() + px(9.0)
-        )));
-        assert_eq!(
-            super::super::selection::selected_text().as_deref(),
-            Some("before\nselectable\n\nsecond\nafter")
-        );
-        super::super::selection::end_active_drag();
-        super::super::selection::clear_if_owner(before_key);
-        assert!(before_bounds.top() < first_bounds.top());
-        assert!(second_bounds.bottom() < after_bounds.bottom());
-    }
-
-    /// Markdown code blocks are the surface the shared setting's default was
-    /// taken from, so they scale 1:1 and need no ratio of their own.
-    #[test]
-    fn the_default_code_font_size_reproduces_the_historical_code_block_size() {
-        assert_eq!(CODE_TEXT_SIZE, crate::typography::CODE_FONT_SIZE_DEFAULT);
-        let theme = crate::theme::Theme::dark();
-        assert_eq!(theme.code_font_size, CODE_TEXT_SIZE);
-        assert_eq!(
-            theme.code_font_size * CODE_LINE_HEIGHT_RATIO,
-            CODE_LINE_HEIGHT
-        );
-    }
-
-    #[test]
-    fn code_block_indices_include_nested_quotes_and_lists() {
-        let quoted = parse_full("> ```rust\n> let x = 1;\n> ```\n");
-        assert_eq!(code_block_indices(&quoted.blocks[0].block, 0), vec![0]);
-
-        let listed = parse_full("- Result:\n\n  ```json\n  {\"ok\":true}\n  ```\n");
-        assert_eq!(code_block_indices(&listed.blocks[0].block, 0), vec![1]);
-
-        let top_level = parse_full("paragraph\n\n```text\nvalue\n```\n");
-        assert_eq!(code_block_indices(&top_level.blocks[1].block, 1), vec![1]);
-    }
-
-    #[test]
-    fn sole_workspace_link_gets_a_file_path() {
-        let runs = vec![InlineRun {
-            text: "slides.ts".into(),
-            style: InlineStyle {
-                link: Some("src/slides.ts#L12".into()),
-                ..Default::default()
-            },
-        }];
-        assert_eq!(
-            sole_workspace_file_link(&runs, "/work/comet"),
-            Some("src/slides.ts".into())
-        );
-    }
-
-    #[test]
-    fn direct_file_decoration_excludes_mixed_and_external_links() {
-        let linked = InlineRun {
-            text: "slides.ts".into(),
-            style: InlineStyle {
-                link: Some("src/slides.ts".into()),
-                ..Default::default()
-            },
-        };
-        let mixed = vec![
-            InlineRun {
-                text: "See ".into(),
-                style: InlineStyle::default(),
-            },
-            linked,
-        ];
-        assert_eq!(sole_workspace_file_link(&mixed, "/work/comet"), None);
-
-        let external = vec![InlineRun {
-            text: "website".into(),
-            style: InlineStyle {
-                link: Some("https://example.com/slides.ts".into()),
-                ..Default::default()
-            },
-        }];
-        assert_eq!(sole_workspace_file_link(&external, "/work/comet"), None);
-    }
-
-    #[test]
-    fn standalone_recognized_filename_gets_a_decorative_identity() {
-        let plain = vec![InlineRun {
-            text: "AudienceView.tsx".into(),
-            style: InlineStyle::default(),
-        }];
-        assert_eq!(
-            sole_file_reference(&plain, "/work/comet"),
-            Some("AudienceView.tsx".into())
-        );
-
-        let linked_unknown = vec![InlineRun {
-            text: "artifact.unknown".into(),
-            style: InlineStyle {
-                link: Some("build/artifact.unknown".into()),
-                ..Default::default()
-            },
-        }];
-        assert_eq!(
-            sole_file_reference(&linked_unknown, "/work/comet"),
-            Some("build/artifact.unknown".into())
-        );
-    }
-
-    #[test]
-    fn plain_file_decoration_rejects_prose_code_and_unknown_dotted_tokens() {
-        let plain = |text: &str| {
-            vec![InlineRun {
-                text: text.into(),
-                style: InlineStyle::default(),
-            }]
-        };
-        assert_eq!(
-            sole_file_reference(&plain("version 1.2"), "/work/comet"),
-            None
-        );
-        assert_eq!(
-            sole_file_reference(&plain("example.invalid"), "/work/comet"),
-            None
-        );
-
-        let code = vec![InlineRun {
-            text: "slides.ts".into(),
-            style: InlineStyle {
-                code: true,
-                ..Default::default()
-            },
-        }];
-        assert_eq!(sole_file_reference(&code, "/work/comet"), None);
-    }
-
-    #[test]
-    fn inline_code_file_references_become_workspace_links() {
-        let runs = vec![InlineRun {
-            text: "src/lib.rs:42:7".into(),
-            style: InlineStyle {
-                code: true,
-                ..Default::default()
-            },
-        }];
-        let linked = implicit_workspace_code_links(&runs, "/work/comet").unwrap();
-        assert_eq!(linked[0].style.link.as_deref(), Some("src/lib.rs:42:7"));
-
-        let ordinary = vec![InlineRun {
-            text: "Vec<String>".into(),
-            style: InlineStyle {
-                code: true,
-                ..Default::default()
-            },
-        }];
-        assert_eq!(
-            implicit_workspace_code_links(&ordinary, "/work/comet"),
-            None
-        );
-    }
-
-    #[test]
-    fn hard_break_file_list_resolves_every_recognized_line() {
-        let runs = vec![InlineRun {
-            text: "slides.ts\ncourseDecks.ts\nAudienceView.tsx\nglobals.css".into(),
-            style: InlineStyle::default(),
-        }];
-        assert_eq!(
-            plain_file_reference_lines(&runs, "/work/comet"),
-            Some(vec![
-                "slides.ts".into(),
-                "courseDecks.ts".into(),
-                "AudienceView.tsx".into(),
-                "globals.css".into(),
-            ])
-        );
-
-        let mixed = vec![InlineRun {
-            text: "slides.ts\nnot a file".into(),
-            style: InlineStyle::default(),
-        }];
-        assert_eq!(plain_file_reference_lines(&mixed, "/work/comet"), None);
-    }
-
-    /// Model GPUI's upstream affinity at a soft-wrap boundary: byte 5 is
-    /// reported at the end of row 0, while byte 6 is after the first glyph on
-    /// row 1.
-    fn wrapped_position(ix: usize) -> Option<gpui::Point<gpui::Pixels>> {
-        (ix <= 9).then(|| {
-            if ix <= 5 {
-                point(px(ix as f32 * 10.0), px(0.0))
-            } else {
-                point(px((ix - 5) as f32 * 10.0), px(22.0))
-            }
-        })
-    }
-
-    fn wrapped_range_rects(range: Range<usize>) -> Vec<Bounds<gpui::Pixels>> {
-        range_rects_with_positions(
-            Bounds::new(point(px(0.0), px(0.0)), size(px(50.0), px(44.0))),
-            px(22.0),
-            &range,
-            0.0,
-            0.0,
-            wrapped_position,
-        )
-    }
-
-    #[test]
-    fn range_starting_at_soft_wrap_includes_first_glyph() {
-        let rects = wrapped_range_rects(5..9);
-        assert_eq!(rects.len(), 1);
-        assert_eq!(rects[0].origin, point(px(0.0), px(22.0)));
-        assert_eq!(rects[0].size, size(px(40.0), px(22.0)));
-    }
-
-    #[test]
-    fn range_crossing_soft_wrap_includes_first_continuation_glyph() {
-        let rects = wrapped_range_rects(2..9);
-        assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0].origin, point(px(20.0), px(0.0)));
-        assert_eq!(rects[0].size, size(px(30.0), px(22.0)));
-        assert_eq!(rects[1].origin, point(px(0.0), px(22.0)));
-        assert_eq!(rects[1].size, size(px(40.0), px(22.0)));
-    }
-
-    #[test]
-    fn code_line_runs_cover_exactly() {
-        let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
-        let line = r#"let x = "hi"; // done"#;
-        let document = mast_syntax::highlight(mast_syntax::HighlightRequest {
-            source: line,
-            path: None,
-            fence_tag: Some("rust"),
-        })
-        .unwrap();
-        let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
-        let total: usize = runs.iter().map(|r| r.len).sum();
-        assert_eq!(total, line.len());
-        assert!(
-            runs.iter().all(|r| r.font == mono),
-            "highlight must not change fonts"
-        );
-        // At least one non-plain color made it through.
-        assert!(runs.iter().any(|r| r.color != theme.text));
-    }
-
-    #[test]
-    fn tree_sitter_runs_are_rich_and_paint_only() {
-        let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
-        let line = "let widget = build!(42);";
-        let document = mast_syntax::highlight(mast_syntax::HighlightRequest {
-            source: line,
-            path: None,
-            fence_tag: Some("rust"),
-        })
-        .unwrap();
-        let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
-        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
-        assert!(runs.iter().all(|run| run.font == mono));
-        let colors = runs.iter().map(|run| run.color).collect::<Vec<_>>();
-        assert!(colors.contains(&theme.syntax.keyword));
-        assert!(colors.contains(&theme.syntax.macro_name));
-        assert!(colors.contains(&theme.syntax.number));
-    }
-
-    #[test]
-    fn affected_language_roles_flow_through_markdown_paint_only() {
-        let cases: &[(&str, &str, &[HighlightKind])] = &[
-            (
-                "typescript",
-                "export function derive(name: string) { return call(name); }",
-                &[
-                    HighlightKind::Keyword,
-                    HighlightKind::Function,
-                    HighlightKind::Parameter,
-                    HighlightKind::TypeBuiltin,
-                ],
-            ),
-            (
-                "tsx",
-                "function card(props: Props): JSX.Element { return <main id={props.id} />; }",
-                &[
-                    HighlightKind::Tag,
-                    HighlightKind::Attribute,
-                    HighlightKind::Type,
-                ],
-            ),
-            (
-                "kotlin",
-                "fun greet(name: String) = println(name)",
-                &[
-                    HighlightKind::Keyword,
-                    HighlightKind::Function,
-                    HighlightKind::Parameter,
-                    HighlightKind::TypeBuiltin,
-                ],
-            ),
-            (
-                "dockerfile",
-                "RUN echo \"hello\"",
-                &[
-                    HighlightKind::Keyword,
-                    HighlightKind::Function,
-                    HighlightKind::String,
-                ],
-            ),
-        ];
-        for &(fence_tag, line, required) in cases {
-            let document = mast_syntax::highlight(mast_syntax::HighlightRequest {
-                source: line,
-                path: None,
-                fence_tag: Some(fence_tag),
-            })
-            .unwrap();
-            let kinds = document.lines[0]
-                .iter()
-                .map(|span| span.kind)
-                .collect::<Vec<_>>();
-            for &kind in required {
-                assert!(kinds.contains(&kind), "missing {kind:?} for {fence_tag}");
-            }
-            for theme in [Theme::dark(), Theme::light()] {
-                let mono = font(theme.font_mono.clone());
-                let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
-                assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
-                assert!(runs.iter().all(|run| run.font == mono));
-                let colors = runs.iter().map(|run| run.color).collect::<Vec<_>>();
-                for &kind in required {
-                    assert!(
-                        colors.contains(&token_color(kind, &theme)),
-                        "missing {kind:?} color for {fence_tag}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn code_line_runs_with_no_tokens_are_one_plain_run() {
-        let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
-        let runs = runs_for_syntax_line("plain text", &[], &mono, &theme);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].len, 10);
-    }
-
-    #[test]
-    fn flatten_collects_and_merges_inline_code_ranges() {
-        let theme = Theme::dark();
-        let code = |text: &str| InlineRun {
-            text: text.into(),
-            style: InlineStyle {
-                code: true,
-                ..Default::default()
-            },
-        };
-        let plain = |text: &str| InlineRun {
-            text: text.into(),
-            style: InlineStyle::default(),
-        };
-        let flat = flatten_runs(
-            &[
-                plain("use "),
-                code("foo"),
-                code("()"),
-                plain(" and "),
-                code("bar"),
-            ],
-            &theme,
-            false,
-        );
-        // Adjacent code runs merge into ONE wash box; separated ones don't.
-        assert_eq!(flat.code_ranges, vec![4..9, 14..17]);
-        // Code text is the violet tint; the square run background is gone
-        // (the rounded wash is painted by the canvas underlay instead).
-        assert_eq!(flat.runs[1].color, inline_code_text(&theme));
-        assert_eq!(flat.runs[1].background_color, None);
-        assert_eq!(flat.runs[0].color, theme.text);
-    }
-
-    #[test]
-    fn code_palette_is_colored_and_shared() {
-        // Round 9: transcript code blocks paint the soft hues (rose keyword,
-        // green string, amber number); comments stay faint neutral.
-        let theme = Theme::dark();
-        assert_ne!(token_color(HighlightKind::Keyword, &theme), theme.text);
-        assert_ne!(
-            token_color(HighlightKind::String, &theme),
-            token_color(HighlightKind::Keyword, &theme)
-        );
-        assert_ne!(token_color(HighlightKind::Comment, &theme), theme.text);
-    }
-
-    #[test]
-    fn flatten_runs_maps_links_and_styles() {
-        let theme = Theme::dark();
-        let runs = vec![
-            InlineRun {
-                text: "go ".into(),
-                style: InlineStyle::default(),
-            },
-            InlineRun {
-                text: "here".into(),
-                style: InlineStyle {
-                    link: Some("https://x.dev".into()),
-                    ..Default::default()
-                },
-            },
-            InlineRun {
-                text: " now".into(),
-                style: InlineStyle {
-                    bold: true,
-                    ..Default::default()
-                },
-            },
-        ];
-        let flat = flatten_runs(&runs, &theme, false);
-        assert_eq!(flat.text, "go here now");
-        assert_eq!(flat.links, vec![(3..7, "https://x.dev".to_string())]);
-        let total: usize = flat.runs.iter().map(|r| r.len).sum();
-        assert_eq!(total, flat.text.len());
-        // Links stay monochrome (foreground + underline), never accent-tinted.
-        assert_eq!(flat.runs[1].color, theme.text);
-        assert!(flat.runs[1].underline.is_some());
-        assert_eq!(flat.runs[2].font.weight, FontWeight::SEMIBOLD);
-    }
-
-    #[test]
-    fn table_columns_floor_and_padding() {
-        // A short column keeps its content width (floored at MIN_COLUMN_CONTENT
-        // + padding); a wide one may wrap but no narrower than minColumnWidth.
-        let geo = table_columns(&[10.0, 200.0]);
-        assert_eq!(geo.naturals, vec![72.0, 224.0]); // 48+24, 200+24
-        assert_eq!(geo.minimums, vec![72.0, 96.0]);
-        assert_eq!(geo.min_table_width, 168.0);
-    }
-
-    #[test]
-    fn table_columns_are_content_proportional_not_equal() {
-        let geo = table_columns(&[300.0, 60.0, 60.0]);
-        // Flex grow factors are the naturals — a prose column gets a larger
-        // share than short ones (not equal thirds).
-        assert!(geo.naturals[0] > 3.0 * geo.naturals[1] * 0.9);
-        assert_eq!(geo.naturals[1], geo.naturals[2]);
-    }
-
-    #[test]
-    fn table_header_flattens_at_weight_700() {
-        let theme = Theme::dark();
-        let runs = vec![InlineRun {
-            text: "Header".into(),
-            style: InlineStyle::default(),
-        }];
-        let flat = flatten_runs_weighted(&runs, &theme, TABLE_HEADER_WEIGHT);
-        assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
-        // Strong runs inside a 700 header stay 700 (never drop to semibold).
-        let bold_runs = vec![InlineRun {
-            text: "Strong".into(),
-            style: InlineStyle {
-                bold: true,
-                ..Default::default()
-            },
-        }];
-        let flat = flatten_runs_weighted(&bold_runs, &theme, TABLE_HEADER_WEIGHT);
-        assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
-    }
-
-    #[test]
-    fn adjacent_same_link_runs_merge_into_one_range() {
-        let theme = Theme::dark();
-        let style = InlineStyle {
-            link: Some("https://x.dev".into()),
-            ..Default::default()
-        };
-        let runs = vec![
-            InlineRun {
-                text: "bold".into(),
-                style: InlineStyle {
-                    bold: true,
-                    ..style.clone()
-                },
-            },
-            InlineRun {
-                text: " tail".into(),
-                style,
-            },
-        ];
-        let flat = flatten_runs(&runs, &theme, false);
-        assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_string())]);
-    }
-
-    #[test]
-    fn viewport_cache_releases_offscreen_paint_data() {
-        let mut cache = RenderCache::default();
-        for row in ["visible", "offscreen"] {
-            cache.flats.insert(
-                (row.into(), 0, 0),
-                Rc::new(FlatText {
-                    original: None,
-                    text: "text".into(),
-                    runs: Vec::new(),
-                    links: Vec::new(),
-                    code_ranges: Vec::new(),
-                }),
-            );
-            cache.code.insert(
-                (row.into(), 0, 0),
-                Rc::new(CachedCode {
-                    code_len: 0,
-                    hl_key: (0, 0),
-                    lines: Vec::new(),
-                }),
-            );
-        }
-        cache.retain_rows(&std::collections::HashSet::from(["visible".into()]));
-        assert_eq!(cache.flats.len(), 1);
-        assert_eq!(cache.code.len(), 1);
-        assert!(cache.flats.keys().all(|(row, _, _)| row == "visible"));
-        cache.retain_rows(&std::collections::HashSet::new());
-        assert!(cache.flats.is_empty());
-        assert!(cache.code.is_empty());
-    }
-
-    #[test]
-    fn style_generation_change_invalidates_cached_runs() {
-        let mut cache = RenderCache {
-            generation: 10,
-            ..Default::default()
-        };
-        cache.flats.insert(
-            ("row".into(), 0, 0),
-            Rc::new(FlatText {
-                original: None,
-                text: "cached".into(),
-                runs: Vec::new(),
-                links: Vec::new(),
-                code_ranges: Vec::new(),
-            }),
-        );
-        cache.sync_generation(10);
-        assert_eq!(cache.flats.len(), 1, "same style is idempotent");
-        cache.sync_generation(11);
-        assert!(
-            cache.flats.is_empty(),
-            "font or color changes invalidate runs"
-        );
-        assert!(cache.code.is_empty());
-    }
 }
 
 /// Native fixture access to actual shaped link ranges; absent in shipped builds.

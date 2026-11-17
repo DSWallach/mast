@@ -19,6 +19,7 @@
 //! - `PrStatus` caching, `PrMyOpen` / `PrReviewRequested` filtering, and
 //!   `StartPrReview` assigning the review Chat to a synced item.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1251,6 +1252,23 @@ async fn a_ticket_item_linking_a_requested_pr_is_not_adopted() {
     assert_eq!(item.status, WorkItemStatus::Pending);
     assert!(item.parent_work_item_id.is_none());
     assert_eq!(snapshot.unresolved_user_action_requests(&ticket).count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_review_drafts_round_trip_through_rpc() {
+    let rig = rig().await;
+    let target = "pr:acme/ui#9";
+    let drafts = json!([{ "id": "one", "target": target,
+        "anchor": {"file": "src/a.rs", "side": "right", "startLine": 4, "endLine": 4, "hunkHash": "hash"},
+        "body": "Check this", "source": "user", "createdAt": 1 }]);
+    rig.call(methods::SET_REVIEW_DRAFTS, json!({"target": target, "before": [], "drafts": drafts})).await.unwrap();
+    assert_eq!(rig.call(methods::GET_REVIEW_DRAFTS, json!({"target": target})).await.unwrap(), drafts);
+    let accepted = json!({"id":"two", "target":target, "anchor":{"file":"src/a.rs", "side":"right", "startLine":4, "endLine":4},
+        "body":"Agent finding", "source":"agent", "createdAt":2});
+    rig.call(methods::ACCEPT_REVIEW_SUGGESTION, json!({"draft":accepted, "id":"suggestion-1"})).await.unwrap();
+    let stored = rig.call(methods::GET_REVIEW_DRAFTS, json!({"target":target})).await.unwrap();
+    assert_eq!(stored.as_array().unwrap().len(), 2);
+    assert_eq!(rig.call(methods::GET_DISMISSED_REVIEW_SUGGESTIONS, json!({"target":target})).await.unwrap(), json!(["suggestion-1"]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

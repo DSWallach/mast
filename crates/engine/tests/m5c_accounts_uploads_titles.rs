@@ -5,6 +5,7 @@
 //! Account tests use explicit `AgentAccountsConfig` paths under a tempdir (never
 //! the real `~/.claude` / `~/.codex`), so they are hermetic and parallel-safe.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

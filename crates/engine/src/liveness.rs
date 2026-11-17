@@ -32,7 +32,6 @@
 //! process's file descriptor table instead.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 /// A source session's on-disk transcript was modified more recently than
@@ -105,7 +104,7 @@ struct PsRow {
 }
 
 fn list_processes() -> Vec<PsRow> {
-    let Ok(output) = Command::new("ps").args(["-eo", "pid=,args="]).output() else {
+    let Ok(output) = mast_harness::command("ps").args(["-eo", "pid=,args="]).output() else {
         return Vec::new(); // `ps` unavailable (e.g. non-Unix) — undetermined
     };
     if !output.status.success() {
@@ -168,7 +167,7 @@ fn processes_matching(
 /// `None` on any failure (process exited, permission denied, `lsof` absent,
 /// unexpected output shape) — undetermined, not an error.
 fn real_cwd_of(pid: u32) -> Option<String> {
-    let output = Command::new("lsof")
+    let output = mast_harness::command("lsof")
         .args(["-a", "-d", "cwd", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -364,7 +363,7 @@ mod tests {
         // reached the actual process's argv at all — the fingerprint has to
         // be something the exec'd binary itself actually receives).
         let fingerprint = std::process::id().to_string();
-        let mut child = match Command::new("sleep").arg(&fingerprint).spawn() {
+        let mut child = match mast_harness::command("sleep").arg(&fingerprint).spawn() {
             Ok(child) => child,
             Err(_) => return, // no `sleep` on this machine/platform — skip
         };

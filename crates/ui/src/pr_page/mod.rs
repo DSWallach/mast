@@ -806,11 +806,9 @@ mod tests {
 
     #[test]
     fn items_insert_headers_per_bucket_run() {
-        let rows = vec![
-            row(1, PrDashBucket::NeedsYou, T2),
+        let rows = [row(1, PrDashBucket::NeedsYou, T2),
             row(2, PrDashBucket::NeedsYou, T1),
-            row(3, PrDashBucket::Ready, T1),
-        ];
+            row(3, PrDashBucket::Ready, T1)];
         let refs: Vec<&PrDashRow> = rows.iter().collect();
         let grouped = items(&refs, true);
         assert_eq!(grouped.len(), 5);

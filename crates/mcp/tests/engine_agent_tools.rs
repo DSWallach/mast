@@ -86,6 +86,120 @@ async fn wait_for<F: FnMut() -> bool>(mut predicate: F, what: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_publish_validates_input_and_example() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FakeClaude));
+    let core = EngineCore::assemble(
+        &root.join("data"),
+        Arc::new(registry),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .expect("engine core assembles");
+    let admin = mast_rpc::memory_client(core.rpc_service());
+    admin
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createSpace", "spaceId": SPACE, "deviceId": core.device_id,
+                    "path": project.to_string_lossy() }),
+        )
+        .await
+        .unwrap();
+    admin
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createChat", "chatId": PARENT, "spaceId": SPACE,
+                    "deviceId": core.device_id,
+                    "config": { "harness": "claude-code", "model": null, "reasoning": null,
+                                "sandbox": "workspace-write" } }),
+        )
+        .await
+        .unwrap();
+    admin
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItem", "spaceId": SPACE, "title": "Feature",
+                    "operationId": "op-item" }),
+        )
+        .await
+        .unwrap();
+    let item = derive_id("op-item", roles::ITEM);
+    admin
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": PARENT, "workItemId": item,
+                    "operationId": "op-assign" }),
+        )
+        .await
+        .unwrap();
+
+    let lease = core
+        .sessions
+        .agent_tokens()
+        .mint(PARENT, "run-1", SPACE, &core.device_id);
+    let tools = Tools::new(Arc::new(Mast::with_client(
+        mast_rpc::memory_client(core.rpc_service()),
+        Some(lease.token().to_owned()),
+    )));
+
+    // Exercise the published example and audit failures through MCP and the offline engine.
+    let git = |args: &[&str]| {
+        let output = mast_harness::git_command().current_dir(&project).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "base"]);
+    let sha = git(&["rev-parse", "HEAD"]);
+    let description = tools.list().into_iter().find(|tool| tool.name == "review_publish").unwrap().description;
+    let example = description.split_once("Example: ").unwrap().1;
+    let mut valid: Value = serde_json::from_str(example).unwrap();
+    valid["headSha"] = json!(sha);
+    valid["review"]["pr"]["headSha"] = json!(sha);
+    valid["review"]["pr"]["baseSha"] = json!(sha);
+    let mut missing_head = valid.clone();
+    missing_head.as_object_mut().unwrap().remove("headSha");
+    let mut missing_review = valid.clone();
+    let flattened = missing_review.as_object_mut().unwrap().remove("review").unwrap();
+    missing_review.as_object_mut().unwrap().extend(flattened.as_object().unwrap().clone());
+    let mut summary_array = valid.clone();
+    summary_array["review"]["summary"] = json!(["First line", "Second line"]);
+    let mut missing_target = valid.clone();
+    missing_target.as_object_mut().unwrap().remove("prUrl");
+    let mut missing_all = valid.clone();
+    missing_all.as_object_mut().unwrap().remove("prUrl");
+    missing_all.as_object_mut().unwrap().remove("headSha");
+    let mut missing_pr = valid.clone();
+    missing_pr["review"].as_object_mut().unwrap().remove("pr");
+    let mut nested_target = valid.clone();
+    nested_target["review"]["target"] = json!({"kind":"pr"});
+    let mut bad_number = valid.clone();
+    bad_number["target"] = json!({"kind":"pr", "repo":"a/b", "number":"one", "headSha":sha, "baseSha":sha});
+    let mut bad_head = bad_number.clone();
+    bad_head["target"]["number"] = json!(1);
+    bad_head["target"]["headSha"] = json!(42);
+    for (arguments, expected, detail) in [
+        (missing_head, "headSha", "expected"), (missing_review, "review", "expected"),
+        (summary_array, "review.summary", "expected a string"), (missing_target, "prUrl or target", "expected"),
+        (missing_all, "prUrl or target", "expected"), (missing_pr, "review.pr", "missing field"),
+        (nested_target, "review.target", "top-level target"),
+        (bad_number, "target.number", "expected u64"), (bad_head, "target.headSha", "expected a string"),
+    ] {
+        let error = tools.call("review_publish", arguments).await.unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(detail), "{error}");
+    }
+    tools.call("review_publish", valid.clone()).await.expect("description example validates");
+    valid["review"]["questions"] = json!(["Why?", {"question":"How?"}, {"text":"When?"}]);
+    tools.call("review_publish", valid).await.expect("question forms validate");
+
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();

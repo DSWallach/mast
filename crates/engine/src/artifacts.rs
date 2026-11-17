@@ -428,14 +428,13 @@ struct PublishArgs {
 }
 
 fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
-        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        && let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
             .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
             .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
         {
             return kind;
         }
-    }
     ArtifactKind::from_path(&path.to_string_lossy())
 }
 
@@ -684,6 +683,13 @@ struct Inner {
     /// Serializes every artifact write and the watcher; holds the watcher
     /// cache keyed by stored path.
     gate: Mutex<HashMap<String, SeenFile>>,
+    /// The watcher's file list (`(artifact id, stored path)` of this device's live
+    /// artifacts) with the artifact-rows generation it was built at. The watcher polls
+    /// every [`WATCH_INTERVAL`]; decoding every row (revision lists included) each time
+    /// just to `stat` their files was the idle engine's top steady allocator.
+    watch_index: Mutex<Option<(u64, Vec<(String, String)>)>>,
+    /// How many times `watch_index` was rebuilt (budget test).
+    watch_index_builds: std::sync::atomic::AtomicU64,
     render: Arc<RenderBroker>,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
@@ -695,6 +701,44 @@ pub struct ArtifactsService {
     inner: Arc<Inner>,
 }
 
+fn deserialize_review_field<T: serde::de::DeserializeOwned>(
+    field: &str,
+    value: Value,
+) -> Outcome<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let mut location = if path == "." { field.to_owned() } else { format!("{field}.{path}") };
+        let message = error.inner().to_string();
+        if let Some(name) = message.strip_prefix("missing field `").and_then(|s| s.strip_suffix('`')) {
+            location.push('.');
+            location.push_str(name);
+        }
+        ArtifactError::invalid(format!("{location}: {message}"))
+    })
+}
+
+fn deserialize_review_target(value: Value) -> Outcome<mast_proto::ReviewTarget> {
+    // Internally tagged enum deserialization buffers fields and loses their paths.
+    if let Some(object) = value.as_object() {
+        let fields: &[&str] = match object.get("kind").and_then(Value::as_str) {
+            Some("pr") => &["repo", "number", "headSha", "baseSha"],
+            Some("branch") => &["repo", "checkoutPath", "checkout", "branch", "baseRef", "baseSha", "headSha"],
+            _ => &[],
+        };
+        for &field in fields {
+            if let Some(field_value) = object.get(field) {
+                let path = format!("target.{field}");
+                if field == "number" {
+                    let _: u64 = deserialize_review_field(&path, field_value.clone())?;
+                } else if !field_value.is_null() || field == "headSha" || matches!(field, "repo" | "baseSha") && object.get("kind").and_then(Value::as_str) == Some("pr") {
+                    let _: String = deserialize_review_field(&path, field_value.clone())?;
+                }
+            }
+        }
+    }
+    deserialize_review_field("target", value)
+}
+
 impl ArtifactsService {
     pub fn new(workspace: WorkspaceHost) -> Self {
         let snapshots = workspace.store_root().join("artifacts");
@@ -704,6 +748,8 @@ impl ArtifactsService {
                 snapshots,
                 questions: Mutex::new(HashMap::new()),
                 gate: Mutex::new(HashMap::new()),
+                watch_index: Mutex::new(None),
+                watch_index_builds: std::sync::atomic::AtomicU64::new(0),
                 render: Arc::new(RenderBroker::default()),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
@@ -1230,17 +1276,21 @@ impl ArtifactsService {
     pub fn scan_external_edits(&self) -> usize {
         let mut seen = lock(&self.inner.gate);
         let mut recorded = 0;
-        for mut view in self.workspace().all_artifacts() {
-            if view.device_id != self.device_id() || view.archived_at.is_some() {
-                continue;
-            }
-            let Ok(meta) = std::fs::metadata(&view.stored_path) else {
+        for (id, stored_path) in self.watch_files() {
+            let Ok(meta) = std::fs::metadata(&stored_path) else {
                 continue;
             };
             let stamp = (meta.modified().ok(), meta.len());
-            if let Some((mtime, size, _)) = seen.get(&view.stored_path)
+            if let Some((mtime, size, _)) = seen.get(&stored_path)
                 && (*mtime, *size) == stamp
             {
+                continue;
+            }
+            // Only a file that moved pays for decoding its row.
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            if view.device_id != self.device_id() || view.archived_at.is_some() {
                 continue;
             }
             let Ok(bytes) = read_file(Path::new(&view.stored_path)) else {
@@ -1286,6 +1336,39 @@ impl ArtifactsService {
             }
         }
         recorded
+    }
+
+    /// This device's live artifacts as `(id, stored path)`, rebuilt only when the
+    /// artifact rows changed.
+    fn watch_files(&self) -> Vec<(String, String)> {
+        // Generation first: a change landing during the rebuild leaves the stored
+        // generation stale, so the next poll rebuilds again.
+        let generation = self.workspace().artifacts_generation();
+        let mut index = lock(&self.inner.watch_index);
+        if let Some((built_at, files)) = index.as_ref()
+            && *built_at == generation
+        {
+            return files.clone();
+        }
+        let files: Vec<(String, String)> = self
+            .workspace()
+            .all_artifacts()
+            .into_iter()
+            .filter(|view| view.device_id == self.device_id() && view.archived_at.is_none())
+            .map(|view| (view.id, view.stored_path))
+            .collect();
+        self.inner
+            .watch_index_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *index = Some((generation, files.clone()));
+        files
+    }
+
+    /// Times the watcher decoded all artifact rows (budget test).
+    pub fn watch_index_builds(&self) -> u64 {
+        self.inner
+            .watch_index_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Poll stored files every [`WATCH_INTERVAL`] for the process lifetime.
@@ -2415,13 +2498,18 @@ impl ArtifactsService {
         let mut target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         let mut value = arguments
             .get("review")
             .cloned()
-            .ok_or_else(|| ArtifactError::invalid("review is required"))?;
+            .ok_or_else(|| ArtifactError::invalid("review: expected an object; received missing field"))?;
+        if value.get("target").is_some() {
+            return Err(ArtifactError::invalid("review.target is not accepted; use the top-level target field"));
+        }
+        if target.is_none() && arguments.get("prUrl").and_then(Value::as_str).is_none() {
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
+        }
         let head = match &target {
             Some(mast_proto::ReviewTarget::Branch {
                 repo,
@@ -2485,11 +2573,10 @@ impl ArtifactsService {
             None => arguments
                 .get("headSha")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ArtifactError::invalid("headSha is required"))?
+                .ok_or_else(|| ArtifactError::invalid("headSha: expected a full commit SHA string when target is absent; received missing or non-string value"))?
                 .to_owned(),
         };
-        let mut review: mast_proto::ReviewSidecar = serde_json::from_value(value)
-            .map_err(|e| ArtifactError::invalid(format!("invalid review: {e}")))?;
+        let mut review: mast_proto::ReviewSidecar = deserialize_review_field("review", value)?;
         if arguments
             .get("headSha")
             .and_then(Value::as_str)
@@ -2533,7 +2620,7 @@ impl ArtifactsService {
                 return Err(ArtifactError::invalid("review.pr does not match prUrl"));
             }
         } else if target.is_none() {
-            return Err(ArtifactError::invalid("prUrl or target is required"));
+            return Err(ArtifactError::invalid("prUrl or target: expected a PR URL string or target object; received neither"));
         }
         if let Some(mast_proto::ReviewTarget::PullRequest {
             repo,
@@ -2541,15 +2628,13 @@ impl ArtifactsService {
             head_sha,
             base_sha,
         }) = &target
-        {
-            if !review.pr.repo.eq_ignore_ascii_case(repo)
+            && (!review.pr.repo.eq_ignore_ascii_case(repo)
                 || review.pr.number != *number
                 || !review.pr.head_sha.eq_ignore_ascii_case(head_sha)
-                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha)
+                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha))
             {
                 return Err(ArtifactError::invalid("review.pr does not match target"));
             }
-        }
         review.target = target;
         crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, &head)
             .map_err(ArtifactError::invalid)?;
@@ -2596,9 +2681,8 @@ impl ArtifactsService {
         let mut requested_target: Option<mast_proto::ReviewTarget> = arguments
             .get("target")
             .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| ArtifactError::invalid(format!("invalid target: {e}")))?;
+            .map(deserialize_review_target)
+            .transpose()?;
         if let Some(mast_proto::ReviewTarget::Branch { repo, checkout_path: Some(path), .. }) = &mut requested_target
             && repo.as_deref().is_none_or(str::is_empty)
         {
@@ -2643,16 +2727,15 @@ impl ArtifactsService {
                     continue;
                 }
             }
-            if let Some(pr) = &requested {
-                if review.pr.number != pr.number
+            if let Some(pr) = &requested
+                && (review.pr.number != pr.number
                     || !review
                         .pr
                         .repo
-                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo)))
                 {
                     continue;
                 }
-            }
             self.normalize_review_hashes(&caller.chat_id, &mut review);
             let branch_head = match &review.target {
                 Some(mast_proto::ReviewTarget::Branch {
@@ -2755,8 +2838,8 @@ impl ArtifactsService {
             Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
         }).unwrap_or_default();
         let mut warnings = Vec::<String>::new();
-        if kind == Some(ArtifactKind::Plan) {
-            if let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
+        if kind == Some(ArtifactKind::Plan)
+            && let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
                 && let Ok(bytes) = self.current_bytes(&artifact)
                 && let Ok(source) = std::str::from_utf8(&bytes)
                 && let Ok(plan) = mast_proto::plan::Plan::parse(source)
@@ -2768,7 +2851,6 @@ impl ArtifactsService {
                 });
                 if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
             }
-        }
         Ok(json!({
             "warnings": warnings,
             "artifactId": reply.artifact_id,
@@ -3157,6 +3239,14 @@ fn encode_reply(
     }
 }
 
+fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => text[..cut].trim_end().to_owned(),
+        None => text.to_owned(),
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3337,12 +3427,5 @@ mod tests {
             ArtifactErrorCode::RateLimited
         );
         broker.check_rate("run-2").unwrap();
-    }
-}
-
-fn clip_chars(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((cut, _)) => text[..cut].trim_end().to_owned(),
-        None => text.to_owned(),
     }
 }

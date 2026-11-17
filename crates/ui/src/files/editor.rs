@@ -259,7 +259,6 @@ mod lifetime_tests {
             )
         });
     }
-
     #[gpui::test]
     fn context_menu_opens_while_editor_is_being_updated(cx: &mut TestAppContext) {
         cx.update(|cx| {

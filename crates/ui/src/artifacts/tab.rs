@@ -412,13 +412,18 @@ impl ArtifactTab {
         });
         // Repaint only when this artifact's metadata, the local device, its
         // Space's Outline snapshot or the first watched Space changed.
-        let observe = cx.observe(&state, {
+        let observe = cx.observe_in(&state, window, {
             let artifact_id = artifact_id.clone();
-            let mut seen = None;
-            move |_, state, cx| {
+            let mut seen = Some(state_slice(state.read(cx), &artifact_id));
+            move |this, state, window, cx| {
                 let slice = state_slice(state.read(cx), &artifact_id);
                 if seen.as_ref() != Some(&slice) {
+                    let revision_changed = seen.as_ref().and_then(|old| old.0.as_ref()).map(|a| a.current_revision)
+                        != slice.0.as_ref().map(|a| a.current_revision);
                     seen = Some(slice);
+                    if revision_changed && this.shown.is_none() && !matches!(this.mode, Mode::Compare | Mode::SideBySide) {
+                        this.load(None, window, cx);
+                    }
                     cx.notify();
                 }
             }

@@ -1,0 +1,9 @@
+# Typing fills the composer; Backspace removes one character.
+name: type-then-backspace
+world: { preset: small, seed: 1 }
+screenshot: on-fail
+steps:
+  - type: { into: "#composer-input", text: "hello world" }
+  - expect: { visible: "#composer-input", focused: true, value: "hello world" }
+  - key: "backspace"
+  - expect: { visible: "#composer-input", value: "hello worl" }

@@ -36,6 +36,8 @@ impl Overview {
         self.declare_outline_spaces(cx);
         if self.view_mode == OverviewMode::Outline {
             self.sync_outline(cx);
+        } else {
+            self.suspend_board(cx);
         }
 
         let new_chat_button = self.render_new_chat_button(&theme, cx);

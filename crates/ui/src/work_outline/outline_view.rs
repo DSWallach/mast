@@ -24,6 +24,7 @@ use gpui::{
 use super::action_log;
 use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
+mod board_view;
 pub(crate) mod group;
 mod move_toast;
 pub(crate) mod templates;
@@ -157,16 +158,28 @@ pub(crate) enum OutlineEvent {
     /// Rename the Chat (the Shell's Chat rename dialog).
     RenameChat(String),
     /// Open Work Item Details.
-    OpenDetails { space_id: String, item_id: String },
+    OpenDetails {
+        space_id: String,
+        item_id: String,
+    },
     /// Open the Space-root details (Space-root instructions).
-    OpenSpaceRoot { space_id: String },
+    OpenSpaceRoot {
+        space_id: String,
+    },
     /// Start a Chat in the work item (Milestone 3).
-    StartChat { space_id: String, item_id: String },
+    StartChat {
+        space_id: String,
+        item_id: String,
+    },
     /// Review proposed instructions (Milestone 4); `item_id` empty = the
     /// Space root.
-    OpenProposals { space_id: String, item_id: String },
+    OpenProposals {
+        space_id: String,
+        item_id: String,
+    },
     /// Open the Required Actions surface (Milestone 4).
     OpenRequiredActions,
+    OpenRequiredAction(String),
     /// The Space roots' order, hidden set, or reveal changed (the Overview
     /// redraws its toolbar count).
     SpacesArranged,
@@ -449,8 +462,42 @@ pub(crate) struct OutlineView {
     state: Entity<AppState>,
     focus: FocusHandle,
     picker_focus: FocusHandle,
+    board_mode: board_view::BoardMode,
+    board_root: Option<(String, String)>,
+    board_space: Option<String>,
+    board_space_scope: bool,
+    board_show_all: bool,
+    board_limit: usize,
+    board_sort: board_view::BoardSort,
+    board_sort_desc: bool,
+    board_expanded: HashSet<String>,
+    board_links: std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus>,
+    board_link_revision: u64,
+    board_link_versions: Vec<u64>,
+    board_transcript_revision: u64,
+    board_status_revision: u64,
+    board_cached_ids: Vec<String>,
+    board_worker_states: std::collections::HashMap<String, crate::team::WorkerState>,
+    board_rows: Vec<(String, crate::board::BoardItem)>,
+    board_groups: [Vec<usize>; 4],
+    board_artifact_revision: Option<(String, u64)>,
+    board_artifacts: std::collections::HashMap<String, Vec<(String, String)>>,
+    board_rows_dirty: bool,
+    #[cfg(test)]
+    board_rebuild_count: usize,
+    board_snapshot_revisions: Vec<(String, u64)>,
+    board_input_chats: Vec<OutlineChat>,
+    board_visible: bool,
+    board_scroll: gpui::ScrollHandle,
+    board_column_scroll: [gpui::ScrollHandle; 4],
+    board_shell_observe: Option<Subscription>,
+    board_activity: std::collections::HashMap<String, String>,
+    board_activity_ids: Vec<String>,
+    board_state_observe: Option<Subscription>,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
+    /// PR link index per Space, rebuilt only when the Space's snapshot changes.
+    pr_links: pr_sync_outline::PrLinkCache,
     model: OutlineModel,
     collapsed: HashSet<String>,
     collapsed_loaded: bool,
@@ -550,8 +597,41 @@ impl OutlineView {
             state,
             focus: cx.focus_handle(),
             picker_focus: cx.focus_handle(),
+            board_mode: board_view::BoardMode::Tree,
+            board_root: None,
+            board_space: None,
+            board_space_scope: false,
+            board_show_all: false,
+            board_limit: 12,
+            board_sort: board_view::BoardSort::Status,
+            board_sort_desc: false,
+            board_expanded: HashSet::new(),
+            board_links: Default::default(),
+            board_link_revision: 0,
+            board_link_versions: Vec::new(),
+            board_transcript_revision: 0,
+            board_status_revision: 0,
+            board_cached_ids: Vec::new(),
+            board_worker_states: Default::default(),
+            board_rows: Vec::new(),
+            board_groups: std::array::from_fn(|_| Vec::new()),
+            board_artifact_revision: None,
+            board_artifacts: Default::default(),
+            board_rows_dirty: true,
+            #[cfg(test)]
+            board_rebuild_count: 0,
+            board_snapshot_revisions: Vec::new(),
+            board_input_chats: Vec::new(),
+            board_visible: false,
+            board_scroll: gpui::ScrollHandle::new(),
+            board_column_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
+            board_shell_observe: None,
+            board_activity: Default::default(),
+            board_activity_ids: Vec::new(),
+            board_state_observe: None,
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
+            pr_links: Default::default(),
             model: OutlineModel::default(),
             collapsed: HashSet::new(),
             collapsed_loaded: false,
@@ -617,7 +697,41 @@ impl OutlineView {
     pub(crate) fn set_inputs(&mut self, inputs: OutlineInputs, cx: &mut Context<Self>) {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
+        let revisions: Vec<_> = inputs
+            .spaces
+            .iter()
+            .filter_map(|space| {
+                space
+                    .load
+                    .snapshot()
+                    .map(|snapshot| (space.id.clone(), snapshot.revision))
+            })
+            .collect();
+        if revisions != self.board_snapshot_revisions || inputs.chats != self.board_input_chats {
+            self.board_snapshot_revisions = revisions;
+            self.board_input_chats = inputs.chats.clone();
+            self.board_rows_dirty = true;
+        }
         self.inputs = inputs;
+        if self
+            .board_space
+            .as_ref()
+            .is_some_and(|id| !self.inputs.spaces.iter().any(|space| &space.id == id))
+        {
+            self.board_space = self
+                .state
+                .read(cx)
+                .selected_space
+                .clone()
+                .filter(|id| self.inputs.spaces.iter().any(|space| &space.id == id))
+                .or_else(|| self.inputs.spaces.first().map(|space| space.id.clone()));
+            self.board_root = None;
+            self.board_space_scope = true;
+            self.board_show_all = false;
+            self.board_limit = 12;
+            self.board_rows_dirty = true;
+            self.notice = Some("Space unavailable; showing the current Space".into());
+        }
         self.retire_shown_optimistic();
         self.overlay_optimistic();
         self.reflatten();
@@ -840,7 +954,7 @@ impl OutlineView {
         self.prune_multi();
     }
 
-    fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
         let changed = if collapsed {
             self.collapsed.insert(key.to_string())
         } else {
@@ -1541,7 +1655,7 @@ impl OutlineView {
                     && !associated.contains(chat.id.as_str())
             })
             .collect();
-        chats.sort_by(|a, b| b.activity.cmp(&a.activity));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.activity));
         if chats.is_empty() {
             return Err("No unassociated chats in this Space");
         }
@@ -3984,7 +4098,9 @@ impl Render for OutlineView {
         let mut first_use = self
             .shows_first_use(cx)
             .then(|| self.render_first_use(&theme, cx));
-        let list: AnyElement = if count == 0 && first_use.is_some() {
+        let list: AnyElement = if self.board_mode != board_view::BoardMode::Tree {
+            self.render_board(&theme, window, cx)
+        } else if count == 0 && first_use.is_some() {
             // First use: the compact line takes the empty tree's place.
             div()
                 .flex_1()
@@ -4182,7 +4298,10 @@ impl Render for OutlineView {
                 &theme,
                 cx,
             ))
-            .when_some(space_root_entry, |el, entry| el.child(entry))
+            .child(self.render_board_controls(&theme, cx))
+            .when(self.board_mode == board_view::BoardMode::Tree, |el| {
+                el.children(space_root_entry)
+            })
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.
             .children(first_use)

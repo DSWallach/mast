@@ -1,5 +1,6 @@
 //! Copy the previous bundle's preferences once, when the destination is empty.
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (4 non-test sites) through mast_harness::command / git_command
 #[cfg(any(target_os = "macos", test))]
 fn legacy_domain(bundle_id: &str) -> Option<&'static str> {
     match bundle_id {

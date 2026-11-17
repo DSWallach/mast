@@ -28,6 +28,38 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 94: menu-bar redraw fix** (2026-11-16; UI 2646/0). menu_bar::MenuSync sets the status-item icon only when the
+  glyph changes and the tooltip only when its text changes, and rebuilds the NSMenu only in menuWillOpen: or while the
+  menu is open (menuDidClose: tracks open/closed). Before, a full menu rebuild about every 900 ms took ≈40% of the main
+  thread. Backup: `~/zeron-dev-app-backups/mast-release-93`.
+- **Release 93: startup watch-storm fix** (2026-11-16, urgent; diff_sync tests 20/20, worker's full mast-engine 711/1
+  with the 1 the known instance_lock flake; installed build only, no full release run because of the load emergency).
+  After each restart Mast pinned about 8 cores for many minutes: every diff-sync entry walked up to 8000 dirs in
+  parallel. With ~116 Cofactr worktrees (node_modules) plus Mast worktrees (target/), that froze or lagged the app. Now
+  at most 2 watch setups run at once, trees with node_modules/target/.venv/dist/build/.next/vendor are over budget
+  immediately (git-dir watch only), and verdicts are cached per root. Still open:
+  - The menu-bar item redraws about every 900 ms (≈40% of the main thread in -[NSStatusItem _updateReplicants]); being
+    fixed on the same branch.
+  - repos/source_control git fan-out (`git branch -r --contains` across Cofactr worktrees).
+  Backup: `~/zeron-dev-app-backups/mast-release-92`.
+- **Release 92: composer crash fix** (2026-11-16; touched crates from 6b24713d4: all passed; UI 2643/0). Release 90
+  aborted in `ComposerInput::drag_selection_position` during a drag-select. `f32::clamp` panics when min > max, and a
+  text box under 0.5px made the upper limit fall below the lower one. That clamp and two others in the composer that
+  have variable bounds are now guarded; test `collapsed_input_bounds_do_not_panic_during_drag`. Rule for workers:
+  every variable-bound `clamp` must guarantee min <= max. Backup: `~/zeron-dev-app-backups/mast-release-91`.
+- **Release 91: active checkout P0 + review tool schemas** (2026-11-16; full suite from bd0aac02a: nextest 2605/2607,
+  only the known `peer::actual_webrtc_pair_streams…` and `preview::leak remote_preview_churn`; UI 2642/0).
+  - Active checkout P0: when a chat has a selected diff target (bind_chat_worktree or a manual pick), the header
+    branch chip, "Runs in" (execution root shown as secondary), Item tab, sidebar row, Overview details and search,
+    command palette, pickers, and the PR lookup and watch keys all follow that checkout. An explicit checkout skips the
+    `.gitmodules` same-branch fallback; `is_worktree`/`diff_stat` come from the checkout. P1+ (inference, touched
+    sets, PR by remote) shelved by Mikey; re-measure first.
+  - review_publish / review_get: flat input schemas (no anyOf/oneOf/allOf), one target object with a `kind` enum,
+    example in the description, errors that name the field path (`review.summary`, `target.number`), and
+    `review.target` rejected in favour of the top-level target. From failed-tool-call audit pass 2
+    (mast-artifact:ff5aaaac), where 22 of 35 failures were review_publish retries. Fixes 2–5 wait for a re-run on a
+    larger sample (item ca2d95cc waits until 2026-11-23).
+  - Backup: `~/zeron-dev-app-backups/mast-release-90`.
 - **Release 90: review follow-ups** (2026-11-14; touched crates from ded3ec8f9: all passed; UI 2639/0): Claude
   limit-error dedupe resets at turn boundaries; admin reach skips archived chats except `archive_chat` (unarchive);
   decision-sheet tables wrap inside their cards at narrow widths (verify visually after restart).
@@ -1187,6 +1219,178 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 09:30; coordinator da545eee handing off)
+
+- **Installed: release 103.** Mikey is still on 96 until he restarts. Nothing is building; no workers are running.
+- **Next, Mikey's ask: a design pass** on the wave-1 surfaces. He finds code hard to read: code shows without
+  syntax colour or formatting (e.g. the code-reference file view and its snippets/chips render plain text; check
+  diffs, review drafts, transcript code blocks too). Screenshots (offscreen, release 103):
+  mast-artifact:be0bb4e213364d721971b1f328db7928 (code reference), dbf6e9b4bb78fe69db23cd670a3b7245 (word diff),
+  898b17235424ac5e05a36bce5b2e8d70 (review drafts), 6d12d5360d60446f988b69b8579d329b (board),
+  dbeeaa997abd06365309848e299646cf (table), e5011e217e8bbaf6818fd0740be39996 (diagram card). Known nits: table
+  "Answer" button has no padding; board cards have an empty expand-arrow row; "Review" on in-progress cards is
+  unclear; dark diagram thumbnail sits on a lighter panel. Render with `scripts/ui-preview.sh --screens
+  code-reference,changes-expanded,walkthrough,board,board-table,diagram-card` (set MAST_PREVIEW_CODE_REF=1 and
+  MAST_SNAPSHOT_POPULATED_CHANGES=1), and the UI driver (`scripts/ui-drive`) for flows.
+- Tooling now available: headless UI driver with YAML scenarios (crates/ui-driver, scripts/ui-drive), enforced perf
+  gate on install, perf-soak with ABBA order. Xcode git hangs on `git submodule`: use
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools` until Mikey opens Xcode or reboots.
+
+## In flight (snapshot 2026-11-17 07:00; coordinator da545eee, overnight run)
+
+- **Installed: release 103** (16afa8cf7, 08:16; = 102 + UI driver YAML scenarios + cleanup pass 2). Mikey's running Mast is still 96 (up since 2026-11-16 17:20); one restart picks
+  up 97–102. Every install went through the enforced perf gate (release-test + soak stamps).
+- Overnight releases: 99 (sidebar spinner rows cached 2268→264 builds/30 frames; freeze watchdog writes
+  `freeze-*.txt` next to mast-headed.log on a ≥2 s main-thread stall, `MAST_FREEZE_WATCHDOG=0` disables; Add to chat
+  on submodule hunks via CodeRef `repoRoot`), 100 (UI driver B4/B5, cleanup pass 1: clippy 743→650 and the last
+  direct spawns through mast_harness, engine startup pass: first sync 6→4 git per checkout, indexed artifact
+  watcher, no-PR cache 10 min), 101 (refactor Phase A batches 1–3: ~43k lines of inline tests/panels moved out of
+  the biggest files as proven pure moves; UI perf: cached transcript view 4.1→1.0 ms per keystroke, Changes
+  active_diff by reference, transcript sync scans only changed rows, cached diff font advance), 102 (repair-tick
+  backoff for quiet watched checkouts, missed-change bound 600 s; ABBA soak order).
+- **Headless UI driver** (plan mast-artifact:10cf07e3bdb339761d5962e11b1ea3f8): B0–B5 done. crates/ui-driver
+  (test-only, `scripts/check-installed-clean.sh` in every release run keeps it out of the installed binary),
+  GPUI from `Pluto8195/zui` branch `mast/test-support` (one test-support commit on gaelcado/zui@53869c2),
+  `scripts/ui-drive start|tree|click|type|key|png|stop` in a sandboxed seeded world, first flow test
+  `first_flow_send_approve_finish`. Next: scenario/batch mode, medium and Mikey-scale presets, cue-driven fake agent.
+- **Environment:** since 2026-11-16 evening Xcode.app's git hangs on shell-script subcommands (`git submodule …`
+  stalls at exec). Release runs and workers use `DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Mast's
+  production code doesn't call `git submodule`. Opening Xcode once or a reboot probably clears it.
+- After 102 (integration, not installed): UI driver YAML scenarios (`scripts/ui-drive run <file>.yaml`, 3 scenarios,
+  report-only in release runs) and cleanup pass 2 (clippy 650 → 517). Release 103's first gate failed only on the
+  test-only `world_template same_seed_same_hash…` driver flake (now quarantined, item 85e3292a); the rerun passed
+  (soak vs 102: equal CPU and git rate) and 103 is installed.
+- **Needs Mikey:** refactor plan Phase B/C review (mast-artifact:2ee3c40d3a47f5d2cda34f8afeee43c5); Perf gate
+  instruction proposal; approval rule for niced cargo commands; review phase 6 (GitHub posting) call; older items.
+- Follow-ups: Changes width shaping off the render thread (changes widths; needs design); transcript sync still
+  clones new_rows; result_large_err clippy (374) needs an error-boxing design; soak memory noise ~55 MB.
+
+## In flight (snapshot 2026-11-16 20:35; coordinator da545eee)
+
+- **Installed: release 98** (84cfe6629), the first install through the enforced perf gate (release-test + soak stamps).
+  Mikey's running Mast is still 96 until he restarts; 97 was installed then superseded by 98 before a restart.
+  - 97: idle git rate fix (spawn-free checkout identity, repair probe re-baselined, diff_sync/diff_targets under the
+    gate) + attach-kick race fix. Soak vs 96: idle git 50 vs 200/min, idle CPU 0.7 vs 3.0%, footprint 390 vs 645 MB.
+  - 98: wave 1 merged from `code-review-nav`: code reference + Add to chat (hidden on expanded submodule hunks and
+    deleted-only Latest Turn hunks; follow-up 0527213f), coordination board + table, inline diagrams (thumbnails on,
+    auto-open off by default), word diff + expand context, review phase 5 (local drafts, suggestions, read-only GitHub
+    threads; no posting). Release tests 2584/2584 + UI; soak vs 97 equal CPU and git rate, footprint 456 vs 347 MB.
+- Gate fixes on the way: quarantined the two mast-preview peer/leak tests that always hang on this Mac (still run
+  under `--quarantine`); perf-soak reads footprint via proc_pid_rusage (vmmap stalled the sampler 10+ min) and
+  invalidates runs whose window overruns; it refuses to start at load > 12.
+- Next: headless UI driver phase 1 (plan mast-artifact:10cf07e3bdb339761d5962e11b1ea3f8, items B0–B5, agent-only,
+  nothing in the installed binary). Then code-ref submodule hunks (0527213f), review phase 6 (needs Mikey's GitHub
+  posting call), sidebar spinner redraw (2694931e), freeze watchdog (17c9d278).
+- Needs Mikey: Perf gate instruction proposal; approval rule for niced cargo commands; older items.
+
+## In flight (snapshot 2026-11-16 evening; coordinator da545eee)
+
+- **Installed: release 96** = 95 + network git ops skip the spawn gate + post-mortem guardrails P1–P4
+  (`chore/perf-guardrails`: `mast_harness::backoff`, clippy `disallowed-methods` for raw `Command::new` with 28
+  non-git/gh sites still allowed under `TODO(post-mortem P3)`, git spawn-rate `warn` above 120/min with top callers,
+  idle-budget tests). Release tests since 94 (e8d628596): UI 2651/0; nextest 1865/1867, the known
+  `preview::leak remote_preview_churn` hang plus `idle_spawn_budget` over by one (87/86); its budget now counts
+  miss refreshes per 3 s window, 5/5 green. 95 at 30 min: 7–9% CPU, 2.7 GB flat.
+- Follow-ups: `diff_sync` / `diff_targets` call `git_command()` directly, bypassing the gate and the spawn-rate
+  counter, and lead 95's startup profile. Pre-install engine soak (gate 3) not built yet.
+
+## In flight (snapshot 2026-11-16 15:45; coordinator da545eee)
+
+- **Installed: release 95** (integration dee3aa810 + 5d6b99faf): git spawn storm and sidebar PR-row scans fixed.
+  Mikey restarted; typing is responsive. perf-sample at 3 min: 6–15% CPU, 2.6 GB (94: 200–380%).
+  Post-mortem: `docs/internal/postmortems/2026-11-16-slow-mast.md`; prevention items P1–P7 there.
+- Integration is ahead of installed by fd5675865 (network git ops skip the spawn gate); ships with the next release.
+- Not a leak: the "8 GB RSS" on 94 is mapped GPU memory (IOAccelerator); 95's physical footprint is 1.1 GB
+  (peak 1.8) while RSS reads 6.4 GB. Gate on footprint, not RSS. Still open: `pr_ticket_cache` gh calls and `diff_sync::read_head` lead
+  the startup profile; spinner ticks re-render the sidebar (2694931e); freeze watchdog (17c9d278).
+- Paused workers unchanged from the previous snapshot (code-ref, board, inline diagrams).
+
+## In flight (snapshot 2026-11-16 15:20; coordinator 443e035b handing off)
+
+- **Installed: release 94; Mikey restarted on it and it still feels slow.** Top priority: keep searching for the cause.
+  - Already fixed: 93 bounds and caches diff-sync watch-budget walks (they pinned ~8 cores after every restart). 94
+    stops the menu-bar item redrawing every ~900 ms (≈40% of the main thread was in NSStatusItem _updateReplicants;
+    it's gone in the 94 sample).
+  - Latest sample (94, 43 s after launch, ~225% CPU, 2.6 GB): the hottest Mast frames are `mast_engine::repos` (768),
+    `source_control` (159), `rpc::handle_request` (154) and `repos::disposable_worker` (108). That is git fan-out:
+    `git branch -r --contains …` and refs/branches across ~110 Cofactr worktrees (ui 62, flagship 44, root 12). Mikey is
+    removing old Cofactr worktrees with a Claude Code session in a terminal.
+  - Earlier: the main thread spent ~¾ of its time in Overview (sidebar) prepaint, which is perf follow-up 2694931e (spinner
+    ticks invalidating ancestors, unchanged sidebar rows redrawn).
+  - Method: find the Mast pid with `ps -Ao pid,command | grep MacOS/mast` (skip ` mcp`), run `sample <pid> 3 -file …`,
+    and count `mast_*` frames; look at the main thread separately. The log is `~/.zeron/logs/mast-headed.log`.
+  - Next steps: profile the repos/source_control git fan-out (who calls it, how often, per worktree?), then cap its
+    concurrency and cache per worktree with event-driven refresh. Then the sidebar prepaint fix. Add the freeze watchdog
+    (17c9d278) so freezes leave a stack.
+- **Build discipline:** at most 2 builds at once, counting the coordinator's own. No builds are running now.
+- **Paused workers (no builds until Mast is fast):**
+  - Code reference + Add to chat (chat bfbe2328, branch `feature/code-ref-add-to-chat` at d12ff36b7): done except the
+    final engine, UI and RPC test runs on its head. When resumed, it should run them, then raise Ready to merge →
+    code-review-nav.
+  - Board (chat a0c94ee7, branch `feature/coordination-board`): it has the review-fix list (perf, real table, labels,
+    buttons). It was interrupted mid-fix; its target/ was deleted.
+  - Inline diagrams (chat 43132a65, branch `feature/inline-diagrams`): it has the review-fix list (default off, don't
+    replace the pane, LRU and concurrency caps, observer outside render). It was interrupted; its target/ was deleted.
+  - Word diff and review phase 5 are not started.
+- **Needs-you:** the approval rule for offscreen ui-preview renders (78abd9dc); the plan's two calls (how editor-like
+  Mast gets; posting to GitHub on Submit); the older items listed in the previous snapshot.
+
+## In flight (snapshot 2026-11-16 afternoon; coordinator 443e035b)
+
+- **Installed: release 92** (91 plus the composer crash fix). Mast crashed on 90 and restarted onto 91; it needs another
+  restart for 92. Mast was laggy with 4 Rust builds running (load 44 on 18 cores). The main thread is mostly Overview
+  (sidebar) prepaint, which is the perf follow-up 2694931e; the coordinator proposed starting it after wave 1.
+- **Code review, navigation and coordination** (item bb3a9716, plan mast-artifact:060317a6, mockups 9229f124 and
+  b860e121): wave 1 builds on branch `code-review-nav`, cut from release 91, so it can be rolled back as one unit. Workers
+  branch from it and merge into it, not into work-outline-implementation. Wave-1 items (briefs in their descriptions):
+  - code reference + Add to chat (187334ff)
+  - word diff + expand context (a33d34b9)
+  - board (d72281c0)
+  - review phase 5 (c5627f01)
+  - inline diagrams (9c17adbe)
+
+  Run order: ref + board, then word diff + diagrams, then phase 5 alone. Open calls for Mikey: how editor-like Mast
+  gets, and whether Mast may post to GitHub on Submit.
+- **Declined:** coordinator context meter and hand-off (Mikey watches the chat's context indicator). Sender provenance
+  held until needed.
+- **Skills:** talk-to-me gained "Yes/no questions" and "Answers he can read in one pass" (backup
+  ~/skills-backups/2026-11-16-answer-shape/).
+- **Aside, not decided:** Mikey asked whether Mast should be project-scoped like VS Code. The coordinator suggested a
+  window per Space with a global Needs-you, to be tested in the pop-out-window spike.
+
+## In flight (snapshot 2026-11-16; coordinator 9fd580ac handing off)
+
+- **Installed: release 90.** Releases 86–90 under this coordinator: Needs-you cards in place + smaller outline reads (86),
+  worker Changes in one click + GitHub-style file tree (87), workflow pack + agent logging/error fixes (88),
+  coordinator reach + approach options (89), review follow-ups (90). Confirm Mikey has restarted onto 90, then
+  verify the decision-sheet table wrapping: artifact_render_check on docs/artifact-kit/decision-sheet-example.json,
+  800 px wide, light and dark. The Data model rejected-table card must not overflow.
+- **Running:** nothing.
+- **Waiting on Mikey (Needs-you):**
+  - approval rule for Codex cargo test in worktrees (ec30a2df)
+  - three proposed Space-root instructions: coordinator talk rules (19300dcc), don't poll finished sessions
+    (5d1d1f92), shell/CI habits (ac32201c)
+  - pinned tabs A (eb86590b; recommend approving all three)
+  - older: a53732a1, 99cf645c, 1ad5d3ee
+- **Not started, needs Mikey's go:** coordinator context-size meter plus hand-off past ~200k tokens (the real Opus
+  cost driver per the quiet-wakes research); freeze watchdog (17c9d278); perf follow-ups (2694931e); structured
+  sender provenance, to re-enable last-sender reach safely.
+- **Cofactr (other Space, Mikey pastes):**
+  - The Space-root instructions (coordinator talk rules, shell/CI habits).
+  - An admin-chat prompt to clean stale `cofactr/workspace/.worktrees` (145 GB, 135 worktrees): dry-run table,
+    approval, then `git worktree remove` only.
+- **Disk:** 178 GB free after `cargo sweep --time 3` (69 GB), the nvm cache plus old Node versions (12 GB) and a Docker
+  prune. A Thunderbolt 5 external SSD for build caches is on hold: prices doubled in 2026.
+- **Skills:** the friction edits are live in ~/.agents/skills (backup ~/skills-backups/2026-11-12-friction/). On
+  2026-11-14 project-planner learned approach-row `options` (backup ~/skills-backups/2026-11-14-approach-options/).
+- **Lessons:**
+  - Terra stops early when a design choice or the finish line is vague. Give it a numbered checklist ending in the
+    Required Action; when it says "blocked", ask exactly what and answer with decisions. Use Sonnet if it stalls 3+
+    times.
+  - Review every permission-scope change adversarially. Coordinator reach first shipped with workers able to
+    approve each other's prompts, and the review caught it.
+  - Worker reports use STATUS / RESULT / NEXT. Worker updates that need nothing from Mikey get one line, or none.
+
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
 - **Installed: release 90** (89 and 90 built overnight 11-14 while Mikey was away; he still needs to restart).
@@ -1840,7 +2044,9 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   and write `.cargo/config.toml` with `[build]\nincremental = false` (untracked; `.cargo/` is in
   info/exclude). Incremental caches were roughly 20 GB per worktree.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
-  merging**; keep at least 100 GB free. **At most 2 building workers at once.**
+  merging**; keep at least 100 GB free. **At most 2 builds at once in total, counting the coordinator's own release
+  run**: release only while a worker is idle, or pause one first. Worktree `.cargo/config.toml` also sets `jobs = 8`
+  under `[build]`. On 2026-11-16, 4 concurrent builds (load 44 on 18 cores) made Mast lag badly.
   Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
   If disk still nears 100 GB, first run `cargo sweep --time 3` in the main checkout (cargo-sweep is
   installed; it removes build outputs not touched in 3 days and freed 69 GB on 2026-11-14), then clear
@@ -1861,6 +2067,24 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   lsregister); push `work-outline-implementation`. Before 2026-11-05 this was a `cp … Contents/MacOS/zeron` plus
   `codesign --identifier sh.zeron.app.dev`. Earlier bundles:
   `Zeron Dev.app` (until 2026-10-23) and `Creel.app` (until 2026-10-26), kept only as rollbacks.
+- **Perf gate before every install** (Mikey, 2026-11-16: perf is part of review, before a restart):
+  1. Branch review includes a perf pass on the diff: per-Space/worktree/chat loops that run git or I/O (cached and
+     bounded?), timers and polls, retry loops (backoff?), `cx.notify()`/redraw on ticks, whole-list scans in render.
+  2. The release suite's budget tests (engine `idle_spawn_budget`, UI PR-link index and retry budgets) must pass at
+     real scale.
+  3. `scripts/perf-soak.sh target/installed/mast --baseline /Applications/Mast.app/Contents/MacOS/mast --real`:
+     sandboxed headless engine soak (MAST_SOAK=1, no network, no writes, git guard) on a `.backup` copy of the data.
+     Worse CPU, git spawns/min or footprint growth = no install.
+  `scripts/install-macos-app.sh` enforces 2 and 3 via stamps in target/perf-gate/ (scripts/perf-gate.py): it refuses a
+  binary without a passing release-test stamp for HEAD and a passing soak of that exact binary. `--skip-perf-gate
+  "<reason>"` only with Mikey's OK; it appends to docs/internal/perf-gate-overrides.md, which must be committed.
+- **Perf check after every release** (post-mortem 2026-11-16, P6): about 2 minutes after Mikey restarts, run
+  `scripts/perf-sample.py` and record CPU, physical footprint and the top frames in the snapshot (RSS includes GPU
+  maps and overstates by GBs). Steady CPU above ~25%, or footprint
+  growing more than 1 GB in 15 minutes, blocks further feature releases until explained.
+- **Perf review rules** (same post-mortem, P4/P5): no fixed-interval retry loops (back off; "not found" and bad
+  params are non-transient); any per-Space, per-worktree or per-chat loop that runs git or I/O is cached and bounded;
+  render paths never scan whole snapshots or chat lists per row (precompute per revision).
 - **Never restart Mast automatically.** Install, then tell Mikey what to restart and test.
   Restarting kills agents running inside Mast, so commit WIP first.
 - **Xcode license prompts** after Xcode updates block git/cargo: Mikey accepts, or use

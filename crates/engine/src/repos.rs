@@ -26,6 +26,20 @@ use mast_proto::{
 
 use crate::EngineError;
 
+mod branch_naming;
+mod checkout_layout;
+mod git_history;
+pub use git_history::git_history_matches;
+mod workspace_access_policy;
+use branch_naming::*;
+use checkout_layout::*;
+use workspace_access_policy::*;
+pub use branch_naming::worktree_branch_from_title;
+pub(crate) use branch_naming::{BRANCH_PREFIX, LEGACY_BRANCH_PREFIX, is_owned_branch, is_owned_branch_of};
+pub use checkout_layout::CheckoutIdentity;
+pub use workspace_access_policy::is_automatic_access_blocked;
+pub(crate) use workspace_access_policy::{home_dir, is_broad_workspace_root, is_broad_workspace_root_resolved};
+
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.
 const PATH_EXISTS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -47,123 +61,6 @@ const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
 const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
-
-/// Branch prefix of worktrees Mast creates (`mast/<name>`). Worktrees made
-/// before the rename carry `zeron/<name>` and are still recognised as ours:
-/// they are renamed from the chat title and deleted with their worktree.
-pub(crate) const BRANCH_PREFIX: &str = "mast/";
-pub(crate) const LEGACY_BRANCH_PREFIX: &str = "zeron/";
-
-/// A branch this app created for a worktree, under either spelling.
-pub(crate) fn is_owned_branch(branch: &str) -> bool {
-    branch.starts_with(BRANCH_PREFIX) || branch.starts_with(LEGACY_BRANCH_PREFIX)
-}
-
-/// Whether `branch` is the original auto-created branch of the worktree
-/// folder `folder` (either prefix).
-pub(crate) fn is_owned_branch_of(branch: &str, folder: &str) -> bool {
-    branch.strip_prefix(BRANCH_PREFIX) == Some(folder)
-        || branch.strip_prefix(LEGACY_BRANCH_PREFIX) == Some(folder)
-}
-
-const ADJECTIVES: &[&str] = &[
-    "swift", "calm", "bright", "bold", "keen", "brave", "clever", "lucky", "quiet", "warm", "cool",
-    "sharp", "gentle", "vivid", "amber", "cobalt",
-];
-const NOUNS: &[&str] = &[
-    "otter", "harbor", "falcon", "cedar", "meadow", "zeron", "delta", "ember", "lynx", "maple",
-    "onyx", "quartz", "raven", "summit", "willow", "aspen",
-];
-
-/// Canonical identity shared by every chat operating in this exact worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckoutIdentity {
-    /// `sha256(deviceId ‖ NUL ‖ canonical git dir)` — device-scoped, path-stable.
-    pub id: String,
-    /// Canonical worktree root (`rev-parse --show-toplevel`, symlinks resolved).
-    pub root: PathBuf,
-    /// Canonical git dir (worktree-specific for linked worktrees).
-    pub git_dir: PathBuf,
-}
-
-/// Best-effort home directory (the `ListFolders` default and worktree root base).
-pub(crate) fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-/// Whether a path is too broad for automatic recursive filesystem work. A
-/// saved Space may legitimately retain HOME as historical chat context, but
-/// background indexing/watching it would reach macOS-protected descendants
-/// (Music, Pictures/Photos Library, Documents, and so on). Ancestors of HOME
-/// are broader still. Relative paths are rejected because their scope depends
-/// on the process cwd.
-pub(crate) fn is_broad_workspace_root(path: &Path) -> bool {
-    is_broad_workspace_root_with_home(path, &home_dir())
-}
-
-/// The same policy after resolving an existing path. Use this only on an
-/// explicit filesystem operation (not a background scan): canonicalization
-/// catches a saved symlink/`..` alias of HOME before a recursive consumer is
-/// allowed to proceed.
-pub(crate) fn is_broad_workspace_root_resolved(path: &Path) -> bool {
-    if is_broad_workspace_root(path) {
-        return true;
-    }
-    let Ok(resolved) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    let home = home_dir();
-    let resolved_home = std::fs::canonicalize(&home).unwrap_or(home);
-    is_broad_workspace_root_with_home(&resolved, &resolved_home)
-}
-
-fn is_broad_workspace_root_with_home(path: &Path, home: &Path) -> bool {
-    !path.is_absolute() || home.starts_with(path)
-}
-
-/// Whether unattended/background work must leave this root alone. In addition
-/// to HOME and its ancestors, this covers macOS privacy-managed HOME subtrees.
-/// A person may still explicitly open a project there; this guard is for boot
-/// reconciliation, imported-history discovery, and other automatic activity.
-pub fn is_automatic_access_blocked(path: &Path) -> bool {
-    is_automatic_access_blocked_with_home(path, &home_dir())
-}
-
-fn is_automatic_access_blocked_with_home(path: &Path, home: &Path) -> bool {
-    if is_broad_workspace_root_with_home(path, home) {
-        return true;
-    }
-    let Ok(relative) = path.strip_prefix(home) else {
-        return false;
-    };
-    let Some(std::path::Component::Normal(first)) = relative.components().next() else {
-        return false;
-    };
-    matches!(
-        first.to_str(),
-        Some("Desktop" | "Documents" | "Downloads" | "Movies" | "Music" | "Pictures" | "Library")
-    )
-}
-
-/// A first-level HOME entry whose metadata must not be probed merely to render
-/// the project picker. On macOS even a `stat`/`.git` existence check against
-/// these privacy-managed folders can raise a TCC prompt. Entering the folder is
-/// still allowed when the person explicitly selects it in the picker.
-fn is_protected_home_child_with_home(target: &Path, name: &str, home: &Path) -> bool {
-    target == home
-        && matches!(
-            name,
-            "Desktop" | "Documents" | "Downloads" | "Movies" | "Music" | "Pictures" | "Library"
-        )
-}
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `MAST_WORKTREES_DIR` overrides
@@ -188,7 +85,26 @@ struct ReposInner {
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
     file_index: FileIndexCache,
+    checkout_sets: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<CheckoutSetSlot>>>,
+    checkout_set_refreshes: std::sync::atomic::AtomicU64,
 }
+
+/// Canonical repo-root + linked-worktree paths of one Space, refreshed under
+/// the slot's async mutex so concurrent callers share a single refresh.
+#[derive(Default)]
+struct CheckoutSetSlot {
+    state: tokio::sync::Mutex<Option<CheckoutSet>>,
+}
+
+struct CheckoutSet {
+    paths: HashSet<PathBuf>,
+    refreshed: std::time::Instant,
+}
+
+/// A cached checkout set is trusted this long when the lookup hits.
+const CHECKOUT_SET_TTL: Duration = Duration::from_secs(60);
+/// A lookup miss re-reads `git worktree list` only if the set is older than this.
+const CHECKOUT_SET_MISS_REFRESH: Duration = Duration::from_secs(3);
 
 struct IndexedPath {
     path: String,
@@ -235,6 +151,8 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
                 file_index: std::sync::Mutex::new(HashMap::new()),
+                checkout_sets: std::sync::Mutex::new(HashMap::new()),
+                checkout_set_refreshes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -287,10 +205,21 @@ impl Repos {
             cmd.current_dir(cwd);
         }
         cmd.stdin(std::process::Stdio::null());
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+        // Network operations can run for minutes; they must not hold a slot
+        // that quick local lookups are queued behind.
+        let network = args
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|arg| matches!(*arg, "fetch" | "clone" | "push" | "pull"));
+        let output = {
+            let _permit = if network {
+                None
+            } else {
+                Some(crate::git_gate::acquire(crate::git_gate::default_tag("repos", args)).await)
+            };
+            cmd.output().await
+        }
+        .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let message = stderr.trim();
@@ -319,6 +248,9 @@ impl Repos {
 
     /// Is `path` inside a git work tree? (Also the SpacesSync git-presence probe.)
     pub async fn is_repo(&self, path: &Path) -> bool {
+        if checkout_layout(path).await.is_some() {
+            return true;
+        }
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,
             Ok(out) if out == "true"
@@ -327,6 +259,18 @@ impl Repos {
 
     /// The branch currently checked out at a repo/worktree path (`"HEAD"` when detached).
     pub async fn current_branch(&self, path: &Path) -> Result<String, EngineError> {
+        // Spawn-free when HEAD is a plain branch ref or a detached sha.
+        if let Some((_, git_dir)) = checkout_layout(path).await
+            && let Ok(head) = tokio::fs::read_to_string(git_dir.join("HEAD")).await
+        {
+            let head = head.trim();
+            if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+                return Ok(branch.to_owned());
+            }
+            if !head.starts_with("ref:") && head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok("HEAD".to_string());
+            }
+        }
         let branch = self.git(&["branch", "--show-current"], Some(path)).await?;
         Ok(if branch.is_empty() {
             "HEAD".to_string()
@@ -368,6 +312,11 @@ impl Repos {
     /// Canonical identity shared by every chat operating in this exact worktree:
     /// `sha256(deviceId ‖ NUL ‖ canonical git dir)`.
     pub async fn checkout_identity(&self, path: &Path) -> Result<CheckoutIdentity, EngineError> {
+        // Fast path: read the checkout layout from disk, no `git` spawn. Any
+        // doubt (bare repo, odd layout, env overrides) falls through to git.
+        if let Some((root, git_dir)) = checkout_layout(path).await {
+            return Ok(self.identity_from(root, git_dir));
+        }
         let root = self
             .git(&["rev-parse", "--show-toplevel"], Some(path))
             .await?;
@@ -380,16 +329,19 @@ impl Repos {
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
         let canonical_git_dir =
             std::fs::canonicalize(&git_dir).unwrap_or_else(|_| PathBuf::from(&git_dir));
+        Ok(self.identity_from(canonical_root, canonical_git_dir))
+    }
+
+    fn identity_from(&self, root: PathBuf, git_dir: PathBuf) -> CheckoutIdentity {
         let mut hasher = Sha256::new();
         hasher.update(self.inner.device_id.as_bytes());
         hasher.update([0u8]);
-        hasher.update(canonical_git_dir.to_string_lossy().as_bytes());
-        let id = hex(&hasher.finalize());
-        Ok(CheckoutIdentity {
-            id,
-            root: canonical_root,
-            git_dir: canonical_git_dir,
-        })
+        hasher.update(git_dir.to_string_lossy().as_bytes());
+        CheckoutIdentity {
+            id: hex(&hasher.finalize()),
+            root,
+            git_dir,
+        }
     }
 
     async fn to_repo(&self, path: &Path) -> Result<Repo, EngineError> {
@@ -595,503 +547,84 @@ impl Repos {
             .collect())
     }
 
-    /// Public commit history in topological order. Only user-facing branches,
-    /// remotes, and tags seed the walk, so Mast's internal refs never leak
-    /// into the graph or keep otherwise-unreachable checkpoints visible.
-    pub async fn history(
-        &self,
-        repo_path: &Path,
-        cursor: usize,
-        limit: usize,
-    ) -> Result<GitHistoryPage, EngineError> {
-        let limit = limit.clamp(1, GIT_HISTORY_MAX_LIMIT);
-        let head_sha = self
-            .git(&["rev-parse", "--verify", "HEAD^{commit}"], Some(repo_path))
-            .await
-            .ok()
-            .filter(|sha| !sha.is_empty());
-
-        let refs_out = self
-            .git(
-                &[
-                    "for-each-ref",
-                    "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)%00",
-                    "refs/heads",
-                    "refs/remotes",
-                    "refs/tags",
-                ],
-                Some(repo_path),
-            )
-            .await?;
-        let refs_by_sha = parse_history_refs(&refs_out);
-
-        if head_sha.is_none() && refs_by_sha.is_empty() {
-            return Ok(GitHistoryPage {
-                commits: Vec::new(),
-                branch_tips: Vec::new(),
-                head_sha: None,
-                next_cursor: None,
-                total_count: Some(0),
-                head_commit_count: Some(0),
-                comparison: None,
-            });
-        }
-
-        let skip = format!("--skip={cursor}");
-        let max_count = format!("--max-count={}", limit + 1);
-        let mut log_args = vec![
-            "log",
-            "--topo-order",
-            "--no-color",
-            "--no-decorate",
-            "--no-show-signature",
-            "--no-patch",
-            skip.as_str(),
-            max_count.as_str(),
-            "--format=%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00",
-        ];
-        if head_sha.is_some() {
-            log_args.push("HEAD");
-        }
-        log_args.extend(["--branches", "--remotes", "--tags"]);
-        let log = self.git(&log_args, Some(repo_path)).await?;
-        let mut commits = parse_history_log(&log, &refs_by_sha);
-        let has_next = commits.len() > limit;
-        commits.truncate(limit);
-
-        // Branch tips are deliberately independent from history pagination.
-        // `--no-walk` resolves every local/remote tip while deduplicating refs
-        // that point at the same commit. Include HEAD as a useful anchor for a
-        // detached checkout, but do not let tags seed extra overview rows.
-        let branch_tips = if cursor == 0 {
-            let mut tip_args = vec![
-                "log",
-                "--no-walk=sorted",
-                "--no-color",
-                "--no-decorate",
-                "--no-show-signature",
-                "--no-patch",
-                "--format=%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00",
-            ];
-            if head_sha.is_some() {
-                tip_args.push("HEAD");
-            }
-            tip_args.extend(["--branches", "--remotes"]);
-            let tips = self.git(&tip_args, Some(repo_path)).await?;
-            parse_history_log(&tips, &refs_by_sha)
-        } else {
-            Vec::new()
-        };
-
-        let total_count = if cursor == 0 {
-            let mut count_args = vec!["rev-list", "--count"];
-            if head_sha.is_some() {
-                count_args.push("HEAD");
-            }
-            count_args.extend(["--branches", "--remotes", "--tags"]);
-            self.git(&count_args, Some(repo_path))
-                .await
-                .ok()
-                .and_then(|count| count.parse().ok())
-        } else {
-            None
-        };
-        let head_commit_count = if cursor == 0 && head_sha.is_some() {
-            self.git(&["rev-list", "--count", "HEAD"], Some(repo_path))
-                .await
-                .ok()
-                .and_then(|count| count.parse().ok())
-        } else {
-            None
-        };
-        let comparison = if cursor == 0 && head_sha.is_some() {
-            self.history_comparison(repo_path).await
-        } else {
-            None
-        };
-
-        Ok(GitHistoryPage {
-            next_cursor: has_next.then_some(cursor + commits.len()),
-            commits,
-            branch_tips,
-            head_sha,
-            total_count,
-            head_commit_count,
-            comparison,
-        })
-    }
-
-    /// Compare the checked-out branch with the best locally available
-    /// integration ref. This deliberately never talks to the network: `Fetch
-    /// all` refreshes remote-tracking refs, then the next History load sees
-    /// those new counts.
-    async fn history_comparison(&self, repo_path: &Path) -> Option<GitHistoryComparison> {
-        // Detached checkouts do not have a branch relationship to present.
-        self.git(
-            &["symbolic-ref", "--quiet", "--short", "HEAD"],
-            Some(repo_path),
-        )
-        .await
-        .ok()?;
-
-        // An integration remote is more useful than the branch's push/tracking
-        // ref: a feature usually tracks origin/feature, whereas the status the
-        // user needs in History is its relationship to upstream/main.
-        let mut candidates = Vec::new();
-        for remote in ["upstream", "origin"] {
-            let remote_head = format!("refs/remotes/{remote}/HEAD");
-            if let Ok(base) = self
-                .git(
-                    &["symbolic-ref", "--quiet", "--short", &remote_head],
-                    Some(repo_path),
-                )
-                .await
-                && !base.is_empty()
-            {
-                candidates.push(base);
-            }
-        }
-        // A remote HEAD is not guaranteed to have been configured locally.
-        // Conventional default names keep the result useful in that case.
-        candidates.extend([
-            "upstream/main".to_string(),
-            "origin/main".to_string(),
-            "upstream/master".to_string(),
-            "origin/master".to_string(),
-        ]);
-        // Fall back to the configured tracking ref only after integration
-        // defaults. This still gives sensible data in a single-remote repo.
-        if let Ok(base) = self
-            .git(
-                &[
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "--symbolic-full-name",
-                    "@{upstream}",
-                ],
-                Some(repo_path),
-            )
-            .await
-            && !base.is_empty()
-        {
-            candidates.push(base);
-        }
-
-        let mut seen = HashSet::new();
-        for base in candidates
-            .into_iter()
-            .filter(|base| seen.insert(base.clone()))
-        {
-            let commit_ref = format!("{base}^{{commit}}");
-            if self
-                .git(
-                    &["rev-parse", "--verify", "--quiet", &commit_ref],
-                    Some(repo_path),
-                )
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let range = format!("HEAD...{base}");
-            let Ok(counts) = self
-                .git(
-                    &["rev-list", "--left-right", "--count", &range],
-                    Some(repo_path),
-                )
-                .await
-            else {
-                continue;
-            };
-            let mut counts = counts.split_whitespace();
-            let (Some(ahead), Some(behind)) = (counts.next(), counts.next()) else {
-                continue;
-            };
-            let (Ok(ahead), Ok(behind)) = (ahead.parse(), behind.parse()) else {
-                continue;
-            };
-            return Some(GitHistoryComparison {
-                base,
-                ahead,
-                behind,
-            });
-        }
-        None
-    }
-
-    /// Fuzzy subject / SHA search across the complete public history. Results
-    /// stay in `--topo-order`; fuzzy score decides inclusion, never row order,
-    /// so the client can keep rendering a meaningful commit graph.
-    pub async fn search_history(
-        &self,
-        repo_path: &Path,
-        query: &str,
-        cursor: usize,
-        limit: usize,
-    ) -> Result<GitHistoryPage, EngineError> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Ok(GitHistoryPage {
-                commits: Vec::new(),
-                branch_tips: Vec::new(),
-                head_sha: None,
-                next_cursor: None,
-                total_count: Some(0),
-                head_commit_count: None,
-                comparison: None,
-            });
-        }
-        let limit = limit.clamp(1, GIT_HISTORY_MAX_LIMIT);
-        let head_sha = self
-            .git(&["rev-parse", "--verify", "HEAD^{commit}"], Some(repo_path))
-            .await
-            .ok()
-            .filter(|sha| !sha.is_empty());
-        let refs_out = self
-            .git(
-                &[
-                    "for-each-ref",
-                    "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)%00",
-                    "refs/heads",
-                    "refs/remotes",
-                    "refs/tags",
-                ],
-                Some(repo_path),
-            )
-            .await?;
-        let refs_by_sha = parse_history_refs(&refs_out);
-        if head_sha.is_none() && refs_by_sha.is_empty() {
-            return Ok(GitHistoryPage {
-                commits: Vec::new(),
-                branch_tips: Vec::new(),
-                head_sha: None,
-                next_cursor: None,
-                total_count: Some(0),
-                head_commit_count: None,
-                comparison: None,
-            });
-        }
-
-        let mut log_args = vec![
-            "log",
-            "--topo-order",
-            "--no-color",
-            "--no-decorate",
-            "--no-show-signature",
-            "--no-patch",
-            "--format=%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00",
-        ];
-        if head_sha.is_some() {
-            log_args.push("HEAD");
-        }
-        log_args.extend(["--branches", "--remotes", "--tags"]);
-        let log = self.git(&log_args, Some(repo_path)).await?;
-        let all_commits = parse_history_log(&log, &refs_by_sha);
-        let visible: HashSet<String> = all_commits
-            .iter()
-            .filter(|commit| git_history_matches(query, commit))
-            .map(|commit| commit.sha.clone())
-            .collect();
-        let matches = compact_history_commits(&all_commits, &visible);
-        let total_count = matches.len();
-        let start = cursor.min(total_count);
-        let end = start.saturating_add(limit).min(total_count);
-        let commits = matches[start..end].to_vec();
-
-        Ok(GitHistoryPage {
-            commits,
-            branch_tips: Vec::new(),
-            head_sha,
-            next_cursor: (end < total_count).then_some(end),
-            total_count: Some(total_count),
-            head_commit_count: None,
-            comparison: None,
-        })
-    }
-
-    /// Best-effort GitHub profile images for the authors in one history page.
-    /// Git itself only stores names and emails, so this resolves the hosting
-    /// metadata separately and caches it by both commit and normalized email.
-    pub async fn history_avatar_urls(
-        &self,
-        repo_path: &Path,
-        authors: &[(String, String)],
-        cursor: usize,
-        limit: usize,
-    ) -> HashMap<String, String> {
-        let Ok(remote) = self
-            .git(&["remote", "get-url", "origin"], Some(repo_path))
-            .await
-        else {
-            return HashMap::new();
-        };
-        let Some((owner, repo)) = parse_github_remote(&remote) else {
-            return HashMap::new();
-        };
-        let repo_key = format!("{owner}/{repo}").to_ascii_lowercase();
-        let per_page = limit.clamp(1, 100);
-        let page = cursor / per_page + 1;
-        let page_key = format!("{repo_key}|{page}|{per_page}");
-        let should_fetch = self
-            .inner
-            .github_avatar_pages
-            .lock()
-            .map(|mut pages| pages.insert(page_key.clone()))
-            .unwrap_or(false);
-
-        if should_fetch {
-            let url = format!("https://api.github.com/repos/{owner}/{repo}/commits");
-            let mut request = self.inner.http.get(url).query(&[
-                ("per_page", per_page.to_string()),
-                ("page", page.to_string()),
-            ]);
-            if let Some(token) = std::env::var("GITHUB_TOKEN")
-                .ok()
-                .filter(|token| !token.is_empty())
-                .or_else(|| {
-                    std::env::var("GH_TOKEN")
-                        .ok()
-                        .filter(|token| !token.is_empty())
-                })
-            {
-                request = request.bearer_auth(token);
-            }
-
-            let rows = match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    response.json::<Vec<GitHubCommitAvatar>>().await.ok()
-                }
-                _ => None,
-            };
-            if let Some(rows) = rows {
-                let mut identities_by_url: HashMap<String, Vec<(String, String)>> = HashMap::new();
-                for row in rows {
-                    let Some(author) = row.author else {
-                        continue;
-                    };
-                    if !author.avatar_url.starts_with("https://") {
-                        continue;
-                    }
-                    let avatar_url = if author.avatar_url.contains('?') {
-                        format!("{}&s=40", author.avatar_url)
-                    } else {
-                        format!("{}?s=40", author.avatar_url)
-                    };
-                    identities_by_url.entry(avatar_url).or_default().push((
-                        row.sha.to_ascii_lowercase(),
-                        row.commit.author.email.trim().to_ascii_lowercase(),
-                    ));
-                }
-                let downloads = stream::iter(identities_by_url.into_iter().map(
-                    |(url, identities)| async move {
-                        self.cache_github_avatar(&url)
-                            .await
-                            .map(|path| (identities, path))
-                    },
-                ))
-                .buffer_unordered(8)
-                .filter_map(|download| async move { download })
-                .collect::<Vec<_>>()
-                .await;
-                if let Ok(mut cache) = self.inner.github_avatars.lock() {
-                    for (identities, path) in downloads {
-                        for (sha, email) in identities {
-                            cache.insert(format!("{repo_key}|sha|{sha}"), path.clone());
-                            if !email.is_empty() {
-                                cache.insert(format!("{repo_key}|email|{email}"), path.clone());
-                            }
-                        }
-                    }
-                }
-            } else if let Ok(mut pages) = self.inner.github_avatar_pages.lock() {
-                // A transient network/auth failure may be retried on refresh.
-                pages.remove(&page_key);
-            }
-        }
-
-        let Ok(cache) = self.inner.github_avatars.lock() else {
-            return HashMap::new();
-        };
-        authors
-            .iter()
-            .filter_map(|(sha, email)| {
-                let avatar = cache
-                    .get(&format!("{repo_key}|sha|{}", sha.to_ascii_lowercase()))
-                    .or_else(|| {
-                        cache.get(&format!(
-                            "{repo_key}|email|{}",
-                            email.trim().to_ascii_lowercase()
-                        ))
-                    })?;
-                Some((email.trim().to_ascii_lowercase(), avatar.clone()))
-            })
-            .collect()
-    }
-
-    async fn cache_github_avatar(&self, url: &str) -> Option<String> {
-        const MAX_AVATAR_BYTES: u64 = 2 * 1024 * 1024;
-
-        let digest = Sha256::digest(url.as_bytes());
-        let cache_dir = self.inner.data_dir.join("cache").join("git-avatars");
-        let path = cache_dir.join(format!("{}.img", hex(&digest[..16])));
-        if tokio::fs::metadata(&path)
-            .await
-            .ok()
-            .is_some_and(|metadata| metadata.len() > 0)
-        {
-            return Some(path.to_string_lossy().into_owned());
-        }
-        tokio::fs::create_dir_all(&cache_dir).await.ok()?;
-        let response = self.inner.http.get(url).send().await.ok()?;
-        if !response.status().is_success()
-            || response
-                .content_length()
-                .is_some_and(|size| size > MAX_AVATAR_BYTES)
-        {
-            return None;
-        }
-        let bytes = response.bytes().await.ok()?;
-        if bytes.is_empty() || bytes.len() as u64 > MAX_AVATAR_BYTES {
-            return None;
-        }
-        let temporary = cache_dir.join(format!(
-            ".{}.{}.tmp",
-            hex(&digest[..8]),
-            uuid::Uuid::new_v4()
-        ));
-        tokio::fs::write(&temporary, &bytes).await.ok()?;
-        if tokio::fs::rename(&temporary, &path).await.is_err() {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            if !path.is_file() {
-                return None;
-            }
-        }
-        Some(path.to_string_lossy().into_owned())
-    }
-
     /// Whether `candidate` is the repository root or one of its linked
     /// worktrees. Filesystem resolution happens on a disposable thread because
     /// user-selected paths may be dead mounts.
     pub async fn workspace_checkout(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
-        let repo_path = repo_path.to_path_buf();
-        let candidate = candidate.to_path_buf();
-        let worktrees: Vec<_> = self
-            .refs(&repo_path)
+        let candidate = self.canonical_path(candidate).await?;
+        self.workspace_checkout_canonical(repo_path, candidate).await
+    }
+
+    /// Canonicalize on a disposable thread (dead mounts must not wedge callers).
+    pub(crate) async fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+        let path = path.to_path_buf();
+        disposable_worker("checkout-auth", move || std::fs::canonicalize(path).ok())
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| row.worktree_path.map(PathBuf::from))
-            .collect();
+            .flatten()
+    }
+
+    /// Like [`Self::workspace_checkout`] for an already-canonical candidate.
+    /// Membership comes from a per-Space cache of `git worktree list` (one git
+    /// spawn per refresh, never branches or refs). A hit is served from the
+    /// cache; a miss re-reads the list only when the cache is a few seconds
+    /// old, so a stale path asked for repeatedly costs no further spawns.
+    pub(crate) async fn workspace_checkout_canonical(
+        &self,
+        repo_path: &Path,
+        candidate: PathBuf,
+    ) -> Option<PathBuf> {
+        let slot = {
+            let mut sets = self
+                .inner
+                .checkout_sets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sets.entry(repo_path.to_path_buf()).or_default().clone()
+        };
+        let mut state = slot.state.lock().await;
+        if let Some(set) = state.as_ref()
+            && set.refreshed.elapsed() < CHECKOUT_SET_TTL
+        {
+            if set.paths.contains(&candidate) {
+                return Some(candidate);
+            }
+            if set.refreshed.elapsed() < CHECKOUT_SET_MISS_REFRESH {
+                return None;
+            }
+        }
+        let paths = self.read_checkout_set(repo_path).await;
+        let found = paths.contains(&candidate);
+        *state = Some(CheckoutSet {
+            paths,
+            refreshed: std::time::Instant::now(),
+        });
+        found.then_some(candidate)
+    }
+
+    /// Canonical repo root plus every `worktree <path>` from one
+    /// `git worktree list --porcelain`.
+    async fn read_checkout_set(&self, repo_path: &Path) -> HashSet<PathBuf> {
+        self.inner
+            .checkout_set_refreshes
+            .fetch_add(1, Ordering::Relaxed);
+        let listed = self
+            .git(&["worktree", "list", "--porcelain"], Some(repo_path))
+            .await
+            .unwrap_or_default();
+        let mut raw: Vec<PathBuf> = vec![repo_path.to_path_buf()];
+        raw.extend(
+            listed
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("worktree "))
+                .map(PathBuf::from),
+        );
         disposable_worker("checkout-auth", move || {
-            let candidate = std::fs::canonicalize(candidate).ok()?;
-            std::iter::once(repo_path)
-                .chain(worktrees)
+            raw.into_iter()
                 .filter_map(|path| std::fs::canonicalize(path).ok())
-                .any(|path| path == candidate)
-                .then_some(candidate)
+                .collect::<HashSet<_>>()
         })
         .await
-        .flatten()
+        .unwrap_or_default()
     }
 
     pub(crate) async fn same_folder(&self, folder: &Path, candidate: &Path) -> Option<PathBuf> {
@@ -1713,140 +1246,6 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
         })
 }
 
-/// Match a history commit using the same semantics as the history UI.
-///
-/// This remains the shared entry point so RPC filtering and client-side
-/// filtering cannot disagree about Unicode case normalization.
-pub fn git_history_matches(query: &str, commit: &GitHistoryCommit) -> bool {
-    let query = query.trim();
-    if query.is_empty() {
-        return true;
-    }
-    let normalized = query.to_ascii_lowercase();
-    commit.sha.to_ascii_lowercase().starts_with(&normalized)
-        || fuzzy_score(query, &format!("{} {}", commit.sha, commit.subject)).is_some()
-}
-
-/// Contract hidden commits to their nearest visible ancestors. Search results
-/// remain sparse without leaving graph lanes aimed at rows that are absent.
-fn compact_history_commits(
-    commits: &[GitHistoryCommit],
-    visible: &HashSet<String>,
-) -> Vec<GitHistoryCommit> {
-    let by_sha: HashMap<_, _> = commits
-        .iter()
-        .map(|commit| (commit.sha.as_str(), commit))
-        .collect();
-
-    /// Resolve a hidden commit to its nearest visible ancestors without using
-    /// the call stack. Completed nodes are cached across visible commits so a
-    /// shared hidden branch is contracted only once.
-    fn nearest_visible_parents(
-        sha: &str,
-        visible: &HashSet<String>,
-        by_sha: &HashMap<&str, &GitHistoryCommit>,
-        memo: &mut HashMap<String, Vec<String>>,
-    ) -> Vec<String> {
-        if visible.contains(sha) || !by_sha.contains_key(sha) {
-            return vec![sha.to_string()];
-        }
-        if let Some(cached) = memo.get(sha) {
-            return cached.clone();
-        }
-
-        struct Frame {
-            sha: String,
-            next_parent: usize,
-            resolved: Vec<String>,
-            seen: HashSet<String>,
-        }
-
-        impl Frame {
-            fn new(sha: String) -> Self {
-                Self {
-                    sha,
-                    next_parent: 0,
-                    resolved: Vec::new(),
-                    seen: HashSet::new(),
-                }
-            }
-
-            fn extend(&mut self, parents: &[String]) {
-                for parent in parents {
-                    if self.seen.insert(parent.clone()) {
-                        self.resolved.push(parent.clone());
-                    }
-                }
-            }
-        }
-
-        let mut visiting = HashSet::from([sha.to_string()]);
-        let mut stack = vec![Frame::new(sha.to_string())];
-        loop {
-            let next_parent = {
-                let frame = stack.last_mut().expect("history traversal frame");
-                let parents = &by_sha[frame.sha.as_str()].parent_shas;
-                (frame.next_parent < parents.len()).then(|| {
-                    let parent = parents[frame.next_parent].clone();
-                    frame.next_parent += 1;
-                    parent
-                })
-            };
-
-            let Some(parent) = next_parent else {
-                let frame = stack.pop().expect("history traversal frame");
-                visiting.remove(&frame.sha);
-                let resolved = frame.resolved;
-                memo.insert(frame.sha, resolved.clone());
-                if let Some(caller) = stack.last_mut() {
-                    caller.extend(&resolved);
-                    continue;
-                }
-                return resolved;
-            };
-
-            let resolved = if visible.contains(&parent) || !by_sha.contains_key(parent.as_str()) {
-                Some(vec![parent.clone()])
-            } else if let Some(cached) = memo.get(&parent) {
-                Some(cached.clone())
-            } else if visiting.contains(&parent) {
-                // Git commit graphs are acyclic, but keep malformed input from
-                // looping forever just as the previous `visiting` guard did.
-                Some(Vec::new())
-            } else {
-                None
-            };
-
-            if let Some(resolved) = resolved {
-                stack
-                    .last_mut()
-                    .expect("history traversal frame")
-                    .extend(&resolved);
-            } else {
-                visiting.insert(parent.clone());
-                stack.push(Frame::new(parent));
-            }
-        }
-    }
-
-    let mut memo = HashMap::new();
-    commits
-        .iter()
-        .filter(|commit| visible.contains(&commit.sha))
-        .cloned()
-        .map(|mut commit| {
-            let mut seen = HashSet::new();
-            commit.parent_shas = commit
-                .parent_shas
-                .iter()
-                .flat_map(|parent| nearest_visible_parents(parent, visible, &by_sha, &mut memo))
-                .filter(|parent| seen.insert(parent.clone()))
-                .collect();
-            commit
-        })
-        .collect()
-}
-
 type RankedFileMatch = (Option<usize>, u32, String, bool);
 
 fn compare_file_matches(
@@ -2085,171 +1484,6 @@ fn rank_file_matches(
         .collect()
 }
 
-/// Turn a generated chat title into the semantic portion of a Mast branch
-/// (port of zeron's `worktreeBranchFromTitle`). Mast NFKD-normalizes accented
-/// letters first; native keeps it ASCII-only (generated titles are Title Case
-/// English), so non-ASCII characters collapse into the `-` separator.
-pub fn worktree_branch_from_title(title: &str) -> String {
-    let mut slug = String::new();
-    for c in title.trim().chars() {
-        if matches!(c, '\'' | '"' | '`') {
-            continue; // dropped entirely (cafe's → cafes), not a separator
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    slug.truncate(48);
-    let slug = slug.trim_matches('-');
-    format!(
-        "{BRANCH_PREFIX}{}",
-        if slug.is_empty() { "update" } else { slug }
-    )
-}
-
-fn bounded_field(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubCommitAvatar {
-    sha: String,
-    author: Option<GitHubAvatarUser>,
-    commit: GitHubCommitMetadata,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubAvatarUser {
-    avatar_url: String,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubCommitMetadata {
-    author: GitHubCommitAuthor,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubCommitAuthor {
-    email: String,
-}
-
-fn parse_github_remote(remote: &str) -> Option<(String, String)> {
-    let remote = remote.trim();
-    let path = remote
-        .strip_prefix("https://github.com/")
-        .or_else(|| remote.strip_prefix("http://github.com/"))
-        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| remote.strip_prefix("git@github.com:"))?;
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let mut parts = path.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    if owner.is_empty()
-        || repo.is_empty()
-        || parts.next().is_some()
-        || !owner
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        || !repo.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-    {
-        return None;
-    }
-    Some((owner.to_string(), repo.to_string()))
-}
-
-fn parse_history_log(
-    output: &str,
-    refs_by_sha: &HashMap<String, Vec<GitHistoryRef>>,
-) -> Vec<GitHistoryCommit> {
-    let fields: Vec<&str> = output.split('\0').collect();
-    fields
-        .chunks(6)
-        .filter_map(|record| {
-            if record.len() != 6 {
-                return None;
-            }
-            let sha = record[0].trim_start_matches(['\r', '\n']);
-            if sha.is_empty() {
-                return None;
-            }
-            Some(GitHistoryCommit {
-                sha: sha.to_string(),
-                parent_shas: record[1]
-                    .split_ascii_whitespace()
-                    .map(str::to_string)
-                    .collect(),
-                subject: bounded_field(record[2], 4_096),
-                author_name: bounded_field(record[3], 512),
-                author_email: bounded_field(record[4], 512),
-                authored_at: bounded_field(record[5], 128),
-                refs: refs_by_sha.get(sha).cloned().unwrap_or_default(),
-            })
-        })
-        .collect()
-}
-
-fn parse_history_refs(output: &str) -> HashMap<String, Vec<GitHistoryRef>> {
-    let fields: Vec<&str> = output.split('\0').collect();
-    let mut refs_by_sha: HashMap<String, Vec<GitHistoryRef>> = HashMap::new();
-    for record in fields.chunks(6) {
-        if record.len() != 6 {
-            continue;
-        }
-        let full_name = record[0].trim_start_matches(['\r', '\n']);
-        let object_sha = record[1];
-        let object_type = record[2];
-        let peeled_sha = record[3];
-        let peeled_type = record[4];
-        let symbolic_target = record[5];
-        if full_name.is_empty() || !symbolic_target.is_empty() {
-            continue;
-        }
-        let Some((kind, label)) = (if let Some(label) = full_name.strip_prefix("refs/heads/") {
-            Some((GitHistoryRefKind::Branch, label))
-        } else if let Some(label) = full_name.strip_prefix("refs/remotes/") {
-            Some((GitHistoryRefKind::Remote, label))
-        } else {
-            full_name
-                .strip_prefix("refs/tags/")
-                .map(|label| (GitHistoryRefKind::Tag, label))
-        }) else {
-            continue;
-        };
-        let target_sha = if object_type == "commit" {
-            object_sha
-        } else if object_type == "tag" && peeled_type == "commit" {
-            peeled_sha
-        } else {
-            continue;
-        };
-        refs_by_sha
-            .entry(target_sha.to_string())
-            .or_default()
-            .push(GitHistoryRef {
-                kind,
-                label: bounded_field(label, 1_024),
-            });
-    }
-    for refs in refs_by_sha.values_mut() {
-        refs.sort_by(|left, right| {
-            let order = |kind| match kind {
-                GitHistoryRefKind::Branch => 0,
-                GitHistoryRefKind::Tag => 1,
-                GitHistoryRefKind::Remote => 2,
-            };
-            order(left.kind)
-                .cmp(&order(right.kind))
-                .then_with(|| left.label.cmp(&right.label))
-        });
-    }
-    refs_by_sha
-}
-
 /// Absolute form of a possibly-relative path (no filesystem access).
 fn absolutize(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -2269,429 +1503,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worktree_branches_are_created_as_mast_and_both_prefixes_are_ours() {
-        assert_eq!(
-            worktree_branch_from_title("Fix login flow"),
-            "mast/fix-login-flow"
-        );
-        assert!(is_owned_branch("mast/swift-otter"));
-        assert!(is_owned_branch("zeron/swift-otter"));
-        assert!(!is_owned_branch("feature/zeron/x"));
-        assert!(is_owned_branch_of("zeron/swift-otter", "swift-otter"));
-        assert!(is_owned_branch_of("mast/swift-otter", "swift-otter"));
-        assert!(!is_owned_branch_of("mast/other", "swift-otter"));
-    }
-
-    #[test]
-    fn broad_workspace_roots_stop_at_home_but_keep_projects_and_volumes() {
-        let home = Path::new("/Users/example");
-        assert!(is_broad_workspace_root_with_home(Path::new("/"), home));
-        assert!(is_broad_workspace_root_with_home(Path::new("/Users"), home));
-        assert!(is_broad_workspace_root_with_home(home, home));
-        assert!(is_broad_workspace_root_with_home(
-            Path::new("relative/project"),
-            home
-        ));
-        assert!(!is_broad_workspace_root_with_home(
-            Path::new("/Users/example/Projects/app"),
-            home
-        ));
-        assert!(!is_broad_workspace_root_with_home(
-            Path::new("/Volumes/work/app"),
-            home
-        ));
-    }
-
-    #[test]
-    fn automatic_access_blocks_privacy_managed_home_subtrees_only() {
-        let home = Path::new("/Users/example");
-        for path in [
-            "/Users/example/Desktop",
-            "/Users/example/Documents/project",
-            "/Users/example/Downloads/repo",
-            "/Users/example/Movies/clips",
-            "/Users/example/Music/library",
-            "/Users/example/Pictures/Photos Library.photoslibrary",
-            "/Users/example/Library/Application Support/app",
-        ] {
-            assert!(is_automatic_access_blocked_with_home(Path::new(path), home));
-        }
-        assert!(!is_automatic_access_blocked_with_home(
-            Path::new("/Users/example/Projects/app"),
-            home
-        ));
-        assert!(!is_automatic_access_blocked_with_home(
-            Path::new("/Volumes/work/app"),
-            home
-        ));
-    }
-
-    #[test]
-    fn resolved_broad_root_catches_dot_alias() {
-        let home = home_dir();
-        assert!(is_broad_workspace_root_resolved(&home.join(".")));
-    }
-
-    #[test]
-    fn home_picker_recognizes_privacy_managed_children_before_metadata_probes() {
-        let home = Path::new("/Users/example");
-        for name in [
-            "Desktop",
-            "Documents",
-            "Downloads",
-            "Movies",
-            "Music",
-            "Pictures",
-            "Library",
-        ] {
-            assert!(is_protected_home_child_with_home(home, name, home));
-        }
-        assert!(!is_protected_home_child_with_home(home, "Projects", home));
-        assert!(!is_protected_home_child_with_home(
-            Path::new("/Users/example/Projects"),
-            "Documents",
-            home
-        ));
-    }
-
-    fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
-        GitHistoryCommit {
-            subject: sha.clone(),
-            sha,
-            parent_shas: parent_sha.into_iter().collect(),
-            author_name: "Test".into(),
-            author_email: "test@example.com".into(),
-            authored_at: "2026-08-20T12:00:00Z".into(),
-            refs: Vec::new(),
-        }
-    }
-
-    fn score(query: &str, candidate: &str) -> Option<u32> {
-        let mut matcher = nucleo_matcher::Matcher::new({
-            let mut config = nucleo_matcher::Config::DEFAULT;
-            config.set_match_paths();
-            config
-        });
-        nucleo_matcher::pattern::Pattern::parse(
-            query,
-            nucleo_matcher::pattern::CaseMatching::Smart,
-            nucleo_matcher::pattern::Normalization::Smart,
-        )
-        .score(
-            nucleo_matcher::Utf32String::from(candidate).slice(..),
-            &mut matcher,
-        )
-    }
-
-    #[test]
-    fn parses_common_github_remote_forms() {
-        let expected = Some(("openai".to_string(), "codex".to_string()));
-        assert_eq!(
-            parse_github_remote("https://github.com/openai/codex.git"),
-            expected
-        );
-        assert_eq!(
-            parse_github_remote("git@github.com:openai/codex.git"),
-            expected
-        );
-        assert_eq!(parse_github_remote("https://gitlab.com/openai/codex"), None);
-    }
-
-    #[tokio::test]
-    async fn github_avatar_downloads_once_into_the_local_cache() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let bytes = b"\xff\xd8\xffavatar".to_vec();
-        let served = bytes.clone();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.unwrap();
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        served.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            socket.write_all(&served).await.unwrap();
-        });
-
-        let data = tempfile::tempdir().unwrap();
-        let repos =
-            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
-        let url = format!("http://{address}/avatar.jpg");
-        let first = repos.cache_github_avatar(&url).await.expect("downloaded");
-        server.await.unwrap();
-        assert_eq!(tokio::fs::read(&first).await.unwrap(), bytes);
-        assert_eq!(
-            repos.cache_github_avatar(&url).await.as_deref(),
-            Some(first.as_str())
-        );
-    }
-
-    #[test]
-    fn linux_drives_take_media_and_mnt_mounts_system_first() {
-        let mounts = "\
-sysfs /sys sysfs rw 0 0
-/dev/nvme0n1p2 / ext4 rw 0 0
-tmpfs /run tmpfs rw 0 0
-/dev/sda1 /media/wing/T7\\040Shield exfat rw 0 0
-/dev/sdb1 /run/media/wing/Backup ext4 rw 0 0
-/dev/sdc1 /mnt/scratch ext4 rw 0 0
-/dev/nvme0n1p2 /var/lib/docker ext4 rw 0 0
-";
-        let drives = finish_drives(linux_drives(mounts));
-        let rows: Vec<(&str, &str)> = drives
-            .iter()
-            .map(|d| (d.name.as_str(), d.path.as_str()))
-            .collect();
-        assert_eq!(
-            rows,
-            vec![
-                ("System", "/"),
-                ("Backup", "/run/media/wing/Backup"),
-                ("scratch", "/mnt/scratch"),
-                ("T7 Shield", "/media/wing/T7 Shield"),
-            ]
-        );
-    }
-
-    #[test]
-    fn linux_drives_take_custom_top_level_block_mounts_not_system_splits() {
-        let mounts = "\
-/dev/nvme0n1p2 / ext4 rw 0 0
-/dev/sdb1 /disk2 ext4 rw 0 0
-/dev/mapper/vault /tank btrfs rw 0 0
-/dev/nvme0n1p1 /boot/efi vfat rw 0 0
-/dev/sdd1 /boot ext4 rw 0 0
-/dev/sde1 /home ext4 rw 0 0
-/dev/sdf1 /data/disks/a ext4 rw 0 0
-/dev/loop3 /snap/core22/1234 squashfs ro 0 0
-/dev/loop9 /disk3 ext4 rw 0 0
-";
-        let drives = finish_drives(linux_drives(mounts));
-        let rows: Vec<&str> = drives.iter().map(|d| d.path.as_str()).collect();
-        // /disk2 and /tank are user drive roots; a loop-mounted ext4 image at
-        // a custom root counts too (it's squashfs snaps that are noise). The
-        // system's own split partitions and deep mounts stay out.
-        assert_eq!(rows, vec!["/", "/disk2", "/disk3", "/tank"]);
-    }
-
-    #[test]
-    fn finish_drives_dedupes_by_mount_point_keeping_the_first_name() {
-        let drives = finish_drives(vec![
-            DriveEntry {
-                name: "Macintosh HD".into(),
-                path: "/".into(),
-            },
-            DriveEntry {
-                name: "System".into(),
-                path: "/".into(),
-            },
-        ]);
-        assert_eq!(drives.len(), 1);
-        assert_eq!(drives[0].name, "Macintosh HD");
-    }
-
-    #[test]
-    fn mount_point_unescape_handles_octal_and_lone_backslash() {
-        assert_eq!(unescape_mount_point("/media/a\\040b"), "/media/a b");
-        assert_eq!(unescape_mount_point("/media/tab\\011x"), "/media/tab\tx");
-        assert_eq!(unescape_mount_point("/media/plain"), "/media/plain");
-        assert_eq!(unescape_mount_point("/media/tail\\"), "/media/tail\\");
-    }
-
-    #[tokio::test]
-    async fn list_drives_resolves_on_this_platform() {
-        let data = tempfile::tempdir().unwrap();
-        let repos =
-            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
-        // Content is machine-dependent; the call must succeed and dedupe.
-        let drives = repos.list_drives().await.unwrap();
-        let mut paths: Vec<&String> = drives.iter().map(|d| &d.path).collect();
-        paths.dedup();
-        assert_eq!(paths.len(), drives.len());
-    }
-
-    #[test]
-    fn fuzzy_score_matches_a_path_subsequence() {
-        assert!(score("cmp rs", "crates/ui/src/composer.rs").is_some());
-        assert!(score("composer crates", "crates/ui/src/composer.rs").is_some());
-        assert!(score("xyzq", "crates/ui/src/composer.rs").is_none());
-    }
-
-    #[test]
-    fn git_history_matches_unicode_case_insensitively() {
-        let mut candidate = history_commit("a1b2c3d4".into(), None);
-        candidate.subject = "RÉPARER la recherche".into();
-
-        assert!(git_history_matches("réparer", &candidate));
-    }
-
-    #[test]
-    fn history_compaction_handles_a_twenty_thousand_commit_gap() {
-        const DEPTH: usize = 20_000;
-        let commits = (0..DEPTH)
-            .rev()
-            .map(|index| {
-                history_commit(
-                    format!("c{index:05}"),
-                    (index > 0).then(|| format!("c{:05}", index - 1)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let newest = format!("c{:05}", DEPTH - 1);
-        let oldest = "c00000".to_string();
-        let visible = HashSet::from([newest.clone(), oldest.clone()]);
-
-        let compact = compact_history_commits(&commits, &visible);
-
-        assert_eq!(compact.len(), 2);
-        assert_eq!(compact[0].sha, newest);
-        assert_eq!(compact[0].parent_shas, vec![oldest.clone()]);
-        assert_eq!(compact[1].sha, oldest);
-        assert!(compact[1].parent_shas.is_empty());
-    }
-
-    #[test]
-    fn search_files_obeys_gitignore_and_returns_directories() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join(".git")).unwrap();
-        std::fs::create_dir(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("src/composer.rs"), "").unwrap();
-        std::fs::write(root.path().join(".secret"), "").unwrap();
-        std::fs::write(root.path().join(".gitignore"), "ignored\n").unwrap();
-        std::fs::create_dir(root.path().join("ignored")).unwrap();
-        std::fs::write(root.path().join("ignored/nope.rs"), "").unwrap();
-
-        let matches = search_files_blocking(root.path(), "src", &[]).unwrap();
-        assert!(
-            matches
-                .iter()
-                .any(|entry| entry.path == "src" && entry.is_dir)
-        );
-        assert!(matches.iter().any(|entry| entry.path == "src/composer.rs"));
-        assert!(
-            !matches
-                .iter()
-                .any(|entry| entry.path.starts_with("ignored"))
-        );
-        assert!(
-            search_files_blocking(root.path(), "secret", &[])
-                .unwrap()
-                .iter()
-                .any(|entry| entry.path == ".secret")
-        );
-        assert!(!matches.iter().any(|entry| entry.path.starts_with(".git/")));
-    }
-
-    #[test]
-    fn empty_search_features_recent_paths_before_shallow_entries() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("README.md"), "").unwrap();
-        std::fs::write(root.path().join("src/deep.rs"), "").unwrap();
-
-        let matches = search_files_blocking(root.path(), "", &["src/deep.rs".into()]).unwrap();
-        assert_eq!(
-            matches.first().map(|entry| entry.path.as_str()),
-            Some("src/deep.rs")
-        );
-        assert!(matches.iter().any(|entry| entry.path == "README.md"));
-    }
-
-    #[test]
-    fn search_files_prefers_filename_matches() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("composer/docs")).unwrap();
-        std::fs::create_dir_all(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("composer/docs/readme.md"), "").unwrap();
-        std::fs::write(root.path().join("src/composer.rs"), "").unwrap();
-
-        let matches = search_files_blocking(root.path(), "composer", &[]).unwrap();
-        let composer = matches
-            .iter()
-            .position(|entry| entry.path == "src/composer.rs")
-            .unwrap();
-        let path_only = matches
-            .iter()
-            .position(|entry| entry.path == "composer/docs/readme.md")
-            .unwrap();
-        assert!(composer < path_only);
-    }
-
-    #[test]
-    fn cached_search_reuses_one_walk_within_the_ttl() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("alpha.rs"), "").unwrap();
-        let cache: FileIndexCache = std::sync::Mutex::new(HashMap::new());
-
-        let first = search_files_cached(&cache, root.path(), "alpha", &[], || false).unwrap();
-        assert_eq!(first.first().map(|m| m.path.as_str()), Some("alpha.rs"));
-        std::fs::write(root.path().join("beta.rs"), "").unwrap();
-        let second = search_files_cached(&cache, root.path(), "beta", &[], || false).unwrap();
-        assert!(second.is_empty(), "{second:?}");
-    }
-
-    #[test]
-    fn cancelled_search_stops_before_walking() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("README.md"), "").unwrap();
-        let cancelled = AtomicBool::new(true);
-
-        let err = search_files_blocking_with_cancel(root.path(), "", &[], || {
-            cancelled.load(Ordering::Relaxed)
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("cancelled"));
-    }
-
-    #[tokio::test]
-    async fn workspace_checkout_rejects_sibling_paths() {
-        let data = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let sibling = tempfile::tempdir().unwrap();
-        let repos =
-            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
-
-        assert_eq!(
-            repos.workspace_checkout(root.path(), root.path()).await,
-            std::fs::canonicalize(root.path()).ok()
-        );
-        assert!(
-            repos
-                .workspace_checkout(root.path(), sibling.path())
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_searches_of_one_checkout_do_not_cancel_each_other() {
-        let data = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("alpha.rs"), "").unwrap();
-        std::fs::write(root.path().join("beta.rs"), "").unwrap();
-        let repos =
-            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
-
-        let alpha = repos.search_files(root.path().into(), "alpha".into(), Vec::new());
-        let beta = repos.search_files(root.path().into(), "beta".into(), Vec::new());
-        let (alpha, beta) = tokio::join!(alpha, beta);
-
-        assert_eq!(alpha.unwrap()[0].path, "alpha.rs");
-        assert_eq!(beta.unwrap()[0].path, "beta.rs");
-    }
-}
+mod tests;

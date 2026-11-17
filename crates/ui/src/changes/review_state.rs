@@ -6,7 +6,7 @@ pub(super) fn comment_state_key(
 ) -> u64 {
     let mut parts: Vec<String> = comments
         .iter()
-        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
+        .flat_map(|comment| [comment.id.clone(), comment.body.clone(), comment.path.clone(), format!("{:?}:{}", comment.side(), comment.line)])
         .collect();
     if let Some((path, side, line)) = draft {
         parts.push(format!("draft:{path}:{}:{line}", side.tag()));
@@ -210,7 +210,7 @@ fn checkout_matches_pr(
 }
 
 impl Changes {
-    fn review_identity(&self, cx: &App) -> Option<(String, Option<String>)> {
+    pub(super) fn review_identity(&self, cx: &App) -> Option<(String, Option<String>)> {
         if let Some(owner) = &self.owner {
             if let Some(target @ mast_proto::ReviewTarget::Branch { checkout_path: Some(path), branch, head_sha, .. }) = &self.walkthrough_target
                 && owner.cwd.as_deref() == Some(path.as_str())
@@ -422,7 +422,7 @@ impl Changes {
                 Some((
                     owner.chat_id.clone(),
                     owner.cwd.clone()?,
-                    self.active_diff(cx).map(|diff| self.parse_key(&diff))?,
+                    self.active_diff(cx).map(|diff| self.parse_key(diff))?,
                 ))
             }) else {
                 return;
@@ -549,6 +549,7 @@ impl Changes {
         let Some((target, head_sha)) = self.review_identity(cx) else {
             return;
         };
+        self.refresh_suggestion_head(head_sha.clone(), cx);
         if self.review_target.as_deref() == Some(&target) {
             self.refresh_review_status(cx);
             if self.review_closed {
@@ -558,6 +559,8 @@ impl Changes {
             return;
         }
         self.review_target = Some(target.clone());
+        self.load_review_threads(&target, cx);
+        self.load_local_drafts(&target, cx);
         self.review_status_task = None;
         self.review_status_checked = None;
         self.review_status_base = None;
@@ -649,7 +652,7 @@ impl Changes {
         if parsed.truncated
             || self
                 .active_diff(cx)
-                .is_none_or(|diff| self.parse_key(&diff) != parsed.key)
+                .is_none_or(|diff| self.parse_key(diff) != parsed.key)
         {
             return;
         }

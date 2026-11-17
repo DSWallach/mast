@@ -3,6 +3,7 @@
 //! SUBMODULE inside the superproject's gitignored `.worktrees/` folder (the
 //! cb4e2158 layout), and a linked worktree of the root repository.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

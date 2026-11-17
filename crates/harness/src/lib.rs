@@ -14,6 +14,10 @@
 //! first uncorrelated idle), manufacturing done-status bugs the native
 //! wires don't have (decision record: docs/research/acp.md).
 
+// The harness owns spawning: its helpers and agent drivers are the only
+// non-test code that may call `Command::new` (clippy.toml, post-mortem P3).
+#![allow(clippy::disallowed_methods)]
+
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
@@ -257,6 +261,7 @@ pub trait Harness: Send + Sync {
     }
 }
 
+pub mod backoff;
 pub mod acp;
 pub mod agent_tools;
 pub use agent_tools::AgentToolsInjection;
@@ -285,6 +290,7 @@ pub mod process;
 pub mod redact;
 mod scratch;
 pub mod shell_env;
+pub mod soak;
 #[cfg(windows)]
 pub mod windows_process;
 
@@ -430,9 +436,85 @@ fn compose_path_from<'a>(
 /// would fail with "command not found". Every engine `git` spawn starts here.
 pub fn git_command() -> std::process::Command {
     GIT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut command = std::process::Command::new("git");
+    let mut command = std::process::Command::new(resolve_program("git"));
     compose_login_shell_path_std(&mut command);
     command
+}
+
+/// Absolute path of a bare program name, searched on the process PATH then the
+/// login-shell PATH and cached per name. std only uses `posix_spawn` when the
+/// program is a path or the child's PATH is untouched; a bare name plus a
+/// composed PATH falls back to `fork`, which is very costly in a large process.
+/// Falls back to the bare name when nothing is found. Symlinks are kept (not
+/// canonicalized) so the program sees the name it was installed under.
+pub fn resolve_program(name: &str) -> std::path::PathBuf {
+    static CACHE: std::sync::Mutex<
+        Option<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::Mutex::new(None);
+    let still_valid = |path: &std::path::Path| path.is_absolute() && path.is_file();
+    {
+        let cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(path) = cache.as_ref().and_then(|map| map.get(name))
+            && still_valid(path)
+        {
+            return path.clone();
+        }
+    }
+    let found = (|| {
+        let component = std::path::Path::new(name);
+        if component.components().count() != 1 || name.is_empty() {
+            return None;
+        }
+        let mut directories = Vec::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            directories.extend(std::env::split_paths(&path));
+        }
+        if let Some(path) = shell_env::login_shell_path() {
+            directories.extend(std::env::split_paths(path));
+        }
+        directories
+            .into_iter()
+            .filter(|directory| directory.is_absolute())
+            .flat_map(|directory| executable_candidates(&directory, name))
+            .find(|candidate| executable_file(candidate))
+    })();
+    match found {
+        Some(path) => {
+            CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(Default::default)
+                .insert(name.to_owned(), path.clone());
+            path
+        }
+        None => std::path::PathBuf::from(name),
+    }
+}
+
+fn executable_file(candidate: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(candidate) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    metadata.is_file()
+}
+
+#[cfg(test)]
+#[test]
+fn git_command_uses_an_absolute_program_when_git_is_installed() {
+    if resolve_program("git").is_absolute() {
+        let command = git_command();
+        assert!(std::path::Path::new(command.get_program()).is_absolute());
+    } else {
+        // No git on this machine's PATH: the bare name is the documented fallback.
+        assert_eq!(git_command().get_program(), "git");
+    }
 }
 
 static GIT_SPAWNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -446,6 +528,39 @@ pub fn git_spawn_count() -> u64 {
 /// Async counterpart to [`git_command`].
 pub fn git_command_async() -> tokio::process::Command {
     tokio::process::Command::from(git_command())
+}
+
+/// The one spawn entry for programs other than `git`/`gh`. A bare name is
+/// resolved to an absolute path ([`resolve_program`]) so std can use
+/// `posix_spawn`; a path is used as given. Post-mortem 2026-11-16 (P3): clippy
+/// forbids `Command::new` outside this crate and tests.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let program = program.as_ref();
+    match program.to_str() {
+        Some(name) if std::path::Path::new(name).components().count() == 1 => {
+            std::process::Command::new(resolve_program(name))
+        }
+        _ => std::process::Command::new(program),
+    }
+}
+
+/// Async counterpart to [`command`].
+pub fn command_async(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    tokio::process::Command::from(command(program))
+}
+
+/// A `gh` command resolved through the login shell with its PATH composed, or
+/// `None` when the GitHub CLI is not installed.
+pub fn gh_command() -> Option<std::process::Command> {
+    let executable = resolve_login_shell_executable("gh")?;
+    let mut command = std::process::Command::new(executable);
+    compose_login_shell_path_std(&mut command);
+    Some(command)
+}
+
+/// Async counterpart to [`gh_command`].
+pub fn gh_command_async() -> Option<tokio::process::Command> {
+    gh_command().map(tokio::process::Command::from)
 }
 
 fn retain_absolute_deduped(paths: &mut Vec<std::path::PathBuf>) {
@@ -713,11 +828,14 @@ mod git_command_tests {
     #[test]
     fn git_command_carries_a_composed_path_for_sync_and_async() {
         let sync = git_command();
-        assert_eq!(sync.get_program(), "git");
+        assert_eq!(sync.get_program(), resolve_program("git").as_os_str());
         assert!(sync.get_envs().any(|(key, _)| key == "PATH"));
 
         let async_command = git_command_async();
-        assert_eq!(async_command.as_std().get_program(), "git");
+        assert_eq!(
+            async_command.as_std().get_program(),
+            resolve_program("git").as_os_str()
+        );
         assert!(
             async_command
                 .as_std()

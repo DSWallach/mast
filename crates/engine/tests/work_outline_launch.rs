@@ -14,6 +14,7 @@
 //!   carrying another cwd) and skip branch auto-rename; unbound Chats keep
 //!   today's behavior.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

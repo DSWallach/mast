@@ -425,8 +425,11 @@ mod about_panel {
 // delegate does not implement applicationShouldTerminate:.
 #[cfg(target_os = "macos")]
 mod native_quit {
+    #[cfg(not(test))]
     use super::*;
+    #[cfg(not(test))]
     use objc::runtime::{Class, Object, Sel, class_addMethod};
+    #[cfg(not(test))]
     use objc::{class, msg_send, sel, sel_impl};
     use std::cell::{Cell, RefCell};
 
@@ -435,6 +438,7 @@ mod native_quit {
         static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
+    #[cfg(not(test))]
     extern "C" fn should_terminate(_: &Object, _: Sel, _: *mut Object) -> usize {
         if ALLOWED.get() {
             return 1; // NSTerminateNow
@@ -451,15 +455,16 @@ mod native_quit {
         ALLOWED.set(true);
     }
 
+    #[cfg(not(test))]
     pub(super) fn init(cx: &mut App) {
         let executor = cx.foreground_executor().clone();
         let app = cx.to_async();
         REQUEST.with_borrow_mut(|request| {
             *request = Some(Box::new(move || {
-                let mut app = app.clone();
+                let app = app.clone();
                 executor
                     .spawn(async move {
-                        let _ = app.update(request_quit);
+                        app.update(request_quit);
                     })
                     .detach();
             }));

@@ -1174,6 +1174,7 @@ impl MarkdownPreview {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn zoom(&self) -> f32 {
         self.zoom
     }
@@ -1269,6 +1270,7 @@ impl MarkdownPreview {
     }
 
     /// Bumps every time a parse result is applied.
+    #[cfg(test)]
     pub(crate) fn parse_generation(&self) -> u64 {
         self.parse_generation
     }

@@ -1102,7 +1102,7 @@ impl ExternalSessionImporter {
                 });
             }
         }
-        candidates.sort_by(|a, b| b.modified_at_ms.cmp(&a.modified_at_ms));
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.modified_at_ms));
         Ok(candidates)
     }
 

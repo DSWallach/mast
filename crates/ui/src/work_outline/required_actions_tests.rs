@@ -622,7 +622,7 @@ fn reply_and_resolve_sends_one_message_then_resolves(cx: &mut gpui::TestAppConte
 
     // Type the note and press Enter.
     let input = list.read_with(vcx, |list, _| list.note_input());
-    let focus = input.read_with(vcx, |input, cx| gpui::Focusable::focus_handle(input, cx));
+    let focus = input.read_with(vcx, gpui::Focusable::focus_handle);
     vcx.update(|window, cx| {
         crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
         window.activate_window();

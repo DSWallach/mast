@@ -3,10 +3,7 @@
 use std::time::Duration;
 
 use chrono::TimeZone;
-use gpui::{
-    AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-    VisualTestContext, Window, div, px,
-};
+use gpui::{Context, IntoElement, Render, TestAppContext, VisualTestContext, Window, div, px};
 use mast_proto::{
     ChatAccountPin, HarnessId, ManagedAccount, ManagedAccountsSnapshot, WorkOutlineSnapshot,
 };
@@ -17,7 +14,6 @@ use crate::work_outline::store::{fixture_ids::*, fixture_snapshot};
 
 struct Host {
     shell: Entity<Shell>,
-    chat_id: &'static str,
     tab: bool,
     _dir: tempfile::TempDir,
 }
@@ -88,7 +84,11 @@ pub(super) fn mount<'a>(
             cx,
         );
         crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-        crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
+        crate::shell::apply_keymap(
+            cx,
+            &crate::settings::KeymapConfig::default(),
+            Default::default(),
+        );
     });
     let (host, vcx) = cx.add_window_view(move |_, cx| {
         let shell = cx.new(|cx| {
@@ -146,6 +146,7 @@ pub(super) fn mount<'a>(
             shell.chat_header_links.insert(
                 chat_id.into(),
                 ChatHeaderLinkCache {
+                    checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -154,7 +155,6 @@ pub(super) fn mount<'a>(
         });
         Host {
             shell,
-            chat_id,
             tab,
             _dir: dir,
         }
@@ -519,6 +519,7 @@ fn changing_chat_drops_the_card_and_its_pin(cx: &mut TestAppContext) {
         shell.chat_header_links.insert(
             CHAT_UI.into(),
             ChatHeaderLinkCache {
+                checkout: None,
                 status: None,
                 fetched_at: Instant::now(),
             },
@@ -966,7 +967,11 @@ fn mixed_needs(snapshot: &mut WorkOutlineSnapshot) {
         at("r-ready-old", "w-0", "Ready to merge: branch-a", 2_000),
         at("r-block-old", CHAT_API, "Pick the auth provider", 3_000),
     ]);
-    if let Some(r) = snapshot.user_action_requests.iter_mut().find(|r| r.id == "r-fyi") {
+    if let Some(r) = snapshot
+        .user_action_requests
+        .iter_mut()
+        .find(|r| r.id == "r-fyi")
+    {
         r.dedupe_key = Some("artq:art1:rollup".into());
         r.priority = Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi);
         r.info = Some("[Open plan](mast-artifact:abc123)".into());
@@ -981,7 +986,9 @@ fn row_top(vcx: &mut VisualTestContext, id: &str) -> gpui::Pixels {
 }
 
 #[gpui::test]
-fn needs_you_cards_group_blocking_then_ready_to_merge_then_fyi_oldest_first(cx: &mut TestAppContext) {
+fn needs_you_cards_group_blocking_then_ready_to_merge_then_fyi_oldest_first(
+    cx: &mut TestAppContext,
+) {
     let (_, vcx) = mount(cx, CHAT_API, true, mixed_needs);
     for heading in [
         "required-actions-group-Blocking",
@@ -990,7 +997,13 @@ fn needs_you_cards_group_blocking_then_ready_to_merge_then_fyi_oldest_first(cx: 
     ] {
         assert!(has(vcx, heading), "{heading}");
     }
-    let order = ["r-block-old", "r-block-new", "r-ready-old", "r-ready-new", "r-fyi"];
+    let order = [
+        "r-block-old",
+        "r-block-new",
+        "r-ready-old",
+        "r-ready-new",
+        "r-fyi",
+    ];
     assert!(has(vcx, "required-actions-kind-r-block-old-Ask"));
     assert!(has(vcx, "required-actions-kind-r-ready-old-Handoff"));
     assert!(has(vcx, "required-actions-artifact-r-fyi-0"));
@@ -1024,20 +1037,36 @@ fn cards_offer_the_inline_actions_for_their_group(cx: &mut TestAppContext) {
 fn the_item_tab_has_no_other_sections_expanded_until_asked(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, needs_attention);
     // One line each: the rows exist, their bodies do not.
-    for row in ["chat-item-instructions", "chat-item-runs-in", "chat-item-model", "chat-item-account", "chat-item-links"] {
+    for row in [
+        "chat-item-instructions",
+        "chat-item-runs-in",
+        "chat-item-model",
+        "chat-item-account",
+        "chat-item-links",
+    ] {
         assert!(has(vcx, row), "{row}");
     }
-    for body in ["chat-item-instructions-edit", "chat-item-account-badge", "chat-item-pr-0"] {
+    for body in [
+        "chat-item-instructions-edit",
+        "chat-item-account-badge",
+        "chat-item-pr-0",
+    ] {
         assert!(!has(vcx, body), "{body} starts collapsed");
     }
     let row = vcx.debug_bounds("chat-item-model-toggle").unwrap();
     assert!(row.size.height <= px(24.0), "{:?}", row.size);
     // Click expands; click again collapses.
-    let at = vcx.debug_bounds("chat-item-instructions-toggle").unwrap().center();
+    let at = vcx
+        .debug_bounds("chat-item-instructions-toggle")
+        .unwrap()
+        .center();
     vcx.simulate_click(at, gpui::Modifiers::default());
     draw(vcx);
     assert!(has(vcx, "chat-item-instructions-edit"));
-    let at = vcx.debug_bounds("chat-item-instructions-toggle").unwrap().center();
+    let at = vcx
+        .debug_bounds("chat-item-instructions-toggle")
+        .unwrap()
+        .center();
     vcx.simulate_click(at, gpui::Modifiers::default());
     draw(vcx);
     assert!(!has(vcx, "chat-item-instructions-edit"));
@@ -1047,18 +1076,25 @@ fn the_item_tab_has_no_other_sections_expanded_until_asked(cx: &mut TestAppConte
 #[gpui::test]
 fn instructions_are_summarised_and_expand_to_their_entries(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
-        snapshot.instructions.push(crate::work_outline::instructions::fixture::instruction(
-            "ins-long",
-            "s1",
-            Some(API),
-            "a0",
-            &format!("First line\n{}", "long ".repeat(80)),
-        ));
+        snapshot
+            .instructions
+            .push(crate::work_outline::instructions::fixture::instruction(
+                "ins-long",
+                "s1",
+                Some(API),
+                "a0",
+                &format!("First line\n{}", "long ".repeat(80)),
+            ));
     });
-    let facts = shell.read_with(vcx, |shell, cx| shell.chat_item_facts(CHAT_API, cx).unwrap());
+    let facts = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
     let entries = &facts.item.unwrap().instructions.entries;
     assert!(entries.iter().any(|e| e == "First line"), "{entries:?}");
-    assert!(entries.iter().all(|e| e.chars().count() <= 141), "{entries:?}");
+    assert!(
+        entries.iter().all(|e| e.chars().count() <= 141),
+        "{entries:?}"
+    );
 }
 
 #[gpui::test]
@@ -1067,7 +1103,13 @@ fn the_item_tab_stays_readable_with_maximal_data(cx: &mut TestAppContext) {
         needs_attention(snapshot);
         mixed_needs(snapshot);
         for n in 0..9 {
-            let mut r = request(&format!("r-more-{n}"), "s1", API, CHAT_API, &"A very long question. ".repeat(20));
+            let mut r = request(
+                &format!("r-more-{n}"),
+                "s1",
+                API,
+                CHAT_API,
+                &"A very long question. ".repeat(20),
+            );
             r.created_at = 10_000 + n;
             r.info = Some("detail ".repeat(100));
             snapshot.user_action_requests.push(r);
@@ -1078,14 +1120,31 @@ fn the_item_tab_stays_readable_with_maximal_data(cx: &mut TestAppContext) {
     let tab = vcx.debug_bounds("chat-item-tab").unwrap();
     // Nothing spills sideways, and a long question stays two lines.
     for id in ["r-block-old", "r-more-0", "r-more-8", "r-fyi"] {
-        let selector: &'static str = Box::leak(format!("required-actions-row-{id}").into_boxed_str());
-        let bounds = vcx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}"));
-        assert!(bounds.right() <= tab.right(), "{selector} {bounds:?} in {tab:?}");
+        let selector: &'static str =
+            Box::leak(format!("required-actions-row-{id}").into_boxed_str());
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector}"));
+        assert!(
+            bounds.right() <= tab.right(),
+            "{selector} {bounds:?} in {tab:?}"
+        );
     }
     let long = vcx.debug_bounds("required-actions-text-r-more-0").unwrap();
-    assert!(long.size.height < px(40.0), "clamped to two lines: {:?}", long.size);
+    assert!(
+        long.size.height < px(40.0),
+        "clamped to two lines: {:?}",
+        long.size
+    );
     // The team block keeps to the roll-up and three workers.
-    let shown = (0..15).filter(|i| has(vcx, Box::leak(format!("chat-item-worker-w-{i}").into_boxed_str()))).count();
+    let shown = (0..15)
+        .filter(|i| {
+            has(
+                vcx,
+                Box::leak(format!("chat-item-worker-w-{i}").into_boxed_str()),
+            )
+        })
+        .count();
     assert_eq!(shown, 3);
     assert!(has(vcx, "chat-item-team-all"));
 }
@@ -1126,6 +1185,7 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
             shell.chat_header_links.insert(
                 format!("w-{i}"),
                 ChatHeaderLinkCache {
+                    checkout: None,
                     status: None,
                     fetched_at: Instant::now(),
                 },
@@ -1137,7 +1197,9 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
 }
 
 fn worker_asks(snapshot: &mut WorkOutlineSnapshot) {
-    snapshot.user_action_requests.push(request("a1", "s1", API, "w-1", "Which database?"));
+    snapshot
+        .user_action_requests
+        .push(request("a1", "s1", API, "w-1", "Which database?"));
     let mut handoff = request("a2", "s1", API, "w-2", "Work delivered");
     handoff.kind = Some(mast_proto::work_outline_user_actions::UserActionKind::Handoff);
     snapshot.user_action_requests.push(handoff);
@@ -1168,7 +1230,10 @@ fn the_team_tab_lists_a_worker_per_row_with_state_activity_and_a_roll_up(cx: &mu
     });
     let facts = shell.update(vcx, |shell, cx| shell.team_facts(CHAT_API, cx));
     assert_eq!(facts.workers.len(), 4);
-    assert_eq!(facts.roll_up(), "◌ 1 working \u{b7} ! 1 waiting on you \u{b7} → 1 ready to merge");
+    assert_eq!(
+        facts.roll_up(),
+        "◌ 1 working \u{b7} ! 1 waiting on you \u{b7} → 1 ready to merge"
+    );
     // Waiting first, then ready to merge, working, idle.
     let ids: Vec<_> = facts.workers.iter().map(|w| w.chat_id.as_str()).collect();
     assert_eq!(ids, ["w-1", "w-2", "w-0", "w-3"]);
@@ -1180,7 +1245,10 @@ fn worker_changes_action_opens_a_diff(cx: &mut TestAppContext) {
     add_workers(&shell, vcx, 2);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    let position = vcx.debug_bounds("team-worker-changes-w-0").unwrap().center();
+    let position = vcx
+        .debug_bounds("team-worker-changes-w-0")
+        .unwrap()
+        .center();
     vcx.simulate_click(position, gpui::Modifiers::default());
     draw(vcx);
     shell.read_with(vcx, |shell, _| {
@@ -1202,15 +1270,24 @@ fn team_tab_rows_stack_without_overlap_for_two_and_fifteen_workers(cx: &mut Test
         for worker in &facts.workers {
             let selector: &'static str =
                 Box::leak(format!("team-worker-{}", worker.chat_id).into_boxed_str());
-            let bounds = vcx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} ({n})"));
-            assert!(bounds.top() >= last_bottom, "{selector} overlaps the row above");
+            let bounds = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} ({n})"));
+            assert!(
+                bounds.top() >= last_bottom,
+                "{selector} overlaps the row above"
+            );
             assert!(bounds.right() <= tab.right(), "{selector} spills sideways");
             last_bottom = bounds.bottom();
         }
         // Each row names its branch; the waiting and ready ones say more.
         assert!(has(vcx, "team-branch-w-0"));
         assert!(has(vcx, "team-worker-activity-w-0"));
-        assert_eq!(has(vcx, "team-worker-jump-w-2"), n > 2, "ready-to-merge jump");
+        assert_eq!(
+            has(vcx, "team-worker-jump-w-2"),
+            n > 2,
+            "ready-to-merge jump"
+        );
         assert!(!has(vcx, "team-worker-jump-w-0"));
     }
 }
@@ -1224,12 +1301,16 @@ fn plain_t_opens_the_team_tab_only_when_the_panel_itself_is_focused(cx: &mut Tes
     let composer = shell.read_with(vcx, |shell, cx| shell.composer.read(cx).focus_handle(cx));
     vcx.update(|window, cx| window.focus(&composer, cx));
     vcx.simulate_keystrokes("t");
-    shell.read_with(vcx, |shell, cx| assert_ne!(shell.resolved_right_active(cx), RightSurface::Team));
+    shell.read_with(vcx, |shell, cx| {
+        assert_ne!(shell.resolved_right_active(cx), RightSurface::Team)
+    });
     // Panel focused: `t` opens Team.
     vcx.update(|window, cx| window.focus(&panel, cx));
     draw(vcx);
     vcx.simulate_keystrokes("t");
-    shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), RightSurface::Team));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team)
+    });
 }
 
 #[gpui::test]
@@ -1237,15 +1318,22 @@ fn team_panel_rebind_replaces_the_default(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 3);
     let mut keymap = crate::settings::KeymapConfig::default();
-    keymap.set(crate::settings::ShortcutId::OpenTeamTabFromPanel, "y".into());
+    keymap.set(
+        crate::settings::ShortcutId::OpenTeamTabFromPanel,
+        "y".into(),
+    );
     vcx.update(|_, cx| crate::shell::apply_keymap(cx, &keymap, Default::default()));
     let panel = shell.update(vcx, |shell, cx| shell.team_panel_focus(cx));
     vcx.update(|window, cx| window.focus(&panel, cx));
     draw(vcx);
     vcx.simulate_keystrokes("t");
-    shell.read_with(vcx, |shell, cx| assert_ne!(shell.resolved_right_active(cx), RightSurface::Team));
+    shell.read_with(vcx, |shell, cx| {
+        assert_ne!(shell.resolved_right_active(cx), RightSurface::Team)
+    });
     vcx.simulate_keystrokes("y");
-    shell.read_with(vcx, |shell, cx| assert_eq!(shell.resolved_right_active(cx), RightSurface::Team));
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team)
+    });
 }
 
 #[gpui::test]
@@ -1255,7 +1343,9 @@ fn plain_t_does_nothing_on_a_chat_without_workers(cx: &mut TestAppContext) {
     vcx.update(|window, cx| window.focus(&panel, cx));
     draw(vcx);
     vcx.simulate_keystrokes("t");
-    shell.read_with(vcx, |shell, cx| assert_ne!(shell.resolved_right_active(cx), RightSurface::Team));
+    shell.read_with(vcx, |shell, cx| {
+        assert_ne!(shell.resolved_right_active(cx), RightSurface::Team)
+    });
 }
 
 #[gpui::test]
@@ -1266,7 +1356,9 @@ fn the_team_hotkey_avoids_the_browsers_new_tab(_cx: &mut TestAppContext) {
     assert!(
         crate::settings::ShortcutId::ALL
             .into_iter()
-            .all(|id| id.default_combo() != "mod-t" && (id == crate::settings::ShortcutId::OpenTeamTab || id.default_combo() != OPEN_TEAM_TAB_COMBO))
+            .all(|id| id.default_combo() != "mod-t"
+                && (id == crate::settings::ShortcutId::OpenTeamTab
+                    || id.default_combo() != OPEN_TEAM_TAB_COMBO))
     );
 }
 
@@ -1276,9 +1368,7 @@ fn the_team_hotkey_avoids_the_browsers_new_tab(_cx: &mut TestAppContext) {
 mod pr_rows {
     use super::*;
     use crate::github::fixture::summary;
-    use mast_proto::{
-        PullRequestCiStatus, PullRequestReviewDecision, PullRequestState,
-    };
+    use mast_proto::{PullRequestCiStatus, PullRequestReviewDecision, PullRequestState};
 
     fn cache(
         shell: &Entity<Shell>,
@@ -1297,8 +1387,13 @@ mod pr_rows {
         draw(vcx);
     }
 
-    fn facts(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> crate::chat_item::ChatItemFacts {
-        shell.read_with(vcx, |shell, cx| shell.chat_item_facts(CHAT_API, cx).unwrap())
+    fn facts(
+        shell: &Entity<Shell>,
+        vcx: &mut VisualTestContext,
+    ) -> crate::chat_item::ChatItemFacts {
+        shell.read_with(vcx, |shell, cx| {
+            shell.chat_item_facts(CHAT_API, cx).unwrap()
+        })
     }
 
     #[gpui::test]
@@ -1309,7 +1404,11 @@ mod pr_rows {
         assert_eq!((pr.number, pr.title.clone(), pr.status), (7, None, None));
         assert!(has(vcx, "chat-item-pr-0"));
         assert!(has(vcx, "chat-item-pr-0-title"));
-        for gone in ["chat-item-pr-0-state", "chat-item-pr-0-checks", "chat-item-pr-0-review"] {
+        for gone in [
+            "chat-item-pr-0-state",
+            "chat-item-pr-0-checks",
+            "chat-item-pr-0-review",
+        ] {
             assert!(!has(vcx, gone), "{gone}");
         }
         cache(&shell, vcx, |_| {}, false);
@@ -1334,7 +1433,10 @@ mod pr_rows {
         let status = pr.status.unwrap();
         assert_eq!(status.state, PullRequestState::Open);
         assert_eq!(status.checks, Some(PullRequestCiStatus::Failing));
-        assert_eq!(status.review, Some(PullRequestReviewDecision::ChangesRequested));
+        assert_eq!(
+            status.review,
+            Some(PullRequestReviewDecision::ChangesRequested)
+        );
         assert_eq!(pr.repo().as_deref(), Some("acme/app"));
         for id in [
             "chat-item-pr-0-title",
@@ -1361,7 +1463,10 @@ mod pr_rows {
         assert!(!has(vcx, "chat-item-pr-0-checks"));
         assert!(!has(vcx, "chat-item-pr-0-review"));
         cache(&shell, vcx, |s| s.state = PullRequestState::Draft, false);
-        assert_eq!(facts(&shell, vcx).prs[0].status.unwrap().state, PullRequestState::Draft);
+        assert_eq!(
+            facts(&shell, vcx).prs[0].status.unwrap().state,
+            PullRequestState::Draft
+        );
     }
 
     #[gpui::test]
@@ -1379,7 +1484,12 @@ mod pr_rows {
     fn a_long_title_truncates_inside_the_tab_and_the_card(cx: &mut TestAppContext) {
         let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
         expand(&shell, vcx, &["links"]);
-        cache(&shell, vcx, |s| s.title = "A very long pull request title ".repeat(30), false);
+        cache(
+            &shell,
+            vcx,
+            |s| s.title = "A very long pull request title ".repeat(30),
+            false,
+        );
         let tab = vcx.debug_bounds("chat-item-tab").unwrap();
         let row = vcx.debug_bounds("chat-item-pr-0").unwrap();
         let title = vcx.debug_bounds("chat-item-pr-0-title").unwrap();
@@ -1421,7 +1531,11 @@ fn wake_event(id: &str, worker: &str, unseen: bool) -> mast_proto::WakeEventView
     }
 }
 
-fn set_wake_status(shell: &Entity<Shell>, vcx: &mut VisualTestContext, status: mast_proto::WakeStatus) {
+fn set_wake_status(
+    shell: &Entity<Shell>,
+    vcx: &mut VisualTestContext,
+    status: mast_proto::WakeStatus,
+) {
     shell.update(vcx, |shell, cx| {
         shell.wakes.set(status);
         cx.notify();
@@ -1433,7 +1547,10 @@ fn held_status() -> mast_proto::WakeStatus {
     mast_proto::WakeStatus {
         chat_id: CHAT_API.into(),
         is_orchestrator: true,
-        held: vec![wake_event("e1", "w-1", false), wake_event("e2", "w-1", false)],
+        held: vec![
+            wake_event("e1", "w-1", false),
+            wake_event("e2", "w-1", false),
+        ],
         hold_reason: Some(mast_proto::WakeHoldReason::Draft),
         recent: vec![
             wake_event("e2", "w-1", true),
@@ -1453,7 +1570,17 @@ fn the_team_header_has_wake_switches_and_shows_held_and_unseen_only_when_present
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    for key in ["enabled", "required-actions", "errors", "worker-reports", "awaiting-input", "tool-calls-failed", "auto-continue", "turn-finished", "prs"] {
+    for key in [
+        "enabled",
+        "required-actions",
+        "errors",
+        "worker-reports",
+        "awaiting-input",
+        "tool-calls-failed",
+        "auto-continue",
+        "turn-finished",
+        "prs",
+    ] {
         let selector: &'static str = Box::leak(format!("team-wake-toggle-{key}").into_boxed_str());
         assert!(has(vcx, selector), "{selector}");
     }
@@ -1483,9 +1610,21 @@ fn team_rows_mark_waiting_and_failed_workers(cx: &mut TestAppContext) {
     add_workers(&shell, vcx, 3);
     let state = shell.read_with(vcx, |shell, _| shell.state.clone());
     state.update(vcx, |state, _| {
-        let failed = state.sessions.iter_mut().find(|s| s.chat_id == "w-0").unwrap();
-        failed.last_turn_tool_failures = Some(mast_proto::ToolFailures { count: 2, tools: vec!["bind_chat_worktree".into()] });
-        let mut waiting = state.sessions.iter().find(|s| s.chat_id == "w-0").unwrap().clone();
+        let failed = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.chat_id == "w-0")
+            .unwrap();
+        failed.last_turn_tool_failures = Some(mast_proto::ToolFailures {
+            count: 2,
+            tools: vec!["bind_chat_worktree".into()],
+        });
+        let mut waiting = state
+            .sessions
+            .iter()
+            .find(|s| s.chat_id == "w-0")
+            .unwrap()
+            .clone();
         waiting.chat_id = "w-1".into();
         waiting.last_turn_tool_failures = None;
         waiting.status = mast_proto::SessionStatus::AwaitingInput;
@@ -1537,14 +1676,19 @@ fn a_workers_latest_report_is_its_activity_line_and_expands_to_the_full_text(
     });
     shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
     draw(vcx);
-    assert!(has(vcx, "team-worker-report-w-1"), "expands to the full text");
+    assert!(
+        has(vcx, "team-worker-report-w-1"),
+        "expands to the full text"
+    );
     shell.update(vcx, |shell, cx| shell.toggle_report_expanded("w-1", cx));
     draw(vcx);
     assert!(!has(vcx, "team-worker-report-w-1"));
 }
 
 #[gpui::test]
-fn the_item_tab_shows_the_compact_wake_control_only_for_chats_with_workers(cx: &mut TestAppContext) {
+fn the_item_tab_shows_the_compact_wake_control_only_for_chats_with_workers(
+    cx: &mut TestAppContext,
+) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 3);
     assert!(has(vcx, "chat-item-wakes"));
@@ -1567,12 +1711,23 @@ fn toggling_a_wake_switch_updates_the_cached_settings_at_once(cx: &mut TestAppCo
     use crate::orchestrator_wakes::WakeToggle;
     let (shell, vcx) = mount(cx, CHAT_API, false, worker_asks);
     add_workers(&shell, vcx, 2);
-    shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::TurnFinished, cx));
-    shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::Enabled, cx));
-    shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::AutoContinue, cx));
+    shell.update(vcx, |shell, cx| {
+        shell.toggle_wake(CHAT_API, WakeToggle::TurnFinished, cx)
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.toggle_wake(CHAT_API, WakeToggle::Enabled, cx)
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.toggle_wake(CHAT_API, WakeToggle::AutoContinue, cx)
+    });
     shell.read_with(vcx, |shell, _| {
         let settings = shell.wakes.statuses[CHAT_API].settings;
-        assert!(settings.turn_finished && !settings.enabled && settings.errors && settings.auto_continue);
+        assert!(
+            settings.turn_finished
+                && !settings.enabled
+                && settings.errors
+                && settings.auto_continue
+        );
     });
 }
 
@@ -1598,15 +1753,24 @@ fn finished_workers(count: usize) -> impl FnOnce(&mut WorkOutlineSnapshot) + 'st
 type Sent = tokio::sync::mpsc::Receiver<String>;
 
 /// Give the shell an engine that records every request it is sent.
-fn record_engine(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> (Sent, tokio::runtime::Runtime) {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+fn record_engine(
+    shell: &Entity<Shell>,
+    vcx: &mut VisualTestContext,
+) -> (Sent, tokio::runtime::Runtime) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let guard = runtime.enter();
     let (out, requests) = tokio::sync::mpsc::channel(16);
     let (_replies, inbound) = tokio::sync::mpsc::channel(16);
-    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    let engine =
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
     std::mem::forget(_replies);
     shell.update(vcx, |shell, cx| {
-        shell.state.update(cx, |state, _| state.set_test_engine(engine));
+        shell
+            .state
+            .update(cx, |state, _| state.set_test_engine(engine));
     });
     drop(guard);
     (requests, runtime)
@@ -1618,16 +1782,24 @@ fn transcript_retry_dispatches_the_error_identity(cx: &mut TestAppContext) {
     let (mut sent, _runtime) = record_engine(&shell, vcx);
     shell.update(vcx, |shell, cx| {
         let transcript = shell.transcript.clone();
-        shell.on_transcript_event(transcript, &crate::transcript::TranscriptEvent::RetryErroredTurn {
-            chat_id: CHAT_API.into(), error_entry_id: "failure-entry".into(),
-        }, cx);
+        shell.on_transcript_event(
+            transcript,
+            &crate::transcript::TranscriptEvent::RetryErroredTurn {
+                chat_id: CHAT_API.into(),
+                error_entry_id: "failure-entry".into(),
+            },
+            cx,
+        );
     });
     vcx.run_until_parked();
     let calls: Vec<serde_json::Value> = std::iter::from_fn(|| sent.try_recv().ok())
-        .map(|line| serde_json::from_str(&line).unwrap()).collect();
-    assert!(calls.iter().any(|call| call["method"] == mast_rpc::methods::RETRY_ERRORED_TURN
-        && call["params"]["chatId"] == CHAT_API
-        && call["params"]["errorEntryId"] == "failure-entry"));
+        .map(|line| serde_json::from_str(&line).unwrap())
+        .collect();
+    assert!(calls.iter().any(
+        |call| call["method"] == mast_rpc::methods::RETRY_ERRORED_TURN
+            && call["params"]["chatId"] == CHAT_API
+            && call["params"]["errorEntryId"] == "failure-entry"
+    ));
 }
 
 /// The `setChatArchived` requests sent so far (other traffic is skipped).
@@ -1683,7 +1855,8 @@ fn archive_finished_confirms_then_archives_exactly_the_listed_chats(cx: &mut Tes
     // Asks first, listing the chats; nothing is sent yet.
     assert!(has(vcx, "team-archive-confirm"));
     for id in ["w-1", "w-2", "w-3"] {
-        let selector: &'static str = Box::leak(format!("team-archive-confirm-row-{id}").into_boxed_str());
+        let selector: &'static str =
+            Box::leak(format!("team-archive-confirm-row-{id}").into_boxed_str());
         assert!(has(vcx, selector), "{id}");
     }
     assert!(!has(vcx, "team-archive-confirm-row-w-0"));
@@ -1713,13 +1886,21 @@ fn archived_workers_leave_the_rows_and_a_toggle_brings_them_back(cx: &mut TestAp
     add_workers(&shell, vcx, 3);
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
-            state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+            state
+                .chats
+                .iter_mut()
+                .find(|c| c.id == "w-1")
+                .unwrap()
+                .archived = true;
         });
         shell.open_team_tab(cx);
     });
     draw(vcx);
     assert!(has(vcx, "team-worker-w-0") && has(vcx, "team-worker-w-2"));
-    assert!(!has(vcx, "team-worker-w-1"), "archived workers drop out of the rows");
+    assert!(
+        !has(vcx, "team-worker-w-1"),
+        "archived workers drop out of the rows"
+    );
     // Archived and thus no longer offered for archiving.
     assert!(!has(vcx, "team-archive-finished"));
     assert!(has(vcx, "team-show-archived"));
@@ -1741,7 +1922,12 @@ fn unarchive_sends_set_chat_archived_false(cx: &mut TestAppContext) {
     let (mut sent, _runtime) = record_engine(&shell, vcx);
     shell.update(vcx, |shell, cx| {
         shell.state.update(cx, |state, _| {
-            state.chats.iter_mut().find(|c| c.id == "w-1").unwrap().archived = true;
+            state
+                .chats
+                .iter_mut()
+                .find(|c| c.id == "w-1")
+                .unwrap()
+                .archived = true;
         });
         shell.open_team_tab(cx);
         shell.wakes.show_archived.insert(CHAT_API.into());
@@ -1924,11 +2110,12 @@ fn spawn_turn(chips: &[(&str, &str)]) -> mast_doc::SessionMessageEntry {
 }
 
 #[gpui::test]
-fn the_item_tab_lists_running_subagents_and_opens_them_like_their_chips(
-    cx: &mut TestAppContext,
-) {
+fn the_item_tab_lists_running_subagents_and_opens_them_like_their_chips(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
-    assert!(!has(vcx, "chat-item-subagents"), "hidden while nothing runs");
+    assert!(
+        !has(vcx, "chat-item-subagents"),
+        "hidden while nothing runs"
+    );
     let state = shell.read_with(vcx, |shell, _| shell.state.clone());
     let set = |vcx: &mut VisualTestContext, chips: &[(&str, &str)]| {
         let entry = spawn_turn(chips);
@@ -1988,9 +2175,10 @@ fn session_activity_pill_tracks_running_agents_and_dropdown(cx: &mut TestAppCont
     });
     draw(vcx);
     assert!(has(vcx, "chat-header-chip-activity"));
-    let at = vcx.debug_bounds("chat-header-chip-activity")
-            .unwrap()
-            .center();
+    let at = vcx
+        .debug_bounds("chat-header-chip-activity")
+        .unwrap()
+        .center();
     vcx.simulate_click(at, gpui::Modifiers::default());
     draw(vcx);
     assert!(has(vcx, "session-activity-menu"));
@@ -2022,9 +2210,10 @@ fn session_activity_pill_tracks_running_agents_and_dropdown(cx: &mut TestAppCont
     });
     draw(vcx);
     assert!(!has(vcx, "session-activity-menu"));
-    let at = vcx.debug_bounds("chat-header-chip-activity")
-            .unwrap()
-            .center();
+    let at = vcx
+        .debug_bounds("chat-header-chip-activity")
+        .unwrap()
+        .center();
     vcx.simulate_click(at, gpui::Modifiers::default());
     draw(vcx);
     shell.read_with(vcx, |shell, _| {
@@ -2042,4 +2231,226 @@ fn session_activity_pill_tracks_running_agents_and_dropdown(cx: &mut TestAppCont
     });
     draw(vcx);
     assert!(!has(vcx, "chat-header-chip-activity"));
+}
+
+#[gpui::test]
+fn header_and_item_tab_follow_the_selected_checkout(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let before = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(before.branch.as_deref(), Some("feature/header"));
+    assert_eq!(
+        before.runs_in.as_deref(),
+        Some(format!("/work/{CHAT_API}").as_str())
+    );
+    assert_eq!(before.execution_root, None);
+    assert!(has(vcx, "chat-header-chip-branch"));
+    assert!(has(vcx, "chat-header-label-branch:feature/header"));
+    assert!(has(vcx, "chat-item-runs-in"));
+    let before_fingerprint = shell.read_with(vcx, |shell, cx| {
+        shell.state.read(cx).shell_fingerprint(chrono::Utc::now())
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/work/checkout".into(),
+                    checkout_id: "checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "checkout".into(),
+                    branch: Some("feature/bound".into()),
+                    head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        });
+    });
+    draw(vcx);
+    let after = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(after.branch.as_deref(), Some("feature/bound"));
+    assert!(has(vcx, "chat-header-label-branch:feature/bound"));
+    let after_fingerprint = shell.read_with(vcx, |shell, cx| {
+        shell.state.read(cx).shell_fingerprint(chrono::Utc::now())
+    });
+    assert_ne!(before_fingerprint, after_fingerprint);
+    assert_eq!(after.runs_in.as_deref(), Some("/work/checkout"));
+    assert_eq!(
+        after.execution_root.as_deref(),
+        Some(format!("/work/{CHAT_API}").as_str())
+    );
+    assert!(has(vcx, "chat-header-chip-branch"));
+    assert!(has(vcx, "chat-item-runs-in"));
+    expand(&shell, vcx, &["runs-in"]);
+    assert!(has(vcx, "chat-item-runs-in"));
+    let root_selector: &'static str = Box::leak(
+        format!("chat-item-execution-root:Execution root: /work/{CHAT_API}").into_boxed_str(),
+    );
+    assert!(has(vcx, root_selector));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/work/checkout".into(),
+                    checkout_id: "checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "checkout".into(),
+                    branch: None,
+                    head_sha: Some("abc".into()),
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    assert!(!has(vcx, "chat-header-chip-branch"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![]);
+            cx.notify();
+        })
+    });
+    draw(vcx);
+    let restored = shell.read_with(vcx, |shell, cx| {
+        shell.chat_item_facts(CHAT_API, cx).unwrap()
+    });
+    assert_eq!(restored.branch, before.branch);
+    assert_eq!(restored.runs_in, before.runs_in);
+    assert_eq!(restored.execution_root, None);
+}
+
+#[gpui::test]
+fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, false, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let engine =
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.set_test_engine(engine);
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/previous".into(),
+                    checkout_id: "previous".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "repo".into(),
+                    branch: Some("old-branch".into()),
+                    head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+        });
+        let entry = shell.chat_header_links.get_mut(CHAT_API).unwrap();
+        entry.checkout = Some((
+            "/previous".into(),
+            "previous".into(),
+            Some("old-branch".into()),
+        ));
+        entry.fetched_at = Instant::now() - Duration::from_secs(60);
+        shell.ensure_chat_header_links(CHAT_API.into(), cx);
+    });
+    let previous_fetch =
+        shell.read_with(vcx, |shell, _| shell.chat_header_links[CHAT_API].fetched_at);
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let first = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("first header request")).unwrap();
+        if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS {
+            break request;
+        }
+    };
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_chat_diff_targets_for_test(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: CHAT_API.into(),
+                targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/checkout".into(),
+                    checkout_id: "bound".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent,
+                    selected: true,
+                    repo_name: "repo".into(),
+                    branch: Some("feature".into()),
+                    head_sha: None,
+                }],
+                ref_targets: vec![],
+            }]);
+            cx.notify();
+        })
+    });
+    let status = mast_engine::pr_ticket_cache::ChatLinkStatus::default();
+    replies
+        .try_send(serde_json::json!({"id": first["id"], "ok": status}).to_string())
+        .unwrap();
+    for _ in 0..20 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if !shell.read_with(vcx, |shell, _| {
+            shell.chat_header_links_pending.contains(CHAT_API)
+        }) {
+            break;
+        }
+    }
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(
+            shell.chat_header_links[CHAT_API]
+                .checkout
+                .as_ref()
+                .map(|key| key.0.as_str()),
+            Some("/previous")
+        );
+        assert_eq!(shell.chat_header_links[CHAT_API].fetched_at, previous_fetch);
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.ensure_chat_header_links(CHAT_API.into(), cx)
+    });
+    vcx.run_until_parked();
+    runtime.block_on(tokio::task::yield_now());
+    let second = loop {
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("checkout refetch")).unwrap();
+        if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS {
+            break request;
+        }
+    };
+    replies
+        .try_send(
+            serde_json::json!({"id": second["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string(),
+        )
+        .unwrap();
+    for _ in 0..20 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        if !shell.read_with(vcx, |shell, _| {
+            shell.chat_header_links_pending.contains(CHAT_API)
+        }) {
+            break;
+        }
+    }
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(
+            shell.chat_header_links[CHAT_API]
+                .checkout
+                .as_ref()
+                .map(|key| key.0.as_str()),
+            Some("/checkout")
+        )
+    });
+    drop(guard);
 }

@@ -15,6 +15,38 @@ use crate::team::{
 };
 
 impl Shell {
+    pub(crate) fn board_links_revision(&self) -> u64 { self.board_links_revision }
+
+    pub(crate) fn board_link_versions(&self, ids: &[String]) -> Vec<u64> {
+        ids.iter().map(|id| self.board_link_versions.get(id).copied().unwrap_or(0)).collect()
+    }
+
+    pub(crate) fn board_link_statuses(&self, ids: &[String]) -> std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus> {
+        ids.iter().filter_map(|id| Some((id.clone(), self.chat_header_links.get(id)?.status.clone()?))).collect()
+    }
+
+    fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
+        ids.iter().filter(|id| {
+            let checkout = self.state.read(cx).selected_checkout_key(id);
+            !self.chat_header_links_pending.contains(*id) && !self.chat_header_links.get(*id).is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
+        }).take(8usize.saturating_sub(self.chat_header_links_pending.len())).cloned().collect()
+    }
+
+    pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        let ids = self.board_links_due(ids, cx);
+        self.board_links_generation = self.board_links_generation.wrapping_add(1);
+        let generation = self.board_links_generation;
+        if ids.is_empty() { return; }
+        cx.spawn(async move |shell, cx| {
+            for id in ids {
+                if !shell.update(cx, |shell, cx| { if shell.board_links_generation != generation { return false; } shell.ensure_chat_header_links(id, cx); true }).unwrap_or(false) { break; }
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            }
+        }).detach();
+    }
+
+    pub(crate) fn cancel_board_links(&mut self) { self.board_links_generation = self.board_links_generation.wrapping_add(1); }
+
     #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_snapshot_team(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, _| {
@@ -720,5 +752,31 @@ impl Shell {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod board_link_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn board_link_requests_skip_fresh_entries(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let shell = cx.new(|cx| Shell::new(state, crate::EngineBootConfig { data_dir:dir.path().into(), ipc_port:0, edge_url:String::new(), edge_token:None, org_id:None, workos_client_id:None, default_harness:mast_proto::HarnessId::Mock }, cx));
+        shell.update(cx, |shell, cx| {
+            shell.chat_header_links.insert("fresh".into(), ChatHeaderLinkCache { checkout:None, status:None, fetched_at:Instant::now() });
+            shell.chat_header_links_pending.insert("pending".into());
+            assert_eq!(shell.board_links_due(&["fresh".into(), "pending".into(), "missing".into()], cx), vec!["missing"]);
+            let many: Vec<_> = (0..100).map(|i| format!("worker-{i}")).collect();
+            assert_eq!(shell.board_links_due(&many, cx).len(), 7);
+        });
     }
 }

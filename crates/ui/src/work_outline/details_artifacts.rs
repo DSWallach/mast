@@ -352,7 +352,7 @@ impl WorkItemDetails {
             .join(" \u{b7} ");
             let linear_chip = row
                 .pinned
-                .then(|| linear.as_ref())
+                .then_some(linear.as_ref())
                 .flatten()
                 .map(|reference| {
                     crate::work_outline::outline_view::linear_outline::project_chip(

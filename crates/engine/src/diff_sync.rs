@@ -19,6 +19,13 @@
 //! slow 2-minute repair tick because native watchers may coalesce or drop events.
 //! Snapshots carry a sha256 checksum; an unchanged checksum publishes nothing.
 //!
+//! Repair-probe backoff: a fully watched checkout whose repair probe found
+//! nothing for [`REPAIR_QUIET_TICKS_BEFORE_BACKOFF`] ticks is probed every
+//! [`REPAIR_BACKOFF_STRIDE`] ticks (phase-staggered per checkout). A change the
+//! watcher missed is therefore caught within 120 s normally and within 600 s
+//! (stride x interval) once backed off; any watcher event, new chat, or probe
+//! hit resets it. Unwatched / over-budget checkouts never back off.
+//!
 //! Reconcile is deliberately damped, because it runs on *every* workspace chat
 //! row change — including the `checkoutId` writes reconcile itself makes.
 //! Checkout identities are memoized per cwd (chat-watch reconciles spawn
@@ -35,8 +42,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -75,6 +83,28 @@ const MAX_SUBMODULE_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Slow repair pass: re-reconcile + re-sync every checkout.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
+/// Repair-probe backoff. A fully watched checkout whose last
+/// `REPAIR_QUIET_TICKS_BEFORE_BACKOFF` repair probes all found nothing changed
+/// is probed only every `REPAIR_BACKOFF_STRIDE` ticks (120 s -> 600 s). Any
+/// watcher event, new chat, or probe that finds a change resets it to every
+/// tick. Probes are phase-staggered per checkout so they spread over the
+/// stride instead of bursting on one tick.
+///
+/// Detection bound for a change the watcher missed: at most one
+/// `REPAIR_INTERVAL` (120 s) before backoff starts and at most
+/// `REPAIR_BACKOFF_STRIDE * REPAIR_INTERVAL` (600 s) once backed off, plus the
+/// debounce and probe time. Checkouts with no live root watcher (over the
+/// watch budget, or watcher setup failed) are never backed off: their working
+/// tree edits only ride the repair tick.
+const REPAIR_QUIET_TICKS_BEFORE_BACKOFF: u32 = 3;
+const REPAIR_BACKOFF_STRIDE: u64 = 5;
+/// How long the first sync may wait for the watchers to attach, so its probe is
+/// taken after attach and the capture-to-attach re-probe is skipped. Zero by
+/// default: measured FSEvents registration takes ~1-2.5 s per checkout (two at
+/// a time), so at startup the first sync would almost always time out and the
+/// first diff would only be delayed. When attach does win the race (or a
+/// test raises this) the re-probe is skipped either way.
+static INITIAL_SYNC_ATTACH_WAIT_MS: AtomicU64 = AtomicU64::new(0);
 /// Max subdirectories a checkout may have before we skip its live recursive
 /// watch (one OS watch per dir; past this the watcher thread's own bookkeeping
 /// costs more than instant diffs are worth). A normal source tree is well
@@ -145,7 +175,11 @@ struct CheckoutEntry {
     /// transient identity failure must never destroy a live entry.
     orphaned_since: Mutex<Option<std::time::Instant>>,
     /// Kick channel into the entry's debounce/sync task.
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: Kicker,
+    /// Kick count already covered by a finished sync (see [`Kicker`]).
+    handled_kicks: AtomicU64,
+    /// Set once the fs watchers are attached (or setup was abandoned).
+    watch_attached: AtomicBool,
     /// Keeps the recursive fs watchers alive; dropped on entry close. Filled
     /// asynchronously — watcher setup (budget walk + FSEvents registration) can
     /// block for seconds, so [`add_entry`] does it off the runtime and attaches
@@ -156,6 +190,36 @@ struct CheckoutEntry {
     /// Set by the repair tick: the next sync may be skipped when the probe
     /// shows nothing changed. Watcher and new-chat kicks leave it clear.
     repair_kick: AtomicBool,
+    /// Consecutive repair probes that found nothing changed (see
+    /// [`REPAIR_BACKOFF_STRIDE`]); reset by watcher kicks, new chats, changes.
+    quiet_ticks: AtomicU32,
+    /// Repair ticks this entry has seen; with `probe_phase` picks which tick of
+    /// a backed-off stride probes.
+    repair_ticks_seen: AtomicU64,
+    probe_phase: u64,
+    /// True once every watch target is attached; only then may the repair
+    /// probe back off.
+    fully_watched: AtomicBool,
+    /// The first sync has been kicked (by attach, or by the attach-wait timeout).
+    initial_kicked: AtomicBool,
+    /// A sync started its probe after the watchers attached, so changes after
+    /// that point are watcher-visible and the attach re-probe is redundant.
+    probed_after_attach: AtomicBool,
+}
+
+/// Kick channel into an entry's sync task that also counts sends, so
+/// "nothing is pending" is observable ([`CheckoutDiffSync::is_settled`]).
+#[derive(Clone)]
+struct Kicker {
+    tx: mpsc::UnboundedSender<()>,
+    sent: Arc<AtomicU64>,
+}
+
+impl Kicker {
+    fn send(&self) {
+        self.sent.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(());
+    }
 }
 
 impl CheckoutEntry {
@@ -170,8 +234,21 @@ impl CheckoutEntry {
         if idle {
             return;
         }
+        if self.fully_watched.load(Ordering::SeqCst)
+            && self.quiet_ticks.load(Ordering::Relaxed) >= REPAIR_QUIET_TICKS_BEFORE_BACKOFF
+        {
+            let tick = self.repair_ticks_seen.fetch_add(1, Ordering::Relaxed);
+            if !(tick + self.probe_phase).is_multiple_of(REPAIR_BACKOFF_STRIDE) {
+                return;
+            }
+        }
         self.repair_kick.store(true, Ordering::Relaxed);
-        let _ = self.kick_tx.send(());
+        self.kick_tx.send();
+    }
+
+    /// Watcher activity or a new chat: probe at the base cadence again.
+    fn reset_repair_backoff(&self) {
+        self.quiet_ticks.store(0, Ordering::Relaxed);
     }
 }
 
@@ -374,6 +451,17 @@ impl CheckoutDiffSync {
         self.inner.targets_tx.subscribe()
     }
 
+    /// True when every tracked checkout has its watchers attached and no kick
+    /// is waiting for a sync. Lets tests wait for startup to finish instead of
+    /// guessing from wall-clock quiet.
+    pub fn is_settled(&self) -> bool {
+        lock(&self.inner.entries).values().all(|entry| {
+            entry.watch_attached.load(Ordering::SeqCst)
+                && entry.handled_kicks.load(Ordering::SeqCst)
+                    >= entry.kick_tx.sent.load(Ordering::SeqCst)
+        })
+    }
+
     /// Regroup this device's chats by checkout identity, then (re)build watchers.
     /// Public for tests (the background task calls it on every chat change).
     pub async fn reconcile_now(&self) {
@@ -392,10 +480,33 @@ impl CheckoutDiffSync {
         }
     }
 
+    /// How long a new entry's first sync may wait for its watchers to attach
+    /// (default 0: no wait). Process-wide; test hook.
+    #[doc(hidden)]
+    pub fn set_initial_sync_attach_wait_for_test(wait: Duration) {
+        INITIAL_SYNC_ATTACH_WAIT_MS.store(wait.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Ticks between probes of a backed-off, fully watched checkout: the detection
+    /// bound for a missed change is this many repair intervals. Test hook.
+    #[doc(hidden)]
+    pub fn max_repair_gap_ticks() -> u64 {
+        REPAIR_BACKOFF_STRIDE
+    }
+
+    /// Drop every checkout's fs watchers while leaving them marked fully
+    /// watched, simulating events the OS never delivered. Test hook.
+    #[doc(hidden)]
+    pub fn drop_watchers_for_test(&self) {
+        for entry in lock(&self.inner.entries).values() {
+            lock(&entry.watchers).clear();
+        }
+    }
+
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
     pub fn sync_all(&self) {
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            entry.kick_tx.send();
         }
     }
 
@@ -975,7 +1086,12 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             }
         }
         for id in &removed {
-            entries.remove(id); // dropping the entry drops watchers + ends its task
+            // Dropping the entry drops watchers + ends its task; its budget
+            // decision is forgotten so a later re-add re-measures.
+            if let Some(entry) = entries.remove(id) {
+                forget_watch_budget(&entry.identity.root);
+                forget_watch_budget(&entry.identity.git_dir);
+            }
         }
         removed
     };
@@ -996,7 +1112,8 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     has_new
                 };
                 if has_new {
-                    let _ = entry.kick_tx.send(()); // new chat needs a sidecar now
+                    entry.reset_repair_backoff();
+                    entry.kick_tx.send(); // new chat needs a sidecar now
                 }
             }
             None => add_entry(inner, identity, chats),
@@ -1004,13 +1121,71 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     }
 }
 
+/// Directory names that mark a heavy dependency or build tree. Finding one
+/// anywhere in the walk means the checkout is over budget at once; the walk
+/// never descends into it.
+const HEAVY_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "dist",
+    "build",
+    ".next",
+    "vendor",
+];
+
+/// At most this many budget walks plus watcher setups run at once. Startup adds
+/// one entry per checkout (~100+ worktrees); unbounded, they all walk together
+/// and pin every core for minutes.
+const MAX_CONCURRENT_WATCH_SETUPS: usize = 2;
+
+fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WATCH_SETUPS)))
+}
+
+/// Runs blocking `work` on the blocking pool once `gate` has a free permit, so
+/// queued setups wait as cheap async tasks rather than parked threads.
+async fn run_gated_blocking<F>(gate: Arc<tokio::sync::Semaphore>, work: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let Ok(_permit) = gate.acquire_owned().await else {
+        return;
+    };
+    let _ = tokio::task::spawn_blocking(work).await;
+}
+
+/// Budget decision per root path, kept for the process lifetime so the same
+/// root is never walked twice. Forgotten when its entry is torn down (which
+/// only happens after the orphan grace, [`REPAIR_INTERVAL`] by default).
+fn budget_cache() -> &'static Mutex<HashMap<PathBuf, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn forget_watch_budget(root: &Path) {
+    lock(budget_cache()).remove(root);
+}
+
+/// Cached [`walk_exceeds_watch_budget`].
+fn exceeds_watch_budget(root: &Path) -> bool {
+    if let Some(&decided) = lock(budget_cache()).get(root) {
+        return decided;
+    }
+    let exceeds = walk_exceeds_watch_budget(root);
+    lock(budget_cache()).insert(root.to_path_buf(), exceeds);
+    exceeds
+}
+
 /// True if `root`'s directory tree exceeds [`MAX_WATCH_DIRS`] — the signal that
 /// a live recursive watch would cost more than it's worth. Bounded BFS: stops
-/// the moment the budget is blown (never walks a whole node_modules), skips
-/// symlinks (a symlinked dep cycle must not send this into a spin), and treats
-/// unreadable dirs as leaves. `.git` internal churn is real diff signal, so it
-/// counts toward the budget rather than being skipped.
-fn exceeds_watch_budget(root: &Path) -> bool {
+/// the moment the budget is blown (never walks a whole node_modules), returns
+/// at once on a heavy dependency/build dir ([`HEAVY_DIR_NAMES`]) without
+/// descending into it, skips symlinks (a symlinked dep cycle must not send this
+/// into a spin), and treats unreadable dirs as leaves. `.git` internal churn is
+/// real diff signal, so it counts toward the budget rather than being skipped.
+fn walk_exceeds_watch_budget(root: &Path) -> bool {
     if crate::repos::is_automatic_access_blocked(root) {
         return true;
     }
@@ -1025,6 +1200,13 @@ fn exceeds_watch_budget(root: &Path) -> bool {
             // directory reports as a symlink and is skipped, so cyclic deps
             // (pnpm/npm) can't blow up the walk.
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| HEAVY_DIR_NAMES.contains(&name))
+                {
+                    return true;
+                }
                 seen += 1;
                 if seen > MAX_WATCH_DIRS {
                     return true;
@@ -1072,16 +1254,31 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 }
 
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
-    let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+    let (tx, kick_rx) = mpsc::unbounded_channel();
+    let kick_tx = Kicker { tx, sent: Arc::new(AtomicU64::new(0)) };
+    let probe_phase = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        identity.id.hash(&mut hasher);
+        hasher.finish() % REPAIR_BACKOFF_STRIDE
+    };
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
         checksum: Mutex::new(None),
         orphaned_since: Mutex::new(None),
         kick_tx: kick_tx.clone(),
+        handled_kicks: AtomicU64::new(0),
+        watch_attached: AtomicBool::new(false),
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
         repair_kick: AtomicBool::new(false),
+        quiet_ticks: AtomicU32::new(0),
+        repair_ticks_seen: AtomicU64::new(0),
+        probe_phase,
+        fully_watched: AtomicBool::new(false),
+        initial_kicked: AtomicBool::new(false),
+        probed_after_attach: AtomicBool::new(false),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -1090,24 +1287,58 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_rx,
         inner.cancel.clone(),
     ));
-    let _ = kick_tx.send(()); // initial snapshot — must not wait for watchers
+    // The initial snapshot normally goes at once; with a non-zero
+    // INITIAL_SYNC_ATTACH_WAIT_MS it waits for the watcher attach (below) so its
+    // probe lands after attach, falling back to going ahead after the wait.
+    let attach_wait = Duration::from_millis(INITIAL_SYNC_ATTACH_WAIT_MS.load(Ordering::Relaxed));
+    if attach_wait.is_zero() {
+        entry.initial_kicked.store(true, Ordering::SeqCst);
+        kick_tx.send(); // initial snapshot — must not wait for watchers
+    } else {
+        let weak = Arc::downgrade(&entry);
+        let kick_tx = kick_tx.clone();
+        let cancel = inner.cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(attach_wait) => {}
+            }
+            if let Some(entry) = weak.upgrade()
+                && !entry.initial_kicked.swap(true, Ordering::SeqCst)
+            {
+                kick_tx.send();
+            }
+        });
+    }
 
     // Watcher setup is genuinely blocking: the budget walk reads up to
     // MAX_WATCH_DIRS directory entries and FSEvents stream registration stalls
     // for seconds when fseventsd is contended. Doing it inline starved the whole
     // runtime (workspace watches, presence) whenever entries were (re)built, so
     // it runs on the blocking pool and attaches to the entry when ready. Events
-    // occurring before attachment are covered by the initial sync; one extra
-    // kick after attachment closes the capture→attach gap.
+    // occurring before attachment are covered by the initial sync when that ran
+    // after attach; when the attach-wait timeout let the initial sync go first,
+    // one probe-gated kick after attachment closes the capture->attach gap
+    // (one `git status` when nothing moved).
+    // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
+    // checkout).
     let weak = Arc::downgrade(&entry);
-    tokio::task::spawn_blocking(move || {
+    tokio::spawn(run_gated_blocking(watch_setup_gate().clone(), move || {
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
-        let watchers = build_watchers(&entry.identity, &kick_tx);
+        let (watchers, fully_watched) = build_watchers(&entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
-        let _ = kick_tx.send(());
-    });
+        entry.fully_watched.store(fully_watched, Ordering::SeqCst);
+        entry.watch_attached.store(true, Ordering::SeqCst);
+        if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
+            // First sync, probed after attach: nothing to close.
+            kick_tx.send();
+        } else if !entry.probed_after_attach.load(Ordering::SeqCst) {
+            entry.repair_kick.store(true, Ordering::Relaxed);
+            kick_tx.send();
+        }
+    }));
 }
 
 /// Recursive watchers on the worktree root (budget permitting) and the git
@@ -1116,10 +1347,14 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 /// from the blocking pool.
 fn build_watchers(
     identity: &CheckoutIdentity,
-    kick_tx: &mpsc::UnboundedSender<()>,
-) -> Vec<crate::watch_budget::Watcher> {
+    kick_tx: &Kicker,
+) -> (Vec<crate::watch_budget::Watcher>, bool) {
     let mut watchers = Vec::new();
-    for target in watch_targets(identity) {
+    let targets = watch_targets(identity);
+    // Fully watched: the working tree root itself has a live watcher.
+    let mut root_watched = false;
+    for target in targets {
+        let is_root = target == identity.root;
         let tx = kick_tx.clone();
         let git_dir = identity.git_dir.clone();
         let watcher =
@@ -1127,13 +1362,16 @@ fn build_watchers(
                 if event.as_ref().is_ok_and(|event| {
                     is_checkout_change(event) && kick_relevant(&event.paths, &git_dir)
                 }) {
-                    let _ = tx.send(());
+                    tx.send();
                 }
             });
         match watcher {
             Some(mut watcher) => {
                 match watcher.watch(&target, notify::RecursiveMode::Recursive) {
-                    Ok(()) => watchers.push(watcher),
+                    Ok(()) => {
+                        root_watched |= is_root;
+                        watchers.push(watcher)
+                    }
                     Err(err) => {
                         tracing::debug!(path = %target.display(), error = %err, "diff-sync: watch failed")
                     }
@@ -1142,7 +1380,7 @@ fn build_watchers(
             None => tracing::debug!("diff-sync: watcher unavailable; using repair polling"),
         }
     }
-    watchers
+    (watchers, root_watched)
 }
 
 /// Whether a watch event can change this checkout's diff. A superproject's
@@ -1223,12 +1461,16 @@ async fn entry_task(
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
+        // Everything sent up to here is covered by this sync; later sends
+        // leave the entry unsettled until the next one.
+        let seen = entry.kick_tx.sent.load(Ordering::SeqCst);
         // The upgraded Arc would let a sync outlive shutdown — race the token
         // so an in-flight sidecar POST is dropped, not completed.
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = sync_entry(&inner, &entry) => {}
         }
+        entry.handled_kicks.fetch_max(seen, Ordering::SeqCst);
     }
 }
 
@@ -1242,9 +1484,19 @@ async fn entry_task(
 /// listed path, which catches an edit to a file that was already modified.
 /// `None` (cannot decide: git failed, too many paths, or a submodule is
 /// involved) means "run the full capture".
-async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    const MAX_PROBED_PATHS: usize = 2_000;
+/// Also hands back the `status --porcelain=v2` bytes it read
+/// (when complete), so the capture that follows in the same sync can derive its
+/// own file list from them instead of spawning a second `git status`.
+async fn repair_probe_with_status(identity: &CheckoutIdentity) -> (Option<u64>, Option<Vec<u8>>) {
+    let Some(status) = probe_status(identity).await else {
+        return (None, None);
+    };
+    let hash = probe_hash(identity, &status);
+    let bytes = (!status.truncated).then_some(status.stdout);
+    (hash, bytes)
+}
+
+async fn probe_status(identity: &CheckoutIdentity) -> Option<Capture> {
     let status = capture_git(
         &identity.root,
         &[
@@ -1259,6 +1511,12 @@ async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
     )
     .await
     .ok()?;
+    Some(status)
+}
+
+fn probe_hash(identity: &CheckoutIdentity, status: &Capture) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    const MAX_PROBED_PATHS: usize = 2_000;
     if status.truncated {
         return None;
     }
@@ -1308,16 +1566,48 @@ async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
 }
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
-    if entry.repair_kick.swap(false, Ordering::Relaxed)
-        && lock(&entry.checksum).is_some()
-        && let Some(probe) = repair_probe(&entry.identity).await
-    {
-        let unchanged = lock(&entry.probe).replace(probe) == Some(probe);
-        if unchanged {
-            return; // one `git status` said nothing moved: skip the full capture
-        }
+    // The probe is taken BEFORE the capture and stored only once the capture
+    // succeeded. A change landing between the two then leaves the stored probe
+    // stale, so the next repair/attach probe sees it and recaptures. (Probing
+    // after the capture baked such a change into the baseline and hid it until
+    // the checkout changed again.) Every sync probes once, so an idle repair
+    // costs exactly one `git status` and no capture ever starts without a
+    // baseline being stored with its result.
+    let repair = entry.repair_kick.swap(false, Ordering::Relaxed);
+    // Read before the probe starts: a probe that begins after attach covers
+    // everything the watchers did not see (see `probed_after_attach`).
+    if entry.watch_attached.load(Ordering::SeqCst) {
+        entry.probed_after_attach.store(true, Ordering::SeqCst);
     }
-    let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
+    if !repair {
+        entry.reset_repair_backoff(); // watcher or chat activity
+    }
+    let (probe, probe_status_v2) = repair_probe_with_status(&entry.identity).await;
+    if repair
+        && lock(&entry.checksum).is_some()
+        && let Some(now) = probe
+        && lock(&entry.probe).replace(now) == Some(now)
+    {
+        entry.quiet_ticks.fetch_add(1, Ordering::Relaxed);
+        return; // one `git status` said nothing moved: skip the full capture
+    }
+    // Spawn savers for the full capture: HEAD comes from the git dir's files and
+    // the file list from the probe's status (taken just before, see above).
+    // Either falls back to its own git call when unavailable.
+    let hints = CaptureHints {
+        head: read_head(&entry.identity).1,
+        status_v1: probe_status_v2
+            .as_deref()
+            .and_then(git_status::v2_to_v1),
+    };
+    let snapshot = match Box::pin(capture_diff_hinted(
+        &inner.repos,
+        &entry.identity.root,
+        None,
+        hints,
+    ))
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
@@ -1326,7 +1616,17 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
             return;
         }
     };
-
+    *lock(&entry.probe) = probe;
+    if repair {
+        // An undecidable probe (a dirty submodule) runs this full capture every
+        // tick; an unchanged result counts as quiet so those checkouts back
+        // off too, under the same detection bound. A changed one resets.
+        if lock(&entry.checksum).as_deref() == Some(snapshot.checksum.as_str()) {
+            entry.quiet_ticks.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry.reset_repair_backoff();
+        }
+    }
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
     }
@@ -1538,6 +1838,9 @@ fn capture_git<'a>(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // Engine-wide git gate; held until the child is done. Leaf call: no
+        // caller holds another permit while waiting on this one.
+        let _permit = crate::git_gate::acquire("diff_sync").await;
         let mut child = cmd
             .spawn()
             .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
@@ -2447,10 +2750,31 @@ pub async fn capture_diff_against(
     root: &Path,
     base_override: Option<&str>,
 ) -> Result<DiffSnapshot, EngineError> {
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
-        .await
-        .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
-        .unwrap_or_default();
+    Box::pin(capture_diff_hinted(repos, root, base_override, CaptureHints::default())).await
+}
+
+/// Answers the caller already has, so the capture can skip the matching git call.
+#[derive(Default)]
+struct CaptureHints {
+    /// HEAD commit id read from the git dir's files.
+    head: Option<String>,
+    /// `status --porcelain=v1 -z --untracked-files=all` bytes (complete, untruncated).
+    status_v1: Option<Vec<u8>>,
+}
+
+async fn capture_diff_hinted(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+    hints: CaptureHints,
+) -> Result<DiffSnapshot, EngineError> {
+    let head = match hints.head.filter(|h| valid_object_id(h)) {
+        Some(head) => head,
+        None => capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+            .await
+            .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
+            .unwrap_or_default(),
+    };
     let base: &str = match base_override {
         Some(base) => base,
         None if head.is_empty() => EMPTY_TREE_SHA,
@@ -2508,18 +2832,23 @@ pub async fn capture_diff_against(
     .await?;
     // Untracked listing via porcelain status; `--no-optional-locks` keeps this
     // read-only (a status-triggered index refresh would re-kick our own watcher).
-    let status = capture_git(
-        root,
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ],
-        2 * 1024 * 1024,
-    )
-    .await?;
+    let status = match hints.status_v1 {
+        Some(stdout) => Capture { stdout, truncated: false },
+        None => {
+            capture_git(
+                root,
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                ],
+                2 * 1024 * 1024,
+            )
+            .await?
+        }
+    };
 
     let mut files = parse_name_status(&names.stdout);
     apply_numstat(&mut files, &nums.stdout);
@@ -2741,6 +3070,32 @@ pub async fn resolve_range(
     })
 }
 
+/// Resolve a diff range and read one immutable source file at either revision.
+pub async fn resolve_code_ref_source(root: &Path, base_ref: &str, head_ref: &str, path: &str, head: bool) -> Result<(String, String), EngineError> {
+    let path = validate_diff_path(path)?;
+    let range = resolve_range(root, base_ref, head_ref).await?;
+    let revision = if head { range.head } else { range.merge_base };
+    let source = read_git_source(root, &revision, path).await?;
+    if source.truncated { return Err(EngineError::Other("code reference source exceeds size limit".into())); }
+    let text = String::from_utf8(source.stdout).map_err(|_| EngineError::Other("code reference source is not UTF-8".into()))?;
+    Ok((revision, text))
+}
+
+/// Read one source file at an exact commit of a nested (submodule) repository.
+/// `repo_root` is checkout-relative and must be a real directory inside the
+/// checkout; `path` is relative to the nested repository.
+pub async fn resolve_nested_code_ref_source(root: &Path, repo_root: &str, revision: &str, path: &str) -> Result<(String, String), EngineError> {
+    if !valid_object_id(revision) {
+        return Err(EngineError::Other("invalid code reference revision".into()));
+    }
+    let path = validate_diff_path(path)?;
+    let nested = resolve_submodule_root(root, repo_root).await?;
+    let source = read_git_source(&nested, revision, path).await?;
+    if source.truncated { return Err(EngineError::Other("code reference source exceeds size limit".into())); }
+    let text = String::from_utf8(source.stdout).map_err(|_| EngineError::Other("code reference source is not UTF-8".into()))?;
+    Ok((revision.to_ascii_lowercase(), text))
+}
+
 /// Resolve a branch against the local remote-default ref, without fetching.
 pub async fn resolve_branch_review_base(
     root: &Path,
@@ -2958,7 +3313,10 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
         cmd.arg("-C").arg(root).args(args);
         cmd.env("GIT_INDEX_FILE", &index);
         cmd.stdin(std::process::Stdio::null());
-        cmd.output()
+        async move {
+            let _permit = crate::git_gate::acquire("diff_sync").await;
+            cmd.output().await
+        }
     };
     let added = run(&["add", "-A", "--ignore-errors", "."])
         .await
@@ -3119,10 +3477,14 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         Capture, CheckoutIdentity, MAX_EXPANDED_SUBMODULES, MAX_SUBMODULE_METADATA_BYTES,
-        MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, kick_relevant, parse_raw_diff,
-        watch_targets,
+        MAX_CONCURRENT_WATCH_SETUPS, MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget,
+        forget_watch_budget, kick_relevant, parse_raw_diff, run_gated_blocking,
+        walk_exceeds_watch_budget, watch_targets,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn branch_review_base_counts_commits_without_fetching() {
@@ -3150,6 +3512,73 @@ mod watch_budget_tests {
         assert_eq!(result.head_sha, head);
         assert_eq!(result.ahead_count, 1);
         assert_eq!(super::resolve_branch_review_base(directory.path(), "main", "device").await.unwrap().ahead_count, 0);
+    }
+
+    #[tokio::test]
+    async fn code_reference_base_reads_the_merge_base_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = mast_harness::git_command().current_dir(directory.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(directory.path().join("file.rs"), "before\n").unwrap();
+        git(&["add", "file.rs"]);
+        git(&["commit", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-b", "feature"]);
+        git(&["rm", "file.rs"]);
+        git(&["commit", "-m", "delete"]);
+        let (sha, text) = super::resolve_code_ref_source(directory.path(), "main", "HEAD", "file.rs", false).await.unwrap();
+        assert_eq!(sha, base);
+        assert_eq!(text, "before\n");
+        assert!(super::resolve_code_ref_source(directory.path(), "main", "HEAD", "../file.rs", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn nested_code_reference_reads_the_submodule_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let sub = directory.path().join("sub-origin");
+        let parent = directory.path().join("parent");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&parent).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = mast_harness::git_command().current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        for dir in [&sub, &parent] {
+            git(dir, &["init", "-b", "main"]);
+            git(dir, &["config", "user.email", "test@example.invalid"]);
+            git(dir, &["config", "user.name", "Test"]);
+        }
+        std::fs::write(sub.join("lib.rs"), "one\ntwo\n").unwrap();
+        git(&sub, &["add", "."]);
+        git(&sub, &["commit", "-m", "sub"]);
+        let first = git(&sub, &["rev-parse", "HEAD"]);
+        // `git submodule add` stalls for minutes on some hosts; a local clone plus a
+        // gitlink and `.gitmodules` entry produces the same repository layout.
+        git(&parent, &["clone", "-q", sub.to_str().unwrap(), "vendor/ui"]);
+        git(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.path", "vendor/ui"]);
+        git(&parent, &["config", "-f", ".gitmodules", "submodule.vendor/ui.url", sub.to_str().unwrap()]);
+        git(&parent, &["add", ".gitmodules", "vendor/ui"]);
+        git(&parent, &["commit", "-m", "add submodule"]);
+        let nested = parent.join("vendor/ui");
+        git(&nested, &["config", "user.email", "test@example.invalid"]);
+        git(&nested, &["config", "user.name", "Test"]);
+        std::fs::write(nested.join("lib.rs"), "zero\none\ntwo\n").unwrap();
+        git(&nested, &["commit", "-am", "edit"]);
+        let second = git(&nested, &["rev-parse", "HEAD"]);
+        let (sha, text) = super::resolve_nested_code_ref_source(&parent, "vendor/ui", &first, "lib.rs").await.unwrap();
+        assert_eq!((sha.as_str(), text.as_str()), (first.as_str(), "one\ntwo\n"));
+        let (sha, text) = super::resolve_nested_code_ref_source(&parent, "vendor/ui", &second, "lib.rs").await.unwrap();
+        assert_eq!((sha.as_str(), text.as_str()), (second.as_str(), "zero\none\ntwo\n"));
+        assert!(super::resolve_nested_code_ref_source(&parent, "vendor/ui", "HEAD", "lib.rs").await.is_err());
+        assert!(super::resolve_nested_code_ref_source(&parent, "../x", &first, "lib.rs").await.is_err());
+        assert!(super::resolve_nested_code_ref_source(&parent, "vendor/ui", &first, "../lib.rs").await.is_err());
     }
 
     #[test]
@@ -3329,5 +3758,75 @@ mod watch_budget_tests {
         // A self-referential symlink cycle must not send the walk into a spin.
         std::os::unix::fs::symlink(root.join("real"), root.join("real/inner/loop")).unwrap();
         assert!(!exceeds_watch_budget(root)); // terminates, under budget
+    }
+
+    #[test]
+    fn top_level_heavy_dir_is_over_budget_without_walking_into_it() {
+        for name in ["node_modules", "target", ".venv", "dist", "build", ".next", "vendor"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let heavy = root.join(name);
+            std::fs::create_dir_all(&heavy).unwrap();
+            // Unreadable: a walk that descended would treat it as a leaf, so
+            // the verdict can only come from the name.
+            assert!(exceeds_watch_budget(root), "{name}");
+        }
+        // Nested a few levels down also trips it.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("packages/app/node_modules")).unwrap();
+        assert!(exceeds_watch_budget(tmp.path()));
+    }
+
+    #[test]
+    fn heavy_dir_contents_are_never_enumerated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Far more dirs than the budget inside node_modules; the heavy name
+        // verdict must come first, so under the budget the walk is trivial.
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(walk_exceeds_watch_budget(root));
+        let small = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(small.path().join("src")).unwrap();
+        assert!(!walk_exceeds_watch_budget(small.path()));
+    }
+
+    #[test]
+    fn repeated_root_uses_the_cached_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert!(!exceeds_watch_budget(root));
+        // Tree changes underneath; the cached verdict stands (no second walk).
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(!exceeds_watch_budget(root));
+        // Tearing the entry down forgets it.
+        forget_watch_budget(root);
+        assert!(exceeds_watch_budget(root));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn watch_setups_are_bounded_to_the_gate() {
+        use std::sync::atomic::AtomicUsize;
+        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WATCH_SETUPS));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let (running, peak, done) = (running.clone(), peak.clone(), done.clone());
+            tasks.push(tokio::spawn(run_gated_blocking(gate.clone(), move || {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(15));
+                running.fetch_sub(1, Ordering::SeqCst);
+                done.fetch_add(1, Ordering::SeqCst);
+            })));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(done.load(Ordering::SeqCst), 20);
+        assert!(peak.load(Ordering::SeqCst) <= MAX_CONCURRENT_WATCH_SETUPS);
+        assert!(peak.load(Ordering::SeqCst) >= 1);
     }
 }

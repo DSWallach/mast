@@ -57,6 +57,8 @@ pub(crate) const UNSUPPORTED_TEXT: &str = "Artifacts aren\u{2019}t available on 
 #[derive(Debug, Default)]
 pub(crate) struct ArtifactStore {
     loads: HashMap<String, ArtifactsLoad>,
+    ids: HashMap<String, (String, usize)>,
+    paths: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl ArtifactStore {
@@ -89,6 +91,7 @@ impl ArtifactStore {
             return false;
         }
         self.loads.insert(space_id.to_owned(), load);
+        self.rebuild_index();
         true
     }
 
@@ -96,7 +99,11 @@ impl ArtifactStore {
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) -> bool {
         let before = self.loads.len();
         self.loads.retain(|space_id, _| keep(space_id));
-        before != self.loads.len()
+        let changed = before != self.loads.len();
+        if changed {
+            self.rebuild_index();
+        }
+        changed
     }
 
     /// Order-independent hash of every Space's load (kind and snapshot
@@ -132,36 +139,68 @@ impl ArtifactStore {
             .flat_map(|snapshot| snapshot.artifacts.iter())
     }
 
-    /// An artifact by id, in any watched Space.
-    pub(crate) fn artifact(&self, artifact_id: &str) -> Option<&ArtifactView> {
-        self.all().find(|artifact| artifact.id == artifact_id)
-    }
-
-    /// A live artifact whose stored, origin, or preview path is `path`
-    /// (absolute, or relative to `cwd` — the linking chat's checkout).
-    /// Artifacts of `space_id` win over other Spaces'.
-    pub(crate) fn artifact_by_path(
-        &self,
-        path: &str,
-        cwd: Option<&str>,
-        space_id: Option<&str>,
-    ) -> Option<&ArtifactView> {
-        let candidates = candidate_paths(path, cwd);
-        let matches = |artifact: &&ArtifactView| {
-            artifact.archived_at.is_none()
-                && [
+    /// Rebuild once per snapshot change, keeping transcript lookups constant-time.
+    fn rebuild_index(&mut self) {
+        self.ids.clear();
+        self.paths.clear();
+        for (space, load) in &self.loads {
+            let Some(snapshot) = load.snapshot() else {
+                continue;
+            };
+            for (index, artifact) in snapshot.artifacts.iter().enumerate() {
+                self.ids
+                    .entry(artifact.id.clone())
+                    .or_insert_with(|| (space.clone(), index));
+                if artifact.archived_at.is_some() {
+                    continue;
+                }
+                for path in [
                     Some(artifact.stored_path.as_str()),
                     artifact.origin_path.as_deref(),
                     artifact.preview_path.as_deref(),
                 ]
                 .into_iter()
                 .flatten()
-                .any(|known| candidates.iter().any(|c| same_path(known, c)))
+                {
+                    self.paths
+                        .entry(normalize(path))
+                        .or_default()
+                        .push((space.clone(), index));
+                }
+            }
+        }
+    }
+
+    fn indexed(&self, location: &(String, usize)) -> Option<&ArtifactView> {
+        self.snapshot(&location.0)?.artifacts.get(location.1)
+    }
+
+    /// An artifact by id, in any watched Space.
+    pub(crate) fn artifact(&self, artifact_id: &str) -> Option<&ArtifactView> {
+        self.indexed(self.ids.get(artifact_id)?)
+    }
+
+    /// A live artifact by stored, origin, or preview path; the named Space wins.
+    pub(crate) fn artifact_by_path(
+        &self,
+        path: &str,
+        cwd: Option<&str>,
+        space_id: Option<&str>,
+    ) -> Option<&ArtifactView> {
+        let candidates: Vec<_> = candidate_paths(path, cwd)
+            .into_iter()
+            .map(|path| normalize(&path))
+            .collect();
+        let locations = || {
+            candidates
+                .iter()
+                .filter_map(|path| self.paths.get(path))
+                .flatten()
         };
         space_id
-            .and_then(|space| self.snapshot(space))
-            .and_then(|snapshot| snapshot.artifacts.iter().find(matches))
-            .or_else(|| self.all().find(matches))
+            .and_then(|space| locations().find(|location| location.0 == space))
+            .and_then(|location| self.indexed(location))
+            .or_else(|| locations().find_map(|location| self.indexed(location)))
     }
 
     /// The one live artifact whose stored file is named `file_name` (a bare

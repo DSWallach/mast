@@ -201,18 +201,23 @@ pub fn render(
                     shell.update(cx, |shell, cx| shell.fixture_snapshot_overview(cx));
                     shell.into()
                 }
+                "diagram-card" => mast_ui::snapshot::diagram_card_fixture(cx).into(),
                 "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
+                "board" => mast_ui::snapshot::board_fixture(false, false, cx).into(),
+                "board-table" => mast_ui::snapshot::board_fixture(true, false, cx).into(),
+                "board-empty" => mast_ui::snapshot::board_fixture(false, true, cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
-                "token-usage" => mast_ui::snapshot::token_usage_fixture(0,cx).into(),
-                "token-usage-tools" => mast_ui::snapshot::token_usage_fixture(1,cx).into(),
-                "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
-                "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
+                "token-usage" => mast_ui::snapshot::token_usage_fixture(0, cx).into(),
+                "token-usage-tools" => mast_ui::snapshot::token_usage_fixture(1, cx).into(),
+                "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2, cx).into(),
+                "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3, cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
                 "question" => mast_ui::snapshot::question_fixture(data_dir, cx).into(),
+                "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "changes-expanded" => {
                     mast_ui::snapshot::changes_fixture(false, false, window, cx).into()
                 }

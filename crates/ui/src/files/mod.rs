@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod client;
+mod code_ref_bar;
 pub mod document;
 pub mod editor;
 pub mod editor_adapter;
@@ -40,7 +41,11 @@ use search::FileSearchState;
 static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
 use crate::surface_chrome::toolbar;
 
-pub(super) fn toolbar_button(id: &'static str, label: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toolbar_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
     crate::components::file_toolbar_button(id, label, theme)
         .tooltip(move |_, cx| {
             cx.new(|_| preview::FileEditorTooltip { text: label.into() })
@@ -170,6 +175,7 @@ pub struct FilesSurface {
     /// One-shot location requested by a transcript workspace link. Applied
     /// after the async file load creates its editor.
     pending_editor_location: Option<(u32, Option<u32>)>,
+    pinned_reference: Option<crate::code_ref::StagedCodeRef>,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
     selected_editor_path: Option<String>,
@@ -225,6 +231,10 @@ impl Render for FilesSurface {
                 "files-surface-{}",
                 self.chat_id
             )))
+            .key_context("Files")
+            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| {
+                this.add_selected_code_to_chat(cx)
+            }))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .size_full()
@@ -272,7 +282,13 @@ impl FilesSurface {
                         .border_color(theme.border)
                         .bg(crate::theme::wash(0.04))
                         .hover(|style| style.bg(crate::theme::wash(0.09)))
-                        .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Retry))
+                        .when(true, |element| {
+                            crate::components::file_action(
+                                element,
+                                theme,
+                                crate::components::FileAction::Retry,
+                            )
+                        })
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -342,7 +358,13 @@ impl FilesSurface {
                                 .aria_label("Refresh workspace files now")
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
-                                .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Refresh))
+                                .when(true, |element| {
+                                    crate::components::file_action(
+                                        element,
+                                        theme,
+                                        crate::components::FileAction::Refresh,
+                                    )
+                                })
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
@@ -492,6 +514,7 @@ impl FilesSurface {
             presentation,
             editor_path: editor_path.clone(),
             pending_editor_location: None,
+            pinned_reference: None,
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -635,12 +658,15 @@ impl FilesSurface {
                         row.on_click(cx.listener(move |this, _, window, cx| {
                             let selected_text = editor.read(cx).selected_value().to_string();
                             this.close_editor_context_menu(cx);
-                            window.dispatch_action(Box::new(crate::selection_chip::AddToSession(selected_text)), cx);
+                            window.dispatch_action(
+                                Box::new(crate::selection_chip::AddToSession(selected_text)),
+                                cx,
+                            );
                         }))
                     })
                     .child("Add to session"),
             )
-            .child(crate::popover::menu_separator(&theme))
+            .child(crate::popover::menu_separator(theme))
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-select-all",
@@ -708,6 +734,21 @@ impl FilesSurface {
         }
         if !self.presentation.is_editor() {
             self.ensure_tree_loaded(cx);
+        }
+    }
+
+    pub(crate) fn show_pinned_reference(
+        &mut self,
+        reference: crate::code_ref::StagedCodeRef,
+        cx: &mut Context<Self>,
+    ) {
+        self.pinned_reference = Some(reference);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_pinned_reference(&mut self, cx: &mut Context<Self>) {
+        if self.pinned_reference.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -1078,10 +1119,12 @@ impl FilesSurface {
                     } else {
                         "Show all files (even hidden)"
                     },
-                    &theme,
+                    theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
-                .when(true, |element| crate::components::file_toolbar_selection(element, &theme, include_ignored))
+                .when(true, |element| {
+                    crate::components::file_toolbar_selection(element, theme, include_ignored)
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_ignored(cx);
@@ -1115,14 +1158,23 @@ mod explorer_tests {
         struct Host;
         impl Render for Host {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let theme = crate::theme::Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
-                div().flex().flex_col().children([(300.0, "wide"), (80.0, "narrow")].into_iter().map(|(width, id)| {
-                    div().w(px(width)).flex().child(
-                        toolbar_button(id, "Reveal file in tree", &theme)
-                            .debug_selector(move || id.into())
-                            .child(crate::icons::icon(crate::icons::FOLDER).size(px(14.0)).flex_none())
-                    )
-                }))
+                let theme =
+                    crate::theme::Theme::default().with_ui_style(crate::ui_style::UiStyle::GUIDED);
+                div().flex().flex_col().children(
+                    [(300.0, "wide"), (80.0, "narrow")]
+                        .into_iter()
+                        .map(|(width, id)| {
+                            div().w(px(width)).flex().child(
+                                toolbar_button(id, "Reveal file in tree", &theme)
+                                    .debug_selector(move || id.into())
+                                    .child(
+                                        crate::icons::icon(crate::icons::FOLDER)
+                                            .size(px(14.0))
+                                            .flex_none(),
+                                    ),
+                            )
+                        }),
+                )
             }
         }
         let (_, cx) = cx.add_window_view(|_, _| Host);
