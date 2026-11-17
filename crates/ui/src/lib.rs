@@ -276,7 +276,7 @@ pub fn run_app(config: UiConfig) {
                     if let Some((space_id, request_id, decision)) = notify::parse_decision_target(&chat_id) {
                         #[cfg(any(target_os = "macos", target_os = "linux"))]
                         handle_menu_bar_event(menu_bar::MenuEvent::Action(
-                            menu_bar::MenuAction::DecideRequest { space_id, request_id, decision, via: "banner" },
+                            menu_bar::MenuAction::DecideRequest { space_id, request_id, decision },
                         ), &click_state, cx);
                         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                         let _ = (space_id, request_id, decision);

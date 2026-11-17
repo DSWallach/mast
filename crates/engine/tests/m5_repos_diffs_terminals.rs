@@ -2285,6 +2285,3 @@ async fn rpc_dispatch_for_m5_methods() {
 
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

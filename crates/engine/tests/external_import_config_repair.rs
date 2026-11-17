@@ -276,6 +276,3 @@ async fn repair_never_overwrites_an_existing_config() {
 
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

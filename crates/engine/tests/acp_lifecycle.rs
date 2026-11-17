@@ -156,6 +156,3 @@ async fn quiet_acp_prompt_stays_working_until_response() {
         SessionStatus::Idle
     );
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

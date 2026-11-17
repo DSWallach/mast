@@ -1629,6 +1629,3 @@ async fn long_reports_are_cut_and_marked_and_orphans_cannot_report() {
     assert!(rig.wakes.report_to_parent("w1", "  ").await.is_err());
     rig.core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

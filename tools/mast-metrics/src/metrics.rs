@@ -94,7 +94,7 @@ fn resolution_category(r: &UserActionResolution, origin_chat: &str) -> &'static 
         return "chat_reply";
     }
     match r.via.as_deref() {
-        Some("card") | Some("banner") | Some("menu") => "card_reply_or_choice",
+        Some("card") => "card_reply_or_choice",
         Some("prMerged") => "pr_merged",
         Some("agent") if r.by.chat_id.as_deref() == Some(origin_chat) => "agent_self_resolve",
         Some("agent") => "agent_other",

@@ -31,7 +31,7 @@ Validation commands:
 
 ```sh
 cargo test --release --locked -p mast-ui --lib -- --test-threads=1
-cargo test --release --locked -p mast-engine --lib --test workspace_files --test device_routing
+cargo nextest run --release --locked -p mast-engine -E 'kind(lib) | (binary(engine) & test(/^(workspace_files|device_routing)::/))'
 ```
 
 Automated results recorded on 2026-09-12 (Linux):

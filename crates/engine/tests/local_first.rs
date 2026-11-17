@@ -681,6 +681,3 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     );
     edge_task.abort();
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

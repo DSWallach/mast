@@ -5254,7 +5254,7 @@ impl Shell {
             let mut page = crate::overview::Overview::new(state, weak, transcript, composer, cx);
             page.in_sidebar = true;
             page.outline_entity()
-                .update(cx, |outline, _| outline.set_single_click_opens(true));
+                .update(cx, |outline, cx| outline.set_sidebar(true, cx));
             page
         });
         self.overview_page = Some(page.clone());
@@ -5453,16 +5453,6 @@ impl Shell {
                                     state.set_sidebar_outline_sections(value, cx)
                                 });
                                 this.sidebar_prev_order.clear();
-                                this.schedule_save(cx);
-                                cx.notify();
-                            }
-                            AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
-                                this.settings.compact_single_chat = value;
-                                if let Some(overview) = &this.overview_page {
-                                    overview.update(cx, |overview, cx| {
-                                        overview.set_compact_single_chat(value, cx)
-                                    });
-                                }
                                 this.schedule_save(cx);
                                 cx.notify();
                             }

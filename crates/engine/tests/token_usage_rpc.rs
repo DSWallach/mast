@@ -131,6 +131,3 @@ async fn token_usage_queries_filter_agents_and_reject_unknown_devices() {
     );
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
