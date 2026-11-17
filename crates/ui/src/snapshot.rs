@@ -180,6 +180,64 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
     shell
 }
 
+/// Rows read back from real engine stores (see the headless UI driver).
+pub struct WorldRows {
+    pub spaces: Vec<mast_proto::Space>,
+    pub chats: Vec<mast_proto::Chat>,
+    pub outline: mast_proto::WorkOutlineSnapshot,
+    pub selected_chat: Option<String>,
+    /// `SessionMessageEntry` wire values for the selected chat.
+    pub transcript: Vec<serde_json::Value>,
+}
+
+/// Offline shell whose state is filled from [`WorldRows`] before the shell
+/// exists, the same way [`chat_fixture`] does. The engine is not booted: its
+/// attach path fires the shell's state observer headlessly and panics.
+pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let selected = rows.selected_chat.clone();
+    let selected_space = selected
+        .as_ref()
+        .and_then(|id| rows.chats.iter().find(|chat| &chat.id == id))
+        .and_then(|chat| chat.space_id.clone());
+    let transcript = rows.transcript;
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.local_device_id = rows.chats.first().map(|chat| chat.device_id.clone());
+        state.selected_chat = selected;
+        state.selected_space = selected_space;
+        state.auto_selected = true;
+        state.chats_synced = true;
+        state.spaces_synced = true;
+        state.spaces = rows.spaces;
+        state.chats = rows.chats;
+        state.set_work_outline_for_test(rows.outline);
+        state
+    });
+    state.update(cx, |state, cx| {
+        if state.selected_chat.is_some() {
+            if let Ok(reset) = serde_json::from_value(serde_json::Value::Array(transcript)) {
+                state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset }, cx).ok();
+            }
+        }
+    });
+    let boot = crate::EngineBootConfig {
+        data_dir,
+        ipc_port: 0,
+        edge_url: String::new(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    cx.new(|cx| {
+        let mut shell = crate::shell::Shell::new(state, boot, cx);
+        shell.fixture_snapshot_ready();
+        shell
+    })
+}
+
 /// Construct the chat fixture with its hand-off dialog open.
 pub fn handoff_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture(data_dir, cx);
