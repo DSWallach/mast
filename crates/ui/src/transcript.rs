@@ -1533,6 +1533,19 @@ impl Transcript {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Rows visited by `sync`'s tool-group passes (previous-tool map and live
+    /// group loop).
+    pub(crate) static SYNC_TOOL_SCAN_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn sync_scan_visit() {
+    #[cfg(test)]
+    SYNC_TOOL_SCAN_ROWS.with(|count| count.set(count.get() + 1));
+}
+
 /// Runtime-handle keys of the code blocks a markdown row renders.
 fn row_code_fence_keys(row: &Row) -> Vec<SharedString> {
     match &row.kind {
@@ -4978,9 +4991,25 @@ impl Transcript {
                 fold.disclosure_at = None;
             }
         }
-        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self
-            .rows
+        // Tool-group reveal bookkeeping only changes for rows inside the diff
+        // when nothing resets the whole transcript: an unchanged (id, version)
+        // row would recompute the same `starts` from its own previous value.
+        // Computed once: the same diff drives this scan, the prune and the
+        // list splice.
+        let rows_diff = diff_rows(&self.rows, &new_rows);
+        let incremental = !attached && !baseline_changed && !replay_baseline;
+        let (old_scan, new_scan) = match (&rows_diff, incremental) {
+            (Some((old_range, count)), true) => (
+                old_range.clone(),
+                old_range.start..old_range.start + count,
+            ),
+            (None, true) => (0..0, 0..0),
+            _ => (0..self.rows.len(), 0..new_rows.len()),
+        };
+        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self.rows
+            [old_scan.clone()]
             .iter()
+            .inspect(|_| sync_scan_visit())
             .filter(|row| !fully_historical.contains(&row.entry_id))
             .filter_map(|row| match &row.kind {
                 RowKind::ToolGroup { tools, .. } => {
@@ -5004,7 +5033,8 @@ impl Transcript {
             .collect();
         let now = Instant::now();
         let mut live_tool_groups = HashSet::new();
-        for row in &new_rows {
+        for row in &new_rows[new_scan.clone()] {
+            sync_scan_visit();
             let RowKind::ToolGroup { tools, .. } = &row.kind else {
                 continue;
             };
@@ -5064,14 +5094,24 @@ impl Transcript {
                 })
                 .collect();
         }
-        self.tool_group_reveals
-            .retain(|row_id, _| live_tool_groups.contains(row_id));
+        if incremental {
+            // Unchanged rows keep their reveal; only groups that left the diff
+            // range (removed or no longer collapsing) are dropped.
+            for row in &self.rows[old_scan.clone()] {
+                if matches!(row.kind, RowKind::ToolGroup { .. })
+                    && !live_tool_groups.contains(&row.id)
+                {
+                    self.tool_group_reveals.remove(&row.id);
+                }
+            }
+        } else {
+            self.tool_group_reveals
+                .retain(|row_id, _| live_tool_groups.contains(row_id));
+        }
 
         // Runtime scroll handles follow the stable code rows exactly. A live
         // block keeps its handle through completion; deleted/reindexed tail
         // blocks and the previous chat cannot accumulate stale handles.
-        // Computed once: the same diff drives this prune and the list splice.
-        let rows_diff = diff_rows(&self.rows, &new_rows);
         self.prune_code_fences(attached, &rows_diff, &new_rows);
 
         // Text already streamed before this (re)attach is the veil BASELINE:
