@@ -155,6 +155,7 @@ pub(crate) const OPEN_PR_REVIEW_CHATS_COMBO: &str = "mod-shift-p";
 pub(crate) const OPEN_ITEM_TAB_COMBO: &str = "mod-alt-;";
 /// Open the side panel's Team tab. ⌘T is the browser's New tab inside the side
 /// panel (`Browser` context), so the Team tab takes ⌥⌘T, next to ⌥⌘; for Item.
+#[cfg(test)]
 pub(crate) const OPEN_TEAM_TAB_COMBO: &str = "mod-alt-t";
 /// Pin the header's context card open / release it.
 pub(crate) const TOGGLE_ITEM_CARD_COMBO: &str = "mod-alt-i";
@@ -162,6 +163,7 @@ pub(crate) const TOGGLE_ITEM_CARD_COMBO: &str = "mod-alt-i";
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
 /// focus from controls that are mounting in response to the same input event.
+#[cfg(test)]
 pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
     focus: FocusHandle,
     window: &mut Window,
@@ -3744,25 +3746,6 @@ impl Shell {
         };
         browser.update(cx, |browser, cx| {
             browser.open_fragment(source, reader, notice, window, cx)
-        });
-    }
-
-    /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
-    /// FRESH diff tab with its own scope/base selection (multiple diff
-    /// panels, user request).
-    pub(crate) fn open_chat_changes(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        self.open_chat(chat_id, cx);
-        // `open_chat` changes AppState selection immediately, while the
-        // Shell's `active_chat`/panel key follows through its state observer.
-        // Wait until that observer has reconciled so the new diff belongs to
-        // the destination chat instead of the previously active one.
-        let this = cx.weak_entity();
-        cx.defer(move |cx| {
-            this.update(cx, |this, cx| {
-                this.set_surfaces_open(true, cx);
-                this.add_diff_surface(cx);
-            })
-            .ok();
         });
     }
 

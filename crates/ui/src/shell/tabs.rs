@@ -198,6 +198,7 @@ impl Shell {
     /// Open a fresh draft whose first send is rooted in an exact, already
     /// materialized worktree selected from Repo Map. The project still owns
     /// device/config defaults; only the checkout target is pinned.
+    #[cfg(test)]
     pub(crate) fn open_new_session_in_worktree(
         &mut self,
         space_id: String,

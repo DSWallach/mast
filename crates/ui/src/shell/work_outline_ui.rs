@@ -165,6 +165,7 @@ pub(super) fn reference_open(
 
 /// Key contexts that hold a text input. Outline navigation keys must never
 /// fire while one of these owns focus.
+#[cfg(test)]
 pub(crate) const TEXT_INPUT_CONTEXTS: [&str; 3] = ["Composer", "MessageComposer", "PaletteSearch"];
 
 /// The context predicate every bare-key outline binding uses.

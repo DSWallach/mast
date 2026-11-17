@@ -2,7 +2,7 @@ use super::*;
 use chrono::TimeZone;
 use mast_proto::{AgentAccount, AgentUsageWindow, InterruptedOutcome, InterruptedRun, ManagedAccount};
 
-use crate::running_chats::{self, Input, Toggled};
+use crate::running_chats::{self, Input, RunState, Toggled};
 
 fn now() -> DateTime<Utc> {
     // A Friday.

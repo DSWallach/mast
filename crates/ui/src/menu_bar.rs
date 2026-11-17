@@ -12,7 +12,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use mast_proto::{AgentAccountsSnapshot, HarnessId, ManagedAccountsSnapshot};
 
-use crate::running_chats::{Entry, InterruptedBlock, Row, RunState, Snapshot};
+use crate::running_chats::{Entry, InterruptedBlock, Row, Snapshot};
 use crate::settings::accounts::{UsageLevel, usage_level};
 use crate::status_light::AppLight;
 

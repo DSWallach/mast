@@ -538,6 +538,7 @@ fn matches_search(query_lower: &str, fields: &[Option<&str>]) -> bool {
 /// Legacy UI-flag entry from when a Canvas view existed. Read-only: a saved
 /// `viewMode:canvas` loads as Outline ([`OverviewMode::from_flags`]) and is
 /// never written back (the writer purges every `viewMode:` flag).
+#[cfg(test)]
 const LEGACY_VIEW_CANVAS_FLAG: &str = "viewMode:canvas";
 /// UI-flag entry: the Work Outline is the main column's mode. Older builds
 /// read it as an unknown flag, i.e. List (downgrade-safe).

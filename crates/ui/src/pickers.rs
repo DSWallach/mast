@@ -2561,6 +2561,7 @@ impl Pickers {
     /// Point a fresh-chat draft at an already materialized worktree. Used by
     /// Repo Map as both an entry point and an audit escape hatch for unmatched
     /// worktrees.
+    #[cfg(test)]
     pub(crate) fn target_existing_worktree(
         &mut self,
         path: String,
