@@ -1608,11 +1608,17 @@ mod tests {
 
         // The menu entry runs the same move as its key. Reveal the earlier
         // row after keyboard navigation has scrolled to the moved chat.
-        outline.update(cx, |outline, cx| {
-            outline.reveal(&row_key::chat(CHAT_API), cx)
-        });
-        redraw(cx);
-        right_click(cx, &row_key::chat(CHAT_API));
+        let key = row_key::chat(CHAT_API);
+        // Reparenting updates the cached sidebar and virtual-list viewport in
+        // separate frames. Wait for the revealed target before sending a click.
+        for _ in 0..4 {
+            outline.update(cx, |outline, cx| outline.reveal(&key, cx));
+            redraw(cx);
+            if cx.debug_bounds(selector(format!("outline-row-{key}"))).is_some() {
+                break;
+            }
+        }
+        right_click(cx, &key);
         assert!(menu_open(&shell, cx));
         click(cx, "move-to-next-item");
         assert!(!menu_open(&shell, cx));
