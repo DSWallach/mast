@@ -1,8 +1,8 @@
 # Combine Overview and Sidebar
 
-Status: implementation complete; final review and the requested Mast Dev QA build are pending.
+Status: original consolidation merged; pin-display follow-up implemented and awaiting final review and integration.
 Work item: Sidebar and Overview combination (`22ac3419111b39808a8565dbc57c6498`).
-Branch: `david/sidebar-overview-combination`, based on local `david-rolling` at `4cc809e2` (three commits ahead of fetched `origin/david-rolling` on 2026-11-16).
+Follow-up branch: `david/overview-hide-pins`, integrated with `david-rolling` at `6d8e3965`. The original `david/sidebar-overview-combination` implementation started at `4cc809e2` and is recorded in the progress history below.
 
 ## Goal and layout
 
@@ -10,7 +10,7 @@ Make Overview the persistent navigation surface in the left column where the sid
 
 Proposed layout:
 
-- **Left column — Overview:** assistant/current-chat access, Space scope, New chat, New item, search, attention counts, view controls, pins/custom sections, and the Work Outline. Keep account, connection, update, and error controls at the bottom.
+- **Left column — Overview:** assistant/current-chat access, Space scope, New chat, New item, search, attention counts, view controls, and the Work Outline with pinned chats highlighted in place. Keep account, connection, update, and error controls at the bottom.
 - **Main workspace:** the selected chat, work-item details, Required Actions, subagent transcript, Inbox/Linear/GitHub content, or another existing destination. The current transcript/composer remain the single live chat surface.
 - **Existing right workspace panes:** files, diffs, browser, artifacts, and other chat tools continue to open beside the active content. Where space is insufficient, use the existing takeover/overlay pattern rather than squeezing the outline and chat beyond usable widths.
 
@@ -31,7 +31,7 @@ These observations come from reading the implementation at the base SHA, rather 
 | Sidebar Space selector and Space management | Scope control above the tree; preserve All Spaces, projectless sessions, creation/rename and existing Space menus. |
 | Personal assistant and current session outside the active filter | Small fixed access area above the scoped body, visibly identified when outside scope. |
 | Pinned sessions, manual pin ordering, custom sections, section menus and archive-all | Overview highlights pinned chats in place. The separate Pinned collection and manual pin ordering appear only in Sessions. Session-list collections appear only in Sessions, backed by the existing synced records. |
-| Archived accordion, restore/archive, scheduled-task runs grouped by task and task-history entry points | Archived and Scheduled collections in the same column; retain existing actions and counts. |
+| Archived accordion, restore/archive, scheduled-task runs grouped by task and task-history entry points | Archived and Scheduled collections in the Sessions presentation; retain existing actions and counts. |
 | Organization by project/device/one list, created/updated sort, compact rows, project icon/label, branch/PR/harness visibility | View menu for a Sessions presentation within this same Overview column. Work Outline remains the default. |
 | Session context menu and conditional actions | Shared session menu on every chat occurrence, including rename, pin, archive/restore, imported-session sync, PR/ticket links, review, handoff, side questions, admin/assistant actions, worktree closeout, copy/IDs/provider links, and confirmed deletion where currently available. |
 | User/account menu, local/synced/development identity, settings, connection state, update strip, mutation failures | Fixed shell-owned footer around the Overview body; keep all existing menu destinations and recovery controls. |
