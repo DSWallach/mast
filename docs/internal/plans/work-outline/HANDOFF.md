@@ -1221,7 +1221,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-17 07:00; coordinator da545eee, overnight run)
 
-- **Installed: release 102** (58d531d05). Mikey's running Mast is still 96 (up since 2026-11-16 17:20); one restart picks
+- **Installed: release 103** (16afa8cf7, 08:16; = 102 + UI driver YAML scenarios + cleanup pass 2). Mikey's running Mast is still 96 (up since 2026-11-16 17:20); one restart picks
   up 97–102. Every install went through the enforced perf gate (release-test + soak stamps).
 - Overnight releases: 99 (sidebar spinner rows cached 2268→264 builds/30 frames; freeze watchdog writes
   `freeze-*.txt` next to mast-headed.log on a ≥2 s main-thread stall, `MAST_FREEZE_WATCHDOG=0` disables; Add to chat
@@ -1240,9 +1240,9 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
   stalls at exec). Release runs and workers use `DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Mast's
   production code doesn't call `git submodule`. Opening Xcode once or a reboot probably clears it.
 - After 102 (integration, not installed): UI driver YAML scenarios (`scripts/ui-drive run <file>.yaml`, 3 scenarios,
-  report-only in release runs) and cleanup pass 2 (clippy 650 → 517). Release 103's gate failed only on the
-  test-only `world_template same_seed_same_hash…` driver flake (passes alone; now quarantined, item 85e3292a); its
-  soak passed (equal CPU/git, footprint 408 vs 456 MB). Rerun the gate on the current head to release it.
+  report-only in release runs) and cleanup pass 2 (clippy 650 → 517). Release 103's first gate failed only on the
+  test-only `world_template same_seed_same_hash…` driver flake (now quarantined, item 85e3292a); the rerun passed
+  (soak vs 102: equal CPU and git rate) and 103 is installed.
 - **Needs Mikey:** refactor plan Phase B/C review (mast-artifact:2ee3c40d3a47f5d2cda34f8afeee43c5); Perf gate
   instruction proposal; approval rule for niced cargo commands; review phase 6 (GitHub posting) call; older items.
 - Follow-ups: Changes width shaping off the render thread (changes widths; needs design); transcript sync still
