@@ -3,6 +3,7 @@
 
 pub mod environment;
 pub mod materialize;
+pub mod scenario;
 pub mod serve;
 pub mod session;
 pub mod template;

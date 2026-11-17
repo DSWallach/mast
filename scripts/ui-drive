@@ -8,12 +8,17 @@
   scripts/ui-drive key <chord>
   scripts/ui-drive png [path]        (needs `start --render`)
   scripts/ui-drive stop
+  scripts/ui-drive run <file.yaml> [--render] [--out DIR]   (batch: runs a whole scenario)
 
 Flags on tree/click/type/key: --brief (no tree), --selectors (also list regions
 that have a #selector but no a11y node).
 
 Locators: #selector | role[name="Name"] | text="..."[:nth(n)] | e22 (id from
 the last tree). An ambiguous locator is an error that lists the matches.
+
+`run` plays a YAML scenario (crates/ui-driver/scenarios/*.yaml) in its own sandbox, separate
+from any warm session, prints each step and exits non-zero on the first failed `expect`. The
+failing step's tree (and a PNG with --render) land in <out>/<name>/ (default /tmp/mast-scenarios).
 
 One warm driver process (the ui_drive test binary in serve mode) runs inside
 the scratch sandbox; each command writes request.json into its control
@@ -187,6 +192,39 @@ def start(args):
     show(call({"cmd": "tree"}))
 
 
+def run_scenario(args):
+    render, out, files = False, None, []
+    while args:
+        arg = args.pop(0)
+        if arg == "--render":
+            render = True
+        elif arg == "--out" and args:
+            out = os.path.abspath(args.pop(0))
+        elif arg.startswith("-"):
+            die(f"unknown run option {arg}", 2)
+        else:
+            files.append(os.path.abspath(arg))
+    if len(files) != 1:
+        die("usage: ui-drive run <file.yaml> [--render] [--out DIR]", 2)
+    environment = dict(os.environ, MAST_SCENARIO_FILE=files[0])
+    if out:
+        environment["MAST_SCENARIO_OUT"] = out  # the runner adds a <name>/ subdirectory
+    if render:
+        environment["MAST_SCENARIO_RENDER"] = "1"
+    command = [
+        "nice", "-n", "10", "cargo", "test", "-p", "mast-ui-driver", "--test", "scenarios", "--",
+        "--ignored", "--exact", "scenario_launcher", "--test-threads=1", "--nocapture",
+    ]
+    result = subprocess.run(command, cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lines = result.stdout.splitlines()
+    report = [l for l in lines if (l.startswith(("  ", "PASS ", "FAIL ")) and not l.startswith("    ")) or "step" in l]
+    text = "\n".join(l.replace("test scenario_launcher ... ", "", 1) for l in report)
+    print(text)
+    if "PASS " not in text and "FAIL " not in text:
+        die("scenario did not run:\n" + (result.stderr + result.stdout)[-3000:])
+    sys.exit(0 if result.returncode == 0 else 1)
+
+
 def stop():
     pid = session_pid()
     if read("root") and pid and pid_alive(pid):
@@ -215,6 +253,8 @@ def main(argv):
         start(args)
     elif command == "stop":
         stop()
+    elif command == "run":
+        run_scenario(args)
     elif command == "tree":
         show(call({"cmd": "tree"}), selectors=selectors)
     elif command == "click" and len(args) == 1:
@@ -231,7 +271,7 @@ def main(argv):
             response["message"] = os.path.abspath(target)
         show(response, tree=False)
     else:
-        die("usage: ui-drive start|tree|click <locator>|type <locator> <text>|key <chord>|png [path]|stop", 2)
+        die("usage: ui-drive start|run <file.yaml>|tree|click <locator>|type <locator> <text>|key <chord>|png [path]|stop", 2)
 
 
 if __name__ == "__main__":

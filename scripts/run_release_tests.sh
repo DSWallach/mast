@@ -17,6 +17,9 @@
 #                       directory (target/release-build), so it cannot block the tests
 #   --quarantine        additionally run the quarantine profile (failures are reported, not fatal)
 #   --dry-run           print the selection and exit
+# The UI driver scenarios (crates/ui-driver/scenarios/*.yaml) run after the suites whenever the
+# selection includes mast-ui-driver. They need the macOS sandbox, so they run outside nextest like
+# the ignored driver tests, and are report-only: results print, the run's status never changes.
 # On RESULT: pass (clean tree) it also runs the budget tests and writes the perf-gate stamp
 # target/perf-gate/<HEAD>.json (scripts/perf-gate.py); the install script requires it.
 #   --timeout SECONDS   wall-clock limit per suite group (default 5400)
@@ -92,6 +95,8 @@ else
     case "$p" in mast-ui) run_ui=1 ;; mast) ;; *) non_ui_packages+=(-p "$p") ;; esac
   done
 fi
+run_scenarios=0
+case " $selection " in *" all "*|*" mast-ui-driver "*) run_scenarios=1 ;; esac
 echo "nextest packages: ${non_ui_packages[*]:-<none>}   ui suite: $run_ui   installed build: $run_build"
 [ "$dry_run" = 1 ] && exit 0
 
@@ -119,6 +124,13 @@ if [ "$run_ui" = 1 ]; then
   with_time_limit cargo test -p mast-ui --lib -- --test-threads=1 || status=1
 fi
 echo "test wall time: $(( $(date +%s) - started )) s"
+if [ "$run_scenarios" = 1 ]; then
+  echo "== ui-driver scenarios (report only)"
+  with_time_limit cargo test -p mast-ui-driver --test scenarios -- --ignored run_all_scenarios \
+    --test-threads=1 --nocapture 2>&1 | grep -E '^ *(ok|FAIL) +step|^(PASS|FAIL) |^ {8}|note:|artifact:|^scenarios:|panicked|error' \
+    || true
+  echo "scenarios: report only, not part of RESULT"
+fi
 
 if [ -n "$build_pid" ]; then
   if wait "$build_pid"; then echo "installed build ok: target/release-build/installed/zeron"

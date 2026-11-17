@@ -154,6 +154,50 @@ pub fn serve() -> Result<(), String> {
     serve_in(&scratch)
 }
 
+/// Tell the Mock harness which script to play. Single-threaded callers only:
+/// before the runtime and the app exist. The sandboxed process has a cleared
+/// environment, so this is the only way the Mock harness learns the script.
+pub fn apply_mock(config: &Config) -> Result<(), String> {
+    if let Some(name) = &config.mock {
+        unsafe {
+            std::env::set_var(mock_knob(name)?, "1");
+            // The composer only offers the Mock harness under the dev rig flag.
+            std::env::set_var("MAST_HARNESS", "mock");
+        }
+    }
+    Ok(())
+}
+
+pub fn new_runtime() -> Result<Arc<tokio::runtime::Runtime>, String> {
+    Ok(Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+/// Restore the template into the scratch data dir and open the app on it.
+pub fn boot_session(
+    scratch: &ScratchDirectories,
+    template: &Template,
+    world: &SmallWorld,
+    runtime: &Arc<tokio::runtime::Runtime>,
+    render: bool,
+) -> Result<Session, String> {
+    template.restore(scratch).map_err(|e| e.to_string())?;
+    // The engine opens the restored stores to read the first frame's rows,
+    // then shuts down; the session boots it again behind the window.
+    let rows = runtime.block_on(async {
+        let core = crate::materialize::open_core(scratch.data())?;
+        let rows = crate::materialize::load_rows(world, &core);
+        core.shutdown().await;
+        rows
+    })?;
+    Session::open(scratch.data(), template.header(), rows, runtime.clone(), render)
+}
+
 /// The serve loop on an already validated scratch root.
 pub fn serve_in(scratch: &ScratchDirectories) -> Result<(), String> {
     let ctl = control_dir(scratch.root());
@@ -162,41 +206,11 @@ pub fn serve_in(scratch: &ScratchDirectories) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let config = Config::from_json(&config)?;
-    if let Some(name) = &config.mock {
-        // Single-threaded here: before the runtime and the app exist. The
-        // sandboxed process has a cleared environment, so this is the only way
-        // the Mock harness learns which script to play.
-        unsafe {
-            std::env::set_var(mock_knob(name)?, "1");
-            // The composer only offers the Mock harness under the dev rig flag.
-            std::env::set_var("MAST_HARNESS", "mock");
-        }
-    }
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?,
-    );
+    apply_mock(&config)?;
+    let runtime = new_runtime()?;
     let world = SmallWorld::small(config.seed);
     let template = runtime.block_on(Template::build(scratch, &world))?;
-    template.restore(scratch).map_err(|e| e.to_string())?;
-    // The engine opens the restored stores to read the first frame's rows,
-    // then shuts down; the session boots it again behind the window.
-    let rows = runtime.block_on(async {
-        let core = crate::materialize::open_core(scratch.data())?;
-        let rows = crate::materialize::load_rows(&world, &core);
-        core.shutdown().await;
-        rows
-    })?;
-    let mut session = Session::open(
-        scratch.data(),
-        template.header(),
-        rows,
-        runtime.clone(),
-        config.render,
-    )?;
+    let mut session = boot_session(scratch, &template, &world, &runtime, config.render)?;
     let first = json!({
         "header": session.header(),
         "tree_hash": session.frame().hash(),
