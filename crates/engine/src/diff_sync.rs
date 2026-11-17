@@ -1358,9 +1358,19 @@ async fn entry_task(
 /// listed path, which catches an edit to a file that was already modified.
 /// `None` (cannot decide: git failed, too many paths, or a submodule is
 /// involved) means "run the full capture".
-async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    const MAX_PROBED_PATHS: usize = 2_000;
+/// Also hands back the `status --porcelain=v2` bytes it read
+/// (when complete), so the capture that follows in the same sync can derive its
+/// own file list from them instead of spawning a second `git status`.
+async fn repair_probe_with_status(identity: &CheckoutIdentity) -> (Option<u64>, Option<Vec<u8>>) {
+    let Some(status) = probe_status(identity).await else {
+        return (None, None);
+    };
+    let hash = probe_hash(identity, &status);
+    let bytes = (!status.truncated).then_some(status.stdout);
+    (hash, bytes)
+}
+
+async fn probe_status(identity: &CheckoutIdentity) -> Option<Capture> {
     let status = capture_git(
         &identity.root,
         &[
@@ -1375,6 +1385,12 @@ async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
     )
     .await
     .ok()?;
+    Some(status)
+}
+
+fn probe_hash(identity: &CheckoutIdentity, status: &Capture) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    const MAX_PROBED_PATHS: usize = 2_000;
     if status.truncated {
         return None;
     }
@@ -1432,7 +1448,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     // costs exactly one `git status` and no capture ever starts without a
     // baseline being stored with its result.
     let repair = entry.repair_kick.swap(false, Ordering::Relaxed);
-    let probe = repair_probe(&entry.identity).await;
+    let (probe, probe_status_v2) = repair_probe_with_status(&entry.identity).await;
     if repair
         && lock(&entry.checksum).is_some()
         && let Some(now) = probe
@@ -1440,7 +1456,23 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     {
         return; // one `git status` said nothing moved: skip the full capture
     }
-    let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
+    // Spawn savers for the full capture: HEAD comes from the git dir's files and
+    // the file list from the probe's status (taken just before, see above).
+    // Either falls back to its own git call when unavailable.
+    let hints = CaptureHints {
+        head: read_head(&entry.identity).1,
+        status_v1: probe_status_v2
+            .as_deref()
+            .and_then(git_status::v2_to_v1),
+    };
+    let snapshot = match Box::pin(capture_diff_hinted(
+        &inner.repos,
+        &entry.identity.root,
+        None,
+        hints,
+    ))
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
@@ -2573,10 +2605,31 @@ pub async fn capture_diff_against(
     root: &Path,
     base_override: Option<&str>,
 ) -> Result<DiffSnapshot, EngineError> {
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
-        .await
-        .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
-        .unwrap_or_default();
+    Box::pin(capture_diff_hinted(repos, root, base_override, CaptureHints::default())).await
+}
+
+/// Answers the caller already has, so the capture can skip the matching git call.
+#[derive(Default)]
+struct CaptureHints {
+    /// HEAD commit id read from the git dir's files.
+    head: Option<String>,
+    /// `status --porcelain=v1 -z --untracked-files=all` bytes (complete, untruncated).
+    status_v1: Option<Vec<u8>>,
+}
+
+async fn capture_diff_hinted(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+    hints: CaptureHints,
+) -> Result<DiffSnapshot, EngineError> {
+    let head = match hints.head.filter(|h| valid_object_id(h)) {
+        Some(head) => head,
+        None => capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+            .await
+            .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
+            .unwrap_or_default(),
+    };
     let base: &str = match base_override {
         Some(base) => base,
         None if head.is_empty() => EMPTY_TREE_SHA,
@@ -2634,18 +2687,23 @@ pub async fn capture_diff_against(
     .await?;
     // Untracked listing via porcelain status; `--no-optional-locks` keeps this
     // read-only (a status-triggered index refresh would re-kick our own watcher).
-    let status = capture_git(
-        root,
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ],
-        2 * 1024 * 1024,
-    )
-    .await?;
+    let status = match hints.status_v1 {
+        Some(stdout) => Capture { stdout, truncated: false },
+        None => {
+            capture_git(
+                root,
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                ],
+                2 * 1024 * 1024,
+            )
+            .await?
+        }
+    };
 
     let mut files = parse_name_status(&names.stdout);
     apply_numstat(&mut files, &nums.stdout);
