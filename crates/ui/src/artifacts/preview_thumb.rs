@@ -305,6 +305,19 @@ pub(crate) fn settings_row<V: 'static>(
         .into_any_element()
 }
 
+pub(crate) fn card_footer<V: 'static>(row_id: &str, theme: &Theme, enabled: bool, cx: &mut Context<V>) -> gpui::AnyElement {
+    crate::components::browser_parts::artifact_card_footer(theme)
+        .child(div().flex_1().child("Open diagrams automatically"))
+        .child(crate::settings::widgets::toggle_switch(theme, enabled)
+            .id(gpui::SharedString::from(format!("{row_id}#diagram-auto-open")))
+            .cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.open_diagrams_automatically = !enabled);
+                cx.notify();
+            })))
+        .into_any_element()
+}
+
 #[cfg(feature = "snapshot")]
 pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render + use<>> {
     struct Fixture;
@@ -342,8 +355,8 @@ pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render +
                     None,
                     &theme,
                     Some(image),
+                    Some(card_footer("diagram-preview", &theme, false, cx)),
                 ))
-                .child(settings_row(&theme, false, cx))
         }
     }
     cx.new(|_| Fixture)

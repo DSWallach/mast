@@ -86,6 +86,7 @@ pub(crate) fn artifact_card(
     link_ui: Option<render::LinkUi>,
     theme: &Theme,
     thumbnail: Option<std::sync::Arc<gpui::Image>>,
+    footer: Option<AnyElement>,
 ) -> AnyElement {
     let selector = format!("{row_id}#artifact");
     let title: SharedString = card.title.clone().into();
@@ -173,6 +174,7 @@ pub(crate) fn artifact_card(
                         ),
                 )
             })
+            .when_some(footer, |card, footer| card.child(footer))
             .on_click(move |_, window, cx| open(window, cx)),
         )
         .into_any_element()
