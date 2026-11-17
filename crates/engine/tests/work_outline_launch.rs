@@ -1071,7 +1071,11 @@ async fn unbound_chats_keep_todays_cwd_behavior() {
         run_cwd(&rig, &turns_with(&rig, "plain run")[0]),
         elsewhere.to_string_lossy()
     );
-    // An unassociated Chat is not a work-item Chat.
+    // Removing automatic ownership restores the unassociated boundary.
+    assert!(rig.core.workspace.chat_assigned_work_item("plain", SPACE).is_some());
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op":"removeChatFromWorkItem", "chatId":"plain", "operationId":"remove-plain-item"
+    })).await.unwrap();
     let error = continue_chat(&rig, "plain", "op-plain", "plain next")
         .await
         .expect_err("not a work-item chat");

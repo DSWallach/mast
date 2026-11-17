@@ -132,6 +132,15 @@ pub struct Space {
 }
 
 impl Space {
+    /// Stable per-device container for chats created without a folder.
+    pub fn personal_id(device_id: &str) -> String {
+        crate::derive_id(&format!("personal-space:{device_id}"), "space")
+    }
+
+    pub fn is_personal(&self) -> bool {
+        self.id == Self::personal_id(&self.device_id)
+    }
+
     /// Name override, else basename(path), else the path itself.
     /// Lives here (proto) so UI and engine agree on the derivation.
     pub fn display_name(&self) -> &str {

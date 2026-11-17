@@ -195,23 +195,12 @@ async fn rig_for(fake_codex: bool) -> Rig {
         )
         .await
         .unwrap();
+    // Legacy unassociated chats exercise the authorization boundary. Tests
+    // for current user creation go through Mutate below.
     for chat in [CHAT, OTHER_CHAT] {
-        client
-            .call(
-                methods::MUTATE,
-                json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE,
-                        "deviceId": core.device_id }),
-            )
-            .await
-            .unwrap();
+        core.workspace.create_chat(chat, Some(SPACE), Some(&core.device_id), None, None).unwrap();
     }
-    client
-        .call(
-            methods::MUTATE,
-            json!({ "op": "createChat", "chatId": PROJECTLESS, "deviceId": core.device_id }),
-        )
-        .await
-        .unwrap();
+    core.workspace.create_chat(PROJECTLESS, None, Some(&core.device_id), None, None).unwrap();
     Rig {
         _tmp: tmp,
         core,
@@ -283,7 +272,7 @@ fn snapshot(rig: &Rig) -> WorkOutlineSnapshot {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn space_chat_runs_get_a_run_scoped_token_and_projectless_runs_get_none() {
+async fn new_and_recovered_chats_get_run_scoped_tools() {
     let rig = rig().await;
     let tokens = rig.core.sessions.agent_tokens();
 
@@ -338,7 +327,7 @@ async fn space_chat_runs_get_a_run_scoped_token_and_projectless_runs_get_none() 
         .unwrap_err();
     assert!(err.contains("agent-tools/unauthenticated"), "{err}");
 
-    // A projectless Chat keeps today's behavior: plain run, no token.
+    // First-command recovery gives a folderless chat work ownership too.
     rig.core
         .doc_host
         .queue_command(PROJECTLESS, run_command("solo", "~"))
@@ -350,10 +339,12 @@ async fn space_chat_runs_get_a_run_scoped_token_and_projectless_runs_get_none() 
     .await;
     let spawn = rig.harness.spawns.lock().unwrap()[1].clone();
     assert!(
-        matches!(&spawn, Spawn::Plain { prompt } if prompt == "solo"),
+        matches!(&spawn, Spawn::WithTools { prompt, .. } if prompt == "solo"),
         "{spawn:?}"
     );
-    assert_eq!(tokens.live_count(), 0);
+    assert_eq!(tokens.live_count(), 1);
+    let personal = rig.core.workspace.chat(PROJECTLESS).unwrap().unwrap().space_id.unwrap();
+    assert!(rig.core.workspace.chat_assigned_work_item(PROJECTLESS, &personal).is_some());
     rig.harness.release.notify_one();
 }
 
@@ -910,6 +901,356 @@ fn launch_args(key: &str, item: &str, sandbox: &str) -> Value {
         "config": { "harness": "mock", "model": null, "reasoning": null,
                     "modelOptions": {}, "sandbox": sandbox, "autoApprove": false },
     })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_created_chats_own_an_item_and_retries_preserve_it() {
+    let rig = rig().await;
+    let params = json!({"op":"createChat", "chatId":"new-user-chat", "spaceId":SPACE});
+    rig.client
+        .call(methods::MUTATE, params.clone())
+        .await
+        .unwrap();
+    let item = rig
+        .core
+        .workspace
+        .chat_assigned_work_item("new-user-chat", SPACE)
+        .unwrap();
+    let count = snapshot(&rig).items.len();
+    rig.client.call(methods::MUTATE, params).await.unwrap();
+    assert_eq!(snapshot(&rig).items.len(), count);
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("new-user-chat", SPACE)
+            .as_deref(),
+        Some(item.as_str())
+    );
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"renameChat", "chatId":"new-user-chat", "title":"Fix login"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&rig).item(&item).unwrap().title, "Fix login");
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"updateWorkItem", "workItemId":item, "changes":{"title":"Release project"}, "operationId":"custom-item-title"})).await.unwrap();
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"renameChat", "chatId":"new-user-chat", "title":"Investigate login"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&rig).item(&item).unwrap().title, "Release project");
+    for params in [
+        json!({"op":"createChat", "chatId":"new-child", "spaceId":SPACE, "parentChatId":"new-user-chat"}),
+        json!({"op":"createChat", "chatId":"new-side", "sideOf":"new-user-chat"}),
+    ] {
+        rig.client
+            .call(methods::MUTATE, params.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            rig.core
+                .workspace
+                .chat_assigned_work_item(params["chatId"].as_str().unwrap(), SPACE)
+                .as_deref(),
+            Some(item.as_str())
+        );
+    }
+    assert_eq!(snapshot(&rig).items.len(), count);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn folderless_user_chat_hands_off_in_its_own_scratch_directory() {
+    let rig = rig().await;
+    for id in ["personal-one", "personal-two"] {
+        rig.client
+            .call(
+                methods::MUTATE,
+                json!({"op":"createChat", "chatId":id, "deviceId":rig.core.device_id}),
+            )
+            .await
+            .unwrap();
+    }
+    let source = rig.core.workspace.chat("personal-one").unwrap().unwrap();
+    let other = rig.core.workspace.chat("personal-two").unwrap().unwrap();
+    assert_eq!(source.space_id, other.space_id);
+    assert!(source.space_id.is_some());
+    let space = source.space_id.unwrap();
+    let item = rig
+        .core
+        .workspace
+        .chat_assigned_work_item("personal-one", &space)
+        .unwrap();
+    assert_ne!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("personal-two", &space)
+            .unwrap(),
+        item
+    );
+    let params = json!({"chatId":"personal-one", "summary":"Continue this task", "operationId":"solo-personal-handoff"});
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let root = reply["executionRoot"].as_str().unwrap();
+    assert!(root.ends_with("/projectless/personal-one"), "{root}");
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat(successor)
+            .unwrap()
+            .unwrap()
+            .cwd
+            .as_deref(),
+        Some(root)
+    );
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item(successor, &space)
+            .as_deref(),
+        Some(item.as_str())
+    );
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert!(
+        !rig.core
+            .workspace
+            .chat("personal-one")
+            .unwrap()
+            .unwrap()
+            .archived
+    );
+    wait_for(
+        || {
+            rig.harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt.contains("Continue this task"))
+        },
+        "personal successor",
+    )
+    .await;
+    let requests = rig.harness.requests.lock().unwrap();
+    let request = requests
+        .iter()
+        .find(|r| r.prompt.contains("Continue this task"))
+        .unwrap();
+    assert_eq!(request.cwd, root);
+    assert!(request.prompt.contains("source chat personal-one"));
+    drop(requests);
+    rig.core
+        .workspace
+        .set_chat_archived("personal-one", true)
+        .unwrap();
+    let next = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({"chatId":successor, "summary":"Continue again", "operationId":"second-personal-handoff"})).await.unwrap();
+    assert_eq!(next["executionRoot"], root);
+    let next_id = next["chatId"].as_str().unwrap();
+    rig.core
+        .workspace
+        .set_chat_archived(successor, true)
+        .unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(next_id, "read-predecessors", &space, &rig.core.device_id);
+    let scope = tool(&rig, lease.token(), "chat_project_scope_chats", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        scope["handoffSourceChatIds"],
+        json!([successor, "personal-one"])
+    );
+    assert!(
+        !scope["handoffSourceChatIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("personal-two"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_solo_handoff_creates_an_item_and_keeps_its_checkout() {
+    let rig = rig().await;
+    let checkout = Path::new(&rig.space_path).join("existing-worktree");
+    std::fs::create_dir_all(&checkout).unwrap();
+    rig.core
+        .workspace
+        .set_chat_cwd(CHAT, checkout.to_str().unwrap())
+        .unwrap();
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item(CHAT, SPACE)
+            .is_none()
+    );
+    rig.core
+        .managed_accounts
+        .pin_chat(CHAT, HarnessId::Mock, "")
+        .unwrap();
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({"chatId":CHAT, "summary":"Continue investigating", "operationId":"legacy-solo-handoff"})).await.unwrap();
+    assert_eq!(reply["executionRoot"], checkout.to_str().unwrap());
+    assert_eq!(
+        rig.core
+            .managed_accounts
+            .chat_pin(reply["chatId"].as_str().unwrap(), HarnessId::Mock)
+            .as_deref(),
+        Some("")
+    );
+    let item = rig
+        .core
+        .workspace
+        .chat_assigned_work_item(CHAT, SPACE)
+        .unwrap();
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item(reply["chatId"].as_str().unwrap(), SPACE)
+            .as_deref(),
+        Some(item.as_str())
+    );
+    rig.core
+        .workspace
+        .set_chat_archived(OTHER_CHAT, true)
+        .unwrap();
+    assert!(
+        rig.client
+            .call(
+                methods::HAND_OFF_ORCHESTRATOR,
+                json!({"chatId":OTHER_CHAT, "summary":"No", "operationId":"archived-handoff"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item(OTHER_CHAT, SPACE)
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_command_recovers_work_item_without_create_chat_rpc() {
+    let rig = rig().await;
+    rig.core
+        .doc_host
+        .queue_command(
+            "first-run-only",
+            run_command("recover first run", &rig.space_path),
+        )
+        .unwrap();
+    wait_for(
+        || !rig.harness.requests.lock().unwrap().is_empty(),
+        "recovered run",
+    )
+    .await;
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("first-run-only", SPACE)
+            .is_some()
+    );
+    let count = snapshot(&rig).items.len();
+    rig.core
+        .workspace
+        .ensure_chat_work_item("first-run-only")
+        .unwrap();
+    assert_eq!(snapshot(&rig).items.len(), count);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assignment_failure_does_not_break_creation_retries_or_runs() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .create_chat("archived-without-item", Some(SPACE), None, None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_chat_archived("archived-without-item", true)
+        .unwrap();
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"createChat", "chatId":"archived-without-item", "spaceId":SPACE}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_none()
+    );
+    rig.core
+        .doc_host
+        .queue_command(
+            "archived-without-item",
+            run_command("run despite assignment failure", &rig.space_path),
+        )
+        .unwrap();
+    wait_for(
+        || {
+            rig.harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "run despite assignment failure")
+        },
+        "run despite assignment failure",
+    )
+    .await;
+    assert!(
+        rig.core
+            .workspace
+            .chat_assigned_work_item("archived-without-item", SPACE)
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_folderless_chat_waits_for_its_host_to_initialize_work() {
+    let rig = rig().await;
+    let count = rig.core.workspace.read_spaces().unwrap().len();
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"createChat", "chatId":"remote-solo", "deviceId":"other-host"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rig.core
+            .workspace
+            .chat("remote-solo")
+            .unwrap()
+            .unwrap()
+            .space_id
+            .is_none()
+    );
+    assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({"chatId":"remote-solo", "summary":"Continue remotely", "operationId":"remote-solo-handoff"})).await.is_err());
+    assert!(
+        rig.core
+            .workspace
+            .chat("remote-solo")
+            .unwrap()
+            .unwrap()
+            .space_id
+            .is_none()
+    );
+    assert_eq!(rig.core.workspace.read_spaces().unwrap().len(), count);
 }
 
 #[tokio::test(flavor = "multi_thread")]

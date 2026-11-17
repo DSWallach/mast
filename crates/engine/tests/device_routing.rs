@@ -396,6 +396,100 @@ fn assert_public_change_request_payload(item: &serde_json::Value) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b
+        .workspace
+        .create_space(
+            "handoff-space",
+            "device-b",
+            cwd.to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+    core_b
+        .workspace
+        .create_chat("remote-handoff", Some("handoff-space"), None, None, None)
+        .unwrap();
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let source = core_b.workspace.chat("remote-handoff").unwrap().unwrap();
+    core_a.workspace.import_chat_row(&source).unwrap();
+    let mut device = core_b
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.id == "device-b")
+        .unwrap();
+    assert!(device.supports(mast_proto::capabilities::CHAT_HANDOFF_V1));
+    device.capabilities.clear();
+    core_a.workspace.upsert_device_row(&device);
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(core_a.rpc_service());
+    let params = serde_json::json!({"chatId":"remote-handoff", "summary":"Continue remotely", "operationId":"remote-handoff-test"});
+    for explicit_target in [false, true] {
+        let mut request = params.clone();
+        if explicit_target {
+            request["targetDeviceId"] = "device-b".into();
+        }
+        let error = client
+            .call(methods::HAND_OFF_ORCHESTRATOR, request)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Update Mast"), "{error}");
+    }
+    assert!(
+        core_b
+            .workspace
+            .chat_assigned_work_item("remote-handoff", "handoff-space")
+            .is_none()
+    );
+    device
+        .capabilities
+        .push(mast_proto::capabilities::CHAT_HANDOFF_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let reply = loop {
+        match client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .await
+        {
+            Ok(reply) => break reply,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "{error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(core_b.workspace.chat(successor).unwrap().is_some());
+    assert!(core_a.workspace.chat(successor).unwrap().is_none());
+    assert!(
+        core_b
+            .workspace
+            .chat_assigned_work_item(successor, "handoff-space")
+            .is_some()
+    );
+    assert_eq!(
+        client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap()["chatId"],
+        successor
+    );
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkout_change_request_stream_matches_locally_and_through_device_routing() {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");

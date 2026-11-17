@@ -55,6 +55,8 @@ pub mod capabilities {
     /// seeds their first run from the main chat, and serves
     /// `AbsorbSideChat`.
     pub const SIDE_CHAT_V1: &str = "side-chat-v1";
+    /// The host supports solo chat handoff and automatic work-item ownership.
+    pub const CHAT_HANDOFF_V1: &str = "chat-handoff-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -83,6 +85,7 @@ pub mod capabilities {
         PR_REVIEW_SYNC_V1,
         ARTIFACTS_V1,
         SIDE_CHAT_V1,
+        CHAT_HANDOFF_V1,
     ];
 
     pub fn current() -> Vec<String> {

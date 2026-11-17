@@ -2044,7 +2044,10 @@ impl AgentToolsService {
             .current_item_id()
             .and_then(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-                let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
+                let project = snapshot
+                    .project_root(&root)
+                    .map(|item| item.id.clone())
+                    .unwrap_or(root);
                 Some(
                     snapshot
                         .assignments
@@ -2059,7 +2062,30 @@ impl AgentToolsService {
                 )
             })
             .unwrap_or_default();
-        json!({ "chatIds": chat_ids })
+        let mut handoff_sources = Vec::new();
+        let mut cursor = context.grant.chat_id.clone();
+        while let Some(source) = self
+            .workspace
+            .registry_row(mast_doc::KIND_CHATS, &cursor)
+            .filter(|row| !row.deleted)
+            .and_then(|row| {
+                row.fields
+                    .get("orchestratorHandOff")?
+                    .get("fromChatId")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        {
+            if !chat_ids.contains(&source)
+                || handoff_sources.contains(&source)
+                || source == context.grant.chat_id
+            {
+                break;
+            }
+            handoff_sources.push(source.clone());
+            cursor = source;
+        }
+        json!({ "chatIds": chat_ids, "handoffSourceChatIds": handoff_sources })
     }
 
     fn answer_user_action_request(
