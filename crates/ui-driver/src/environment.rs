@@ -336,6 +336,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires permission to apply a macOS sandbox"]
+    fn sandbox_denies_fake_account_reads_and_external_writes() {
+        let output = std::process::Command::new("/usr/bin/mktemp")
+            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        fs::create_dir(account.join(".claude")).unwrap();
+        fs::write(account.join(".claude/fixture"), "private").unwrap();
+        let scratch = ScratchDirectories::create(&account).unwrap();
+        let profile = scratch.write_sandbox_profile(&account).unwrap();
+        let result = std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(profile)
+            .args([
+                "/bin/sh",
+                "-c",
+                r#"
+                /usr/bin/touch "$DRIVER_ROOT/allowed" || exit 1
+                if /usr/bin/touch "$FAKE_ACCOUNT/denied" 2>/dev/null; then exit 2; fi
+                if /bin/cat "$FAKE_ACCOUNT/.claude/fixture" >/dev/null 2>&1; then exit 3; fi
+            "#,
+            ])
+            .env_clear()
+            .env("DRIVER_ROOT", &scratch.paths.root)
+            .env("FAKE_ACCOUNT", &account)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!account.join("denied").exists());
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
+        fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
     fn template_copy_starts_each_run_clean() {
         let output = std::process::Command::new("/usr/bin/mktemp")
             .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
