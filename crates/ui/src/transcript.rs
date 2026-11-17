@@ -3227,6 +3227,7 @@ pub struct Transcript {
     code_ref_hover: Option<code_refs::ReferenceHover>,
     code_ref_focus: HashMap<(SharedString, usize), code_refs::ReferenceFocusState>,
     code_ref_focus_top: usize,
+    code_ref_viewport_top: usize,
     code_ref_focus_pending: Option<(SharedString, usize)>,
     code_ref_resolutions: HashMap<String, Option<crate::code_ref::Resolution>>,
     code_ref_inflight: usize,
@@ -3592,6 +3593,7 @@ impl Transcript {
             code_ref_hover: None,
             code_ref_focus: HashMap::new(),
             code_ref_focus_top: 0,
+            code_ref_viewport_top: 0,
             code_ref_focus_pending: None,
             code_ref_resolutions: HashMap::new(),
             code_ref_inflight: 0,
@@ -8979,6 +8981,9 @@ impl Render for Transcript {
         // OVER the bottom fade gradient, which is a later sibling of this
         // outlet — an overlay here would be tinted by the fade.
         self.update_runway_minimum(cx);
+        // Row renderers run while ListState is mutably borrowed by GPUI.
+        // Snapshot the viewport here, before building the list element.
+        self.code_ref_viewport_top = self.list.logical_scroll_top().item_ix;
         let list_el = list(self.list.clone(), cx.processor(Self::render_row))
             .size_full()
             .with_sizing_behavior(gpui::ListSizingBehavior::Auto);

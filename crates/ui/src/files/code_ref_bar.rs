@@ -27,17 +27,12 @@ pub(super) fn pinned_view(
                 .text_color(theme.text_muted)
                 .child(reference.reference.location.workspace_path())
                 .child(reference.reference.range.map(|range| format!("L{}–{}", range.start_line, range.end_line)).unwrap_or_default())
-                .child(div().px(px(crate::theme::Theme::SPACE_SM)).py(px(crate::theme::Theme::SPACE_XS))
-                    .rounded(px(crate::theme::Theme::SPACE_XS)).bg(theme.warning.opacity(0.12))
-                    .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(11.0)).child("Changed"))
+                .child(crate::components::code_ref::changed_reference_badge(theme))
                 .child(div().flex_1())
                 .children(mast_syntax::language_for_path(&reference.reference.location.path)
                     .map(|language| div().text_color(theme.text_faint).child(format!("{language:?}")))),
         )
-        .child(div().my(px(crate::theme::Theme::SPACE_SM)).p(px(crate::theme::Theme::SPACE_SM))
-            .rounded(px(crate::theme::Theme::SPACE_XS)).bg(theme.warning.opacity(0.10))
-            .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(12.0))
-            .child("These lines no longer match the file. You are looking at the version that was sent."))
+        .child(crate::components::code_ref::changed_reference_banner(theme))
         .child(match diff {
             None => crate::components::code_block::code_block(source, first_line, highlight, theme, px(editor_text_size).into()).into_any_element(),
             Some(super::PinnedDiff::Loading) => div().child("Loading current file…").into_any_element(),
