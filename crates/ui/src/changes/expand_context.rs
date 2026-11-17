@@ -173,6 +173,15 @@ fn starts(hunk: &super::Hunk) -> Option<((u32, u32), (u32, u32))> {
     Some((range(parts.next()?, '-')?, range(parts.next()?, '+')?))
 }
 
+pub(super) fn known_gap_size(file: &FileDiff, gap: usize) -> Option<usize> {
+    let (_, (start, _)) = starts(file.hunks.get(gap)?)?;
+    let previous = if gap == 0 { 1 } else {
+        let (_, (start, count)) = starts(file.hunks.get(gap - 1)?)?;
+        start.checked_add(count)?
+    };
+    Some(start.checked_sub(previous)? as usize)
+}
+
 pub(super) fn may_have_gap(file: &FileDiff, gap: usize) -> bool {
     if file.status != FileStatus::Modified
         || file.binary

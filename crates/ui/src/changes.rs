@@ -323,6 +323,7 @@ pub struct SourceLineRef {
 pub struct DiffHighlights {
     pub old: Option<Arc<mast_syntax::HighlightedDocument>>,
     pub new: Option<Arc<mast_syntax::HighlightedDocument>>,
+    pub hunk_symbols: Vec<Option<String>>,
 }
 
 impl DiffHighlights {
@@ -1323,7 +1324,7 @@ fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights>
     } else {
         Some(excerpt_side(file, SourceSide::New, language, &file.path)?)
     };
-    Some(DiffHighlights { old, new })
+    Some(DiffHighlights { old, new, hunk_symbols: Vec::new() })
 }
 
 fn sources_match_patch(file: &FileDiff, response: &mast_proto::CheckoutFileDiffText) -> bool {
@@ -1391,7 +1392,14 @@ fn full_highlights(
     if old.is_none() && new.is_none() && mast_syntax::supports_language(language) {
         return None;
     }
-    Some(DiffHighlights { old, new })
+    let hunk_symbols = response.new_text.as_deref().map(|source| {
+        let lines: Vec<_> = file.hunks.iter().map(|hunk| hunk.lines.iter()
+            .find(|line| line.kind == LineKind::Add && line.new_no.is_some())
+            .or_else(|| hunk.lines.iter().find(|line| line.new_no.is_some()))
+            .and_then(|line| line.new_no).unwrap_or(1)).collect();
+        mast_syntax::enclosing_symbols(source, &file.path, &lines)
+    }).unwrap_or_default();
+    Some(DiffHighlights { old, new, hunk_symbols })
 }
 
 fn file_diff_text_request(
@@ -4692,12 +4700,16 @@ impl Changes {
                 let entry = self.expanded_context.entries.get(&(parsed_key.clone(), file));
                 let loading = matches!(entry, Some(expand_context::Entry::Loading));
                 let failed = matches!(entry, Some(expand_context::Entry::Failed));
-                div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center().gap(px(12.0))
+                let footer = files.get(file as usize).is_some_and(|diff| gap as usize == diff.hunks.len());
+                let remaining = match entry {
+                    Some(expand_context::Entry::Ready { gaps, shown, .. }) => gaps.get(gap as usize).zip(shown.get(gap as usize)).map(|(gap, shown)| gap.lines.len().saturating_sub(*shown)),
+                    _ => files.get(file as usize).and_then(|diff| expand_context::known_gap_size(diff, gap as usize)),
+                };
+                let label = if loading { "Loading…".to_owned() } else if failed { "Context unavailable".to_owned() } else if let Some(count) = remaining { format!("{} {} more {}", if footer { "↓" } else { "↑" }, count.min(20), if count == 1 { "line" } else { "lines" }) } else { "↓ More lines".to_owned() };
+                div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center()
                     .text_color(theme.text_muted).text_size(px(10.0))
-                    .child(div().id(("expand-context", ix)).cursor_pointer().when(true, |el| crate::components::hunk_action(el, &theme)).child(if loading { "Loading…" } else if failed { "Context unavailable" } else { "Expand 20 lines" })
-                        .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, false, cx))))
-                    .when(!loading && !failed, |el| el.child(div().id(("expand-context-all", ix)).cursor_pointer().when(true, |el| crate::components::hunk_action(el, &theme)).child("Expand all")
-                        .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, true, cx)))))
+                    .child(div().id(("expand-context", ix)).cursor_pointer().child(label)
+                        .on_click(cx.listener(move |this, _, window, cx| this.expand_context(file, gap, window.modifiers().alt, cx))))
                     .into_any_element()
             }
             DiffRow::ContextLine { file, gap, line } => {
@@ -4747,7 +4759,15 @@ impl Changes {
                 // cannot yet name. Expanded submodule hunks anchor to the submodule's own commits, so they never hit that.
                 let nested_repository = origins.get(file as usize).is_some_and(|origin| origin.repository_path.is_some());
                 let show_reference = nested_repository || !(self.scope == DiffScope::LatestTurn && code_ref::deleted_only_hunk(&hunk_diff.header));
-                div().relative().child(hunk_header_row(&hunk_diff.header, &theme))
+                let symbol = highlight.as_ref().and_then(|highlight| highlight.hunk_symbols.get(hunk as usize)).and_then(Option::as_deref);
+                let comment_anchor = hunk_diff.lines.iter().find_map(|line| line.new_no.map(|number| (CommentSide::New, number)).or_else(|| line.old_no.map(|number| (CommentSide::Old, number))));
+                let comment_path = file_diff.path.clone();
+                div().relative().child(hunk_header_row(&hunk_diff.header, symbol, &theme))
+                    .when_some(comment_anchor, |row, (side, line)| row.child(
+                        div().id(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")))
+                            .absolute().right(px(210.0)).top(px(2.0)).cursor_pointer()
+                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Comment")
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_draft(comment_path.clone(), side, line, window, cx)))))
                     .when(show_reference, |row| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
@@ -6568,7 +6588,7 @@ fn notice_row(notice: String, theme: &Theme) -> AnyElement {
 }
 
 /// One `@@ … @@` hunk-header row on the bluish-grey wash.
-fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+fn hunk_header_row(header: &str, symbol: Option<&str>, theme: &Theme) -> AnyElement {
     div()
         .h(px(HUNK_HEADER_HEIGHT))
         .w_full()
@@ -6579,7 +6599,7 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .bg(theme.diff_hunk_bg)
         .when(true, crate::components::hunk_header)
         .text_color(theme.text_faint)
-        .child(SharedString::from(crate::components::hunk_label(header)))
+        .child(SharedString::from(crate::components::hunk_label(header, symbol)))
         .into_any_element()
 }
 
@@ -7030,7 +7050,7 @@ pub(crate) fn render_file_body_with_syntax(
         children.push(notice_row(notice, theme));
     }
     for hunk in &file.hunks {
-        children.push(hunk_header_row(&hunk.header, theme));
+        children.push(hunk_header_row(&hunk.header, None, theme));
         for line in &hunk.lines {
             let spans = highlights
                 .as_deref()
@@ -7089,7 +7109,7 @@ fn render_file_body_upto(
             if y >= max_px {
                 break 'build;
             }
-            children.push(hunk_header_row(&hunk.header, theme));
+            children.push(hunk_header_row(&hunk.header, None, theme));
             y += HUNK_HEADER_HEIGHT;
             match mode {
                 DiffMode::Unified => {
@@ -7443,6 +7463,14 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
         let key = changes.parse_key(&diff);
         let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
         let identities = hunk_identities(&files);
+        if let Some(mut highlights) = excerpt_highlights(&files[0], Lang::Rust) {
+            highlights.hunk_symbols = mast_syntax::enclosing_symbols("// configuration\n// entry point\nfn main() {\n    new();\n}\n", &files[0].path, &[4]);
+            changes.highlights.insert(files[0].path.clone(), HighlightSlot {
+                fingerprint: hash64(&[&key, &files[0].path]),
+                state: DiffHighlightState::Ready(Arc::new(highlights)),
+                _excerpt_task: None, _fetch_task: None,
+            });
+        }
         let (rows, mut ranges, mut headers) = flatten_diff_tree(
             &files, &submodules, &layout, &[], None, changes.mode, |_| false, |_| false,
         );

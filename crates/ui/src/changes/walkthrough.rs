@@ -350,6 +350,7 @@ pub(crate) struct Walkthrough {
     files: Arc<Vec<FileDiff>>,
     coverage: Option<TourCoverage>,
     viewed: BTreeSet<String>,
+    file_progress: Option<(Arc<Vec<Vec<String>>>, BTreeSet<String>, usize)>,
     seen: HashSet<String>,
     target_selected: bool,
     selected: usize,
@@ -557,6 +558,7 @@ impl Walkthrough {
             files: Arc::new(Vec::new()),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: false,
             selected: 0,
@@ -716,6 +718,13 @@ impl Render for Walkthrough {
                 .filter(|state| self.target_selected && state.target == self.review.target_key)
                 .map(|state| state.viewed_hunks.clone())
                 .unwrap_or_default();
+            if let Some(parsed) = &changes.parsed {
+                let stale = self.file_progress.as_ref().is_none_or(|(identities, viewed, _)| !Arc::ptr_eq(identities, &parsed.hunk_identities) || viewed != &self.viewed);
+                if stale {
+                    let count = parsed.hunk_identities.iter().filter(|hunks| !hunks.is_empty() && hunks.iter().all(|id| self.viewed.contains(id))).count();
+                    self.file_progress = Some((parsed.hunk_identities.clone(), self.viewed.clone(), count));
+                }
+            } else { self.file_progress = None; }
             self.seen = if self.target_selected {
                 changes.seen_hunks.clone()
             } else {
@@ -726,9 +735,9 @@ impl Render for Walkthrough {
         let selected_reviewed = coverage.complete.get(self.selected).copied().unwrap_or(false)
             && coverage.steps.get(self.selected).is_some_and(|hunks| !hunks.is_empty() && hunks.iter().all(|hunk| self.viewed.contains(&hunk.identity)));
         let progress = format!(
-            "{} / {} reviewed · {} {}",
-            coverage.reviewed_count(&self.viewed),
-            self.review.steps.len(), draft_count, if draft_count == 1 { "draft" } else { "drafts" }
+            "{} of {} files viewed · {} {}",
+            self.file_progress.as_ref().map_or(0, |(_, _, count)| *count),
+            self.files.len(), draft_count, if draft_count == 1 { "draft" } else { "drafts" }
         );
         let mut steps = div().id("review-steps").flex().flex_col().gap_1();
         for (index, step) in self.review.steps.iter().enumerate() {
@@ -1133,18 +1142,15 @@ impl Render for Walkthrough {
                     .gap_2()
                     .text_color(theme.text_muted)
                     .when(true, |el| crate::components::walkthrough_progress(el, &theme))
-                    .child(crate::components::walkthrough_progress_label(progress, &theme))
                     .child(
                         div()
-                            .id("review-mode")
-                            .cursor_pointer()
-                            .when(true, |el| crate::components::walkthrough_mode(el, &theme))
-                            .child(if self.tour { "Free diff" } else { "Tour" })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                window.focus(&this.focus, cx);
-                                this.toggle_mode(cx);
-                            })),
-                    ),
+                            .flex().items_center()
+                            .child(div().id("review-mode-tour").cursor_pointer().when(true, |el| crate::components::walkthrough_segment(el, &theme, self.tour)).child("Tour")
+                                .on_click(cx.listener(|this, _, window, cx| { window.focus(&this.focus, cx); if !this.tour { this.toggle_mode(cx); } })))
+                            .child(div().id("review-mode").cursor_pointer().when(true, |el| crate::components::walkthrough_segment(el, &theme, !self.tour)).child("All changes")
+                                .on_click(cx.listener(|this, _, window, cx| { window.focus(&this.focus, cx); if this.tour { this.toggle_mode(cx); } }))),
+                    )
+                    .child(crate::components::walkthrough_progress_label(progress, &theme)),
             )
             .child(
                 div()
@@ -1223,15 +1229,19 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
             });
             if let Some(diff) = &changes.scoped {
                 let key = changes.parse_key(diff);
-                if let Some(parsed) = &mut changes.parsed { parsed.key = key; }
+                if let Some(parsed) = &mut changes.parsed { parsed.key = key.clone(); }
+                if let Some(slot) = changes.highlights.get_mut("src/hooks/decorated/main.rs") { slot.fingerprint = super::hash64(&[&key, "src/hooks/decorated/main.rs"]); }
             }
             let target = review.target_key.clone();
             changes.review_target = Some(target.clone());
             changes.review_state = Some(mast_proto::DiffReviewState { target: target.clone(), head_sha: Some("a".into()), ..Default::default() });
+            if let Some(identity) = changes.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.first()).and_then(|hunks| hunks.first()).cloned() {
+                changes.review_state.as_mut().unwrap().viewed_hunks.insert(identity);
+            }
             changes.review_status_checked = Some(std::time::Instant::now());
             changes.local_review_drafts.insert(target.clone(), Vec::new());
             if let Some(mut draft) = changes.new_local_draft(&target, "src/hooks/decorated/main.rs", super::CommentSide::New, 4) {
-                draft.body = "Could this preserve the existing error?".into();
+                draft.body = "Could `new()` preserve the existing error?".into();
                 changes.local_review_drafts.get_mut(&target).unwrap().push(draft);
             }
             changes.review_threads = vec![mast_proto::ReviewThread {
@@ -1240,6 +1250,8 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
                 comments: vec![mast_proto::ReviewThreadComment { id: "preview-comment".into(), author: "reviewer".into(), body: "The fallback looks good.".into() }],
             }];
             changes.review_thread_index = super::review_drafts::ThreadIndex::new(&changes.review_threads);
+            changes.collapsed_review_threads.insert("preview-thread".into());
+            changes.review_thread_index.collapse(0);
             changes.rebuild_draft_index(cx);
             if let Some(hash) = changes.parsed.as_ref().and_then(|parsed| parsed.hunk_identities.first()).and_then(|hunks| hunks.first()).cloned() {
                 changes.suggestion_dispositions_target = Some(target.clone());
@@ -1255,8 +1267,8 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
     }
     cx.new(|cx| Walkthrough {
         review, files: Arc::new(Vec::new()), coverage: None,
-        viewed: BTreeSet::new(), seen: HashSet::new(), target_selected: true,
-        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: !populated, stale_head: None,
+        viewed: BTreeSet::new(), file_progress: None, seen: HashSet::new(), target_selected: true,
+        selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
         focus: cx.focus_handle(), changes, _changes_observer: None,
         step_input: None, _step_input_events: None, step_panel: None,
         step_task: None, step_cancelled: None,
@@ -1441,6 +1453,7 @@ mod tests {
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
@@ -1500,6 +1513,7 @@ mod tests {
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
@@ -1622,6 +1636,7 @@ mod tests {
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
+            file_progress: None,
             seen: HashSet::new(),
             target_selected: true,
             selected: 0,
