@@ -1686,6 +1686,7 @@ pub struct Overview {
 }
 
 impl Overview {
+    #[cfg(test)]
     pub(crate) fn set_compact_single_chat(&mut self, value: bool, cx: &mut Context<Self>) {
         self.outline
             .update(cx, |outline, cx| outline.set_compact_single_chat(value, cx));

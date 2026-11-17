@@ -51,7 +51,6 @@ pub enum FontKind {
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
     TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
-    CompactSingleChatChanged(bool),
     SidebarOutlineGroupsChanged(bool),
 }
 
@@ -2719,21 +2718,6 @@ impl Render for AppearancePage {
                 .child(div().flex().gap(px(6.0)).children(team_choices))
                 .into_any_element(),
         );
-        settings_rows.push(widgets::card_row(&theme, false)
-            .child(widgets::row_tile(&theme, icons::LIST))
-            .child(div().flex_1().child(widgets::row_title(&theme, "Compact single-chat rows"))
-                .child(widgets::meta_line(&theme, vec![div().child("Combine a work item and its only chat into one outline row.").into_any_element()])))
-            .child(widgets::toggle_switch(&theme, ui_settings.compact_single_chat)
-                .id("compact-single-chat-toggle").cursor_pointer()
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(AppearanceSettingsEvent::CompactSingleChatChanged(!ui_settings.compact_single_chat));
-                    cx.notify();
-                }))).into_any_element());
-        settings_rows.push(crate::artifacts::preview_thumb::settings_row(
-            &theme,
-            ui_settings.open_diagrams_automatically,
-            cx,
-        ));
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))
