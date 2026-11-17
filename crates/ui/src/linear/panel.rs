@@ -273,6 +273,7 @@ pub(crate) struct LinearPanel {
     pub(crate) picker: Option<ParentPicker>,
     pub(crate) notice: Option<PanelNotice>,
     generation: u64,
+    cache_revision: u64,
     /// The column's own header ("Inbox") carries the close button.
     pub(crate) embedded: bool,
     /// The header's project dropdown (`space_menu`).
@@ -292,11 +293,20 @@ impl Focusable for LinearPanel {
 impl LinearPanel {
     pub(crate) fn new(state: Entity<AppState>, space_id: String, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| crate::components::linear_parts::search_input("Search issues and projects", cx));
-        let subscriptions = vec![cx.subscribe(&search, |_: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                cx.notify();
-            }
-        })];
+        let subscriptions = vec![
+            cx.subscribe(&search, |_: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) { cx.notify(); }
+            }),
+            cx.observe(&state, |this: &mut Self, state, cx| {
+                let scope = this.snapshot().map(|s| super::store::account_scope(s).to_owned()).unwrap_or_else(|| "default".into());
+                let revision = state.read(cx).linear.revision(&scope);
+                if this.cache_revision != revision {
+                    this.cache_revision = revision;
+                    this.clear_lists();
+                    this.refresh(cx);
+                }
+            }),
+        ];
         let restored = state
             .read(cx)
             .data_dir
@@ -326,6 +336,7 @@ impl LinearPanel {
             picker: None,
             notice: None,
             generation: 0,
+            cache_revision: 0,
             embedded: false,
             space_menu: crate::popover::Popup::default(),
             space_menu_active: None,
@@ -336,21 +347,38 @@ impl LinearPanel {
     /// Fed by the Overview every frame: the Linear-enabled Spaces and the
     /// Outline's selection. A Space that lost Linear moves the panel to the
     /// first enabled one.
-    pub(crate) fn set_data(&mut self, spaces: Vec<LinearSpace>, selection: OutlineSelection) {
+    pub(crate) fn set_data(&mut self, spaces: Vec<LinearSpace>, selection: OutlineSelection) -> bool {
+        let previous_scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned());
+        let previous_space = self.space_id.clone();
         if !spaces.iter().any(|space| space.id == self.space_id)
             && let Some(first) = spaces.first()
         {
             self.space_id = first.id.clone();
-            self.picker = None;
         }
         self.spaces = spaces;
         self.selection = selection;
+        let scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned());
+        let changed = previous_space != self.space_id || (previous_scope.is_some() && previous_scope != scope);
+        if changed {
+            self.clear_lists();
+        }
+        changed
+    }
+
+    fn clear_lists(&mut self) {
+        self.generation += 1;
+        self.my_issues = Load::Loading;
+        self.my_projects = Load::Loading;
+        self.project_issues.clear();
+        self.checked.clear();
+        self.picker = None;
     }
 
     pub(crate) fn set_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         if self.space_id != space_id {
             self.space_id = space_id;
-            self.picker = None;
+            self.clear_lists();
+            self.refresh(cx);
             cx.notify();
         }
     }
@@ -409,19 +437,20 @@ impl LinearPanel {
     fn load_lists(&mut self, read: ListRead, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
+        let scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned()).unwrap_or_else(|| "default".into());
         let actions = self.state.read(cx).work_outline_actions();
         let stored_issues =
-            (!self.my_issues.is_ready()).then(|| actions.linear_my_issues(ListRead::Stored));
+            (!self.my_issues.is_ready()).then(|| actions.linear_my_issues(&self.space_id, ListRead::Stored));
         let stored_projects =
-            (!self.my_projects.is_ready()).then(|| actions.linear_my_projects(ListRead::Stored));
+            (!self.my_projects.is_ready()).then(|| actions.linear_my_projects(&self.space_id, ListRead::Stored));
         if !self.my_issues.is_ready() {
             self.my_issues = Load::Loading;
         }
         if !self.my_projects.is_ready() {
             self.my_projects = Load::Loading;
         }
-        let issues = actions.linear_my_issues(read);
-        let projects = actions.linear_my_projects(read);
+        let issues = actions.linear_my_issues(&self.space_id, read);
+        let projects = actions.linear_my_projects(&self.space_id, read);
         cx.spawn(async move |this, cx| {
             if let Some(stored) = stored_issues
                 && let Ok(stored) = stored.await
@@ -452,7 +481,7 @@ impl LinearPanel {
                 }
                 if let Ok(issues) = &issues {
                     this.state
-                        .update(cx, |state, _| state.linear.remember_issues(issues.iter()));
+                        .update(cx, |state, _| state.linear.remember_issues(&scope, issues.iter()));
                 }
                 this.my_issues = match issues {
                     Ok(issues) => Load::Ready(issues),
@@ -480,7 +509,7 @@ impl LinearPanel {
                     // on slug-keyed project links (the chips re-render).
                     let projects = projects.clone();
                     this.state.update(cx, |state, cx| {
-                        state.linear.projects = Some(projects);
+                        state.linear.projects.insert(scope.clone(), projects);
                         cx.notify();
                     });
                 }
@@ -501,14 +530,16 @@ impl LinearPanel {
     }
 
     fn load_project(&mut self, project_id: String, read: ListRead, cx: &mut Context<Self>) {
+        let scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned()).unwrap_or_else(|| "default".into());
+        let generation = self.generation;
         let actions = self.state.read(cx).work_outline_actions();
         let has_list = self
             .project_issues
             .get(&project_id)
             .is_some_and(Load::is_ready);
         let stored =
-            (!has_list).then(|| actions.linear_project_issues(&project_id, ListRead::Stored));
-        let task = actions.linear_project_issues(&project_id, read);
+            (!has_list).then(|| actions.linear_project_issues(&self.space_id, &project_id, ListRead::Stored));
+        let task = actions.linear_project_issues(&self.space_id, &project_id, read);
         if !has_list {
             self.project_issues
                 .insert(project_id.clone(), Load::Loading);
@@ -518,7 +549,7 @@ impl LinearPanel {
                 && let Ok(stored) = stored.await
             {
                 this.update(cx, |this, cx| {
-                    if matches!(this.project_issues.get(&project_id), Some(Load::Loading)) {
+                    if this.generation == generation && matches!(this.project_issues.get(&project_id), Some(Load::Loading)) {
                         this.project_issues
                             .insert(project_id.clone(), Load::Ready(stored));
                         cx.notify();
@@ -528,9 +559,10 @@ impl LinearPanel {
             }
             let result = task.await;
             this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
                 if let Ok(issues) = &result {
                     this.state
-                        .update(cx, |state, _| state.linear.remember_issues(issues.iter()));
+                        .update(cx, |state, _| state.linear.remember_issues(&scope, issues.iter()));
                 }
                 let keep = result.is_err()
                     && this

@@ -421,6 +421,7 @@ impl WorkItemDetails {
                 // The canonical plan's Linear project, read-only.
                 crate::linear::store::request_project_detail(
                     &self.state,
+                    &self.space_id,
                     &reference.external_id,
                     false,
                     cx,
@@ -429,7 +430,7 @@ impl WorkItemDetails {
                     .state
                     .read(cx)
                     .linear
-                    .project_detail(&reference.external_id)
+                    .project_detail(crate::linear::store::account_scope(snapshot), &reference.external_id)
                     .cloned();
                 section = section.child(crate::artifacts::plan_linear::render(
                     "work-item-plan-linear",

@@ -9,6 +9,7 @@ use super::client::LinearUiError;
 use super::masked_input::{MaskedKeyEvent, MaskedKeyInput};
 use super::store;
 use crate::observe_gate::ObserveGate;
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -61,9 +62,22 @@ pub(crate) fn save_error_text(error: &LinearUiError) -> String {
     }
 }
 
+#[derive(Clone)]
+enum AccountForm {
+    Add,
+    Rename(String),
+    ReplaceKey(String),
+}
+
 pub(crate) struct LinearSettingsPage {
     state: Entity<AppState>,
     pub(crate) key_input: Entity<MaskedKeyInput>,
+    account_label: Entity<ComposerInput>,
+    account_key: Entity<MaskedKeyInput>,
+    account_form: Option<AccountForm>,
+    account_busy: bool,
+    account_error: Option<String>,
+    seen_accounts: ObserveGate<Option<Vec<mast_proto::linear::LinearAccount>>>,
     scroll: widgets::PageScroll,
     pub(crate) saving: bool,
     pub(crate) disconnecting: bool,
@@ -84,13 +98,22 @@ impl LinearSettingsPage {
 
     fn with_status_refresh(state: Entity<AppState>, refresh: bool, cx: &mut Context<Self>) -> Self {
         let key_input = cx.new(|cx| MaskedKeyInput::new("Paste a Linear personal API key", cx));
+        let account_label = cx.new(|cx| ComposerInput::new("Account name", cx).with_single_line());
+        let account_key = cx.new(|cx| MaskedKeyInput::new("Paste a Linear personal API key", cx));
         let subscriptions = vec![
             // The page reads only the connection card's view of the status.
             cx.observe(&state, |this: &mut Self, state, cx| {
                 let view = connection_view(state.read(cx).linear.status.as_ref());
-                if this.seen.changed(view) {
+                let accounts = state.read(cx).linear.accounts.clone();
+                if this.seen.changed(view) | this.seen_accounts.changed(accounts) {
                     cx.notify();
                 }
+            }),
+            cx.subscribe(&account_label, |this: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Submitted) { this.save_account(cx); }
+            }),
+            cx.subscribe(&account_key, |this: &mut Self, _, event, cx| {
+                if matches!(event, MaskedKeyEvent::Submitted) { this.save_account(cx); }
             }),
             cx.subscribe(&key_input, |this: &mut Self, _, event, cx| match event {
                 MaskedKeyEvent::Submitted => this.save(cx),
@@ -103,12 +126,19 @@ impl LinearSettingsPage {
         ];
         if refresh {
             store::refresh_status(&state, false, cx);
+            store::refresh_accounts(&state, cx);
         }
         let seen = ObserveGate::seeded(connection_view(state.read(cx).linear.status.as_ref()));
         Self {
             seen,
+            seen_accounts: ObserveGate::seeded(state.read(cx).linear.accounts.clone()),
             state,
             key_input,
+            account_label,
+            account_key,
+            account_form: None,
+            account_busy: false,
+            account_error: None,
             scroll: widgets::PageScroll::default(),
             saving: false,
             disconnecting: false,
@@ -136,7 +166,10 @@ impl LinearSettingsPage {
             this.update(cx, |this, cx| {
                 this.saving = false;
                 match result {
-                    Ok(status) => store::set_status(&this.state, Ok(status), cx),
+                    Ok(status) => {
+                        this.state.update(cx, |state, cx| { state.linear.invalidate_account("default"); cx.notify(); });
+                        store::set_status(&this.state, Ok(status), cx)
+                    },
                     Err(error) => this.save_error = Some(save_error_text(&error)),
                 }
                 cx.notify();
@@ -162,7 +195,10 @@ impl LinearSettingsPage {
             this.update(cx, |this, cx| {
                 this.disconnecting = false;
                 match result {
-                    Ok(status) => store::set_status(&this.state, Ok(status), cx),
+                    Ok(status) => {
+                        this.state.update(cx, |state, cx| { state.linear.invalidate_account("default"); cx.notify(); });
+                        store::set_status(&this.state, Ok(status), cx)
+                    },
                     Err(error) => this.save_error = Some(error.user_text()),
                 }
                 cx.notify();
@@ -170,6 +206,80 @@ impl LinearSettingsPage {
             .ok();
         })
         .detach();
+    }
+
+    fn open_account_form(&mut self, form: AccountForm, label: &str, cx: &mut Context<Self>) {
+        self.account_label.update(cx, |input, cx| input.set_text(label, cx));
+        self.account_key.update(cx, |input, cx| input.clear(cx));
+        self.account_error = None;
+        self.account_form = Some(form);
+        cx.notify();
+    }
+
+    fn save_account(&mut self, cx: &mut Context<Self>) {
+        if self.account_busy { return; }
+        let Some(form) = self.account_form.clone() else { return; };
+        let label = self.account_label.read(cx).text().trim().to_owned();
+        let actions = self.state.read(cx).work_outline_actions();
+        let task = match form {
+            AccountForm::Add => {
+                if label.is_empty() || self.account_key.read(cx).is_empty() { return; }
+                let key = self.account_key.update(cx, |input, cx| input.take(cx));
+                let task = actions.linear_add_account(label, key);
+                cx.spawn(async move |this, cx| {
+                    let result = task.await.map(|_| ());
+                    this.update(cx, |this, cx| this.finish_account_change(result, None, cx)).ok();
+                })
+            }
+            AccountForm::Rename(id) => {
+                if label.is_empty() { return; }
+                let task = actions.linear_rename_account(id, label);
+                cx.spawn(async move |this, cx| {
+                    let result = task.await.map(|_| ());
+                    this.update(cx, |this, cx| this.finish_account_change(result, None, cx)).ok();
+                })
+            }
+            AccountForm::ReplaceKey(id) => {
+                if self.account_key.read(cx).is_empty() { return; }
+                let key = self.account_key.update(cx, |input, cx| input.take(cx));
+                let task = actions.linear_replace_account_key(id.clone(), key);
+                cx.spawn(async move |this, cx| {
+                    let result = task.await.map(|_| ());
+                    this.update(cx, |this, cx| this.finish_account_change(result, Some(id), cx)).ok();
+                })
+            }
+        };
+        self.account_busy = true;
+        self.account_error = None;
+        task.detach();
+        cx.notify();
+    }
+
+    fn remove_account(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.account_busy { return; }
+        self.account_busy = true;
+        let task = self.state.read(cx).work_outline_actions().linear_remove_account(id.clone());
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map(|_| ());
+            this.update(cx, |this, cx| this.finish_account_change(result, Some(id), cx)).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    fn finish_account_change(&mut self, result: Result<(), LinearUiError>, changed_key: Option<String>, cx: &mut Context<Self>) {
+        self.account_busy = false;
+        match result {
+            Ok(()) => {
+                self.account_form = None;
+                if let Some(id) = changed_key {
+                    self.state.update(cx, |state, cx| { state.linear.invalidate_account(&id); cx.notify(); });
+                    if id == "default" { store::refresh_status(&self.state, false, cx); }
+                }
+                store::refresh_accounts(&self.state, cx);
+            }
+            Err(error) => self.account_error = Some(error.user_text()),
+        }
+        cx.notify();
     }
 
     fn button(
@@ -305,6 +415,47 @@ impl Render for LinearSettingsPage {
                             .on_click(|_, _, cx| cx.open_url(super::API_KEY_SETTINGS_URL)),
                     ),
             );
+        let accounts = self.state.read(cx).linear.accounts.clone().unwrap_or_default();
+        let mut account_card = widgets::section_card(&theme);
+        for account in accounts {
+            let id = account.id.clone();
+            let rename_id = id.clone();
+            let replace_id = id.clone();
+            let remove_id = id.clone();
+            let label = account.label.clone();
+            let row = widgets::card_row(&theme, false)
+                .child(crate::components::outline_execution_line(
+                    format!("{} · {}", account.label, if account.key_set { "Key set" } else { "No key" }),
+                    12.0, theme.text, &theme,
+                ))
+                .child(crate::work_outline::hints::details_button(SharedString::from(format!("linear-account-rename-{id}")), "Rename", &theme)
+                    .debug_selector({ let id = id.clone(); move || format!("linear-account-rename-{id}") })
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_account_form(AccountForm::Rename(rename_id.clone()), &label, cx))))
+                .child(crate::work_outline::hints::details_button(SharedString::from(format!("linear-account-key-{id}")), "Replace key", &theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_account_form(AccountForm::ReplaceKey(replace_id.clone()), "", cx))))
+                .child(crate::work_outline::hints::details_button(SharedString::from(format!("linear-account-remove-{id}")), "Remove", &theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_account(remove_id.clone(), cx))));
+            account_card = account_card.child(row);
+        }
+        account_card = account_card.child(
+            Self::button("linear-account-add", "Add account", false, &theme)
+                .on_click(cx.listener(|this, _, _, cx| this.open_account_form(AccountForm::Add, "", cx))),
+        );
+        if let Some(form) = self.account_form.clone() {
+            let label_needed = matches!(form, AccountForm::Add | AccountForm::Rename(_));
+            let key_needed = matches!(form, AccountForm::Add | AccountForm::ReplaceKey(_));
+            let mut row = widgets::card_row(&theme, false).flex_col().items_start();
+            if label_needed { row = row.child(self.account_label.clone()); }
+            if key_needed { row = row.child(self.account_key.clone()); }
+            row = row.child(Self::button("linear-account-save", if self.account_busy { "Saving…" } else { "Save account" }, true, &theme)
+                .on_click(cx.listener(|this, _, _, cx| this.save_account(cx))))
+                .child(Self::button("linear-account-cancel", "Cancel", false, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| { this.account_key.update(cx, |input, cx| input.clear(cx)); this.account_form = None; cx.notify(); })));
+            account_card = account_card.child(row);
+        }
+        if let Some(error) = self.account_error.clone() {
+            account_card = account_card.child(crate::components::linear_parts::settings_error(&theme, SharedString::from(error)));
+        }
         let scrollbar = crate::popover::rail(self, "linear-settings-scrollbar", &theme, cx);
         div()
             .id("linear-settings-host")
@@ -324,7 +475,8 @@ impl Render for LinearSettingsPage {
                                 &theme,
                                 "Read-only. Turn Linear on in each Space’s details; nothing is created in the Outline or written to Linear automatically. The key stays in this Mac\u{2019}s Keychain.",
                             ))
-                            .child(widgets::section_card(&theme).child(status_row).child(key_row)),
+                            .child(widgets::section_card(&theme).child(status_row).child(key_row))
+                            .child(account_card),
                     ),
             )
             .children(scrollbar)
@@ -443,7 +595,7 @@ mod tests {
         page.read_with(vcx, |page, _| assert!(page.save_error.is_none()));
         // The key is sent once, only to LinearSetApiKey.
         let sent: Vec<String> = calls.lock().unwrap().iter().map(|c| c.0.clone()).collect();
-        assert_eq!(sent, ["LinearStatus", "LinearSetApiKey", "LinearSetApiKey"]);
+        assert_eq!(sent, ["LinearStatus", "LinearListAccounts", "LinearSetApiKey", "LinearSetApiKey"]);
         // Disconnect.
         page.update(vcx, |page, cx| page.disconnect(cx));
         vcx.run_until_parked();
@@ -454,6 +606,28 @@ mod tests {
             )
         });
         assert_eq!(calls.lock().unwrap().last().unwrap().0, "LinearClearApiKey");
+    }
+
+    #[gpui::test]
+    fn account_list_and_add_form_use_account_rpc(cx: &mut gpui::TestAppContext) {
+        let (page, state, calls, vcx) = page(cx, |method, _| match method {
+            "LinearStatus" => Ok(not_configured()),
+            "LinearListAccounts" => Ok(serde_json::json!([
+                {"id": "default", "label": "Default", "keySet": true},
+                {"id": "personal", "label": "Personal", "keySet": true}
+            ])),
+            "LinearAddAccount" => Ok(serde_json::json!({"id": "work", "label": "Work", "keySet": true})),
+            _ => Ok(serde_json::json!({})),
+        });
+        state.read_with(vcx, |state, _| assert_eq!(state.linear.accounts.as_ref().unwrap().len(), 2));
+        page.update(vcx, |page, cx| {
+            page.open_account_form(AccountForm::Add, "Personal", cx);
+            page.account_key.update(cx, |input, cx| input.insert("test-key", cx));
+            page.save_account(cx);
+        });
+        vcx.run_until_parked();
+        assert!(calls.lock().unwrap().iter().any(|(method, params)| method == "LinearAddAccount" && params["label"] == "Personal"));
+        page.read_with(vcx, |page, cx| assert!(page.account_key.read(cx).is_empty()));
     }
 
     #[gpui::test]

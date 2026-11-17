@@ -20,7 +20,7 @@ use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 use mast_proto::linear::{LINEAR_PROJECT_REFERENCE, LINEAR_PROVIDER, LinearProjectRef};
 use mast_proto::{
     CreateWorkItemExternalReferenceParams, LinkLinearProjectParams,
-    RemoveWorkItemExternalReferenceParams, SetSpaceLinearEnabledParams,
+    RemoveWorkItemExternalReferenceParams, SetSpaceLinearAccountParams, SetSpaceLinearEnabledParams,
 };
 
 use super::super::actions::{OperationSlot, new_operation_id};
@@ -111,14 +111,16 @@ impl WorkItemDetails {
             return;
         }
         let actions = self.state.read(cx).work_outline_actions();
-        let cached = self.state.read(cx).linear.projects.clone();
+        let scope = self.snapshot.as_deref().map(crate::linear::store::account_scope).unwrap_or("default");
+        let cached = self.state.read(cx).linear.projects.get(scope).cloned();
         let item_id = self.item_id.clone();
+        let space_id = self.space_id.clone();
         self.error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let projects = match cached {
                 Some(projects) => Some(projects),
-                None => actions.linear_my_projects(ListRead::Cached).await.ok(),
+                None => actions.linear_my_projects(&space_id, ListRead::Cached).await.ok(),
             };
             let short = project_short_id(&slug).map(str::to_owned);
             let matched = projects.and_then(|projects| {
@@ -166,6 +168,24 @@ impl WorkItemDetails {
             .ok();
         })
         .detach();
+    }
+
+    fn select_linear_account(&mut self, account_id: Option<String>, cx: &mut Context<Self>) {
+        if self.linear.toggling { return; }
+        let task = self.state.read(cx).work_outline_actions().set_space_linear_account(
+            SetSpaceLinearAccountParams { space_id: self.space_id.clone(), account_id, operation_id: new_operation_id() }
+        );
+        self.linear.toggling = true;
+        self.linear.error = None;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.linear.toggling = false;
+                if let Err(error) = result { this.linear.error = Some(error.user_text()); }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
     }
 
     pub(crate) fn set_linear_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -371,12 +391,12 @@ impl WorkItemDetails {
                 ),
         );
         if let Some(reference) = issue {
-            store::request_issue(&self.state, &reference.external_id, false, cx);
+            store::request_issue(&self.state, &self.space_id, &reference.external_id, false, cx);
             let entry = self
                 .state
                 .read(cx)
                 .linear
-                .issue(&reference.external_id)
+                .issue_in_scope(crate::linear::store::account_scope(snapshot), &reference.external_id)
                 .cloned();
             let title = match &entry {
                 Some(IssueEntry::Ready { issue, .. }) => {
@@ -419,7 +439,7 @@ impl WorkItemDetails {
                 .read(cx)
                 .linear
                 .projects
-                .clone()
+                .get(crate::linear::store::account_scope(snapshot))
                 .and_then(|projects| {
                     crate::linear::project_links::repair_target(&reference, &projects).cloned()
                 });
@@ -533,9 +553,13 @@ impl WorkItemDetails {
         // fetches the status (`set_linear_enabled`).
         if enabled {
             store::ensure_status(&self.state, cx);
+            store::ensure_accounts(&self.state, cx);
         }
         let store = &self.state.read(cx).linear;
-        let configured = store.configured();
+        let accounts = store.accounts.clone().unwrap_or_default();
+        let selected = snapshot.space_settings.linear_account_id.as_deref().unwrap_or("default");
+        let configured = accounts.iter().find(|account| account.id == selected).map(|account| account.key_set)
+            .or_else(|| if selected == "default" { store.configured() } else if store.accounts.is_some() { Some(false) } else { None });
         let not_available = matches!(&store.status, Some(Err(error)) if error.not_available());
         let toggle = crate::components::toggle_switch(theme, enabled)
             .id("space-linear-toggle")
@@ -551,6 +575,24 @@ impl WorkItemDetails {
             .child(
                 crate::components::outline_execution_line(if enabled { "On: the Linear panel, chips and links work in this Space. Nothing is created or written automatically." } else { "Off: no Linear calls or UI in this Space; Linear URLs stay plain links." }.into(), 11.0, theme.text_faint, theme),
             );
+        if accounts.len() > 1 {
+            let mut choices = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0))
+                .child(crate::components::outline_execution_line("Account".into(), 11.0, theme.text_muted, theme));
+            for account in accounts {
+                let is_selected = account.id == selected;
+                let id = account.id.clone();
+                let choice = if id == "default" { None } else { Some(id.clone()) };
+                let label = if is_selected { format!("✓ {}", account.label) } else { account.label };
+                choices = choices.child(
+                    div().id(SharedString::from(format!("space-linear-account-{id}")))
+                        .debug_selector({ let id = id.clone(); move || format!("space-linear-account-{id}") })
+                        .cursor_pointer().px(px(8.0)).py(px(4.0)).rounded(px(4.0))
+                        .border_1().border_color(theme.border).text_color(theme.text).child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_linear_account(choice.clone(), cx)))
+                );
+            }
+            section = section.child(choices);
+        }
         if not_available {
             section = section.child(
                 crate::components::outline_execution_line("Linear isn’t available on this host yet".into(), 11.0, theme.text_muted, theme),

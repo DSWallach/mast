@@ -709,9 +709,9 @@ impl Overview {
         }
         let selection = self.linear_selection(cx);
         if let Some(panel) = &panel {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 panel.embedded = true;
-                panel.set_data(spaces, selection);
+                if panel.set_data(spaces, selection) { panel.refresh(cx); }
             });
         }
         if !closing && std::mem::take(&mut self.linear_column.focus_search) {

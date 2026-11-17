@@ -152,14 +152,14 @@ impl OutlineView {
         });
         // A pasted-URL link (slug, not id) that My projects resolves.
         let repair = project_reference.and_then(|reference| {
-            let projects = self.state.read(cx).linear.projects.clone()?;
+            let projects = self.state.read(cx).linear.projects.get(store::account_scope(snapshot)).cloned()?;
             let project = project_links::repair_target(&reference, &projects)?.clone();
             Some((reference, project))
         });
         let shell = self.shell.clone();
         let issue = issue.map(|(identifier, url)| {
-            store::request_issue(&self.state, &identifier, false, cx);
-            let entry = self.state.read(cx).linear.issue(&identifier).cloned();
+            store::request_issue(&self.state, &item.space_id, &identifier, false, cx);
+            let entry = self.state.read(cx).linear.issue_in_scope(store::account_scope(snapshot), &identifier).cloned();
             LinearIssueRow {
                 identifier,
                 url,

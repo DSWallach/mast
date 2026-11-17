@@ -271,6 +271,43 @@ fn space_root_toggle_and_connect_prompt(cx: &mut gpui::TestAppContext) {
     assert!(toggles[0]["operationId"].as_str().is_some_and(|id| !id.is_empty()));
 }
 
+#[gpui::test]
+fn space_account_choices_are_hidden_for_one_account(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _, vcx) = linear_overview(cx, dir.path(), linear_snapshot(true), |method, params| {
+        if method == "LinearListAccounts" {
+            return Ok(serde_json::json!([{"id": "default", "label": "Default", "keySet": true}]));
+        }
+        default_reply(method, params)
+    });
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("space-linear-account-default").is_none());
+}
+
+#[gpui::test]
+fn space_account_choices_appear_for_multiple_accounts(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, calls, vcx) = linear_overview(cx, dir.path(), linear_snapshot(true), |method, params| {
+        if method == "LinearListAccounts" {
+            return Ok(serde_json::json!([
+                {"id": "default", "label": "Default", "keySet": true},
+                {"id": "personal", "label": "Personal", "keySet": true}
+            ]));
+        }
+        default_reply(method, params)
+    });
+    open_details(&overview, vcx, "");
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(vcx.debug_bounds("space-linear-account-personal").is_some());
+    press(vcx, "space-linear-account-personal".into());
+    let changes = mutations(&calls, "setSpaceLinearAccount");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["accountId"], "personal");
+}
+
 /// The panel lists My issues and My projects, filters on the search, marks
 /// the issue a live item links, and Reveal selects that item.
 #[gpui::test]
@@ -1435,7 +1472,7 @@ fn issue_chip_text_is_stable_across_refreshes_and_changes_with_the_data(
     assert_ne!(before, "ENG-1", "the issue loaded");
 
     let pull = |vcx: &mut gpui::VisualTestContext| {
-        vcx.update(|_, cx| crate::linear::store::request_issue(&state, "ENG-1", true, cx))
+        vcx.update(|_, cx| crate::linear::store::request_issue(&state, "s", "ENG-1", true, cx))
     };
     for _ in 0..2 {
         pull(vcx);
