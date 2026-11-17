@@ -37,7 +37,6 @@ pub(super) struct TrackerState {
     requests: std::collections::HashMap<String, String>,
     stalled: std::collections::HashMap<String, (String, bool)>,
     review_progress: std::collections::HashMap<String, (usize, usize)>,
-    review_loaded: std::collections::HashSet<String>,
     review_generation: u64,
     review_task: Option<Task<()>>,
     filter: TrackerFilter,
@@ -352,9 +351,10 @@ impl Shell {
             let pr = crate::chat_work_context::parse_pr_url(&pr.url)?;
             Some(format!("pr:{}", pr.external_id().to_lowercase()))
         }).collect();
-        self.tracker.review_loaded.retain(|target| visible_targets.contains(target));
-        self.tracker.review_progress.retain(|target, _| visible_targets.contains(target));
-        let review_targets: Vec<_> = visible_targets.into_iter().filter(|target| !self.tracker.review_loaded.contains(target)).collect();
+        // Review marks may have changed on another surface or device since the
+        // previous board revision. Re-read them once for this revision.
+        self.tracker.review_progress.clear();
+        let review_targets: Vec<_> = visible_targets.into_iter().collect();
         self.tracker.review_generation = self.tracker.review_generation.wrapping_add(1);
         let generation = self.tracker.review_generation;
         self.tracker.review_task = None;
@@ -389,7 +389,6 @@ impl Shell {
                             let viewed = review.state.map_or(0, |state| state.viewed_files.len());
                             let _ = shell.update(cx, |shell, cx| {
                                 if shell.tracker.review_generation == generation {
-                                    shell.tracker.review_loaded.insert(target.clone());
                                     if viewed > 0 || !drafts.is_empty() {
                                         shell.tracker.review_progress.insert(target, (viewed, drafts.len()));
                                         cx.notify();
@@ -649,7 +648,6 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.tracker.key = None;
-                        this.tracker.review_loaded.clear();
                         this.tracker.review_progress.clear();
                         this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
                         this.tracker.review_task = None;
