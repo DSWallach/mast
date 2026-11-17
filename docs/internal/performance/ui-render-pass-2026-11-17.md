@@ -110,5 +110,5 @@ Same debug-profile benches, two runs each, before = incremental scan disabled.
   Still O(rows) per delta: the `new_rows` clone, the veil/markdown `active_markdown` set and its three retains.
 - **Changes: monospace advance cached** (`diff_ch_advance`). The expanded-context path ran `resolve_font` + `ch_advance`
   per rendered row. Test `font_advance_is_not_looked_up_per_row`: 430 lookups over 10 redraws before, 0 after.
-- **Changes width shaping not moved off-thread.** `metrics_use_painted_widths` shows widths depend on the highlight
+- **Changes width shaping not moved off-thread.** `native_diff_font_geometry` shows widths depend on the highlight
   runs on a proportional font, so keeping the previous width until a background shape lands moves the scrollbar. Left as is.
