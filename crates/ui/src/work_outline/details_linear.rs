@@ -555,8 +555,9 @@ impl WorkItemDetails {
         // fetches the status (`set_linear_enabled`).
         if enabled {
             store::ensure_status(&self.state, cx);
-            store::ensure_accounts(&self.state, cx);
         }
+        // Local metadata lets the user choose an account before enabling sync.
+        store::ensure_accounts(&self.state, cx);
         let store = &self.state.read(cx).linear;
         let accounts = store.accounts.clone().unwrap_or_default();
         let selected = snapshot.space_settings.linear_account_id.as_deref().unwrap_or("default");

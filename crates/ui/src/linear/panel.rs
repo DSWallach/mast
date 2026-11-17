@@ -347,7 +347,7 @@ impl LinearPanel {
     /// Fed by the Overview every frame: the Linear-enabled Spaces and the
     /// Outline's selection. A Space that lost Linear moves the panel to the
     /// first enabled one.
-    pub(crate) fn set_data(&mut self, spaces: Vec<LinearSpace>, selection: OutlineSelection) -> bool {
+    pub(crate) fn set_data(&mut self, spaces: Vec<LinearSpace>, selection: OutlineSelection, cx: &mut Context<Self>) -> bool {
         let previous_scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned());
         let previous_space = self.space_id.clone();
         if !spaces.iter().any(|space| space.id == self.space_id)
@@ -361,6 +361,7 @@ impl LinearPanel {
         let changed = previous_space != self.space_id || (previous_scope.is_some() && previous_scope != scope);
         if changed {
             self.clear_lists();
+            self.cache_revision = self.state.read(cx).linear.revision(scope.as_deref().unwrap_or("default"));
         }
         changed
     }
@@ -378,6 +379,8 @@ impl LinearPanel {
         if self.space_id != space_id {
             self.space_id = space_id;
             self.clear_lists();
+            let scope = self.snapshot().map(|s| super::store::account_scope(s).to_owned()).unwrap_or_else(|| "default".into());
+            self.cache_revision = self.state.read(cx).linear.revision(&scope);
             self.refresh(cx);
             cx.notify();
         }

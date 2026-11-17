@@ -289,7 +289,7 @@ fn space_account_choices_are_hidden_for_one_account(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn space_account_choices_appear_for_multiple_accounts(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (overview, calls, vcx) = linear_overview(cx, dir.path(), linear_snapshot(true), |method, params| {
+    let (overview, calls, vcx) = linear_overview(cx, dir.path(), linear_snapshot(false), |method, params| {
         if method == "LinearListAccounts" {
             return Ok(serde_json::json!([
                 {"id": "default", "label": "Default", "keySet": true},
