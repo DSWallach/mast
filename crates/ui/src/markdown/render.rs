@@ -850,7 +850,15 @@ fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
 /// Element discriminators for every code block below `block`. Transcript rows
 /// use this to provision one independent scroll handle per nested fence before
 /// the renderer recursively reaches it.
+#[cfg(test)]
+thread_local! {
+    /// Calls to [`code_block_indices`] on this thread (budget tests).
+    pub(crate) static CODE_BLOCK_INDEX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
+    #[cfg(test)]
+    CODE_BLOCK_INDEX_CALLS.with(|count| count.set(count.get() + 1));
     fn collect(block: &Block, ix: usize, out: &mut Vec<usize>) {
         match block {
             Block::CodeBlock { .. } => out.push(ix),

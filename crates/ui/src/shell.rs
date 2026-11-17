@@ -9975,7 +9975,14 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        // Cached: the transcript notifies itself when its rows
+                        // change; a composer keystroke or cursor blink must not
+                        // re-render its visible rows.
+                        .child(
+                            self.transcript
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.

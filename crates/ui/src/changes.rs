@@ -451,6 +451,12 @@ impl DiffHorizontalGeometry {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lines shaped by `max_shaped_text_width` on this thread (benchmarks).
+    pub(crate) static SHAPED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Measure the same runs the row paints. Color boundaries can break kerning
 /// and ligatures on native platforms even when every run uses the same font.
 fn max_shaped_text_width(
@@ -465,6 +471,10 @@ fn max_shaped_text_width(
         .ch_advance(text_system.resolve_font(&mono), size)
         .unwrap_or(size * 0.6)
         .as_f32();
+    #[cfg(test)]
+    SHAPED_LINES.with(|count| {
+        count.set(count.get() + file.hunks.iter().map(|hunk| hunk.lines.len()).sum::<usize>())
+    });
     file.hunks
         .iter()
         .flat_map(|hunk| &hunk.lines)
@@ -1987,6 +1997,8 @@ pub struct Changes {
     benchmark_render_count: usize,
     #[cfg(test)]
     benchmark_highlight_count: usize,
+    #[cfg(test)]
+    benchmark_sync_count: usize,
     state: Entity<AppState>,
     /// Immutable owner identity plus the latest authoritative target for that
     /// owner. This is deliberately independent of AppState's global selection.
@@ -2281,6 +2293,8 @@ impl Changes {
             benchmark_render_count: 0,
             #[cfg(test)]
             benchmark_highlight_count: 0,
+            #[cfg(test)]
+            benchmark_sync_count: 0,
             state,
             owner,
             mode,
@@ -2712,14 +2726,14 @@ impl Changes {
         })
     }
 
-    fn resolved(&self, _cx: &App) -> Option<CheckoutDiff> {
+    fn resolved(&self, _cx: &App) -> Option<&CheckoutDiff> {
         if self.pinned_cwd.is_some() {
             // A pinned watch is server-scoped by canonical cwd, so its frame
             // can contain at most the intended checkout. This snapshot drives
             // one-shot refreshes without consulting global chat selection.
-            return self.diffs.first().cloned();
+            return self.diffs.first();
         }
-        self.owner.as_ref()?.resolve(&self.diffs).cloned()
+        self.owner.as_ref()?.resolve(&self.diffs)
     }
 
     /// The checkout root the scoped RPCs address: the watch-resolved diff's
@@ -2729,19 +2743,19 @@ impl Changes {
             return Some(cwd.clone());
         }
         if let Some(diff) = self.resolved(cx) {
-            return Some(diff.cwd);
+            return Some(diff.cwd.clone());
         }
         self.owner.as_ref()?.cwd.clone()
     }
 
     /// The diff the pane currently displays: the watch stream for the working
     /// tree, the one-shot scoped capture otherwise.
-    fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
+    fn active_diff(&self, cx: &App) -> Option<&CheckoutDiff> {
         match self.scope {
-            DiffScope::WorkingTree if self.pinned_cwd.is_some() => self.scoped.clone(),
+            DiffScope::WorkingTree if self.pinned_cwd.is_some() => self.scoped.as_ref(),
             DiffScope::WorkingTree => self.resolved(cx),
             DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Commit | DiffScope::Range => {
-                self.scoped.clone()
+                self.scoped.as_ref()
             }
             DiffScope::History => None,
         }
@@ -2915,7 +2929,7 @@ impl Changes {
         let watch_sum = if range.is_some() {
             String::new()
         } else {
-            self.resolved(cx).map(|d| d.checksum).unwrap_or_default()
+            self.resolved(cx).map(|d| d.checksum.clone()).unwrap_or_default()
         };
         let key = format!("{context}|{watch_sum}");
         if self.scoped_for.as_deref() == Some(key.as_str())
@@ -3113,6 +3127,10 @@ impl Changes {
 
     /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.benchmark_sync_count += 1;
+        }
         // A binding that arrives after the pane opened still gets its
         // per-member data (idempotent once fetched).
         if self.pinned_cwd.is_none()
@@ -3140,7 +3158,7 @@ impl Changes {
             self.ensure_branches(cx);
         }
         self.ensure_scoped(cx);
-        let Some(diff) = self.active_diff(cx) else {
+        if self.active_diff(cx).is_none() {
             if self.parsed.take().is_some() {
                 self.rows.clear();
                 self.row_ranges.clear();
@@ -3152,9 +3170,14 @@ impl Changes {
                 cx.notify();
             }
             return;
-        };
+        }
         self.ensure_review_state(cx);
-        let key = self.parse_key(&diff);
+        // Borrowed, not cloned: the patch can be megabytes and this runs on
+        // every AppState notify.
+        let Some(diff) = self.active_diff(cx) else {
+            return;
+        };
+        let key = self.parse_key(diff);
         if self.parsed.as_ref().is_some_and(|p| p.key == key) {
             self.sync_comment_rows(cx);
             return;
@@ -3177,7 +3200,7 @@ impl Changes {
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
-                let current = changes.active_diff(cx).map(|d| changes.parse_key(&d));
+                let current = changes.active_diff(cx).map(|d| changes.parse_key(d));
                 if current.as_deref() != Some(key.as_str()) {
                     return;
                 }
@@ -4347,7 +4370,7 @@ impl Changes {
         }
         let Some(file) = parsed.files.get(file_ix as usize).cloned() else { return; };
         let Some(origin) = parsed.origins.get(file_ix as usize).cloned() else { return; };
-        let (Some(diff), Some(engine)) = (self.active_diff(cx), self.state.read(cx).engine().cloned()) else { return; };
+        let (Some(diff), Some(engine)) = (self.active_diff(cx).cloned(), self.state.read(cx).engine().cloned()) else { return; };
         let mode = self.scope.mode().to_string();
         let (base_ref, head_ref) = match (self.scope, self.owner.as_ref().and_then(|o| o.range.as_ref())) {
             (DiffScope::Range, Some(range)) => (Some(range.base_ref.clone()), Some(range.head_ref.clone())),
@@ -4451,7 +4474,7 @@ impl Changes {
             .ok();
         });
 
-        let active = self.active_diff(cx);
+        let active = self.active_diff(cx).cloned();
         let engine = self.state.read(cx).engine().cloned();
         let target = self.desired_target(cx);
         let chat_id = self.owner_chat_id_owned();
@@ -7118,7 +7141,7 @@ impl Render for Changes {
         // prepare — show the quiet empty state, not an endless spinner.
         let no_chat = self.owner.is_none() && self.pinned_cwd.is_none();
         let pinned = self.pinned_cwd.is_some();
-        let phase = pane_diff_phase(no_chat, pinned, active.as_ref());
+        let phase = pane_diff_phase(no_chat, pinned, active);
         let error = self.error.clone().map(|message| {
             if active.is_some() {
                 SharedString::from(format!(
