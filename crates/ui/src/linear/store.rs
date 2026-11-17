@@ -199,7 +199,11 @@ pub(crate) fn refresh_accounts(state: &Entity<AppState>, cx: &mut App) {
         let result = task.await;
         let retry = state.update(cx, |state, cx| {
             state.linear.accounts_loading = false;
-            state.linear.accounts = Some(result.unwrap_or_default());
+            match result {
+                Ok(accounts) => state.linear.accounts = Some(accounts),
+                Err(_) if state.linear.accounts.is_none() => state.linear.accounts = Some(Vec::new()),
+                Err(_) => {}
+            }
             let retry = std::mem::take(&mut state.linear.accounts_refresh_pending);
             cx.notify();
             retry
