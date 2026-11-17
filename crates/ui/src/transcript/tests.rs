@@ -824,7 +824,7 @@ fn connector_intersection_is_tessellated_only_once() {
     let path = path.build().unwrap();
     let area: f32 = path
         .vertices
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|triangle| {
             let a = triangle[0].xy_position;
             let b = triangle[1].xy_position;
@@ -2047,7 +2047,7 @@ fn reasoning_joins_the_tool_group_accordion() {
         tools[0].detail.as_deref(),
         Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
     ));
-    let summary = tool_group_summary(&tools);
+    let summary = tool_group_summary(tools);
     assert!(summary.starts_with("Thought 2 times"), "{summary}");
     assert!(summary.contains("2 commands"), "{summary}");
 
@@ -2063,7 +2063,7 @@ fn reasoning_joins_the_tool_group_accordion() {
     let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
         panic!("expected a tool group");
     };
-    assert_eq!(tool_group_summary(&tools), "Thought process");
+    assert_eq!(tool_group_summary(tools), "Thought process");
 
     // Empty reasoning renders nothing.
     let entry = assistant(

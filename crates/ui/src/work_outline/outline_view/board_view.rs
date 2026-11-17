@@ -311,7 +311,7 @@ impl OutlineView {
                 bar = bar.child(
                     div()
                         .id(SharedString::from(format!("board-scope-{label}")))
-                        .debug_selector(move || format!("board-scope-{label}").into())
+                        .debug_selector(move || format!("board-scope-{label}"))
                         .px(px(6.0))
                         .py(px(4.0))
                         .text_color(if enabled {
@@ -654,7 +654,7 @@ impl OutlineView {
                         .id(SharedString::from(format!("board-answer-{}", item.id)))
                         .debug_selector({
                             let id = item.id.clone();
-                            move || format!("board-answer-{id}").into()
+                            move || format!("board-answer-{id}")
                         })
                         .cursor_pointer()
                         .bg(theme.accent)
@@ -866,7 +866,7 @@ impl OutlineView {
                         .id(SharedString::from(format!("board-action-{id}")))
                         .debug_selector({
                             let id = id.clone();
-                            move || format!("board-action-{id}").into()
+                            move || format!("board-action-{id}")
                         })
                         .cursor_pointer()
                         .text_color(theme.text_muted)
@@ -888,7 +888,7 @@ impl OutlineView {
                         .id(SharedString::from(format!("board-answer-{}", item.id)))
                         .debug_selector({
                             let id = item.id.clone();
-                            move || format!("board-answer-{id}").into()
+                            move || format!("board-answer-{id}")
                         })
                         .cursor_pointer()
                         .bg(theme.accent)

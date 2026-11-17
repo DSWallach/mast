@@ -260,7 +260,7 @@ impl Changes {
                     let sha = value.get("revisionSha")?.as_str()?.to_string();
                     let contents = value.get("text")?.as_str()?;
                     let snippet = crate::code_ref::snippet(contents, range)?;
-                    (snippet == expected).then(|| (mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
+                    (snippet == expected).then_some((mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
                 })
             } else if let Some((base_ref, head_ref, head)) = source_refs {
                 let params = serde_json::json!({ "cwd": context.cwd.clone(), "checkoutId": context.checkout_id.clone(), "targetDeviceId": context.target_device_id.clone(), "baseRef": base_ref, "headRef": head_ref, "path": path.clone(), "head": head });
@@ -268,7 +268,7 @@ impl Changes {
                     let sha = value.get("revisionSha")?.as_str()?.to_string();
                     let contents = value.get("text")?.as_str()?;
                     let snippet = crate::code_ref::snippet(contents, range)?;
-                    (snippet == expected).then(|| (mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
+                    (snippet == expected).then_some((mast_proto::CodeRefRevision::Commit { commit: sha }, snippet))
                 })
             } else if let Some(commit) = commit {
                 Some((mast_proto::CodeRefRevision::Commit { commit }, expected.clone()))
@@ -281,7 +281,7 @@ impl Changes {
                     _ => None,
                 }
             };
-            let _ = state_handle.update(cx, |state, cx| { state.end_code_ref_load(&key); cx.notify(); });
+            state_handle.update(cx, |state, cx| { state.end_code_ref_load(&key); cx.notify(); });
             let _ = this.update(cx, |this, cx| {
                 let current = this.code_ref_context(this.state.read(cx), &key);
                 if current.as_ref() != Some(&context) { return; }
@@ -507,7 +507,7 @@ mod tests {
             snippet: "x\ny".into(),
         };
         assert_eq!(staged.reference.location.workspace_path(), "src/a.rs");
-        let prompt = crate::code_ref::with_code_refs("look", &[staged.clone()]);
+        let prompt = crate::code_ref::with_code_refs("look", std::slice::from_ref(&staged));
         let (_, spans) = crate::code_ref::project_sent_refs(&prompt).unwrap();
         assert_eq!(spans[0].path.as_ref(), "src/a.rs:2");
         assert_eq!(spans[0].code_ref.as_ref().unwrap().reference, staged.reference);

@@ -160,7 +160,7 @@ pub const CARET_BLINK_MS: u64 = 500;
 /// through the first half-period (typing bursts never blink — each keystroke
 /// resets the phase), then alternating.
 pub fn caret_visible(ms_since_activity: u64) -> bool {
-    (ms_since_activity / CARET_BLINK_MS) % 2 == 0
+    (ms_since_activity / CARET_BLINK_MS).is_multiple_of(2)
 }
 
 /// Auto-grow: content height for a wrapped-line count.
@@ -3879,7 +3879,7 @@ impl Render for ComposerInput {
         }
         let min_height = self
             .auto_grow
-            .then(|| AUTO_GROW_MIN_LINES as f32 * row_height);
+            .then_some(AUTO_GROW_MIN_LINES as f32 * row_height);
         let max_content_height = self.max_content_height();
         let theme = Theme::of(cx);
         let popup_theme = theme.for_popup();
@@ -4046,9 +4046,7 @@ fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
         .rev()
         .find_map(|(at, ch)| ch.is_whitespace().then_some(at + ch.len_utf8()))
         .unwrap_or(0);
-    let Some(relative_at) = text[token_start..cursor].rfind('@') else {
-        return None;
-    };
+    let relative_at = text[token_start..cursor].rfind('@')?;
     let at = token_start + relative_at;
     let valid_boundary = at == 0
         || text[..at]
@@ -4641,12 +4639,11 @@ impl Composer {
             cx.spawn(async move |this, cx| {
                 let result = rpc.call(mast_rpc::methods::LOCAL_AGENT_SIGN_IN_STATUS, serde_json::json!({"harness": harness, "accountId": request_key.2.clone()})).await;
                 this.update(cx, |this, cx| {
-                    if let Some((d, h, a, at, signed_out)) = &mut this.sign_in_check {
-                        if (&*d, *h, &*a, *at) == (&request_key.0, request_key.1, &request_key.2, started) {
+                    if let Some((d, h, a, at, signed_out)) = &mut this.sign_in_check
+                        && (&*d, *h, &*a, *at) == (&request_key.0, request_key.1, &request_key.2, started) {
                             *signed_out = result.ok().and_then(|value| value.as_str().map(str::to_owned)).as_deref() == Some("signed_out");
                             cx.notify();
                         }
-                    }
                 }).ok();
             }).detach();
             return None;

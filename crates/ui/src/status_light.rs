@@ -613,7 +613,7 @@ mod tests {
                 let px = image.as_bytes(0).unwrap(); // premultiplied BGRA
                 assert_eq!(px[3], 0, "{asset}: top-left corner is transparent");
                 let found = px
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .filter(|p| p[3] == 255)
                     .any(|p| has_hue(&[p[0], p[1], p[2]]));
                 assert!(found, "{asset}: lens shows its lamp colour");

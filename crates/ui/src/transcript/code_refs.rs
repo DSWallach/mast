@@ -250,6 +250,21 @@ pub(super) fn activate(
     .detach();
 }
 
+#[cfg(feature = "snapshot")]
+impl Transcript {
+    pub(crate) fn fixture_changed_code_ref(
+        &mut self,
+        reference: &crate::code_ref::StagedCodeRef,
+        cx: &mut Context<Self>,
+    ) {
+        self.code_ref_resolutions.insert(
+            crate::code_ref::resolution_key(reference),
+            Some(crate::code_ref::Resolution::Changed),
+        );
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +313,7 @@ mod tests {
                 },
             )),
         );
-        let (display, spans) = project_resolutions(text, &[span.clone()], &resolutions);
+        let (display, spans) = project_resolutions(text, std::slice::from_ref(&span), &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:4-5 moved");
         assert_eq!(spans[0].path.as_ref(), "src/file.rs:4");
         resolutions.insert(
@@ -311,20 +326,5 @@ mod tests {
             spans[0].resolution,
             Some(crate::code_ref::Resolution::Changed)
         );
-    }
-}
-
-#[cfg(feature = "snapshot")]
-impl Transcript {
-    pub(crate) fn fixture_changed_code_ref(
-        &mut self,
-        reference: &crate::code_ref::StagedCodeRef,
-        cx: &mut Context<Self>,
-    ) {
-        self.code_ref_resolutions.insert(
-            crate::code_ref::resolution_key(reference),
-            Some(crate::code_ref::Resolution::Changed),
-        );
-        cx.notify();
     }
 }

@@ -295,13 +295,11 @@ impl TourCoverage {
                         file.hunks
                             .iter()
                             .enumerate()
-                            .filter_map(move |(hunk_index, hunk)| {
-                                step_covers_hunk(step, file, hunk_index).then(|| TourHunk {
+                            .filter(|&(hunk_index, _)| step_covers_hunk(step, file, hunk_index)).map(move |(hunk_index, hunk)| TourHunk {
                                     file: file_index,
                                     hunk: hunk_index,
                                     identity: hunk_identity(&file.path, hunk),
                                 })
-                            })
                     })
                     .inspect(|hunk| {
                         covered.insert((hunk.file, hunk.hunk));

@@ -217,11 +217,10 @@ pub(super) fn gaps(file: &FileDiff, text: &str) -> Option<Vec<Gap>> {
         }
         result.push(make_gap(&source, old_next, new_next, new_gap)?);
         for line in &hunk.lines {
-            if let Some(number) = line.new_no {
-                if source.get(number.checked_sub(1)? as usize).copied()? != line.text {
+            if let Some(number) = line.new_no
+                && source.get(number.checked_sub(1)? as usize).copied()? != line.text {
                     return None;
                 }
-            }
         }
         old_next = old_start.checked_add(old_count)?;
         new_next = new_start.checked_add(new_count)?;

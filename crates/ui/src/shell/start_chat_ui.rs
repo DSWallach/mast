@@ -2282,7 +2282,7 @@ mod tests {
         draw(cx);
         assert_eq!(calls_to(&calls, mast_rpc::methods::LIST_COMMANDS).len(), 1);
         let names = prompt_skills(&shell, cx);
-        assert!(names.len() >= 1 && names.contains(&"open-pr".to_owned()));
+        assert!(!names.is_empty() && names.contains(&"open-pr".to_owned()));
         let open_pr = names.iter().position(|name| name == "open-pr").unwrap();
         for _ in 0..open_pr {
             cx.simulate_keystrokes("down");
@@ -2400,7 +2400,7 @@ mod tests {
         set_prompt(&shell, cx, "one line");
         draw(cx);
         assert_eq!(height(cx), empty, "three rows minimum");
-        set_prompt(&shell, cx, &vec!["line"; 8].join("\n"));
+        set_prompt(&shell, cx, &["line"; 8].join("\n"));
         draw(cx);
         let grown = height(cx);
         assert!(

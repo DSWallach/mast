@@ -1115,22 +1115,18 @@ impl Changes {
                 else {
                     return;
                 };
-                if line.kind != LineKind::Add {
-                    if let Some(n) = line.old_no {
-                        if let Some(slot) = anchors.get_mut(count) {
+                if line.kind != LineKind::Add
+                    && let Some(n) = line.old_no
+                        && let Some(slot) = anchors.get_mut(count) {
                             *slot = Some((CommentSide::Old, n));
                             count += 1;
                         }
-                    }
-                }
-                if line.kind != LineKind::Del {
-                    if let Some(n) = line.new_no {
-                        if let Some(slot) = anchors.get_mut(count) {
+                if line.kind != LineKind::Del
+                    && let Some(n) = line.new_no
+                        && let Some(slot) = anchors.get_mut(count) {
                             *slot = Some((CommentSide::New, n));
                             count += 1;
                         }
-                    }
-                }
             };
             match row {
                 DiffRow::Line { hunk, line, .. } => append(hunk, line),
@@ -1622,7 +1618,7 @@ mod tests {
             end_line_hash: None,
         };
         assert_eq!(
-            DraftAnchorIndex::new(&moved, &identities, &[draft.clone()], &[]).resolve(&draft),
+            DraftAnchorIndex::new(&moved, &identities, std::slice::from_ref(&draft), &[]).resolve(&draft),
             Some((10, 10))
         );
         let changed = super::super::parse_patch(
@@ -1632,7 +1628,7 @@ mod tests {
             DraftAnchorIndex::new(
                 &changed,
                 &super::super::hunk_identities(&changed),
-                &[draft.clone()],
+                std::slice::from_ref(&draft),
                 &[]
             )
             .resolve(&draft),

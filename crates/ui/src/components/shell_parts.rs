@@ -2835,83 +2835,6 @@ pub(crate) fn chat_identity_button(
         )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Context, Render, TestAppContext};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    struct HorizonRow {
-        archived: Arc<AtomicBool>,
-        hovered: bool,
-    }
-
-    impl Render for HorizonRow {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let mut theme = Theme::default();
-            theme.ui_style = crate::ui_style::UiStyle::resolve(
-                crate::ui_style::UiStyleId::Horizon,
-                crate::ui_style::UiLayout::Guided,
-            );
-            let archived = self.archived.clone();
-            horizon_sidebar_chat_row(
-                &theme,
-                "chat-test".into(),
-                "test",
-                theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")),
-                "Session".into(),
-                crate::status_style::Status::Waiting,
-                "Queued",
-                true,
-                false,
-                Some("Work".into()),
-                None,
-                None,
-                false,
-                self.hovered,
-                false,
-                move |_, _, _| {
-                    archived.store(true, Ordering::SeqCst);
-                },
-            )
-            .unwrap()
-        }
-    }
-
-    #[gpui::test]
-    fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
-        let archived = Arc::new(AtomicBool::new(false));
-        let recorded = archived.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
-            archived: recorded,
-            hovered: true,
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-account-test").is_some());
-        let corner = cx
-            .debug_bounds("chat-test-corner")
-            .expect("archive action")
-            .center();
-        cx.simulate_mouse_down(corner, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(corner, MouseButton::Left, gpui::Modifiers::default());
-        assert!(archived.load(Ordering::SeqCst));
-    }
-
-    #[gpui::test]
-    fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
-            archived: Arc::new(AtomicBool::new(false)),
-            hovered: false,
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("chat-account-test").is_some());
-        assert!(cx.debug_bounds("chat-status-test").is_some());
-    }
-}
-
 pub(crate) fn action_control(theme: &Theme) -> gpui::Div {
     div()
         .relative()
@@ -3050,5 +2973,82 @@ pub(crate) fn sidebar_row_height(
     } else {
         chat_row_height(branch, pr) - (if show_label { 0.0 } else { 16.0 })
             + tokens.sidebar_row_extra_h
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct HorizonRow {
+        archived: Arc<AtomicBool>,
+        hovered: bool,
+    }
+
+    impl Render for HorizonRow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut theme = Theme::default();
+            theme.ui_style = crate::ui_style::UiStyle::resolve(
+                crate::ui_style::UiStyleId::Horizon,
+                crate::ui_style::UiLayout::Guided,
+            );
+            let archived = self.archived.clone();
+            horizon_sidebar_chat_row(
+                &theme,
+                "chat-test".into(),
+                "test",
+                theme.agent_identity_color(Some(mast_proto::HarnessId::ClaudeCode), Some("opus")),
+                "Session".into(),
+                crate::status_style::Status::Waiting,
+                "Queued",
+                true,
+                false,
+                Some("Work".into()),
+                None,
+                None,
+                false,
+                self.hovered,
+                false,
+                move |_, _, _| {
+                    archived.store(true, Ordering::SeqCst);
+                },
+            )
+            .unwrap()
+        }
+    }
+
+    #[gpui::test]
+    fn horizon_row_archive_action_is_clickable(cx: &mut TestAppContext) {
+        let archived = Arc::new(AtomicBool::new(false));
+        let recorded = archived.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
+            archived: recorded,
+            hovered: true,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-account-test").is_some());
+        let corner = cx
+            .debug_bounds("chat-test-corner")
+            .expect("archive action")
+            .center();
+        cx.simulate_mouse_down(corner, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(corner, MouseButton::Left, gpui::Modifiers::default());
+        assert!(archived.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn horizon_row_shows_status_and_account(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(move |_, _| HorizonRow {
+            archived: Arc::new(AtomicBool::new(false)),
+            hovered: false,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-account-test").is_some());
+        assert!(cx.debug_bounds("chat-status-test").is_some());
     }
 }

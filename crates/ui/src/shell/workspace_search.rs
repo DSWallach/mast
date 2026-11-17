@@ -186,7 +186,7 @@ impl Shell {
                 let Some(entries) = entries else {
                     continue;
                 };
-                if this
+                if !this
                     .update(cx, |this, cx| {
                         if this.workspace_search_index_key.as_ref() != Some(&key) {
                             return false;
@@ -199,7 +199,6 @@ impl Shell {
                         true
                     })
                     .unwrap_or(false)
-                    == false
                 {
                     break;
                 }
