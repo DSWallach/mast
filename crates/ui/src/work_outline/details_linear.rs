@@ -589,7 +589,7 @@ impl WorkItemDetails {
                 choices = choices.child(
                     div().id(SharedString::from(format!("space-linear-account-{id}")))
                         .debug_selector({ let id = id.clone(); move || format!("space-linear-account-{id}") })
-                        .cursor_pointer().px(px(8.0)).py(px(4.0)).rounded(px(4.0))
+                        .cursor_pointer().px(px(8.0)).py(px(4.0))
                         .border_1().border_color(theme.border).text_color(theme.text).child(label)
                         .on_click(cx.listener(move |this, _, _, cx| this.select_linear_account(choice.clone(), cx)))
                 );
