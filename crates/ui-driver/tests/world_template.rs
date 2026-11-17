@@ -1,6 +1,9 @@
 //! B2b: the small world materialized into real repos and engine stores, the
 //! snapshot hash, the template and reset.
 #![allow(clippy::disallowed_methods)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::path::PathBuf;
 
 use mast_ui_driver::environment::ScratchDirectories;

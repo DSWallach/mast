@@ -1,5 +1,8 @@
 //! Keep this in its own test binary: the allocator counts all live allocations.
 //! Measuring retained allocations avoids platform-dependent RSS/GC thresholds.
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use mast_doc::{MessagePart, SegmentWriter, SessionDoc, fold_event_into_parts};

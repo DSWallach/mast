@@ -1,4 +1,7 @@
 //! Actual 1.13.7 persisted bytes, shared with the edge compatibility tests.
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use loro::{ExportMode, LoroDoc, ToJson};
 use serde_json::{Value, json};
 

@@ -7,6 +7,9 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods)]
 
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

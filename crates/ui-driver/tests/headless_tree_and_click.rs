@@ -3,6 +3,9 @@
 //! (Pluto8195/zui branch mast/test-support, see MAST-PATCH.md there); runs
 //! without a GPU (no renderer).
 #![cfg(target_os = "macos")]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use std::sync::Arc;
 
 use gpui::{
