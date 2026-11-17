@@ -30,11 +30,20 @@ pub(crate) fn hunk_label(header: &str) -> String {
 
 pub(crate) fn hunk_action<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element
+        .text_size(crate::typography::ui_rems(10.0))
         .px(px(Theme::SPACE_SM))
         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
         .border_1()
         .border_color(theme.border)
         .text_color(theme.text_muted)
+}
+
+pub(crate) fn review_card<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
+    element.bg(theme.surface_raised).rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+}
+
+pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
+    element.text_size(crate::typography::ui_rems(11.0))
 }
 
 pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {

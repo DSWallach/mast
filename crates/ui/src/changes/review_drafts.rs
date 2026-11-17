@@ -186,8 +186,7 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(theme.surface_raised)
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(
@@ -386,8 +385,7 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(theme.surface_raised)
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(
@@ -1184,8 +1182,7 @@ impl Changes {
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
-            .bg(theme.surface_raised)
-            .rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+            .when(true, |el| crate::components::review_card(el, theme))
             .border_1()
             .border_color(theme.border)
             .child(

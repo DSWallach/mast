@@ -4751,7 +4751,7 @@ impl Changes {
                     .when(show_reference, |row| row.child(
                         div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
                             .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0)).when(true, |el| crate::components::hunk_action(el, &theme)).child("Add hunk to chat")
+                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Add hunk to chat")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
@@ -6577,7 +6577,7 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .items_center()
         .px(px(Theme::SPACE_LG))
         .bg(theme.diff_hunk_bg)
-        .text_size(crate::typography::ui_rems(11.0))
+        .when(true, crate::components::hunk_header)
         .text_color(theme.text_faint)
         .child(SharedString::from(crate::components::hunk_label(header)))
         .into_any_element()
