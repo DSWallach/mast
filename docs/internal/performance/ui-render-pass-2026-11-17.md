@@ -77,3 +77,23 @@ Fixture: `perf/diff_bench.rs`, 250 chats in AppState, scoped diff of 1–4 MB. R
 | 1. `active_diff`/`resolved` clone the `CheckoutDiff` | `active_diff` allocated 1,032,190 bytes per call for a 1 MB patch (it runs in render, sync and every highlight miss). Idle frame allocation at 300 files (3.9 MB patch) 11,179 → 4,869 KiB; draw time moves only ~0.05 ms in the debug build (memcpy is fast, the cost is allocator churn and page faults) | Real. Fixed: both return `Option<&CheckoutDiff>`; the three places that need an owned diff (async fetch, expand context, parse spawn) clone there, once. Test `active_diff_does_not_copy_the_patch`: 0 bytes/call after, 1,032,190 before |
 | 2. `observe(&state, sync)` runs the whole sync on every AppState notify | 1 sync + 1 render per notify. Notify + draw 2.00 ms vs idle draw 1.96 ms with 250 chats, so sync itself adds ~0.04 ms once the diff clone is gone | Real only because of the clone; fixed by 1. Gating on a revision is not worth the risk at this cost; left as is |
 | 3. `max_shaped_text_width` shapes every line | A 5,000-line single file shapes 10,000 lines during load + first draw: once without highlights, once when the highlights arrive. Multi-file diffs shape only the visible files (400 lines at 1, 50 and 300 files). Per row, `metrics()` is a cached compare. The headless text system shapes in microseconds, so the ms cost on CoreText is not measurable here | Real in count (2 full passes per visible file, on the render thread), unmeasured in ms. Not fixed: skipping the first pass changes widths, and moving it off-thread needs a width placeholder that moves the scrollbar (visible). Recommend: shape on the background parse/highlight task and keep the previous width until it lands; hoist `ch_advance` out of the per-row path |
+
+## Cached transcript: audit of inputs that change its pixels
+
+gpui `.hover()` and group-hover styles call `cx.notify(current_view)`; rows are built inside the Transcript's render, so
+they notify the Transcript. `window.request_animation_frame` and `with_animation` also notify the current view.
+Audited `transcript.rs` and the markdown handlers:
+
+- Row hover (`on_hover`, `hovered_entry`): notifies when the entry changes. Test pointer moves repaint even with that
+  notify removed, because the hover styles notify too.
+- Text selection (markdown `begin`/`update_drag_at`/`clear_if_owner`): `window.refresh()`, which bypasses view caches.
+  Drag autoscroll and mouse up in `transcript.rs` call `cx.notify()`.
+- Link hover and code-block scrollbar hover/fade (`markdown/link_interaction.rs`, `render.rs`): `window.refresh()` or
+  `cx.notify()` on the owning entity when the state changes.
+- Streaming text and the working trailer: `sync` and the shell's 1 s heartbeat notify the Transcript.
+- Settings, theme, appearance: `refresh_windows`.
+- Handlers that only run `cancel_user_hold` (user bubble press/move) change no pixels.
+
+Tests (`shell/perf_tests.rs`, real pointer events in the full Shell): `hovering_a_row_repaints_the_cached_transcript`,
+`selection_drag_repaints_the_cached_transcript`, `streamed_text_repaints_the_cached_transcript_without_other_notifies`.
+Not covered headless: scrollbar fade timing and copy-button reveal (they notify on the owning entity; check in the app).
