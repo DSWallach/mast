@@ -108,6 +108,27 @@ async fn token_usage_queries_filter_agents_and_reject_unknown_devices() {
             .await
             .is_err()
     );
+    let mut legacy_device = core
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    legacy_device.id = "legacy-device".into();
+    legacy_device.capabilities = vec![mast_proto::capabilities::TOKEN_USAGE_V1.into()];
+    core.workspace.upsert_device_row(&legacy_device);
+    let unsupported = client
+        .call(
+            mast_rpc::methods::TOKEN_USAGE,
+            serde_json::json!({"targetDeviceId":"legacy-device", "agentType":"worker"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        unsupported.to_string().contains("Update Mast"),
+        "{unsupported}"
+    );
     core.shutdown().await;
 }
 

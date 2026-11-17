@@ -609,3 +609,123 @@ fn original_results_and_retained_copies_are_not_two_repetition_findings() {
     );
     assert_eq!(all.total, 11);
 }
+
+#[test]
+fn failed_origin_reads_do_not_invent_a_main_agent_classification() {
+    let (activity, agent, parent) = super::super::attribution::classify_origin(
+        &request(),
+        Err(EngineError::Other("fixture: registry read failed".into())),
+    );
+    assert_eq!(activity, "Conversation");
+    assert_eq!(agent, "Unknown agent type");
+    assert!(parent.is_none());
+}
+
+#[test]
+fn attribution_failure_rolls_back_both_persistent_and_active_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("chat", "run", &request(), "Conversation");
+    store.observe("chat", &measurement("usage", "model", "turn", 10, 1));
+    store.flush().unwrap();
+    store
+        .0
+        .lock()
+        .unwrap()
+        .db
+        .execute_batch("DROP TABLE usage_agents")
+        .unwrap();
+    store.set_attribution("chat", "worker".into(), Some("parent".into()));
+    store.flush().unwrap();
+    {
+        let inner = store.0.lock().unwrap();
+        assert_eq!(
+            inner.active["chat"].context.agent_type.as_deref(),
+            Some("main")
+        );
+        let context: String = inner
+            .db
+            .query_row("SELECT context FROM turns WHERE id='run:0'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let context: UsageContext = serde_json::from_str(&context).unwrap();
+        assert_eq!(context.agent_type.as_deref(), Some("main"));
+        assert!(context.parent_chat_id.is_none());
+        assert_eq!(inner.capture_failures, 1);
+    }
+    // Opening another collector restores the additive table after the injected failure.
+    let reloaded = TokenUsage::open(dir.path()).unwrap();
+    store.set_attribution("chat", "worker".into(), Some("parent".into()));
+    store.flush().unwrap();
+    assert_eq!(
+        reloaded
+            .snapshot(&TokenUsageQuery {
+                agent_type: Some("worker".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .total,
+        11
+    );
+}
+
+#[test]
+fn uncommitted_attribution_is_rolled_back_and_provider_replay_is_counted_once() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = TokenUsage::open(dir.path()).unwrap();
+        store.begin("chat", "run", &request(), "Conversation");
+        store.set_attribution("chat", "worker".into(), Some("parent".into()));
+        store.observe(
+            "chat",
+            &measurement("provider:request", "model", "turn", 10, 1),
+        );
+        store.flush().unwrap();
+    }
+    {
+        let db = Connection::open(dir.path().join("token-usage.sqlite3")).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE; UPDATE usage_agents SET agent_type='uncommitted'; UPDATE turns SET context='{}';").unwrap();
+        // Dropping a connection without COMMIT models losing the in-flight transaction.
+    }
+    let recovered = TokenUsage::open(dir.path()).unwrap();
+    recovered.begin("chat", "replayed", &request(), "Conversation");
+    recovered.set_attribution("chat", "worker".into(), Some("parent".into()));
+    recovered.observe(
+        "chat",
+        &measurement("provider:request", "model", "turn", 10, 1),
+    );
+    let all = recovered.snapshot(&Default::default()).unwrap();
+    assert_eq!(all.total, 11);
+    assert_eq!(all.agent_types[0].agent_type, "worker");
+    assert_eq!(
+        all.details[0].context.parent_chat_id.as_deref(),
+        Some("parent")
+    );
+}
+
+#[test]
+fn comparison_groups_retain_build_identity_even_with_the_same_package_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    for (run, build) in [("before", "aaa111"), ("after", "bbb222")] {
+        store.begin("chat", run, &request(), "Conversation");
+        store.observe("chat", &measurement("usage", "model", "turn", 10, 1));
+        store.observe("chat", &done());
+        store.flush().unwrap();
+        store.0.lock().unwrap().db.execute("UPDATE turns SET configuration='same-version-and-options', context=json_set(context,'$.buildRevision',?2) WHERE id=?1", params![format!("{run}:0"), build]).unwrap();
+    }
+    let all = store.snapshot(&Default::default()).unwrap();
+    assert_eq!(all.configurations.len(), 2);
+    assert!(
+        all.configurations
+            .iter()
+            .any(|group| group.build_revision.as_deref() == Some("aaa111"))
+    );
+    assert!(
+        all.configurations
+            .iter()
+            .any(|group| group.build_revision.as_deref() == Some("bbb222"))
+    );
+    assert_eq!(all.total, 22);
+}

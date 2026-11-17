@@ -10,7 +10,9 @@ use std::{
 };
 
 mod attribution;
-pub(crate) use attribution::launch_agent_type;
+#[cfg(test)]
+use attribution::launch_agent_type;
+pub(crate) use attribution::{classify_origin, read_origin};
 mod insights;
 mod query;
 mod retention;
@@ -161,7 +163,7 @@ impl TokenUsage {
             });
             return;
         }
-        let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
+        let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "buildRevision":env!("MAST_USAGE_BUILD_REVISION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.insert(
             chat.into(),
@@ -177,6 +179,7 @@ impl TokenUsage {
                     reasoning: request.reasoning.map(|r| format!("{r:?}")),
                     configured_model: request.model.clone(),
                     build: Some(env!("CARGO_PKG_VERSION").into()),
+                    build_revision: Some(env!("MAST_USAGE_BUILD_REVISION").into()),
                     agent_type: Some(
                         attribution::launch_agent_type(activity, false, false, false).into(),
                     ),

@@ -48,6 +48,55 @@ pub(super) fn tag(
     Ok(())
 }
 
+pub(crate) struct LaunchOrigin {
+    parent_chat_id: Option<String>,
+    has_children: bool,
+    links: Vec<mast_proto::ChatPrLink>,
+}
+
+pub(crate) fn read_origin(
+    workspace: &crate::WorkspaceHost,
+    chat_id: &str,
+) -> Result<LaunchOrigin, EngineError> {
+    let chat = workspace
+        .chat(chat_id)?
+        .ok_or_else(|| fail("chat origin is not available"))?;
+    Ok(LaunchOrigin {
+        parent_chat_id: chat.parent_chat_id,
+        has_children: workspace
+            .read_chats()?
+            .iter()
+            .any(|chat| chat.parent_chat_id.as_deref() == Some(chat_id)),
+        links: workspace.chat_pr_links(chat_id)?,
+    })
+}
+
+pub(crate) fn classify_origin(
+    request: &RunRequest,
+    origin: Result<LaunchOrigin, EngineError>,
+) -> (&'static str, &'static str, Option<String>) {
+    match origin {
+        Ok(origin) => {
+            let worker = origin.parent_chat_id.is_some();
+            let activity = super::classify_activity(request, &origin.links, worker);
+            let review = origin
+                .links
+                .iter()
+                .any(|link| link.source == mast_proto::ChatLinkSource::ReviewLauncher);
+            (
+                activity,
+                launch_agent_type(activity, worker, origin.has_children, review),
+                origin.parent_chat_id,
+            )
+        }
+        Err(_) => (
+            super::classify_activity(request, &[], false),
+            "Unknown agent type",
+            None,
+        ),
+    }
+}
+
 impl TokenUsage {
     pub fn set_attribution(&self, chat: &str, agent_type: String, parent_chat_id: Option<String>) {
         if self.2.is_some() {
@@ -56,13 +105,15 @@ impl TokenUsage {
             return;
         }
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(active) = inner.active.get_mut(chat) else {
+        let Some(active) = inner.active.get(chat) else {
             return;
         };
-        active.context.agent_type = Some(agent_type.clone());
-        active.context.parent_chat_id = parent_chat_id;
+        // The one collector lock covers both the transaction and active state.
+        let mut next_context = active.context.clone();
+        next_context.agent_type = Some(agent_type.clone());
+        next_context.parent_chat_id = parent_chat_id;
         let turn = format!("{}:{}", active.run, active.turn);
-        let context = serde_json::to_string(&active.context).unwrap_or_default();
+        let context = serde_json::to_string(&next_context).unwrap_or_default();
         let result = (|| -> rusqlite::Result<()> {
             let tx = inner.db.transaction()?;
             tx.execute(
@@ -75,9 +126,12 @@ impl TokenUsage {
             )?;
             tx.commit()
         })();
-        if let Err(error) = result {
-            inner.capture_failures += 1;
-            tracing::warn!(%error, "usage attribution write failed");
+        match result {
+            Ok(()) => inner.active.get_mut(chat).unwrap().context = next_context,
+            Err(error) => {
+                inner.capture_failures += 1;
+                tracing::warn!(%error, "usage attribution write failed");
+            }
         }
     }
 
@@ -88,13 +142,14 @@ impl TokenUsage {
             return;
         }
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(active) = inner.active.get_mut(chat) else {
+        let Some(active) = inner.active.get(chat) else {
             return;
         };
         if active.context.agent_type.as_deref() != Some("main") {
             return;
         }
-        active.context.agent_type = Some("orchestrator".into());
+        let mut next_context = active.context.clone();
+        next_context.agent_type = Some("orchestrator".into());
         let turn = format!(
             "{}:{}",
             active.run,
@@ -104,7 +159,7 @@ impl TokenUsage {
                 active.turn.saturating_sub(1)
             }
         );
-        let context = serde_json::to_string(&active.context).unwrap_or_default();
+        let context = serde_json::to_string(&next_context).unwrap_or_default();
         let result = (|| -> rusqlite::Result<()> {
             let tx = inner.db.transaction()?;
             tx.execute(
@@ -114,9 +169,12 @@ impl TokenUsage {
             tx.execute("UPDATE usage_agents SET agent_type='orchestrator' WHERE turn_id=?1 AND agent_type='main' AND role!='subagent'", [&turn])?;
             tx.commit()
         })();
-        if let Err(error) = result {
-            inner.capture_failures += 1;
-            tracing::warn!(%error, "orchestrator attribution write failed");
+        match result {
+            Ok(()) => inner.active.get_mut(chat).unwrap().context = next_context,
+            Err(error) => {
+                inner.capture_failures += 1;
+                tracing::warn!(%error, "orchestrator attribution write failed");
+            }
         }
     }
 }

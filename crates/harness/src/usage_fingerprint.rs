@@ -17,6 +17,7 @@ impl UsageFingerprint {
     }
 
     pub(crate) fn measure(&self, payload: &Value) -> (u64, String) {
+        // Share one JSON representation between byte counting and hashing.
         let body = payload
             .as_str()
             .map(std::borrow::Cow::Borrowed)

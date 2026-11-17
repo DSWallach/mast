@@ -217,6 +217,7 @@ impl TokenUsagePage {
                     partial: 0,
                     completed_tokens: 100000,
                     failed_tokens: 60000,
+                    build_revision: Some("aaa111bbb222".into()),
                     runs: 3,
                 },
                 ConfigurationUsage {
@@ -232,6 +233,7 @@ impl TokenUsagePage {
                     partial: 0,
                     completed_tokens: 50000,
                     failed_tokens: 0,
+                    build_revision: Some("ccc333ddd444".into()),
                     runs: 1,
                 },
             ],
@@ -273,7 +275,13 @@ impl TokenUsagePage {
                     .devices
                     .iter()
                     .find(|d| &d.id == target)
-                    .is_some_and(|d| !d.supports(mast_proto::capabilities::TOKEN_USAGE_V1))
+                    .is_some_and(|d| {
+                        !d.supports(if self.query.agent_type.is_some() {
+                            mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
+                        } else {
+                            mast_proto::capabilities::TOKEN_USAGE_V1
+                        })
+                    })
             {
                 self.error = Some("Update Mast on this device to view token usage.".into());
                 self.loading = false;
@@ -322,7 +330,7 @@ impl TokenUsagePage {
             Ok(snapshot) => {
                 if self.query.agent_type.is_some() && !snapshot.insights_available {
                     self.error =
-                        Some("Update Mast on this device to filter usage by agent type.".into());
+                        Some("Update Mast on the selected device to a build with agent-type monitoring before using this filter.".into());
                     self.snapshot = None;
                     cx.notify();
                     return;
@@ -762,7 +770,7 @@ impl Render for TokenUsagePage {
                                 cohort.tokens / cohort.completed
                             )
                         };
-                        content=content.child(widgets::card_row(&theme,i==0).child(div().flex_1().min_w_0().child(format!("{} · {} · {}",cohort.model,cohort.activity,cohort.agent_type)).child(widgets::page_subtitle(&theme,format!("{} · {} completed · {} failed/cancelled · {} partial",average,cohort.completed,cohort.failed,cohort.partial))).child(widgets::page_subtitle(&theme,format!("Configuration {} · Space {} · Work item {} · {} failed/cancelled tokens",cohort.fingerprint.chars().take(12).collect::<String>(),cohort.space_id.as_deref().unwrap_or("unknown"),cohort.work_item_id.as_deref().unwrap_or("not attached"),cohort.failed_tokens)))).child(format!("{} tokens",cohort.tokens)));
+                        content=content.child(widgets::card_row(&theme,i==0).child(div().flex_1().min_w_0().child(format!("{} · {} · {}",cohort.model,cohort.activity,cohort.agent_type)).child(widgets::page_subtitle(&theme,format!("{} · {} completed · {} failed/cancelled · {} partial",average,cohort.completed,cohort.failed,cohort.partial))).child(widgets::page_subtitle(&theme,format!("Configuration {} · Build {} · Space {} · Work item {} · {} failed/cancelled tokens",cohort.fingerprint.chars().take(12).collect::<String>(),build_label(cohort.build_revision.as_deref()),cohort.space_id.as_deref().unwrap_or("unknown"),cohort.work_item_id.as_deref().unwrap_or("not attached"),cohort.failed_tokens)))).child(format!("{} tokens",cohort.tokens)));
                     }
                     for (i, run) in snapshot.details.iter().enumerate() {
                         content = content.child(
@@ -824,6 +832,16 @@ impl Render for TokenUsagePage {
             .children(rail)
     }
 }
+fn build_label(revision: Option<&str>) -> String {
+    let Some(revision) = revision else {
+        return "unrecorded".into();
+    };
+    let (commit, suffix) = revision
+        .strip_suffix("-dirty")
+        .map_or((revision, ""), |commit| (commit, " (uncommitted)"));
+    format!("{}{suffix}", commit.chars().take(12).collect::<String>())
+}
+
 fn format_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())

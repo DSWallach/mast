@@ -45,6 +45,7 @@ impl TokenUsage {
         let mut result=TokenUsageSnapshot{updated_at:crate::now_ms(),coverage:vec![
             "Recorded on this device since rollout. Earlier history is not included.".into(),
             "Provider counts and observed payload bytes are separate. Bytes are not billed tokens.".into(),
+            "Agent CLIs started inside shell tools are not independently metered. Their model token usage may be absent from this ledger.".into(),
             "Tool schemas, hidden prompts, repeated request inclusion, exact rule token costs and causal savings are unavailable unless the harness exposes them.".into(),
             "Claude role totals combine main and subagent usage; a precise Claude subagent split is unavailable. First results after Claude resume establish a baseline and use only observed current-process requests, so those turns may be incomplete. Claude per-model cumulative results are differenced within a harness process and include children. Request observations may be partial until a result arrives. Other harnesses may report input/output only.".into(),
             "Agent types use explicit launch origins and provider spawn metadata. Older records remain Unknown agent type. Claude child request observations are a partial breakdown and must not be added to parent totals.".into(),
@@ -124,7 +125,7 @@ impl TokenUsage {
             .map_err(fail)?;
         result.has_more = result.details.len() > 50;
         result.details.truncate(50);
-        let mut configurations=db.prepare(&format!("SELECT t.configuration,m.model,t.activity,COALESCE(SUM({selected}),0),COUNT(DISTINCT CASE WHEN t.status='completed' THEN t.id END),COUNT(DISTINCT CASE WHEN t.status IN ('failed','cancelled') THEN t.id END),COUNT(DISTINCT CASE WHEN t.status='partial' THEN t.id END),COALESCE(SUM(CASE WHEN t.status='completed' THEN {selected} ELSE 0 END),0),COUNT(DISTINCT t.id),COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type'),json_extract(t.context,'$.workItemId'),json_extract(t.context,'$.spaceId'),COALESCE(SUM(CASE WHEN t.status IN ('failed','cancelled') THEN {selected} ELSE 0 END),0) {FILTER} GROUP BY t.configuration,m.model,t.activity,10,11,12 ORDER BY 4 DESC LIMIT 200")).map_err(fail)?;
+        let mut configurations=db.prepare(&format!("SELECT t.configuration,m.model,t.activity,COALESCE(SUM({selected}),0),COUNT(DISTINCT CASE WHEN t.status='completed' THEN t.id END),COUNT(DISTINCT CASE WHEN t.status IN ('failed','cancelled') THEN t.id END),COUNT(DISTINCT CASE WHEN t.status='partial' THEN t.id END),COALESCE(SUM(CASE WHEN t.status='completed' THEN {selected} ELSE 0 END),0),COUNT(DISTINCT t.id),COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type'),json_extract(t.context,'$.workItemId'),json_extract(t.context,'$.spaceId'),COALESCE(SUM(CASE WHEN t.status IN ('failed','cancelled') THEN {selected} ELSE 0 END),0),json_extract(t.context,'$.buildRevision') {FILTER} GROUP BY t.configuration,m.model,t.activity,10,11,12,14 ORDER BY 4 DESC LIMIT 200")).map_err(fail)?;
         result.configurations = configurations
             .query_map(
                 params![q.model, q.since, q.until, q.activity, q.agent_type],
@@ -143,6 +144,7 @@ impl TokenUsage {
                         work_item_id: r.get(10)?,
                         space_id: r.get(11)?,
                         failed_tokens: r.get(12)?,
+                        build_revision: r.get(13)?,
                     })
                 },
             )

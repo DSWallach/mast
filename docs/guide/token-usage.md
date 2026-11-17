@@ -31,7 +31,7 @@ have an unknown type.
 
 Select an agent type to filter the accounted totals, models, token types,
 contributing turns, and configuration groups consistently. A remote engine must
-support these filters; older responses produce an update message rather than
+advertise `token-usage-insights-v1` for these filters; older responses produce an update message rather than
 silently returning unfiltered totals.
 
 Claude's combined totals remain with the launching agent and say **includes
@@ -78,7 +78,7 @@ Original harness responses and retained transcript results are separate stages. 
 
 **Instructions & rules** records Work Outline instruction entries and envelope sizes by revision when Mast submits them to the harness. The envelope includes the entries, so those rows overlap and must not be added together. Repo rule files in the run’s working directory found on disk and instruction/skill reads are labeled separately from instruction delivery. File inventory uses file sizes and modification versions; availability does not establish prompt inclusion. Hidden harness prompts, global/repository instructions loaded internally by a harness, tool-schema delivery, and repeated inclusion in provider requests are not currently observable. The page states these gaps instead of displaying zero cost.
 
-**Trends & comparisons** shows daily totals in UTC and groups turns by configuration fingerprint, model, activity, agent type, Space, and work item. It shows completed, failed/cancelled, and partial sample counts plus total tokens per completed turn, including failed and partial attempts. Compare the same work item, model, and agent type across configuration groups; differences in task mix or outcomes can explain the result. A configuration fingerprint covers the Mast package version, requested harness/model/reasoning/options, and supplied Work Outline revision. It does not identify every external harness configuration or hidden prompt change. Use the same task and comparable outcomes when comparing workflows; differences in cache warmness, models, task difficulty, or external configuration can explain apparent savings.
+**Trends & comparisons** shows daily totals in UTC and groups turns by configuration fingerprint, model, activity, agent type, Space, and work item. It shows completed, failed/cancelled, and partial sample counts plus total tokens per completed turn, including failed and partial attempts. Compare the same work item, model, and agent type across configuration groups; differences in task mix or outcomes can explain the result. A configuration fingerprint covers the Mast package version and Git build revision, requested harness/model/reasoning/options, and supplied Work Outline revision. It does not identify every external harness configuration or hidden prompt change. Use the same task and comparable outcomes when comparing workflows; differences in cache warmness, models, task difficulty, or external configuration can explain apparent savings.
 
 Useful candidates include large MCP responses, repeated CLI commands, discovery/polling loops, repeated failed calls, large instruction envelopes, and expensive background title runs. These observations identify candidates to investigate; the page does not automatically change rules or workflows or claim causal savings.
 
@@ -90,3 +90,9 @@ Usage collection runs on a bounded background writer. If its queue fills,
 measurements can be dropped and the page reports incomplete coverage. The
 ledger has no automatic age or size limit: it grows with recorded activity
 until the owning chats are deleted.
+
+Comparison groups identify the Git build revision captured at compilation.
+Builds with tracked source changes are marked **uncommitted**. Comparisons
+should use clean commits: multiple uncommitted variants of one base revision
+are not distinguished from each other. Source archives without Git metadata
+report an unknown revision. Older rows can have an unrecorded revision.

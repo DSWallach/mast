@@ -123,6 +123,8 @@ pub struct TokenUsageQuery {
     pub since: Option<i64>,
     pub until: Option<i64>,
     pub activity: Option<String>,
+    /// Requires token-usage-insights-v1. Legacy hosts ignore this field;
+    /// callers must verify response support before presenting filtered totals.
     #[serde(default)]
     pub agent_type: Option<String>,
     #[serde(default)]
@@ -169,6 +171,8 @@ pub struct UsageContext {
     pub reasoning: Option<String>,
     pub configured_model: Option<String>,
     pub build: Option<String>,
+    #[serde(default)]
+    pub build_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +197,7 @@ pub struct DiagnosticGroup {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsageSnapshot {
+    /// False on legacy responses, including a host that ignored agent_type.
     #[serde(default)]
     pub insights_available: bool,
     pub total: u64,
@@ -245,6 +250,8 @@ pub struct ConfigurationUsage {
     pub space_id: Option<String>,
     #[serde(default)]
     pub failed_tokens: u64,
+    #[serde(default)]
+    pub build_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

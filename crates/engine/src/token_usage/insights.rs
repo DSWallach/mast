@@ -1,6 +1,8 @@
 use super::query::FILTER;
 use super::*;
 
+// Old rows and missing metadata stay unknown. A child's type never falls
+// back to its parent's run classification.
 pub(super) const AGENT: &str = "COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type')";
 
 pub(super) fn populate(
