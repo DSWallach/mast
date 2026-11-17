@@ -1618,7 +1618,14 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     };
     *lock(&entry.probe) = probe;
     if repair {
-        entry.reset_repair_backoff(); // the probe saw a change
+        // An undecidable probe (a dirty submodule) runs this full capture every
+        // tick; an unchanged result counts as quiet so those checkouts back
+        // off too, under the same detection bound. A changed one resets.
+        if lock(&entry.checksum).as_deref() == Some(snapshot.checksum.as_str()) {
+            entry.quiet_ticks.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry.reset_repair_backoff();
+        }
     }
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
