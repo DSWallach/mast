@@ -258,8 +258,6 @@ fn bench_chat(index: usize) -> mast_proto::Chat {
 /// monospace advance once per typography/theme state, not once per row.
 #[gpui::test]
 fn font_advance_is_not_looked_up_per_row(cx: &mut gpui::TestAppContext) {
-    // Tests may share a thread (and so the cache) with other text systems.
-    crate::changes::reset_ch_advance_cache();
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -301,11 +299,12 @@ fn font_advance_is_not_looked_up_per_row(cx: &mut gpui::TestAppContext) {
             window.draw(cx).clear();
         });
     };
+    crate::changes::reset_ch_advance_cache();
     let first = crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get());
     draw(vcx);
     assert!(
         crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get()) > first,
-        "the expanded-context width path never ran; the budget is vacuous"
+        "the first draw never measured a column; the budget is vacuous"
     );
     let before = crate::changes::CH_ADVANCE_LOOKUPS.with(|c| c.get());
     for _ in 0..10 {
