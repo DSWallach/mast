@@ -4694,9 +4694,9 @@ impl Changes {
                 let failed = matches!(entry, Some(expand_context::Entry::Failed));
                 div().w_full().h(px(HUNK_HEADER_HEIGHT)).flex().justify_center().items_center().gap(px(12.0))
                     .text_color(theme.text_muted).text_size(px(10.0))
-                    .child(div().id(("expand-context", ix)).cursor_pointer().child(if loading { "Loading…" } else if failed { "Context unavailable" } else { "Expand 20 lines" })
+                    .child(div().id(("expand-context", ix)).cursor_pointer().when(true, |el| crate::components::hunk_action(el, &theme)).child(if loading { "Loading…" } else if failed { "Context unavailable" } else { "Expand 20 lines" })
                         .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, false, cx))))
-                    .when(!loading && !failed, |el| el.child(div().id(("expand-context-all", ix)).cursor_pointer().child("Expand all")
+                    .when(!loading && !failed, |el| el.child(div().id(("expand-context-all", ix)).cursor_pointer().when(true, |el| crate::components::hunk_action(el, &theme)).child("Expand all")
                         .on_click(cx.listener(move |this, _, _, cx| this.expand_context(file, gap, true, cx)))))
                     .into_any_element()
             }
