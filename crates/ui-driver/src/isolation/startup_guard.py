@@ -1,0 +1,58 @@
+#!/usr/bin/python3
+"""Entry guard for a process already inside the driver sandbox."""
+import errno
+import os
+import pwd
+import socket
+import sys
+
+
+def fail(message):
+    print("driver startup refused: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
+def directory(name):
+    value = os.environ.get(name)
+    if not value or not os.path.isabs(value) or not os.path.isdir(value):
+        fail(name + " must name an existing absolute directory")
+    return os.path.realpath(value)
+
+
+def inside(path, parent):
+    return os.path.commonpath((path, parent)) == parent
+
+
+def main():
+    account = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    if directory("MAST_DRIVER_ACCOUNT_HOME") != account:
+        fail("account home does not match the current user")
+    root = directory("MAST_DRIVER_ROOT")
+    if not inside(root, os.path.realpath("/private/tmp")) or not os.path.basename(root).startswith("mast-drive."):
+        fail("scratch root is invalid")
+    if inside(root, account) or inside(account, root):
+        fail("scratch root overlaps account home")
+    paths = [directory(name) for name in ("HOME", "MAST_DATA_DIR", "TMPDIR")]
+    if any(path == root or not inside(path, root) or inside(path, account) for path in paths):
+        fail("environment directory is outside scratch root")
+    for index, path in enumerate(paths):
+        if any(inside(path, other) or inside(other, path) for other in paths[index + 1:]):
+            fail("environment directories overlap")
+    if len(sys.argv) < 2 or not os.path.isabs(sys.argv[1]):
+        fail("absolute executable path is required")
+    # This must be an explicit sandbox denial. A timeout or routing failure
+    # would also happen without a sandbox and therefore cannot prove isolation.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1)
+            connection.connect(("192.0.2.1", 443))
+    except OSError as error:
+        if error.errno not in (errno.EPERM, errno.EACCES):
+            fail("network probe did not receive a sandbox denial")
+    else:
+        fail("outbound network is available")
+    os.execv(sys.argv[1], sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main()
