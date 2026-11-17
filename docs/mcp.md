@@ -56,7 +56,8 @@ the original tools to the token's Chat, project, and device:
 | `interrupt_chat`, `respond_to_input`, `wait_for_turn`, `archive_chat` | Only chats the caller created. |
 | `send_message` | Chats the caller created, or its parent chat (`parentChatId`; see `report_to_parent`). Anything else: "you can message chats you created and your parent chat". |
 | `report_to_parent` | Needs a parent chat (errors clearly without one). Never crosses Spaces. |
-| `get_chat`, `read_chat` | Chats the caller created, or the caller itself. |
+| `get_chat` | Chats the caller created, or the caller itself. |
+| `read_chat` | Those chats, non-archived chats in the caller's item subtree or project, and recorded handoff predecessors in that scope even after archiving. |
 | `list_chats` | Lists only the caller and the chats it created. |
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |

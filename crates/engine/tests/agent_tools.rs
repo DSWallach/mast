@@ -1050,6 +1050,33 @@ async fn folderless_user_chat_hands_off_in_its_own_scratch_directory() {
         .unwrap();
     assert_eq!(request.cwd, root);
     assert!(request.prompt.contains("source chat personal-one"));
+    drop(requests);
+    rig.core
+        .workspace
+        .set_chat_archived("personal-one", true)
+        .unwrap();
+    let next = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({"chatId":successor, "summary":"Continue again", "operationId":"second-personal-handoff"})).await.unwrap();
+    assert_eq!(next["executionRoot"], root);
+    let next_id = next["chatId"].as_str().unwrap();
+    rig.core
+        .workspace
+        .set_chat_archived(successor, true)
+        .unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(next_id, "read-predecessors", &space, &rig.core.device_id);
+    let scope = tool(&rig, lease.token(), "chat_project_scope_chats", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        scope["handoffSourceChatIds"],
+        json!([successor, "personal-one"])
+    );
+    assert!(
+        !scope["handoffSourceChatIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("personal-two"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
