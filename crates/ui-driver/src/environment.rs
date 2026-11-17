@@ -92,19 +92,111 @@ impl ScratchDirectories {
         let paths = EnvironmentPaths::validate(&root, &home, &data, &temporary, account_home)?;
         let stub_log = root.join("stub.log");
         std::fs::write(&stub_log, b"")?;
-        for program in ["gh", "claude", "codex"] {
+        // Keep git disabled until its confinement checks cover every repository
+        // indirection. The prototype guard is tested separately below.
+        for program in ["gh", "claude", "codex", "git"] {
             let path = shims.join(program);
             // The log location comes from the cleared child environment, not a
             // caller-supplied command argument.
             std::fs::write(&path, b"#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" >> \"${MAST_DRIVER_STUB_LOG:?}\"\necho 'driver: command disabled' >&2\nexit 127\n")?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         }
+        std::fs::write(root.join("git.log"), b"")?;
         Ok(Self {
             paths,
             repositories,
             shims,
             stub_log,
         })
+    }
+
+    /// Copy a template data directory into an empty run directory. Symlinks are
+    /// rejected rather than followed, including links back to the template.
+    pub(crate) fn copy_template_data(&self, template: &ScratchDirectories) -> io::Result<()> {
+        fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                let target = destination.join(entry.file_name());
+                if kind.is_dir() {
+                    std::fs::create_dir(&target)?;
+                    copy_directory(&entry.path(), &target)?;
+                } else if kind.is_file() {
+                    let mut input = std::fs::File::open(entry.path())?;
+                    let mut output = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(target)?;
+                    io::copy(&mut input, &mut output)?;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "template contains a link or special file",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        if self.paths.root == template.paths.root
+            || std::fs::read_dir(&self.paths.data)?.next().is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "run data directory must be empty and distinct",
+            ));
+        }
+        copy_directory(&template.paths.data, &self.paths.data)
+    }
+
+    /// Start a command only after the sandbox and startup guard are active.
+    pub(crate) fn run_isolated(
+        &self,
+        account_home: &Path,
+        executable: &Path,
+        arguments: &[&std::ffi::OsStr],
+    ) -> io::Result<std::process::Output> {
+        if !executable.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "executable must be absolute",
+            ));
+        }
+        EnvironmentPaths::validate(
+            &self.paths.root,
+            &self.paths.home,
+            &self.paths.data,
+            &self.paths.temporary,
+            account_home,
+        )?;
+        let profile = self.write_sandbox_profile(account_home)?;
+        let guard = self.paths.root.join("startup_guard.py");
+        std::fs::write(&guard, include_str!("isolation/startup_guard.py"))?;
+        let path = std::env::join_paths([
+            self.shims.as_path(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+            Path::new("/usr/sbin"),
+            Path::new("/sbin"),
+        ])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(profile)
+            .arg("/usr/bin/python3")
+            .arg(guard)
+            .arg(executable)
+            .args(arguments)
+            .current_dir(&self.repositories)
+            .env_clear()
+            .env("HOME", &self.paths.home)
+            .env("MAST_DATA_DIR", &self.paths.data)
+            .env("TMPDIR", &self.paths.temporary)
+            .env("MAST_DRIVER_ROOT", &self.paths.root)
+            .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
+            .env("MAST_DRIVER_STUB_LOG", &self.stub_log)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("PATH", path)
+            .output()
     }
 
     /// Write a restrictive profile for sandbox-exec. This does not itself
@@ -175,6 +267,97 @@ mod tests {
             "gh\nclaude\ncodex\n"
         );
         fs::remove_dir_all(&scratch.paths.root).unwrap();
+        fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
+    fn prototype_git_guard_refuses_common_overrides() {
+        let output = std::process::Command::new("/usr/bin/mktemp")
+            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        let scratch = ScratchDirectories::create(&account).unwrap();
+        let repo = scratch.repositories.join("space");
+        fs::create_dir(&repo).unwrap();
+        let guard = scratch.paths.root.join("git_guard.py");
+        fs::write(&guard, include_str!("isolation/git_guard.py")).unwrap();
+        let run = |cwd: &Path, args: &[&str]| {
+            let mut command = std::process::Command::new("/usr/bin/python3");
+            command.arg(&guard);
+            command
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .env("HOME", &scratch.paths.home)
+                .env("MAST_DRIVER_ROOT", &scratch.paths.root)
+                .output()
+                .unwrap()
+        };
+        assert!(run(&repo, &["init", "-q", "-b", "main"]).status.success());
+        assert!(
+            run(&repo, &["commit", "-q", "--allow-empty", "-m", "initial"])
+                .status
+                .success()
+        );
+        assert!(run(&repo, &["rev-parse", "--show-toplevel"])
+            .status
+            .success());
+        assert!(!run(&repo, &["-C", "/", "status"]).status.success());
+        assert!(!run(&repo, &["--git-dir=/", "status"]).status.success());
+        assert!(!run(&repo, &["status", "--output=/tmp/out"])
+            .status
+            .success());
+        let log = fs::read_to_string(scratch.paths.root.join("git.log")).unwrap();
+        assert!(log.contains("A init\n"));
+        assert_eq!(log.lines().filter(|line| line.starts_with("R ")).count(), 3);
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
+        fs::remove_dir_all(account).unwrap();
+    }
+
+    /// Requires permission to apply a macOS sandbox (the agent sandbox may
+    /// reject nested sandbox-exec). Run separately from the normal unit suite.
+    #[test]
+    #[ignore = "requires permission to apply a macOS sandbox"]
+    fn isolated_command_passes_guard_without_invoking_stubs() {
+        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let scratch = ScratchDirectories::create(&account).unwrap();
+        let output = scratch
+            .run_isolated(&account, Path::new("/usr/bin/true"), &[])
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(fs::read(&scratch.stub_log).unwrap().is_empty());
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
+    }
+
+    #[test]
+    fn template_copy_starts_each_run_clean() {
+        let output = std::process::Command::new("/usr/bin/mktemp")
+            .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        let template = ScratchDirectories::create(&account).unwrap();
+        let first = ScratchDirectories::create(&account).unwrap();
+        let second = ScratchDirectories::create(&account).unwrap();
+        fs::write(template.paths.data.join("fixture"), "seed").unwrap();
+        first.copy_template_data(&template).unwrap();
+        fs::write(first.paths.data.join("fixture"), "changed").unwrap();
+        second.copy_template_data(&template).unwrap();
+        assert_eq!(
+            fs::read_to_string(second.paths.data.join("fixture")).unwrap(),
+            "seed"
+        );
+        assert!(first.copy_template_data(&template).is_err());
+        fs::remove_dir_all(&template.paths.root).unwrap();
+        fs::remove_dir_all(&first.paths.root).unwrap();
+        fs::remove_dir_all(&second.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
     }
 
