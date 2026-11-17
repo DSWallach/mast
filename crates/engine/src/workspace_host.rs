@@ -911,6 +911,11 @@ impl WorkspaceHost {
 
     // ── Work Outline (registry rows; policy in `crate::work_outline`) ──────
 
+    /// Chat-row revision, including edits that coalesce to the same published list.
+    pub(crate) fn chats_generation(&self) -> u64 {
+        self.read(|doc| doc.kinds_generation(&[mast_doc::KIND_CHATS]))
+    }
+
     /// The registry change counter: bumped on every local mutation and every
     /// applied server frame. Composed watches (`WatchWorkOutline`) recompute
     /// from it.

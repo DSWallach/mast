@@ -28,6 +28,9 @@ platform = 'cfg(target_os = "macos")'
 filter = 'package(mast-engine) & not (test(/^workspace_files::/) | test(/^diff_sync_/) | test(/^idle_spawn_budget::/) | test(/m5_repos_diffs_terminals::diff_sync_publishes_without_rewriting_chat_branch$/))'
 setup = 'engine-repair-only'
 
+# The inherited world-template hash quarantine isolates a reproducibility failure,
+# not a network/credential requirement. Remove it from both filters once repeated
+# same-seed hashes agree in isolated runs and the complete release suite.
 # Tests that open PTYs / spawn login shells and git processes time out when many
 # run at once (observed 2026-11-03: every m5_repos_diffs_terminals test hit the 3 min
 # limit at 8 threads). Limit them to two concurrent tests; the rest still run wide.

@@ -96,6 +96,8 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Scenario-only YAML parser; excluded from the installed dependency graph.
+serde_yaml = "0.9"
 json5 = "0.4"
 # antigravity writes `settings.json` but reads it back with `hjson.load`, so a
 # user's comments and unquoted keys have to survive our read of the same file.
@@ -164,10 +166,9 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
-# Temporary renderer override for the companion per-pixel text fade PR.
-# Replace with an upstream revision once it merges.
-# Pluto8195/zui mast/test-support = gaelcado/zui@53869c2 + one test-support-only
-# commit for the headless UI driver (a11y activation, debug bounds).
+# Renderer fork includes per-pixel text fade and the headless driver hooks.
+# Pluto8195/zui mast/test-support builds on gaelcado/zui@53869c2.
+# Debug-bounds support is gated by test-support; shared renderer code ships too.
 [patch."https://github.com/zeronsh/zui"]
 gpui = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }
 gpui_macros = { git = "https://github.com/Pluto8195/zui", rev = "690b8349778c3202a00b28d3dc0a99be9ec84c90" }

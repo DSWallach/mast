@@ -31,18 +31,22 @@ impl TokenUsage {
         // Registry revisions retain that deletion signal even when no list changed.
         let mut changes = workspace.watch_changes();
         tokio::spawn(async move {
+            let mut reconciled = None;
             loop {
-                let usage = usage.clone();
-                let workspace = workspace.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || usage.reconcile_deletions(&workspace))
-                        .await;
-                if !matches!(result, Ok(Ok(()))) {
-                    tracing::warn!("token usage deletion reconciliation failed; retrying");
+                let generation = workspace.chats_generation();
+                if reconciled != Some(generation) {
+                    let usage = usage.clone();
+                    let workspace = workspace.clone();
+                    let result = tokio::task::spawn_blocking(move || usage.reconcile_deletions(&workspace)).await;
+                    if matches!(result, Ok(Ok(()))) {
+                        reconciled = Some(generation);
+                    } else {
+                        tracing::warn!("token usage deletion reconciliation failed; retrying");
+                    }
                 }
                 tokio::select! {
                     changed=changes.changed()=>if changed.is_err(){break;},
-                    _=tokio::time::sleep(std::time::Duration::from_secs(30))=>{},
+                    _=tokio::time::sleep(std::time::Duration::from_secs(30))=>{reconciled = None;},
                 }
             }
         })

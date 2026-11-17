@@ -368,7 +368,18 @@ impl OutlineView {
             .child(
                 div()
                     .id(SharedString::from(format!("outline-chat-summary-{key}")))
-                    .when(drift, |el| el.debug_selector(move || selector.clone()))
+                    .when(drift, |el| {
+                        let chat_id = chat.id.clone();
+                        el.debug_selector(move || selector.clone())
+                            .cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(shell) = this.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+                                    shell.update(cx, |shell, cx| shell.open_instruction_compare(&chat_id, cx));
+                                }
+                            }))
+                    })
                     .flex_1()
                     .min_w_0()
                     .truncate()

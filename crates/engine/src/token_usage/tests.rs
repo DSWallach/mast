@@ -575,8 +575,8 @@ fn resume_baselines_are_retained_for_audit_and_excluded_from_billed_usage() {
     assert_eq!(rows, 1);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purge() {
+#[tokio::test]
+async fn rapid_registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purge() {
     let dir = tempfile::tempdir().unwrap();
     let profile = crate::EngineProfile::development(dir.path(), "org", "user");
     let root = profile.store_root().to_path_buf();
@@ -587,6 +587,12 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
         None,
     )
     .unwrap();
+    let usage = core.sessions.token_usage().unwrap();
+    // Finish the initial pass, then create, record and delete without yielding:
+    // the published chat list remains empty throughout this cycle.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let published = core.workspace.watch_chats();
+    let generation = core.workspace.chats_generation();
     core.workspace
         .create_chat(
             "remote-deleted",
@@ -596,7 +602,6 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
             Some(dir.path().display().to_string()),
         )
         .unwrap();
-    let usage = core.sessions.token_usage().unwrap();
     usage.begin("remote-deleted", "r", &request(), "Conversation");
     usage.observe(
         "remote-deleted",
@@ -605,6 +610,8 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
     // This is the same registry tombstone the host receives through sync,
     // without executing the host's DeleteChat RPC.
     core.workspace.delete_chat("remote-deleted").unwrap();
+    assert!(published.borrow().iter().all(|chat| chat.id != "remote-deleted"));
+    assert!(core.workspace.chats_generation() > generation);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if usage.snapshot(&Default::default()).unwrap().total == 0 {
