@@ -157,3 +157,23 @@ async fn clearing_cache_discards_inflight_results() {
     assert_eq!(fresh.value, vec![2]);
     assert_eq!(store.peek("k").unwrap().value, vec![2]);
 }
+
+#[test]
+fn older_disk_writes_cannot_restore_a_cleared_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.json");
+    let store = Store::new(Duration::from_secs(60));
+    store.attach_file(path.clone());
+    let (old, cleared) = {
+        let mut state = store.lock();
+        state.entries.insert("k".into(), Entry { fetched_at: Utc::now(), value: vec![1] });
+        let old = persist_snapshot(&state);
+        state.entries.clear();
+        let cleared = persist_snapshot(&state);
+        (old, cleared)
+    };
+    write_snapshot(cleared);
+    write_snapshot(old);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(disk, serde_json::json!({}));
+}

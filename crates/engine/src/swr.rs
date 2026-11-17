@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -32,6 +33,8 @@ struct State<V, E> {
     inflight: HashMap<String, (u64, Flight<V, E>)>,
     next_id: u64,
     path: Option<PathBuf>,
+    write_revision: Arc<AtomicU64>,
+    write_gate: Arc<Mutex<()>>,
 }
 
 /// Cheap to clone; clones share state.
@@ -62,6 +65,8 @@ where
                 inflight: HashMap::new(),
                 next_id: 0,
                 path: None,
+                write_revision: Arc::new(AtomicU64::new(0)),
+                write_gate: Arc::new(Mutex::new(())),
             })),
         }
     }
@@ -163,20 +168,23 @@ where
     }
 }
 
-type Snapshot = Option<(PathBuf, Result<Vec<u8>, String>)>;
+type Snapshot = Option<(PathBuf, Result<Vec<u8>, String>, Arc<AtomicU64>, u64, Arc<Mutex<()>>)>;
 
 fn persist_snapshot<V: Serialize, E>(state: &State<V, E>) -> Snapshot {
     let path = state.path.clone()?;
     let bytes = serde_json::to_vec(&state.entries).map_err(|e| e.to_string());
-    Some((path, bytes))
+    let revision = state.write_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    Some((path, bytes, state.write_revision.clone(), revision, state.write_gate.clone()))
 }
 
 /// Write off the async worker when a runtime is present; atomic via rename.
 fn write_snapshot(snapshot: Snapshot) {
-    let Some((path, bytes)) = snapshot else {
+    let Some((path, bytes, latest, revision, gate)) = snapshot else {
         return;
     };
     let write = move || {
+        let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+        if latest.load(Ordering::SeqCst) != revision { return; }
         let Ok(bytes) = bytes else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
