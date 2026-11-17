@@ -2026,6 +2026,11 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                if let Some(parent) = self.workspace.chat(&chat_id).ok().flatten().and_then(|chat| chat.parent_chat_id)
+                    && let Some(usage) = self.sessions.token_usage()
+                {
+                    usage.promote_orchestrator(&parent);
+                }
                 if let Some(parent) = parent_chat_id
                     && let Err(err) = self.launch.inherit_from_parent(&chat_id, &parent)
                 {

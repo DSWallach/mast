@@ -978,6 +978,21 @@ mod tests {
         assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
+    #[test]
+    fn sanitize_preserves_explicit_agent_types_without_the_prompt() {
+        for key in ["agent_type", "agentType", "subagent_type"] {
+            let call = ToolCall::Unknown {
+                name: "Agent".into(),
+                input: Some(serde_json::json!({key:"pr-review", "prompt":"private instructions"})),
+            };
+            let clean = sanitize_tool_call(&call);
+            let ToolCall::Unknown { input: Some(input), .. } = &clean else { panic!() };
+            assert_eq!(input[key], "pr-review");
+            assert!(input.get("prompt").is_none());
+            assert_eq!(sanitize_tool_call(&clean), clean);
+        }
+    }
+
     /// A spawn keeps the two short identifiers its chip names the child by and
     /// drops the prompt — the whole point of the whitelist. Still a fixpoint.
     #[test]

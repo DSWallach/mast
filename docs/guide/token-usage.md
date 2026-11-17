@@ -1,6 +1,6 @@
 # Token usage
 
-Open **Settings → Token usage** to see usage recorded by a device across its Spaces. Choose a device, time range, model, and token type. Select an activity to narrow its contributing runs; select a run to open its chat.
+Open **Settings → Token usage** to see usage recorded by a device across its Spaces. Choose a device, time range, model, agent type, and token type. Select an activity to narrow its contributing runs; select a run to open its chat.
 
 The page starts collecting new usage when the updated engine runs. It does not reconstruct older sessions. The visible page refreshes periodically; Refresh retrieves the latest stored measurements without making a model request. An offline device must reconnect before its data can be queried.
 
@@ -12,6 +12,64 @@ The first result after resuming a Claude process establishes a cumulative baseli
 
 Completed runs, failed/cancelled attempts, and partial measurements are retained. A completed run means the harness finished; it does not establish that the work was correct.
 
+## Find expensive agents
+
+Overview ranks agent types alongside activities. Mast records `pr-review` for
+its review launcher, `worker` for chats created by another chat, `orchestrator`
+for main chats that create workers, and `title-generator` for automatic titles.
+These labels are separate from activity: a scheduled review can have activity
+Scheduled task and agent type `pr-review`. A worker that also creates children
+keeps its worker label. Parent-chat and work-item IDs are kept in run details.
+
+Native subagents use their provider's explicit type, such as `explorer`, `worker`,
+or a custom `pr-review`. Missing metadata and older ledger rows remain
+**Unknown agent type**. Names are not guessed from a prompt, task description,
+or a shell command. An opaque `claude --agent pr-review` subprocess has no
+independently observed token usage; the parent tool call alone cannot establish
+its cost. Resumed native children whose original spawn was not observed can also
+have an unknown type.
+
+Select an agent type to filter the accounted totals, models, token types,
+contributing turns, and configuration groups consistently. A remote engine must
+support these filters; older responses produce an update message rather than
+silently returning unfiltered totals.
+
+Claude's combined totals remain with the launching agent and say **includes
+subagents**. **Observed child agent requests** shows a partial, provider-reported
+breakdown with links to example chats. Those observations overlap the combined
+totals and are never added to them. An agent filter can therefore show child
+request evidence with no independently attributable billing total.
+
+## Investigate repeated work
+
+The **Efficiency** tab ranks repeated tool inputs, repeated retained tool
+results, errors, empty CLI/MCP results, and repeated instruction deliveries.
+Each finding links to an example chat and identifies the agent type, stage,
+observation count, repeated bytes, and time. Matching inputs and results use
+local keyed fingerprints; raw commands and payloads are not copied to the ledger.
+Repeated reads and searches are included alongside CLI and MCP calls. Claude
+and Codex raw-result fingerprints use a secret limited to the harness capture;
+matching across separate captures is unavailable. Where raw result metadata is
+present, a retained transcript copy is excluded from the repetition ranking to
+avoid reporting the same result twice.
+
+Repetition is compared within a chat, agent type, operation, stage and the
+selected time range. Equal inputs/results are candidates to inspect, not proof
+of waste: a read after an edit, a fresh status check or an empty successful
+command can be necessary. Bytes measure observed content, not billed tokens or
+verified savings. Tool-input and tool-result rows are separate stages.
+
+Instruction comparisons count observed submissions of the same revision to the
+harness. They do not prove repeated inclusion in later provider requests. Where
+individual instruction entries were recorded, the envelope is omitted from the
+repetition ranking so the same delivery is not counted again as an envelope.
+
+Efficiency also shows completed, failed, cancelled and partial **turns** with
+their token totals. Total tokens per completed turn includes failed and partial
+attempts in the selection; it does not hide retries by averaging completed-turn
+tokens alone. A completed turn is not a verified successful task. Runs that
+continue for several turns contribute several samples.
+
 ## Optimization diagnostics
 
 **Tools** separates MCP, CLI, and native tools. It records call counts, observed argument and response bytes, retained transcript-result bytes, errors, repeated normalized inputs, and observed elapsed time where available. Raw payload-size collection is supported for Claude and Codex. CLI execution hidden inside an MCP wrapper remains attributed to that wrapper unless the harness exposes separate tool events. Other adapters may provide only their normalized retained results.
@@ -20,7 +78,7 @@ Original harness responses and retained transcript results are separate stages. 
 
 **Instructions & rules** records Work Outline instruction entries and envelope sizes by revision when Mast submits them to the harness. The envelope includes the entries, so those rows overlap and must not be added together. Repo rule files in the run’s working directory found on disk and instruction/skill reads are labeled separately from instruction delivery. File inventory uses file sizes and modification versions; availability does not establish prompt inclusion. Hidden harness prompts, global/repository instructions loaded internally by a harness, tool-schema delivery, and repeated inclusion in provider requests are not currently observable. The page states these gaps instead of displaying zero cost.
 
-**Trends & comparisons** shows daily totals in UTC and groups runs by configuration fingerprint, model, and activity. It shows completed, failed/cancelled, and partial sample counts plus average tokens per completed run. A configuration fingerprint covers the Mast package version, requested harness/model/reasoning/options, and supplied Work Outline revision. It does not identify every external harness configuration or hidden prompt change. Use the same task and comparable outcomes when comparing workflows; differences in cache warmness, models, task difficulty, or external configuration can explain apparent savings.
+**Trends & comparisons** shows daily totals in UTC and groups turns by configuration fingerprint, model, activity, agent type, Space, and work item. It shows completed, failed/cancelled, and partial sample counts plus total tokens per completed turn, including failed and partial attempts. Compare the same work item, model, and agent type across configuration groups; differences in task mix or outcomes can explain the result. A configuration fingerprint covers the Mast package version, requested harness/model/reasoning/options, and supplied Work Outline revision. It does not identify every external harness configuration or hidden prompt change. Use the same task and comparable outcomes when comparing workflows; differences in cache warmness, models, task difficulty, or external configuration can explain apparent savings.
 
 Useful candidates include large MCP responses, repeated CLI commands, discovery/polling loops, repeated failed calls, large instruction envelopes, and expensive background title runs. These observations identify candidates to investigate; the page does not automatically change rules or workflows or claim causal savings.
 

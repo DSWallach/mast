@@ -124,6 +124,8 @@ pub struct TokenUsageQuery {
     pub until: Option<i64>,
     pub activity: Option<String>,
     #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
     pub offset: usize,
 }
 
@@ -143,6 +145,8 @@ pub struct UsageRun {
     pub model: String,
     pub activity: String,
     pub role: String,
+    #[serde(default)]
+    pub agent_type: String,
     pub at: i64,
     pub tokens: u64,
     pub status: String,
@@ -154,6 +158,10 @@ pub struct UsageRun {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageContext {
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub parent_chat_id: Option<String>,
     pub space_id: Option<String>,
     pub work_item_id: Option<String>,
     pub logical_turn: Option<String>,
@@ -185,6 +193,8 @@ pub struct DiagnosticGroup {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsageSnapshot {
+    #[serde(default)]
+    pub insights_available: bool,
     pub total: u64,
     pub runs: u64,
     pub unknown_breakdown: u64,
@@ -202,6 +212,17 @@ pub struct TokenUsageSnapshot {
     pub configurations: Vec<ConfigurationUsage>,
     #[serde(default)]
     pub context_samples: Vec<UsageContextSample>,
+    #[serde(default)]
+    pub available_agent_types: Vec<String>,
+    #[serde(default)]
+    pub agent_types: Vec<AgentUsageGroup>,
+    /// Child requests are a partial breakdown, not extra billed usage.
+    #[serde(default)]
+    pub observed_agents: Vec<AgentUsageGroup>,
+    #[serde(default)]
+    pub efficiency: EfficiencySummary,
+    #[serde(default)]
+    pub insights: Vec<EfficiencyInsight>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -216,6 +237,58 @@ pub struct ConfigurationUsage {
     pub partial: u64,
     pub completed_tokens: u64,
     pub runs: u64,
+    #[serde(default)]
+    pub agent_type: String,
+    #[serde(default)]
+    pub work_item_id: Option<String>,
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub failed_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsageGroup {
+    #[serde(default)]
+    pub unknown_breakdown: u64,
+    pub agent_type: String,
+    pub role: String,
+    pub tokens: u64,
+    pub turns: u64,
+    pub observations: u64,
+    pub example_chat_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EfficiencySummary {
+    pub completed: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+    pub partial: u64,
+    pub completed_tokens: u64,
+    pub failed_tokens: u64,
+    pub partial_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EfficiencyInsight {
+    pub category: String,
+    pub label: String,
+    pub channel: Option<String>,
+    pub stage: String,
+    pub agent_type: String,
+    pub occurrences: u64,
+    pub repeated: u64,
+    pub bytes: u64,
+    pub repeated_bytes: u64,
+    pub errors: u64,
+    pub empty_results: u64,
+    pub example_chat_id: String,
+    pub example_turn_id: String,
+    pub example_at: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

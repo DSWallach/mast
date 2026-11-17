@@ -141,3 +141,20 @@ The first implementation follows these decisions: device-scoped first release; e
 Implemented: durable device-local collection; model/token-type/date filtering; activity and role groups; private telemetry; paginated chat drill-down; MCP/CLI/native payload sizes, repeated inputs, errors and elapsed time; Work Outline instruction revisions and working-directory rule-file inventory; context occupancy history; advertised-tool-name fingerprints; daily usage and configuration cohorts; title attempts; registry-driven deletion cleanup; capability-aware routing.
 
 Unavailable or deferred: exact hidden prompt/tool-schema tokens, actual repeated instruction inclusion, precise Claude subagent separation, complete first resumed-Claude-turn aggregates, cross-device combined totals, historical journal/native-transcript imports, custom calendar ranges, outcome-confirmed experiments and automatic savings claims. The page explicitly distinguishes provider counts, observed bytes, on-disk availability, and missing measurements. Configuration cohorts compare observations and do not establish causal savings.
+
+## Token-efficiency follow-up
+
+The follow-up branch `david/token-efficiency-insights`, based on `david-rolling`
+at `7eb16398`, adds explicit agent-type attribution, partial native-child request
+breakdowns, repetition candidates with example chats, failed-attempt totals,
+and work-item/configuration cohorts. Its goal is to identify changes to Mast
+and its workflows that reduce tokens on comparable work.
+
+The accounting query remains authoritative. Combined Claude parent/child usage
+is not split by guesswork. Missing historical type labels remain unknown.
+Claude and Codex raw payloads are fingerprinted with a capture-local secret;
+bytes and repetition are evidence to investigate, not causal savings claims.
+The ledger retains an additive attribution table; existing measurement and
+turn table shapes remain readable by older engines. Older engines cannot
+serve the new agent filters; the UI checks response support before presenting
+filtered totals.

@@ -3084,6 +3084,9 @@ async fn drive_run(
         let space=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|c|c.space_id);
         let item=space.as_deref().and_then(|space|inner.workspace().and_then(|ws|ws.chat_assigned_work_item(&chat_id,space)));
         usage.set_context(&chat_id,space,item,Some(resume_state.user_message_id.clone()));
+        let parent=inner.workspace().and_then(|ws|ws.chat(&chat_id).ok().flatten()).and_then(|chat|chat.parent_chat_id);
+        let orchestrator=inner.workspace().and_then(|ws|ws.read_chats().ok()).is_some_and(|chats|chats.iter().any(|chat|chat.parent_chat_id.as_deref()==Some(chat_id.as_str())));
+        usage.set_attribution(&chat_id, crate::token_usage::launch_agent_type(activity, worker, orchestrator, links.iter().any(|link|link.source==mast_proto::ChatLinkSource::ReviewLauncher)).into(), parent);
         if let Some(delivery) = &request.instructions
             && let Some(revision) = inner.workspace().and_then(|ws| ws.instruction_revision(&delivery.envelope.revision_id)) {
             for entry in revision.body.entries {
