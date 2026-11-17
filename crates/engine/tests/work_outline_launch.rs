@@ -209,7 +209,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
     if std::env::var_os(ISOLATED).is_none() {
         let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "signed_out_claude_launch_reaches_transcript"])
+            .args(["--exact", "work_outline_launch::signed_out_claude_launch_reaches_transcript"])
             .env(ISOLATED, "1")
             .env("HOME", profile.path())
             .env("MAST_DATA_DIR", profile.path().join("data"))
@@ -218,6 +218,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
             .env("TMPDIR", "/private/tmp")
             .env("MAST_NO_LOGIN_SHELL", "1")
             .output().unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "child did not run exactly one test: {}", String::from_utf8_lossy(&output.stdout));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -254,7 +255,7 @@ async fn codex_only_launch_spawns_selected_executable() {
     if std::env::var_os(ISOLATED).is_none() {
         let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "codex_only_launch_spawns_selected_executable"])
+            .args(["--exact", "work_outline_launch::codex_only_launch_spawns_selected_executable"])
             .env(ISOLATED, "1")
             .env("HOME", profile.path())
             .env("MAST_DATA_DIR", profile.path().join("data"))
@@ -263,6 +264,7 @@ async fn codex_only_launch_spawns_selected_executable() {
             .env("TMPDIR", "/private/tmp")
             .env("MAST_NO_LOGIN_SHELL", "1")
             .output().unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "child did not run exactly one test: {}", String::from_utf8_lossy(&output.stdout));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1930,6 +1932,3 @@ async fn item_rooted_at_a_nested_repository_runs_its_chat_there() {
     );
     rig.core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

@@ -15,7 +15,7 @@ ui test binary).
 cargo test -p mast-ui --lib --profile installed -- --ignored --nocapture --test-threads=1 bench_
 
 # Engine: cold start (empty and 250-chat data dirs), SWR cache cold load / persist
-cargo test -p mast-engine --profile installed --test perf_bench -- --ignored --nocapture --test-threads=1
+cargo test -p mast-engine --profile installed --test engine perf_bench:: -- --ignored --nocapture --test-threads=1
 
 # Git spawn latency
 cargo test -p mast-harness --profile installed --test perf_bench -- --ignored --nocapture
@@ -34,8 +34,8 @@ D=/tmp/perf/real; mkdir -p $D/profiles/local /tmp/perf/fakehome
 sqlite3 -readonly ~/.zeron/profiles/local/docs.sqlite3 ".backup $D/profiles/local/docs.sqlite3"
 cp -c -R ~/.zeron/profiles/local/journals $D/profiles/local/journals   # APFS clone, ~250 MB
 cp ~/.zeron/local-profile.json $D/
-cargo test -p mast-engine --profile installed --test perf_bench --no-run   # prints the test binary
-HOME=/tmp/perf/fakehome MAST_PERF_REAL_COPY=$D <that binary> --ignored --nocapture --test-threads=1 real_copy
+cargo test -p mast-engine --profile installed --test engine --no-run   # prints the test binary
+HOME=/tmp/perf/fakehome MAST_PERF_REAL_COPY=$D <that binary> --ignored --nocapture --test-threads=1 perf_bench::
 ```
 
 (`bench_engine_startup_real_profile_copy`, `bench_registry_session_heartbeat_publish`,

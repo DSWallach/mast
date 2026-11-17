@@ -187,6 +187,3 @@ async fn sending_a_message_unarchives_the_chat() {
 
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

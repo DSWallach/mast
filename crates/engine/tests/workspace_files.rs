@@ -630,6 +630,3 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         "hello\n"
     );
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

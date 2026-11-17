@@ -46,7 +46,7 @@ fn npm_codex_is_offered_by_production_catalog() {
     std::fs::create_dir_all(&prefix).unwrap();
     std::fs::write(prefix.join("codex.cmd"), b"npm shim").unwrap();
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "catalog_child", "--nocapture"]);
+    command.args(["--exact", "codex_catalog::catalog_child", "--nocapture"]);
     for key in [
         "HOME",
         "USERPROFILE",
@@ -67,12 +67,14 @@ fn npm_codex_is_offered_by_production_catalog() {
         .output()
         .unwrap();
     assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "child did not run exactly one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
         output.status.success(),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;
