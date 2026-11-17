@@ -785,3 +785,203 @@ fn bench_sidebar_redraw_with_many_sessions(cx: &mut TestAppContext) {
         started.elapsed().as_secs_f64() * 1000.0 / f64::from(REDRAWS)
     );
 }
+
+/// Counters for one sidebar measurement window.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct SidebarCounts {
+    shell: u64,
+    sidebar_pane: u64,
+    chat_rows: u64,
+    spinner_views: u64,
+}
+
+fn sidebar_counts(sidebar: &Entity<SidebarPane>, cx: &mut gpui::VisualTestContext) -> SidebarCounts {
+    SidebarCounts {
+        shell: perf_counts::SHELL_RENDERS.with(|c| c.get()),
+        sidebar_pane: sidebar.read_with(cx, |pane, _| pane.renders as u64),
+        chat_rows: perf_counts::CHAT_ROW_BUILDS.with(|c| c.get()),
+        spinner_views: crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get()),
+    }
+}
+
+fn sidebar_delta(a: SidebarCounts, b: SidebarCounts) -> SidebarCounts {
+    SidebarCounts {
+        shell: b.shell - a.shell,
+        sidebar_pane: b.sidebar_pane - a.sidebar_pane,
+        chat_rows: b.chat_rows - a.chat_rows,
+        spinner_views: b.spinner_views - a.spinner_views,
+    }
+}
+
+const BUDGET_CHATS: usize = 200;
+const BUDGET_WORKING: usize = 5;
+const BUDGET_FRAMES: u64 = 30;
+
+/// 200 chats in an open sidebar, 5 working. Returns the shell, its sidebar pane
+/// and the window context after the first frames have settled.
+fn sidebar_budget_fixture(
+    cx: &mut TestAppContext,
+) -> (Entity<Shell>, Entity<SidebarPane>, Entity<AppState>, &mut gpui::VisualTestContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        cx.set_global(Theme::default());
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::composer::init(cx, Default::default());
+        crate::terminal::panel::init(cx);
+        crate::app_menus::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = (0..BUDGET_CHATS).map(chat_row).collect();
+        state.sessions = (BUDGET_CHATS - BUDGET_WORKING..BUDGET_CHATS)
+            .map(|index| mast_proto::Session {
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
+                chat_id: format!("c{index}"),
+                device_id: "local".into(),
+                status: mast_proto::SessionStatus::Working,
+                started_at: None,
+                updated_at: Utc::now(),
+            })
+            .collect();
+        state.chats_synced = true;
+        state.selected_chat = Some("c0".into());
+        state.no_project = true;
+        state.data_dir = Some(dir.path().to_path_buf());
+    });
+    let boot = EngineBootConfig {
+        data_dir: dir.path().to_path_buf(),
+        ipc_port: 0,
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: mast_proto::HarnessId::Mock,
+    };
+    let (shell, vcx) = cx.add_window_view(|_, cx| {
+        let mut shell = Shell::new(state.clone(), boot, cx);
+        shell.route = Route::Chat;
+        shell.active_chat = "c0".into();
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+        shell.sessions_open = true;
+        shell.splash = SplashPhase::Gone;
+        shell
+    });
+    std::mem::forget(dir);
+    let sidebar = shell.read_with(vcx, |shell, _| shell.sidebar_pane.clone());
+    for _ in 0..3 {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
+    (shell, sidebar, state, vcx)
+}
+
+/// Advance the animation clock one pulse tick and draw one frame.
+fn animation_frame(vcx: &mut gpui::VisualTestContext) {
+    vcx.executor().advance_clock(std::time::Duration::from_millis(34));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn sidebar_spinner_frames_rerender_only_spinners(cx: &mut TestAppContext) {
+    let (shell, sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    let watched = vec![watch(vcx, "shell", &shell), watch(vcx, "state", &state), watch(vcx, "sidebar", &sidebar)];
+    // Settle one-time work (row measuring, culling) before counting.
+    for _ in 0..8 {
+        animation_frame(vcx);
+    }
+    perf_counts::CHAT_ROW_BY_ID.with(|m| m.borrow_mut().clear());
+    let before = sidebar_counts(&sidebar, vcx);
+    for _ in 0..BUDGET_FRAMES {
+        animation_frame(vcx);
+    }
+    eprintln!("BUDGET notifies: {:?}", totals(&watched));
+    let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
+    eprintln!("BUDGET spinner frames ({BUDGET_FRAMES}): {spent:?}");
+    assert!(spent.spinner_views > 0, "fixture must have visible spinners: {spent:?}");
+    // Per row: an animated row may re-render once per frame; every other row
+    // only on the occasional shell-wide notify, never per tick.
+    let by_id = perf_counts::CHAT_ROW_BY_ID.with(|m| m.borrow().clone());
+    let first_working = BUDGET_CHATS - BUDGET_WORKING;
+    for (id, builds) in &by_id {
+        let ix: usize = id[1..].parse().unwrap();
+        let cap = if ix >= first_working { BUDGET_FRAMES + 2 } else { BUDGET_FRAMES / 4 };
+        assert!(*builds <= cap, "row {id} rebuilt {builds} times in {BUDGET_FRAMES} spinner frames (cap {cap}): {by_id:?}");
+    }
+    assert!(
+        spent.spinner_views <= 2 * BUDGET_FRAMES * BUDGET_WORKING as u64,
+        "more spinner renders than animated rows × frames (own tick + row re-render): {spent:?}"
+    );
+}
+
+/// One streamed token into the selected chat: only its transcript changes.
+fn stream_token(state: &Entity<AppState>, vcx: &mut gpui::VisualTestContext, i: u64) {
+    state.update(vcx, |state, cx| {
+        state.transcript.push(mast_doc::SessionMessageEntry {
+            id: format!("m{i}"),
+            role: mast_doc::MessageRole::Assistant,
+            parts: vec![mast_doc::MessagePart::Text { id: "t0".into(), text: format!("token {i}") }],
+            created_at: i as i64,
+            device_id: "local".into(),
+            status: None,
+            continuation_of: None,
+        });
+        state.transcript_revision = state.transcript_revision.wrapping_add(1);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+}
+
+#[gpui::test]
+fn sidebar_unrelated_transcript_delta_rebuilds_no_rows(cx: &mut TestAppContext) {
+    let (_shell, sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    // Static spinners: this test is about data changes, not animation.
+    vcx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+    for _ in 0..4 {
+        animation_frame(vcx);
+    }
+    // Settle the one-off pass that follows the reduced-motion switch.
+    for i in 0..4 {
+        stream_token(&state, vcx, 1000 + i);
+    }
+    let before = sidebar_counts(&sidebar, vcx);
+    let t0 = std::time::Instant::now();
+    for i in 0..BUDGET_FRAMES {
+        stream_token(&state, vcx, i);
+    }
+    eprintln!("BUDGET delta loop wall: {:?}", t0.elapsed());
+    let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
+    eprintln!("BUDGET unrelated deltas ({BUDGET_FRAMES}): {spent:?}");
+    assert_eq!(spent.chat_rows, 0, "unrelated delta rebuilt chat rows: {spent:?}");
+    assert_eq!(spent.spinner_views, 0, "unrelated delta re-rendered spinners: {spent:?}");
+}
+
+
+/// With nothing animating the sidebar pane stays a cached view: streaming into
+/// the selected chat does not re-render it at all.
+#[gpui::test]
+fn idle_sidebar_ignores_transcript_deltas(cx: &mut TestAppContext) {
+    let (_shell, sidebar, state, vcx) = sidebar_budget_fixture(cx);
+    state.update(vcx, |state, cx| {
+        state.sessions.clear();
+        cx.notify();
+    });
+    for i in 0..8 {
+        animation_frame(vcx);
+        stream_token(&state, vcx, 2000 + i);
+    }
+    let before = sidebar_counts(&sidebar, vcx);
+    for i in 0..BUDGET_FRAMES {
+        stream_token(&state, vcx, i);
+    }
+    let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
+    eprintln!("BUDGET idle deltas ({BUDGET_FRAMES}): {spent:?}");
+    // Allow the occasional shell-wide notify that is not caused by a delta.
+    assert!(spent.sidebar_pane <= BUDGET_FRAMES / 10, "idle sidebar re-rendered on transcript deltas: {spent:?}");
+    assert!(spent.chat_rows <= 64 * spent.sidebar_pane, "{spent:?}");
+}

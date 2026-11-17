@@ -951,7 +951,7 @@ struct RightTabDragState {
 }
 
 /// Sidebar-only drag payload. Regular sessions never acquire a manual order.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct SidebarSessionDrag {
     chat_id: String,
     visible_ids: std::sync::Arc<Vec<String>>,
@@ -1562,6 +1562,114 @@ struct SubagentTab {
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
+/// Test-only render counters for the sidebar perf budgets (thread-local: gpui
+/// tests run on one thread).
+#[cfg(test)]
+pub(crate) mod perf_counts {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static SHELL_RENDERS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_BUILDS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_BY_ID: std::cell::RefCell<std::collections::HashMap<String, u64>> = std::cell::RefCell::new(Default::default());
+    }
+}
+
+/// Everything `render_chat_row` needs that the sidebar computes per row.
+#[derive(Clone, PartialEq)]
+struct ChatRowArgs {
+    id: String,
+    title: SharedString,
+    time_ago: SharedString,
+    space_name: SharedString,
+    branch: Option<SharedString>,
+    change_request: Option<mast_proto::ChangeRequestSummary>,
+    harness: Option<mast_proto::HarnessId>,
+    status: mast_proto::ChatIndicator,
+    selected: bool,
+    drag: Option<SidebarSessionDrag>,
+    jump_label: Option<SharedString>,
+}
+
+/// One sidebar chat row as its own cached view. The pane rebuilds the args each
+/// pass and only notifies this view when they changed, so a working row's
+/// spinner tick re-renders just that row instead of every row in the list.
+struct ChatRowView {
+    shell: gpui::WeakEntity<Shell>,
+    args: ChatRowArgs,
+    _observation: Subscription,
+}
+
+impl Render for ChatRowView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(shell) = self.shell.upgrade() else {
+            return div().into_any_element();
+        };
+        let args = self.args.clone();
+        // A view root is laid out against its bounds but sizes to its content, so
+        // restore the full-width stretch the row had as a direct flex child.
+        let row = shell.update(cx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            shell.render_chat_row(
+                args.id,
+                args.title,
+                args.time_ago,
+                args.space_name,
+                args.branch,
+                args.change_request,
+                args.harness,
+                args.status,
+                args.selected,
+                false,
+                false,
+                args.drag,
+                args.jump_label,
+                None,
+                &theme,
+                cx,
+            )
+        });
+        div().w_full().child(row).into_any_element()
+    }
+}
+
+impl Shell {
+    /// The cached row view for one live sidebar row. `height` is the slot height.
+    fn cached_chat_row(&mut self, args: ChatRowArgs, height: f32, cx: &mut Context<Self>) -> AnyElement {
+        self.sidebar_row_views_seen.insert(args.id.clone());
+        let view = match self.sidebar_row_views.get(&args.id) {
+            Some(view) => {
+                let view = view.clone();
+                view.update(cx, |row, cx| {
+                    if row.args != args {
+                        row.args = args;
+                        cx.notify();
+                    }
+                });
+                view
+            }
+            None => {
+                let shell = cx.entity();
+                let id = args.id.clone();
+                let view = cx.new(|cx| ChatRowView {
+                    shell: shell.downgrade(),
+                    args,
+                    _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
+                });
+                self.sidebar_row_views.insert(id, view.clone());
+                view
+            }
+        };
+        // Width stays auto so the row stretches like the uncached row did.
+        view.cached(gpui::StyleRefinement::default().h(px(height.max(0.0)))).into_any_element()
+    }
+
+    /// Drop row views for chats that left the list; called once per sidebar pass.
+    fn prune_sidebar_row_views(&mut self) {
+        let seen = std::mem::take(&mut self.sidebar_row_views_seen);
+        self.sidebar_row_views.retain(|id, _| seen.contains(id));
+    }
+}
+
 struct SidebarPane {
     #[cfg(test)]
     renders: usize,
@@ -1790,6 +1898,10 @@ pub struct Shell {
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_row_extents: spaces::SidebarRowExtents,
+    /// One cached view per visible sidebar chat row, so a spinner tick (or any
+    /// change confined to one row) re-renders that row alone.
+    sidebar_row_views: std::collections::HashMap<String, Entity<ChatRowView>>,
+    sidebar_row_views_seen: std::collections::HashSet<String>,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2284,6 +2396,8 @@ impl Shell {
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_row_extents: Default::default(),
+            sidebar_row_views: Default::default(),
+            sidebar_row_views_seen: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -7159,12 +7273,37 @@ impl Shell {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
+        // While a working chat's spinner is on screen, the pane must NOT be a
+        // `.cached()` view: a spinner tick dirties the pane as an ancestor, and
+        // gpui re-renders a dirty cached view with `refreshing` set for its whole
+        // subtree, which defeats the per-row cached views below it (every row
+        // was rebuilt and re-prepainted each tick). Uncached, the pane re-emits
+        // cheap row stubs and only the rows that changed re-render. With nothing
+        // animating the cached pane keeps skipping Shell renders it does not care
+        // about (streaming deltas, composer typing).
+        let animating = self
+            .state
+            .read(cx)
+            .sessions
+            .iter()
+            .any(|session| session.status == mast_proto::SessionStatus::Working);
+        let pane = self.sidebar_pane.clone();
+        let inner: AnyElement = if animating {
+            div()
                 .w(px(self.sidebar_shown_width()))
                 .h_full()
-                .flex_none(),
-        );
+                .flex_none()
+                .child(pane)
+                .into_any_element()
+        } else {
+            pane.cached(
+                gpui::StyleRefinement::default()
+                    .w(px(self.sidebar_shown_width()))
+                    .h_full()
+                    .flex_none(),
+            )
+            .into_any_element()
+        };
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
@@ -7172,7 +7311,7 @@ impl Shell {
         crate::components::shell_parts::sidebar_frame(
             &theme,
             width,
-            inner.into_any_element(),
+            inner,
             cx.listener(|this, _, _, cx| this.open_new_session(cx)),
         )
     }
@@ -7287,6 +7426,11 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        {
+            perf_counts::CHAT_ROW_BUILDS.with(|c| c.set(c.get() + 1));
+            perf_counts::CHAT_ROW_BY_ID.with(|m| *m.borrow_mut().entry(id.clone()).or_default() += 1);
+        }
         // Activity, not position (t3code Sidebar): status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
@@ -7890,6 +8034,7 @@ impl Shell {
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
         let session_rows = self.render_active_rows(theme, cx);
+        self.prune_sidebar_row_views();
         let moving_row = session_rows
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
@@ -11628,6 +11773,8 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        perf_counts::SHELL_RENDERS.with(|c| c.set(c.get() + 1));
         self.ensure_diagram_observer(window, cx);
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("shell");

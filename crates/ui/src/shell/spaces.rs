@@ -4950,27 +4950,48 @@ impl Shell {
                 let element = if offscreen {
                     div().h(px(slot_height.max(0.0))).into_any_element()
                 } else {
-                    self.render_chat_row(
-                        chat.id.clone(),
-                        transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )
-                        .into(),
-                        time_ago,
-                        folder.into(),
-                        branch.map(SharedString::from),
-                        change_request,
-                        harness,
-                        status,
-                        is_selected,
-                        false,
-                        is_moving,
-                        if is_moving { None } else { drag },
-                        jump_label,
-                        None,
-                        theme,
-                        cx,
+                    let title: SharedString = transcript::single_line(
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
+                    .into();
+                    if is_moving {
+                        self.render_chat_row(
+                            chat.id.clone(),
+                            title,
+                            time_ago,
+                            folder.into(),
+                            branch.map(SharedString::from),
+                            change_request,
+                            harness,
+                            status,
+                            is_selected,
+                            false,
+                            true,
+                            None,
+                            jump_label,
+                            None,
+                            theme,
+                            cx,
+                        )
+                    } else {
+                        self.cached_chat_row(
+                            ChatRowArgs {
+                                id: chat.id.clone(),
+                                title,
+                                time_ago,
+                                space_name: folder.into(),
+                                branch: branch.map(SharedString::from),
+                                change_request,
+                                harness,
+                                status,
+                                selected: is_selected,
+                                drag,
+                                jump_label,
+                            },
+                            slot_height,
+                            cx,
+                        )
+                    }
                 };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
