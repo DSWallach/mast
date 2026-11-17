@@ -961,6 +961,7 @@ pub(super) mod tests {
             cx.notify();
         });
         redraw_assistant(vcx);
+        vcx.run_until_parked();
         shell.read_with(vcx, |shell, _| {
             assert!(
                 shell.board_links_generation > generation,

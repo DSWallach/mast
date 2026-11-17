@@ -2205,6 +2205,9 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
             },
         ];
     });
+    state.update(cx, |state, _| {
+        state.chats.iter_mut().find(|chat| chat.id == "c-errored").unwrap().last_message_at = Some(now);
+    });
     let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
     let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
     let (overview, vcx) = cx.add_window_view(|_, cx| {
@@ -2236,7 +2239,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
         vcx.debug_bounds("overview-row-stalled-c-failed-tools")
             .is_some()
     );
-    assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
+
     assert!(
         vcx.debug_bounds("overview-row-needs-input-c-idle")
             .is_none()
@@ -2269,6 +2272,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
         assert_eq!(o.attention_filter, AttentionFilter::Stalled);
         assert_eq!(o.list_order.len(), 2);
     });
+    assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
 
     // Clicking "stalled" again clears the filter.
     let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();

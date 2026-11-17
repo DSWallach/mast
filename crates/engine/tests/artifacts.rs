@@ -880,7 +880,9 @@ async fn marker_links_and_visualize_references_register_once() {
     let by_id = format!("[Rollout notes](mast-artifact:{})", notes.id);
     assert_eq!(rig.core.artifacts.import_markers(CHAT, &by_id), 0);
     assert_eq!(rig.core.workspace.artifacts_of_space(SPACE).len(), 2);
-    // A chat without a work item gets `_chats/<chatId>`.
+    // Explicitly unassociated chats retain the legacy artifact fallback.
+    outline(&rig.client, json!({"op":"removeChatFromWorkItem", "chatId":LONE_CHAT,
+        "operationId":"remove-lone-item"})).await;
     let lone = format!("[Lone](mast-artifact:{})", file.display());
     assert_eq!(rig.core.artifacts.import_markers(LONE_CHAT, &lone), 1);
     let lone_row = rig

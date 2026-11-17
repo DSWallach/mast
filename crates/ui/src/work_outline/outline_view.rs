@@ -2949,6 +2949,7 @@ impl OutlineView {
                 theme,
             )
             .hint(chips::INSTRUCTION_DRIFT_TOOLTIP, HintKey::None)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 if let Some(shell) = this.shell.as_ref().and_then(WeakEntity::upgrade) {

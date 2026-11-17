@@ -272,6 +272,8 @@ async fn agent_surface_authorizes_reads_and_writes_as_the_chat() {
     let core = assemble(&tmp.path().join("data"));
     let client = mast_rpc::memory_client(core.rpc_service());
     let (a, b) = seed(&client).await;
+    mutate(&client, json!({"op":"removeChatFromWorkItem", "chatId":"chat-2",
+        "operationId":"remove-chat-2-default"})).await.unwrap();
     let service = core.rpc_service().work_outline();
     let parse = |value: Value| -> WorkOutlineMutation { serde_json::from_value(value).unwrap() };
 

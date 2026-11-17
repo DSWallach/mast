@@ -10642,6 +10642,8 @@ impl Shell {
             && !self.overview_navigation_visible()
             && let Some(overview) = &self.overview_page
         {
+            let overview = overview.clone();
+            self.cancel_board_links();
             overview.update(cx, |overview, cx| overview.suspend_board(cx));
         }
         // Settings route: just the section outlet — the section label lives in

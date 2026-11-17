@@ -368,7 +368,9 @@ async fn manual_links_count_and_mentioned_branch_or_foreign_prs_do_not() {
         .workspace
         .set_chat_branch("c2", "feature-x")
         .unwrap();
-    // No item.
+    // Explicitly remove the default item to exercise the unassociated boundary.
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"removeChatFromWorkItem",
+        "chatId":"c3", "operationId":"remove-c3-default"})).await.unwrap();
     rig.link(
         "c3",
         "https://github.com/acme/ui/pull/11",

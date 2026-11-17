@@ -824,7 +824,7 @@ async fn space_scoped_linear_operations_need_linear_on() {
         "idempotent"
     );
     let snapshot = rig.snapshot(SPACE);
-    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(snapshot.items.len(), 3, "includes the chat's automatic work item");
     assert_eq!(snapshot.item(&id).unwrap().title, "ENG-1 · One");
     assert_eq!(
         snapshot.linear_issue_reference(&id).unwrap().external_id,

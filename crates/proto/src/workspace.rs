@@ -210,7 +210,8 @@ mod tests {
                     "linear-v1",
                     "pr-review-sync-v1",
                     "artifacts-v1",
-                    "side-chat-v1"
+                    "side-chat-v1",
+                    "chat-handoff-v1"
                 ],
             })
         );

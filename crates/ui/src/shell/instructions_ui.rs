@@ -1635,6 +1635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
         seed(&shell, cx, fixture::snapshot("s1"), ok_ids);
+        cx.simulate_resize(gpui::size(px(1400.0), px(1100.0)));
         shell.update(cx, |shell, cx| shell.open_overview(cx));
         let overview = shell.read_with(cx, |shell, _| shell.overview_page.clone().unwrap());
         let outline = overview.read_with(cx, |overview, _| overview.outline_entity());
@@ -1652,7 +1653,7 @@ mod tests {
             .center();
         cx.simulate_click(mark, gpui::Modifiers::default());
         draw(cx);
-        assert!(cx.debug_bounds("instruction-compare").is_some());
+        assert!(cx.debug_bounds("instruction-compare").is_some(), "compare dialog missing after drift mark at {mark:?}");
         shell.read_with(cx, |shell, cx| {
             assert!(shell.state.read(cx).selected_chat.is_none())
         });

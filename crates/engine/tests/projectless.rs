@@ -1,7 +1,7 @@
 //! "Don't work in a project" against a real engine: a chat minted through the
 //! UI's exact wire shape (`Mutate createChat` with a `deviceId` and no
 //! `spaceId`) stores cwd `~`, spawns its run from a stable Mast-owned scratch
-//! directory, and never mints a space row. In particular, the agent must not
+//! directory, and owns an item in its device personal Space. In particular, the agent must not
 //! run from HOME and trigger macOS protected-folder access prompts.
 
 use std::sync::{Arc, Mutex};
@@ -111,7 +111,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn projectless_chat_runs_from_owned_scratch_and_mints_no_space() {
+async fn projectless_chat_runs_from_owned_scratch_in_its_personal_space() {
     exercise_projectless(false).await;
 }
 
@@ -163,7 +163,7 @@ async fn exercise_projectless(command_first: bool) {
             .chat(CHAT)
             .expect("read chat row")
             .expect("chat row exists");
-        assert_eq!(chat.space_id, None, "project-less chat must carry no space");
+        assert_eq!(chat.space_id, Some(mast_proto::Space::personal_id(&core.device_id)));
         assert_eq!(chat.cwd.as_deref(), Some("~"), "cwd defaults to `~`");
         assert_eq!(chat.device_id, core.device_id);
     }
@@ -197,7 +197,7 @@ async fn exercise_projectless(command_first: bool) {
     wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
 
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
-    assert_eq!(chat.space_id, None);
+    assert_eq!(chat.space_id, Some(mast_proto::Space::personal_id(&core.device_id)));
     assert_eq!(chat.cwd.as_deref(), Some("~"));
     assert_eq!(chat.device_id, core.device_id);
     // Simulate the metadata arriving after the command and a retry.
@@ -247,11 +247,11 @@ async fn exercise_projectless(command_first: bool) {
         .await
         .expect("close project-less terminal");
 
-    // And no phantom project: the flow must not mint any space row.
+    // A projectless chat gets only its device personal Space, never a folder project.
     let spaces = core.workspace.read_spaces().expect("read spaces");
     assert!(
-        spaces.is_empty(),
-        "project-less chat minted a space: {spaces:?}"
+        spaces.len() == 1 && spaces[0].is_personal(),
+        "projectless chat must own only its personal Space: {spaces:?}"
     );
 
     core.shutdown().await;
@@ -261,7 +261,7 @@ async fn exercise_projectless(command_first: bool) {
     let core = EngineCore::assemble(&tmp.path().join("data"), registry, HarnessId::Mock, None)
         .expect("reopen persisted engine");
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
-    assert_eq!(chat.space_id, None);
+    assert_eq!(chat.space_id, Some(mast_proto::Space::personal_id(&core.device_id)));
     assert_eq!(chat.cwd.as_deref(), Some("~"));
     assert_eq!(
         complete_assistant_count(&core),
@@ -280,7 +280,7 @@ async fn exercise_projectless(command_first: bool) {
         assert_eq!(requests[1].cwd, cwds[0]);
         assert_eq!(requests[1].resume.as_deref(), Some("sess-np"));
     }
-    assert!(core.workspace.read_spaces().unwrap().is_empty());
+    assert!(core.workspace.read_spaces().unwrap().iter().all(mast_proto::Space::is_personal));
     assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
     core.shutdown().await;
 }

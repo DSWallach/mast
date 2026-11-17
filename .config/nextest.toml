@@ -25,7 +25,7 @@ command = { command-line = 'scripts/nextest-engine-repair-only.sh', relative-to 
 
 [[profile.default.scripts]]
 platform = 'cfg(target_os = "macos")'
-filter = 'package(mast-engine) & not (test(/^workspace_files::/) | test(/m5_repos_diffs_terminals::diff_sync_publishes_without_rewriting_chat_branch$/))'
+filter = 'package(mast-engine) & not (test(/^workspace_files::/) | test(/^diff_sync_/) | test(/^idle_spawn_budget::/) | test(/m5_repos_diffs_terminals::diff_sync_publishes_without_rewriting_chat_branch$/))'
 setup = 'engine-repair-only'
 
 # Tests that open PTYs / spawn login shells and git processes time out when many

@@ -973,6 +973,7 @@ mod tests {
         for compact in [false, true] {
             shell.update(cx, |shell, _| shell.settings.compact_single_chat = compact);
             outline.update(cx, |outline, cx| {
+                outline.set_sidebar(false, cx);
                 outline.set_compact_single_chat(compact, cx)
             });
             redraw(cx);
@@ -982,6 +983,7 @@ mod tests {
                 row_key::chat(CHAT_UI)
             };
             right_click(cx, &key);
+            assert!(ids(&shell, cx).contains(&"personal-assistant"), "compact={compact}, menu={:?}", ids(&shell, cx));
             assert_eq!(
                 row(&shell, cx, "personal-assistant").label,
                 crate::personal_assistant::SET_LABEL
