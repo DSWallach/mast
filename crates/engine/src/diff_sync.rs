@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -146,7 +146,11 @@ struct CheckoutEntry {
     /// transient identity failure must never destroy a live entry.
     orphaned_since: Mutex<Option<std::time::Instant>>,
     /// Kick channel into the entry's debounce/sync task.
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: Kicker,
+    /// Kick count already covered by a finished sync (see [`Kicker`]).
+    handled_kicks: AtomicU64,
+    /// Set once the fs watchers are attached (or setup was abandoned).
+    watch_attached: AtomicBool,
     /// Keeps the recursive fs watchers alive; dropped on entry close. Filled
     /// asynchronously — watcher setup (budget walk + FSEvents registration) can
     /// block for seconds, so [`add_entry`] does it off the runtime and attaches
@@ -157,6 +161,21 @@ struct CheckoutEntry {
     /// Set by the repair tick: the next sync may be skipped when the probe
     /// shows nothing changed. Watcher and new-chat kicks leave it clear.
     repair_kick: AtomicBool,
+}
+
+/// Kick channel into an entry's sync task that also counts sends, so
+/// "nothing is pending" is observable ([`CheckoutDiffSync::is_settled`]).
+#[derive(Clone)]
+struct Kicker {
+    tx: mpsc::UnboundedSender<()>,
+    sent: Arc<AtomicU64>,
+}
+
+impl Kicker {
+    fn send(&self) {
+        self.sent.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(());
+    }
 }
 
 impl CheckoutEntry {
@@ -172,7 +191,7 @@ impl CheckoutEntry {
             return;
         }
         self.repair_kick.store(true, Ordering::Relaxed);
-        let _ = self.kick_tx.send(());
+        self.kick_tx.send();
     }
 }
 
@@ -375,6 +394,17 @@ impl CheckoutDiffSync {
         self.inner.targets_tx.subscribe()
     }
 
+    /// True when every tracked checkout has its watchers attached and no kick
+    /// is waiting for a sync. Lets tests wait for startup to finish instead of
+    /// guessing from wall-clock quiet.
+    pub fn is_settled(&self) -> bool {
+        lock(&self.inner.entries).values().all(|entry| {
+            entry.watch_attached.load(Ordering::SeqCst)
+                && entry.handled_kicks.load(Ordering::SeqCst)
+                    >= entry.kick_tx.sent.load(Ordering::SeqCst)
+        })
+    }
+
     /// Regroup this device's chats by checkout identity, then (re)build watchers.
     /// Public for tests (the background task calls it on every chat change).
     pub async fn reconcile_now(&self) {
@@ -396,7 +426,7 @@ impl CheckoutDiffSync {
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
     pub fn sync_all(&self) {
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            entry.kick_tx.send();
         }
     }
 
@@ -1002,7 +1032,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     has_new
                 };
                 if has_new {
-                    let _ = entry.kick_tx.send(()); // new chat needs a sidecar now
+                    entry.kick_tx.send(); // new chat needs a sidecar now
                 }
             }
             None => add_entry(inner, identity, chats),
@@ -1143,13 +1173,16 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 }
 
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
-    let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+    let (tx, kick_rx) = mpsc::unbounded_channel();
+    let kick_tx = Kicker { tx, sent: Arc::new(AtomicU64::new(0)) };
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
         checksum: Mutex::new(None),
         orphaned_since: Mutex::new(None),
         kick_tx: kick_tx.clone(),
+        handled_kicks: AtomicU64::new(0),
+        watch_attached: AtomicBool::new(false),
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
         repair_kick: AtomicBool::new(false),
@@ -1161,7 +1194,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_rx,
         inner.cancel.clone(),
     ));
-    let _ = kick_tx.send(()); // initial snapshot — must not wait for watchers
+    kick_tx.send(); // initial snapshot — must not wait for watchers
 
     // Watcher setup is genuinely blocking: the budget walk reads up to
     // MAX_WATCH_DIRS directory entries and FSEvents stream registration stalls
@@ -1179,7 +1212,13 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         };
         let watchers = build_watchers(&entry.identity, &kick_tx);
         *lock(&entry.watchers) = watchers;
-        let _ = kick_tx.send(());
+        // This kick only closes the capture→attach gap, so it is probe-gated
+        // like a repair kick: one `git status` when nothing moved, instead of a
+        // second full ~8-spawn capture per checkout (which, when attach lags
+        // under load, also landed inside later idle windows).
+        entry.repair_kick.store(true, Ordering::Relaxed);
+        entry.watch_attached.store(true, Ordering::SeqCst);
+        kick_tx.send();
     }));
 }
 
@@ -1189,7 +1228,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
 /// from the blocking pool.
 fn build_watchers(
     identity: &CheckoutIdentity,
-    kick_tx: &mpsc::UnboundedSender<()>,
+    kick_tx: &Kicker,
 ) -> Vec<crate::watch_budget::Watcher> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
@@ -1200,7 +1239,7 @@ fn build_watchers(
                 if event.as_ref().is_ok_and(|event| {
                     is_checkout_change(event) && kick_relevant(&event.paths, &git_dir)
                 }) {
-                    let _ = tx.send(());
+                    tx.send();
                 }
             });
         match watcher {
@@ -1296,12 +1335,16 @@ async fn entry_task(
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
+        // Everything sent up to here is covered by this sync; later sends
+        // leave the entry unsettled until the next one.
+        let seen = entry.kick_tx.sent.load(Ordering::SeqCst);
         // The upgraded Arc would let a sync outlive shutdown — race the token
         // so an in-flight sidecar POST is dropped, not completed.
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = sync_entry(&inner, &entry) => {}
         }
+        entry.handled_kicks.fetch_max(seen, Ordering::SeqCst);
     }
 }
 
@@ -1381,16 +1424,21 @@ async fn repair_probe(identity: &CheckoutIdentity) -> Option<u64> {
 }
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
-    let mut probed_now = false;
-    if entry.repair_kick.swap(false, Ordering::Relaxed)
+    // The probe is taken BEFORE the capture and stored only once the capture
+    // succeeded. A change landing between the two then leaves the stored probe
+    // stale, so the next repair/attach probe sees it and recaptures. (Probing
+    // after the capture baked such a change into the baseline and hid it until
+    // the checkout changed again.) Every sync probes once, so an idle repair
+    // costs exactly one `git status` and no capture ever starts without a
+    // baseline being stored with its result.
+    let repair = entry.repair_kick.swap(false, Ordering::Relaxed);
+    let probe = repair_probe(&entry.identity).await;
+    if repair
         && lock(&entry.checksum).is_some()
-        && let Some(probe) = repair_probe(&entry.identity).await
+        && let Some(now) = probe
+        && lock(&entry.probe).replace(now) == Some(now)
     {
-        probed_now = true;
-        let unchanged = lock(&entry.probe).replace(probe) == Some(probe);
-        if unchanged {
-            return; // one `git status` said nothing moved: skip the full capture
-        }
+        return; // one `git status` said nothing moved: skip the full capture
     }
     let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
         Ok(snapshot) => snapshot,
@@ -1401,15 +1449,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
             return;
         }
     };
-
-    // Re-baseline the repair probe at this capture. Without it the first repair
-    // tick after every capture (startup included) sees "changed" against a
-    // stale or missing probe and re-runs the full ~8-spawn capture per
-    // checkout. One cheap `git status` here makes an idle repair cost one.
-    if !probed_now {
-        let probe = repair_probe(&entry.identity).await;
-        *lock(&entry.probe) = probe;
-    }
+    *lock(&entry.probe) = probe;
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
     }

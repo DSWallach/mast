@@ -96,26 +96,17 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
         core.diff_sync.watch_diffs().borrow().len() == CHECKOUTS
     })
     .await;
-    // Initial + attach kicks (and the probe baselines) land, then go quiet:
-    // wait until no git has been spawned for 3 s (robust under a loaded box).
-    let mut last = git_spawn_count();
-    let mut quiet_since = tokio::time::Instant::now();
-    let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while quiet_since.elapsed() < Duration::from_secs(3) {
-        assert!(tokio::time::Instant::now() < settle_deadline, "git never went quiet");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let now = git_spawn_count();
-        if now != last {
-            last = now;
-            quiet_since = tokio::time::Instant::now();
-        }
-    }
+    // Startup is done when every checkout has its watchers attached and no kick
+    // is pending (initial capture, attach re-check). Event-driven, not a
+    // wall-clock quiet guess, so a loaded box cannot leave attach work for the
+    // measured window.
+    wait_for("startup settles", || core.diff_sync.is_settled()).await;
 
     let harness_before = git_spawn_count();
     let gate_before = git_gate::spawn_count();
     for _ in 0..REPAIR_PASSES {
         core.diff_sync.repair_now().await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        wait_for("repair pass completes", || core.diff_sync.is_settled()).await;
     }
     let harness = git_spawn_count() - harness_before;
     let gate = git_gate::spawn_count() - gate_before;
@@ -133,6 +124,7 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
     git(&repos[3], &["commit", "-q", "-a", "-m", "second"]);
     let moved = std::fs::canonicalize(&repos[3]).unwrap().to_string_lossy().into_owned();
     core.diff_sync.repair_now().await;
+    wait_for("repair pass completes", || core.diff_sync.is_settled()).await;
     wait_for("HEAD change is published", || {
         let now = checksums(&core.diff_sync);
         now.iter().any(|(cwd, sum)| {
