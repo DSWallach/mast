@@ -627,7 +627,7 @@ fn review_schema() -> Value {
         }, "required": ["id", "title", "file", "hunks", "what", "why", "risk", "riskNote", "tags"]}},
         "highlights": {"type": "array", "items": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["risk", "missing-tests", "behaviour-change", "security", "migration", "perf", "style"]}, "severity": {"type": "string"}, "text": {"type": "string"}, "anchor": anchor}, "required": ["kind", "severity", "text", "anchor"]}},
         "questions": {"type": "array", "description": "Questions as strings or objects with question or text fields.", "items": {}},
-        "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
+        "suggestedComments": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string", "description": "Stable identifier across review revisions."}, "anchor": anchor, "body": {"type": "string"}, "severity": {"type": "string"}, "suggestion": {"type": "string"}}, "required": ["anchor", "body", "severity"]}}
     }, "required": ["schema", "summary", "steps", "highlights", "questions", "suggestedComments"],
        "description": "With prUrl, pr is required. With target, Mast supplies pr when omitted."})
 }
@@ -2865,6 +2865,7 @@ mod tests {
         for value in step["risk"]["enum"].as_array().unwrap() { assert!(serde_json::from_value::<mast_proto::ReviewRisk>(value.clone()).is_ok()); }
         let side = &review_schema["properties"]["highlights"]["items"]["properties"]["anchor"]["properties"]["side"]["enum"];
         assert_eq!(side, &json!(["left", "right"]));
+        assert_eq!(review_schema["properties"]["suggestedComments"]["items"]["properties"]["id"]["type"], "string");
         for value in side.as_array().unwrap() { assert!(serde_json::from_value::<mast_proto::ReviewSide>(value.clone()).is_ok()); }
     }
 
@@ -2876,7 +2877,7 @@ mod tests {
         assert!(def.input_schema.get("anyOf").is_none());
         let world = Arc::new(World::default());
         let agent = tools(world.clone(), Some(BETA_TOKEN));
-        let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1"}});
+        let arguments = json!({"prUrl": "https://github.com/a/b/pull/1", "headSha": "abc", "review": {"schema": "mast.review/v1", "suggestedComments": [{"id":"s1", "anchor":{"file":"a", "side":"right", "startLine":1, "endLine":1}, "body":"Check", "severity":"low"}]}});
         agent.call(agent_tool_names::REVIEW_PUBLISH, arguments.clone()).await.unwrap();
         let calls = world.agent_calls(agent_tool_names::REVIEW_PUBLISH);
         assert_eq!(calls[0]["token"], BETA_TOKEN);

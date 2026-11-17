@@ -4049,6 +4049,16 @@ impl RpcService for EngineRpc {
                 let items = cache.my_open_prs();
                 RpcReply::value(&items)
             }
+            methods::GET_REVIEW_THREADS => {
+                let p: mast_proto::PrStatusParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                let threads = dash.review_threads(&p.owner, &p.repo, p.number).await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&threads)
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {
@@ -4308,6 +4318,48 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)
+            }
+            methods::ACCEPT_REVIEW_SUGGESTION => {
+                let draft: mast_proto::ReviewDraft = serde_json::from_value(params.get("draft").cloned()
+                    .ok_or_else(|| RpcError::Failed("draft is required".into()))?)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                let id = params.get("id").and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty()).ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                RpcReply::value(&self.workspace.accept_review_suggestion(&draft, id)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?)
+            }
+            methods::GET_DISMISSED_REVIEW_SUGGESTIONS | methods::DISMISS_REVIEW_SUGGESTION => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                if method == methods::GET_DISMISSED_REVIEW_SUGGESTIONS {
+                    RpcReply::value(&self.workspace.dismissed_review_suggestions(target))
+                } else {
+                    let id = params.get("id").and_then(serde_json::Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| RpcError::Failed("id is required".into()))?;
+                    RpcReply::value(&self.workspace.dismiss_review_suggestion(target, id)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?)
+                }
+            }
+            methods::GET_REVIEW_DRAFTS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.review_drafts(target))
+            }
+            methods::SET_REVIEW_DRAFTS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                let drafts: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params.get("drafts").cloned().ok_or_else(|| RpcError::Failed("drafts is required".into()))?
+                ).map_err(|error| RpcError::Failed(error.to_string()))?;
+                let before: Vec<mast_proto::ReviewDraft> = serde_json::from_value(
+                    params.get("before").cloned().ok_or_else(|| RpcError::Failed("before is required".into()))?
+                ).map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&self.workspace.update_review_drafts(target, &before, &drafts)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?)
             }
             methods::GET_DIFF_REVIEW_STATE => {
                 let target = params

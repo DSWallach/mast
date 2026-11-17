@@ -66,6 +66,7 @@ mod file_list;
 mod explanation;
 mod ref_picker;
 mod review_state;
+mod review_drafts;
 mod word_diff;
 pub(crate) mod walkthrough;
 
@@ -1497,6 +1498,11 @@ pub enum DiffRow {
     CommentDraft {
         file: u32,
     },
+    ReviewThread {
+        file: u32,
+        thread: u32,
+        height: u32,
+    },
     /// Trailing pad closing an expanded body ([`BODY_BOTTOM_PAD`]).
     BodyPad {
         file: u32,
@@ -1522,6 +1528,7 @@ impl DiffRow {
             | Self::SplitLine { file, .. }
             | Self::CommentCard { file, .. }
             | Self::CommentDraft { file }
+            | Self::ReviewThread { file, .. }
             | Self::BodyPad { file }
             | Self::FoldingBody { file } => Some(file as usize),
         }
@@ -1543,6 +1550,7 @@ impl DiffRow {
                 .map(|comment| comments::card_height(&comment.body))
                 .unwrap_or(0.0),
             DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
+            DiffRow::ReviewThread { height, .. } => height as f32,
             DiffRow::BodyPad { .. } => BODY_BOTTOM_PAD,
             DiffRow::FoldingBody { .. } => 0.0,
         }
@@ -1566,16 +1574,16 @@ pub fn body_rows(
     fn push_cards(
         rows: &mut Vec<DiffRow>,
         file_ix: u32,
-        comments: &[ReviewComment],
+        cards: &HashMap<(CommentSide, u32), Vec<u32>>,
         draft: Option<(CommentSide, u32)>,
         anchors: &[Option<(CommentSide, u32)>],
     ) {
         for anchor in anchors.iter().flatten() {
-            for (ix, comment) in comments.iter().enumerate() {
-                if comment.diff_anchor() == Some(*anchor) {
+            if let Some(indices) = cards.get(anchor) {
+                for &ix in indices {
                     rows.push(DiffRow::CommentCard {
                         file: file_ix,
-                        card: ix as u32,
+                        card: ix,
                     });
                 }
             }
@@ -1585,6 +1593,12 @@ pub fn body_rows(
         }
     }
 
+    let mut cards: HashMap<(CommentSide, u32), Vec<u32>> = HashMap::new();
+    for (ix, comment) in comments.iter().enumerate() {
+        if let Some(anchor) = comment.diff_anchor() {
+            cards.entry(anchor).or_default().push(ix as u32);
+        }
+    }
     let mut rows = Vec::with_capacity(body_row_count(file));
     for notice in 0..file_notices(file).len() {
         rows.push(DiffRow::Notice {
@@ -1607,7 +1621,7 @@ pub fn body_rows(
                         line: line_ix as u32,
                         flat: hunk_flat + line_ix as u32,
                     });
-                    push_cards(&mut rows, file_ix, comments, draft, &[line_anchor(line)]);
+                    push_cards(&mut rows, file_ix, &cards, draft, &[line_anchor(line)]);
                 }
             }
             DiffMode::Split => {
@@ -1619,7 +1633,7 @@ pub fn body_rows(
                         right,
                     });
                     let anchors = pair_anchors(&hunk.lines, (left, right));
-                    push_cards(&mut rows, file_ix, comments, draft, &anchors);
+                    push_cards(&mut rows, file_ix, &cards, draft, &anchors);
                 }
             }
         }
@@ -1941,6 +1955,8 @@ struct HoverRow {
 
 struct CommentDraft {
     editing_id: Option<String>,
+    local: Option<review_drafts::LocalDraftEdit>,
+    outdated: bool,
     /// Composer the note will stage onto, captured when the card opened. A
     /// draft belongs to the checkout it was written over, so it must not
     /// follow the user onto whatever chat is selected by commit time.
@@ -1953,6 +1969,15 @@ struct CommentDraft {
     line: u32,
     input: Entity<ComposerInput>,
     _events: Subscription,
+}
+
+#[derive(PartialEq, Eq)]
+struct CommentSyncKey {
+    revision: u64,
+    owner: Option<String>,
+    target: Option<String>,
+    pinned: bool,
+    editor: Option<(String, CommentSide, u32, Option<String>)>,
 }
 
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
@@ -2018,6 +2043,36 @@ pub struct Changes {
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
     review_task: Option<Task<()>>,
+    review_threads: Vec<mast_proto::ReviewThread>,
+    review_thread_index: review_drafts::ThreadIndex,
+    unplaced_review_threads: Vec<usize>,
+    review_threads_task: Option<Task<()>>,
+    review_threads_error: Option<String>,
+    local_review_drafts: HashMap<String, Vec<mast_proto::ReviewDraft>>,
+    local_draft_comments: HashMap<String, Vec<ReviewComment>>,
+    local_draft_ids: std::collections::HashSet<String>,
+    local_outdated_drafts: Vec<mast_proto::ReviewDraft>,
+    comment_index: HashMap<String, Vec<ReviewComment>>,
+    comment_sync_key: Option<CommentSyncKey>,
+    draft_anchor_index: review_drafts::DraftAnchorIndex,
+    local_draft_pending: HashMap<String, Vec<mast_proto::ReviewDraft>>,
+    local_draft_acknowledged: HashMap<String, Vec<mast_proto::ReviewDraft>>,
+    local_draft_load_task: Option<Task<()>>,
+    local_draft_save_task: Option<Task<()>>,
+    local_draft_debounce_task: Option<Task<()>>,
+    local_draft_save_ready: bool,
+    local_draft_error: Option<String>,
+    review_suggestions: HashMap<String, mast_proto::ReviewSuggestedComment>,
+    suggestion_comments: Vec<ReviewComment>,
+    suggestion_target: Option<String>,
+    suggestion_head: Option<String>,
+    suggestion_display_head: Option<Option<String>>,
+    outdated_suggestions: Vec<(String, String)>,
+    outdated_limit: usize,
+    dismissed_suggestions: std::collections::HashSet<String>,
+    suggestion_dispositions_target: Option<String>,
+    suggestion_load_task: Option<Task<()>>,
+    suggestion_accept_task: Option<Task<()>>,
     review_save_task: Option<Task<()>>,
     review_pending: HashMap<String, mast_proto::DiffReviewState>,
     review_acknowledged: HashMap<String, mast_proto::DiffReviewState>,
@@ -2274,6 +2329,36 @@ impl Changes {
             walkthrough_target: None,
             review_tour: false,
             review_task: None,
+            review_threads: Vec::new(),
+            review_thread_index: review_drafts::ThreadIndex::default(),
+            unplaced_review_threads: Vec::new(),
+            review_threads_task: None,
+            review_threads_error: None,
+            local_review_drafts: HashMap::new(),
+            local_draft_comments: HashMap::new(),
+            local_draft_ids: std::collections::HashSet::new(),
+            local_outdated_drafts: Vec::new(),
+            comment_index: HashMap::new(),
+            comment_sync_key: None,
+            draft_anchor_index: review_drafts::DraftAnchorIndex::default(),
+            local_draft_pending: HashMap::new(),
+            local_draft_acknowledged: HashMap::new(),
+            local_draft_load_task: None,
+            local_draft_save_task: None,
+            local_draft_debounce_task: None,
+            local_draft_save_ready: false,
+            local_draft_error: None,
+            review_suggestions: HashMap::new(),
+            suggestion_comments: Vec::new(),
+            suggestion_target: None,
+            suggestion_head: None,
+            suggestion_display_head: None,
+            outdated_suggestions: Vec::new(),
+            outdated_limit: 20,
+            dismissed_suggestions: std::collections::HashSet::new(),
+            suggestion_dispositions_target: None,
+            suggestion_load_task: None,
+            suggestion_accept_task: None,
             review_save_task: None,
             review_pending: HashMap::new(),
             review_acknowledged: HashMap::new(),
@@ -3161,7 +3246,9 @@ impl Changes {
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
+                changes.refresh_thread_rows(cx);
                 cx.notify();
             })
             .ok();
@@ -3176,6 +3263,7 @@ impl Changes {
         let new_body = if let Some(parsed) = &self.parsed {
             expand_context::add_rows(new_body, &parsed.files, &parsed.key, &self.expanded_context).0
         } else { new_body };
+        let new_body = self.add_thread_rows(file_ix, new_body);
         if self.explanation_selection.take().is_some() {
             self.explanation_unified_rows = None;
             self.explanation_hunk = None;
@@ -3589,6 +3677,7 @@ impl Changes {
         self.rows = rows;
         self.row_ranges = ranges;
         self.section_headers = section_headers;
+        self.refresh_thread_rows(cx);
         let anchor = anchor_row.and_then(|row| self.rows.iter().position(|candidate| *candidate == row)).or_else(|| anchor_file
             .and_then(|ix| self.row_ranges.get(ix))
             .and_then(|range| range.as_ref())
@@ -3622,7 +3711,7 @@ impl Changes {
             .map(|owner| owner.chat_id.as_str())
             .unwrap_or("");
         let state = self.state.read(cx);
-        state
+        let mut comments: Vec<_> = state
             .review_comments(key)
             .iter()
             .filter(|comment| {
@@ -3632,14 +3721,18 @@ impl Changes {
                     != Some(&comment.id)
             })
             .cloned()
-            .collect()
+            .collect();
+        if let Some(local) = self.review_target.as_ref().and_then(|target| self.local_draft_comments.get(target)) {
+            comments.extend(local.iter().filter(|comment| self.draft.as_ref().and_then(|draft| draft.editing_id.as_ref()) != Some(&comment.id)).cloned());
+        }
+        if self.suggestion_target.as_ref() == self.review_target.as_ref() {
+            comments.extend(self.suggestion_comments.iter().cloned());
+        }
+        comments
     }
 
-    fn comments_for(&self, path: &str, cx: &App) -> Vec<ReviewComment> {
-        self.staged_comments(cx)
-            .into_iter()
-            .filter(|comment| !comment.is_file() && comment.path == path)
-            .collect()
+    fn comments_for(&self, path: &str, _cx: &App) -> Vec<ReviewComment> {
+        self.comment_index.get(path).cloned().unwrap_or_default()
     }
 
     /// The parsed diff's pre-rename path for `path`, when the file moved.
@@ -3663,7 +3756,8 @@ impl Changes {
             .map(|owner| owner.chat_id.clone())
             .unwrap_or_default();
         if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
-            self.draft = None;
+            if self.draft.as_ref().is_some_and(|draft| draft.local.is_some()) { self.commit_draft(cx); }
+            else { self.draft = None; }
             self.sync_comment_rows(cx);
             cx.notify();
         }
@@ -3672,13 +3766,14 @@ impl Changes {
     fn draft_anchor(&self) -> Option<(String, CommentSide, u32)> {
         self.draft
             .as_ref()
+            .filter(|draft| !draft.outdated)
             .map(|draft| (draft.path.clone(), draft.side, draft.line))
     }
 
     fn draft_anchor_in(&self, path: &str) -> Option<(CommentSide, u32)> {
         self.draft
             .as_ref()
-            .filter(|draft| draft.path == path)
+            .filter(|draft| !draft.outdated && draft.path == path)
             .map(|draft| (draft.side, draft.line))
     }
 
@@ -3686,6 +3781,13 @@ impl Changes {
         if self.parsed.is_none() {
             return;
         }
+        let sync_key = CommentSyncKey {
+            revision: self.state.read(cx).review_comments_revision,
+            owner: self.owner_chat_id_owned(), target: self.review_target.clone(), pinned: self.pinned_cwd.is_some(),
+            editor: self.draft.as_ref().map(|draft| (draft.path.clone(), draft.side, draft.line, draft.editing_id.clone())),
+        };
+        if self.comment_sync_key.as_ref() == Some(&sync_key) { return; }
+        self.comment_sync_key = Some(sync_key);
         let staged = self.staged_comments(cx);
         let draft = self.draft_anchor();
         let key = comment_state_key(&staged, draft.as_ref());
@@ -3693,6 +3795,10 @@ impl Changes {
             return;
         }
         self.comment_key = key;
+        self.comment_index.clear();
+        for comment in &staged {
+            if !comment.is_file() { self.comment_index.entry(comment.path.clone()).or_default().push(comment.clone()); }
+        }
         let Some(parsed) = &self.parsed else {
             return;
         };
@@ -3717,11 +3823,7 @@ impl Changes {
             {
                 continue;
             }
-            let comments: Vec<ReviewComment> = staged
-                .iter()
-                .filter(|comment| !comment.is_file() && comment.path == file.path)
-                .cloned()
-                .collect();
+            let comments = self.comment_index.get(&file.path).cloned().unwrap_or_default();
             let body = body_rows(
                 file_ix as u32,
                 file,
@@ -3778,13 +3880,31 @@ impl Changes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_draft_internal(path, side, line, true, window, cx);
+    }
+
+    fn open_draft_internal(
+        &mut self, path: String, side: CommentSide, line: u32, local_allowed: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
         if self.pinned_cwd.is_some() {
             return;
         }
+        if self.draft.is_some() { self.commit_draft(cx); }
+        let local = if local_allowed && matches!(self.scope, DiffScope::Branch | DiffScope::Range) {
+            if let Some(target) = self.review_target.as_deref() {
+                let Some(draft) = self.new_local_draft(target, &path, side, line) else {
+                    self.local_draft_error = Some("The review draft is still loading or this line is no longer in the diff.".into());
+                    cx.notify();
+                    return;
+                };
+                Some(review_drafts::LocalDraftEdit { draft, original: None })
+            } else { None }
+        } else { None };
         let input = cx.new(|cx| ComposerInput::new("Request a change…", cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.commit_draft(cx),
-            ComposerInputEvent::Edited => cx.notify(),
+            ComposerInputEvent::Edited => this.local_draft_edited(cx),
             _ => {}
         });
         let handle = input.read(cx).focus_handle(cx);
@@ -3792,6 +3912,8 @@ impl Changes {
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
             editing_id: None,
+            local,
+            outdated: false,
             key,
             path,
             old_path,
@@ -3806,10 +3928,9 @@ impl Changes {
     }
 
     fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let key = self.owner_chat_id_owned().unwrap_or_default();
-        let state = self.state.read(cx);
-        let Some(comment) = state
-            .review_comments(&key)
+        let local = self.review_target.as_ref().and_then(|target| self.local_review_drafts.get(target))
+            .and_then(|drafts| drafts.iter().find(|draft| draft.id == id)).cloned();
+        let Some(comment) = self.staged_comments(cx)
             .iter()
             .find(|comment| comment.id == id && !comment.is_file())
             .cloned()
@@ -3819,9 +3940,10 @@ impl Changes {
         let Some((side, line)) = comment.diff_anchor() else {
             return;
         };
-        self.open_draft(comment.path.clone(), side, line, window, cx);
-        let draft = self.draft.as_mut().unwrap();
+        self.open_draft_internal(comment.path.clone(), side, line, local.is_some(), window, cx);
+        let Some(draft) = self.draft.as_mut() else { return; };
         draft.editing_id = Some(comment.id);
+        draft.local = local.map(|draft| review_drafts::LocalDraftEdit { original: Some(draft.clone()), draft });
         if let comments::CommentSource::Diff { old_path, .. } = comment.source {
             draft.old_path = old_path;
         }
@@ -3833,7 +3955,9 @@ impl Changes {
     }
 
     fn cancel_draft(&mut self, cx: &mut Context<Self>) {
-        self.draft = None;
+        if let Some(draft) = self.draft.take() {
+            if let Some(local) = draft.local { self.cancel_local_edit(local, cx); }
+        }
         self.sync_comment_rows(cx);
         cx.notify();
     }
@@ -3843,6 +3967,13 @@ impl Changes {
             return;
         };
         let body = draft.input.read(cx).text().trim().to_string();
+        if let Some(mut local) = draft.local {
+            if body.is_empty() { self.cancel_local_edit(local, cx); }
+            else { local.draft.body = body; self.put_local_draft(local.draft, true, cx); self.rebuild_draft_index(cx); }
+            self.sync_comment_rows(cx);
+            cx.notify();
+            return;
+        }
         if body.is_empty() {
             self.sync_comment_rows(cx);
             cx.notify();
@@ -3867,6 +3998,10 @@ impl Changes {
     }
 
     fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(target) = self.review_target.clone().filter(|target| self.local_review_drafts.get(target).is_some_and(|drafts| drafts.iter().any(|draft| draft.id == id))) {
+            self.remove_local_draft(&target, id, cx);
+            return;
+        }
         let key = self.owner_chat_id_owned().unwrap_or_default();
         self.state.update(cx, |state, cx| {
             state.remove_review_comment(&key, id);
@@ -4740,8 +4875,10 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let comments = self.comments_for(&file_diff.path, cx);
-                match comments.get(card as usize) {
+                let comment = self.comment_index.get(&file_diff.path).and_then(|comments| comments.get(card as usize)).cloned();
+                match comment.as_ref() {
+                    Some(comment) if self.review_suggestions.contains_key(&comment.id) => self.render_suggestion_card(comment, &theme, cx),
+                    Some(comment) if self.is_local_draft(&comment.id) => self.render_local_draft_card(comment, &theme, cx),
                     Some(comment) => crate::comment_ui::render_comment_card(
                         comment,
                         &theme,
@@ -4777,6 +4914,9 @@ impl Changes {
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
+            }
+            DiffRow::ReviewThread { thread, height, .. } => {
+                self.render_review_thread(thread as usize, height, &theme)
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -7156,6 +7296,18 @@ impl Render for Changes {
             .children(self.render_context_chrome(&theme, cx))
             .children(self.render_execution_selector(&theme, cx))
             .children(self.render_diff_target_error(&theme, cx))
+            .children(self.render_outdated_drafts(&theme, cx))
+            .when_some(self.local_draft_error.clone(), |el, message| {
+                el.child(div().flex().items_center().gap(px(8.0))
+                    .child(crate::error_notice::ErrorNotice::from_text("local-review-draft-error", &theme, &message))
+                    .child(div().id("local-review-draft-retry").cursor_pointer().text_color(theme.text_muted)
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_local_drafts(cx))).child("Retry")))
+            })
+            .when_some(self.review_threads_error.clone(), |el, message| {
+                el.child(crate::error_notice::ErrorNotice::from_text(
+                    "changes-review-threads-error", &theme, &format!("Review threads: {message}"),
+                ))
+            })
             .when_some(self.review_error.clone(), |el, message| {
                 el.child(div().flex().items_center().gap(px(8.0))
                     .child(crate::error_notice::ErrorNotice::from_text("changes-review-state-error", &theme, &message))

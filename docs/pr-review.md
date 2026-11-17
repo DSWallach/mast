@@ -1,5 +1,21 @@
 # Review PR launcher
 
+## Local drafts and review threads
+
+In a branch or PR review, add a draft from a diff line. Drafts are stored
+locally for the review target, survive reopening Mast, and can be edited or
+deleted. **Add to chat** stages a copy for the existing composer workflow.
+When the head changes, Mast matches the hunk and line content; a missing or
+ambiguous match is listed as outdated rather than attached to a guessed line.
+
+`review_publish` accepts `suggestedComments` with an anchor, body, severity,
+optional suggestion block and optional stable `id`. Keep the same `id` when
+republishing a suggestion so a dismissal remains dismissed even if its text
+changes. Older suggestions without an id get a derived id. Suggestions are
+local until accepted, edited, or dismissed; accepting creates a local draft.
+Existing GitHub review threads are fetched on demand and shown read-only.
+No draft, suggestion, or thread action posts to GitHub.
+
 Mast can check out someone's pull request and start a review Chat the same
 way the Cofactr workspace's `tools/cursor-claude-launcher/launch.sh` does
 (the GitHub overlay's **Claude ▾ → code-review / fix-ci** menu).
