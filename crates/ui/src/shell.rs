@@ -8741,7 +8741,7 @@ impl Shell {
             true,
             div()
                 .relative()
-                .debug_selector(|| "overview-shortcut-collections".into())
+                .debug_selector(|| "sidebar-session-lists".into())
                 .min_h_0()
                 .flex_1()
                 .child(

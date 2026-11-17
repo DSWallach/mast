@@ -117,7 +117,7 @@ Validation:
 - Native light/dark preview rendered and was inspected. The published [native preview](mast-artifact:f8e561b1409df4a8161ee445670c7d5e) also passed the artifact render check at both artifact viewport widths in both themes. This checks presentation of the preview image, not narrow native-window behavior.
 - New module formatting and whitespace checks passed. All Mast builds used the shared Cargo target directory.
 
-Remaining before the full consolidation is merge-ready: finish the capability-by-capability parity audit, check filter behavior across the shortcut collections and Sessions, validate narrow native windows and the proposed overlay, exercise the full context-menu and remote-preference workflows, and run the required `pr-review` gate on the final commit. The branch has not been merged; the work item remains active.
+Remaining before the full consolidation is merge-ready: finish the capability-by-capability parity audit, check Overview filter behavior and the Sessions presentation, validate narrow native windows and the proposed overlay, exercise the full context-menu and remote-preference workflows, and run the required `pr-review` gate on the final commit. The branch has not been merged; the work item remains active.
 
 
 ### Final implementation and parity audit

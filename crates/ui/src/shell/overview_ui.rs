@@ -404,7 +404,7 @@ pub(super) mod tests {
         assert!(vcx.debug_bounds("outline-pinned-chat-chat").is_some());
         assert!(vcx.debug_bounds("sidebar-pinned-section").is_none());
         assert!(vcx.debug_bounds("pinned-toggle").is_none());
-        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         assert!(vcx.debug_bounds("overview-navigation").is_some());
         let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
         vcx.simulate_click(sessions, gpui::Modifiers::default());
@@ -504,7 +504,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         shell.update(vcx, |shell, cx| {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
             shell.settings.sidebar_overview = false;
@@ -520,7 +520,7 @@ pub(super) mod tests {
         });
         assert!(
             f32::from(
-                vcx.debug_bounds("overview-shortcut-collections")
+                vcx.debug_bounds("sidebar-session-lists")
                     .unwrap()
                     .size
                     .height
@@ -576,7 +576,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
         let clear = vcx.debug_bounds("overview-clear-filters").unwrap().center();
         vcx.simulate_click(clear, gpui::Modifiers::default());
         vcx.run_until_parked();
@@ -622,7 +622,7 @@ pub(super) mod tests {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            shell.settings.sidebar_sections_by_profile.insert(key, vec![crate::settings::SidebarSection {
+            shell.settings.sidebar_sections_by_profile.insert(key.clone(), vec![crate::settings::SidebarSection {
                 id: "custom".into(), name: "Custom".into(), collapsed: false, session_ids: vec!["chat".into()],
             }]);
             let mut snapshot = mast_proto::WorkOutlineSnapshot::unavailable("space", true, 1);
@@ -639,12 +639,12 @@ pub(super) mod tests {
                 cx.notify();
             });
             shell.settings.sidebar_outline_groups = true;
-            let custom = shell.custom_sidebar_sections(cx);
+            let custom = shell.settings.sidebar_sections_by_profile.get(&key).unwrap();
             assert_eq!(custom.len(), 1);
             assert_eq!(custom[0].session_ids, vec!["chat"]);
         });
         redraw_assistant(vcx);
-        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
+        assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
     }
 
     #[gpui::test]
