@@ -34,6 +34,12 @@ test-group = 'terminal-heavy'
 filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
 test-group = 'terminal-heavy'
 
+# Watch attach for 50 checkouts takes ~50 s alone; under a parallel release run the whole
+# test passed 3 min (2026-11-17). Its assertions are git-spawn counts, not time.
+[[profile.release.overrides]]
+filter = 'binary(diff_sync_repair_backoff)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [profile.default]
 test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 3 }
