@@ -468,6 +468,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+pub(crate) fn reset_ch_advance_cache() {
+    CH_ADVANCE_CACHE.with(|cache| *cache.borrow_mut() = None);
+}
+
 /// Width of one monospace column at the diff text size. Resolving the font
 /// and asking the shaper is done once per typography/theme change, not once
 /// per rendered row.

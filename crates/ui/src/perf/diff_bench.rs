@@ -258,6 +258,8 @@ fn bench_chat(index: usize) -> mast_proto::Chat {
 /// monospace advance once per typography/theme state, not once per row.
 #[gpui::test]
 fn font_advance_is_not_looked_up_per_row(cx: &mut gpui::TestAppContext) {
+    // Tests may share a thread (and so the cache) with other text systems.
+    crate::changes::reset_ch_advance_cache();
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
