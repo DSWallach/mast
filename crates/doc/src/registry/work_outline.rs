@@ -774,8 +774,12 @@ impl RegistryDoc {
         now_ms: i64,
     ) -> Outcome<WorkOutlineMutateReply> {
         check_operation_id(mutation.operation_id())?;
-        if matches!(mutation, WorkOutlineMutation::SetApprovalRule(_)) && actor.kind != WorkOutlineActorKind::User {
-            return Err(WorkOutlineError::unauthorized("Only a user may change approval rules"));
+        if matches!(mutation, WorkOutlineMutation::SetApprovalRule(_))
+            && actor.kind != WorkOutlineActorKind::User
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "Only a user may change approval rules",
+            ));
         }
         if actor.kind == WorkOutlineActorKind::Agent {
             let chat_id = actor.chat_id.as_deref().ok_or_else(|| {
@@ -835,9 +839,9 @@ impl RegistryDoc {
             WorkOutlineMutation::ArchiveWorkItemInstruction(p) => self
                 .archive_work_item_instruction(p, actor, now_ms)
                 .map(|_| empty),
-            WorkOutlineMutation::RestoreWorkItemInstruction(p) => self
-                .restore_work_item_instruction(p, now_ms)
-                .map(|_| empty),
+            WorkOutlineMutation::RestoreWorkItemInstruction(p) => {
+                self.restore_work_item_instruction(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::CreateInstructionRevision(p) => {
                 let id = self.create_instruction_revision(p, actor, now_ms)?;
                 Ok(WorkOutlineMutateReply {
@@ -874,7 +878,10 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::UpdateUserActionRequest(p) => {
                 self.update_user_action_request(p, actor)?;
-                Ok(WorkOutlineMutateReply { user_action_request_id: Some(p.user_action_request_id.clone()), ..Default::default() })
+                Ok(WorkOutlineMutateReply {
+                    user_action_request_id: Some(p.user_action_request_id.clone()),
+                    ..Default::default()
+                })
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => self
                 .resolve_user_action_request(p, actor, now_ms)
@@ -898,6 +905,9 @@ impl RegistryDoc {
                 .map(|_| empty),
             WorkOutlineMutation::SetSpaceLinearEnabled(p) => {
                 self.set_space_linear_enabled(p, now_ms).map(|_| empty)
+            }
+            WorkOutlineMutation::SetSpaceLinearAccount(p) => {
+                self.set_space_linear_account(p, now_ms).map(|_| empty)
             }
             WorkOutlineMutation::SetResolveMergedHandoffs(p) => {
                 self.set_resolve_merged_handoffs(p, now_ms).map(|_| empty)
@@ -939,7 +949,10 @@ impl RegistryDoc {
             }
             WorkOutlineMutation::ImportWorkItemTemplate(p) => {
                 let id = self.import_work_item_template(p, now_ms)?;
-                Ok(WorkOutlineMutateReply { template_id: Some(id), ..Default::default() })
+                Ok(WorkOutlineMutateReply {
+                    template_id: Some(id),
+                    ..Default::default()
+                })
             }
             WorkOutlineMutation::DeleteWorkItemTemplate(p) => {
                 self.delete_work_item_template(p).map(|_| empty)

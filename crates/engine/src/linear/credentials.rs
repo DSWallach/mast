@@ -24,6 +24,14 @@ fn keychain_account(account_id: &str) -> &str {
         account_id
     }
 }
+fn validate_account_id(account_id: &str) -> Result<(), String> {
+    if account_id.is_empty() || account_id == KEYCHAIN_ACCOUNT {
+        Err("Invalid Linear account identifier".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Environment fallback (and the only source when no store holds a key).
 pub const ENV_KEY: &str = "LINEAR_API_KEY";
 /// `memory` forces the in-memory store (dev/test runs that must never
@@ -115,6 +123,7 @@ impl LinearKeyStore for MemoryKeyStore {
     }
 
     fn read_account(&self, account_id: &str) -> Result<Option<String>, String> {
+        validate_account_id(account_id)?;
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
         Ok(self
             .keys
@@ -124,6 +133,7 @@ impl LinearKeyStore for MemoryKeyStore {
             .cloned())
     }
     fn write_account(&self, account_id: &str, key: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
         self.keys
             .lock()
@@ -132,6 +142,7 @@ impl LinearKeyStore for MemoryKeyStore {
         Ok(())
     }
     fn delete_account(&self, account_id: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).2 += 1;
         self.keys
             .lock()
@@ -212,6 +223,7 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn read_account(&self, account_id: &str) -> Result<Option<String>, String> {
+        validate_account_id(account_id)?;
         if account_id == DEFAULT_ACCOUNT_ID {
             return self.read();
         }
@@ -222,6 +234,7 @@ impl LinearKeyStore for KeychainKeyStore {
     }
 
     fn write_account(&self, account_id: &str, key: &str) -> Result<(), String> {
+        validate_account_id(account_id)?;
         let (ok, _, stderr) = Self::run(&[
             "add-generic-password",
             "-U",
@@ -386,5 +399,7 @@ mod account_tests {
         assert_eq!(store.read().unwrap().as_deref(), Some("default key"));
         assert_eq!(keychain_account(DEFAULT_ACCOUNT_ID), KEYCHAIN_ACCOUNT);
         assert_eq!(keychain_account("personal"), "personal");
+        assert!(store.write_account(KEYCHAIN_ACCOUNT, "collision").is_err());
+        assert_eq!(store.read().unwrap().as_deref(), Some("default key"));
     }
 }

@@ -530,3 +530,32 @@ fn system_writes_never_overwrite_a_field_the_user_took_over() {
     assert_eq!(item.description.as_deref(), Some("Body v2"));
     assert_eq!(item.status, WorkItemStatus::Pending);
 }
+
+#[test]
+fn space_linear_account_defaults_and_updates_independently() {
+    let mut doc = doc();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
+    let set = |account_id, operation_id: &str| {
+        WorkOutlineMutation::SetSpaceLinearAccount(SetSpaceLinearAccountParams {
+            space_id: SPACE.into(),
+            account_id,
+            operation_id: operation_id.into(),
+        })
+    };
+    apply(&mut doc, set(Some("personal".into()), "account-1")).unwrap();
+    assert_eq!(
+        snap(&doc).space_settings.linear_account_id.as_deref(),
+        Some("personal")
+    );
+    assert_eq!(
+        doc.work_outline_snapshot(OFF_SPACE, true)
+            .space_settings
+            .linear_account_id,
+        None
+    );
+    let batches = doc.batches_written();
+    apply(&mut doc, set(Some("personal".into()), "account-2")).unwrap();
+    assert_eq!(doc.batches_written(), batches);
+    apply(&mut doc, set(None, "account-3")).unwrap();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
+}

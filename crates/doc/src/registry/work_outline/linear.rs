@@ -24,8 +24,8 @@ use mast_proto::linear::{
 };
 use mast_proto::work_outline::{
     CreateWorkItemExternalReferenceParams, CreateWorkItemFromLinearParams, LinkLinearProjectParams,
-    SetSpaceLinearEnabledParams, WorkItemStatus, WorkOutlineActor, WorkOutlineSpaceSettings,
-    derive_id, external_reference_id, limits, roles,
+    SetSpaceLinearAccountParams, SetSpaceLinearEnabledParams, WorkItemStatus, WorkOutlineActor,
+    WorkOutlineSpaceSettings, derive_id, external_reference_id, limits, roles,
 };
 use serde_json::{Value, json};
 
@@ -79,6 +79,10 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
             .and_then(|row| row.fields.get("linearEnabled"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        linear_account_id: row
+            .and_then(|row| row.fields.get("linearAccountId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         pr_review_sync_work_item_id: super::pr_review_sync::decode_destination(row),
         linear_assigned_work_item_id: super::pr_review_sync::decode_linear_assigned(row),
         pr_review_prompts: row
@@ -115,22 +119,38 @@ impl RegistryDoc {
         self.require_space(&p.space_id)?;
         let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
             RowState::Live => {
-                if decode_space_settings(self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id).as_ref()).resolve_merged_handoffs == p.enabled {
+                if decode_space_settings(
+                    self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id)
+                        .as_ref(),
+                )
+                .resolve_merged_handoffs
+                    == p.enabled
+                {
                     return Ok(());
                 }
-                Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
-                    ("updatedAt".to_owned(), json!(now_ms)),
-                ]))
+                Planned::update(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                    ]),
+                )
             }
             RowState::Absent => {
-                if p.enabled { return Ok(()); }
-                Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, BTreeMap::from([
-                    ("spaceId".to_owned(), json!(p.space_id)),
-                    ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
-                    ("updatedAt".to_owned(), json!(now_ms)),
-                    ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
-                ]))
+                if p.enabled {
+                    return Ok(());
+                }
+                Planned::upsert(
+                    KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                    &p.space_id,
+                    BTreeMap::from([
+                        ("spaceId".to_owned(), json!(p.space_id)),
+                        ("resolveMergedHandoffs".to_owned(), json!(p.enabled)),
+                        ("updatedAt".to_owned(), json!(now_ms)),
+                        ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                    ]),
+                )
             }
             RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
         };
@@ -257,6 +277,45 @@ impl RegistryDoc {
                     ]),
                 )
             }
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
+    /// Select the Space's Linear account using the settings row's LWW field.
+    pub fn set_space_linear_account(
+        &mut self,
+        p: &SetSpaceLinearAccountParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if let Some(account_id) = &p.account_id {
+            check_id("accountId", account_id)?;
+        }
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id);
+        if decode_space_settings(row.as_ref()).linear_account_id == p.account_id {
+            return Ok(());
+        }
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("linearAccountId".to_owned(), json!(p.account_id)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                ]),
+            ),
+            RowState::Absent => Planned::upsert(
+                KIND_WORK_OUTLINE_SPACE_SETTINGS,
+                &p.space_id,
+                BTreeMap::from([
+                    ("spaceId".to_owned(), json!(p.space_id)),
+                    ("linearAccountId".to_owned(), json!(p.account_id)),
+                    ("updatedAt".to_owned(), json!(now_ms)),
+                    ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+                ]),
+            ),
             RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
         };
         self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])

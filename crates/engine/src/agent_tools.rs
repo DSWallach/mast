@@ -896,10 +896,12 @@ impl AgentToolsService {
     fn linear_issue_for_agent(
         &self,
         identifier: &str,
+        account_id: Option<&str>,
     ) -> Result<mast_proto::LinearIssueSummary, &'static str> {
         let Some(linear) = lock(&self.linear).clone() else {
             return Err("unavailable");
         };
+        let linear = linear.for_account(account_id);
         if let Some(issue) = linear.cached_issue(identifier) {
             return Ok(issue);
         }
@@ -933,7 +935,10 @@ impl AgentToolsService {
         if let Some(reference) =
             snapshot.nearest_linear_reference(item_id, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
         {
-            match self.linear_issue_for_agent(&reference.external_id) {
+            match self.linear_issue_for_agent(
+                &reference.external_id,
+                snapshot.space_settings.linear_account_id.as_deref(),
+            ) {
                 Ok(issue) => {
                     out.insert("linearIssue".into(), json!(issue));
                 }

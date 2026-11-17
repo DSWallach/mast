@@ -2764,8 +2764,7 @@ impl RpcService for EngineRpc {
                     let work_outline = self.work_outline.clone();
                     let pr_review_sync = self.pr_review_sync.clone();
                     tokio::spawn(async move {
-                        if linear.has_key().await
-                            && let Err(error) = crate::linear::sync::sync_space(
+                        if let Err(error) = crate::linear::sync::sync_space(
                                 &linear,
                                 &work_outline,
                                 Some(&pr_review_sync),

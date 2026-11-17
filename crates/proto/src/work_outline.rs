@@ -41,7 +41,8 @@ pub use crate::work_outline_order::MAX_ORDER_KEY_LEN;
 use crate::work_outline_user_actions::{
     ApproveWorkItemInstructionProposalParams, CreateUserActionRequestParams,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView, WorkItemInstructionProposalView,
+    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView,
+    WorkItemInstructionProposalView,
 };
 
 /// Hard limits enforced by typed mutators (doc crate) and the engine service,
@@ -463,6 +464,9 @@ pub struct WorkOutlineSpaceSettings {
     /// Linear integration is on for this Space (default off).
     #[serde(default)]
     pub linear_enabled: bool,
+    /// Linear account for this Space; absent selects Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_account_id: Option<String>,
     /// PR review sync: the work item that receives one child per PR that
     /// requests the user's review (`None` = the sync is off for this Space).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -516,15 +520,40 @@ pub enum ApprovalRuleHarness {
 /// Neutral, disabled suggestions. The user must explicitly enable one.
 pub fn suggested_approval_rules(space_id: &str) -> Vec<ApprovalRule> {
     [
-        ("rust-tests", "Rust tests with isolated HOME", r"^cargo (test|nextest)( |$)", true),
-        ("ui-preview", "UI preview and snapshots", r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)", false),
-        ("process-inspection", "Process inspection", r"^(ps|pgrep)( |$)", false),
-    ].into_iter().map(|(key, label, pattern, isolated)| ApprovalRule {
-        id: crate::derive_id(space_id, key), label: label.into(), created_by: "built-in".into(),
-        harness: ApprovalRuleHarness::Any, enabled: false, argv_prefix: Vec::new(),
-        command_regex: Some(pattern.into()), cwd_scope: None, require_isolated_home: isolated,
-        hit_count: 0, last_used_at: None,
-    }).collect()
+        (
+            "rust-tests",
+            "Rust tests with isolated HOME",
+            r"^cargo (test|nextest)( |$)",
+            true,
+        ),
+        (
+            "ui-preview",
+            "UI preview and snapshots",
+            r"^(scripts/ui-preview\.sh|cargo test .*--features snapshot .*offscreen_snapshot)( |$)",
+            false,
+        ),
+        (
+            "process-inspection",
+            "Process inspection",
+            r"^(ps|pgrep)( |$)",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(key, label, pattern, isolated)| ApprovalRule {
+        id: crate::derive_id(space_id, key),
+        label: label.into(),
+        created_by: "built-in".into(),
+        harness: ApprovalRuleHarness::Any,
+        enabled: false,
+        argv_prefix: Vec::new(),
+        command_regex: Some(pattern.into()),
+        cwd_scope: None,
+        require_isolated_home: isolated,
+        hit_count: 0,
+        last_used_at: None,
+    })
+    .collect()
 }
 
 fn default_resolve_merged_handoffs() -> bool {
@@ -539,6 +568,7 @@ impl Default for WorkOutlineSpaceSettings {
         Self {
             resolve_merged_handoffs: true,
             linear_enabled: false,
+            linear_account_id: None,
             pr_review_sync_work_item_id: None,
             linear_assigned_work_item_id: None,
             pr_review_prompts: None,
@@ -1426,6 +1456,16 @@ pub struct SetSpaceLinearEnabledParams {
     pub operation_id: String,
 }
 
+/// Select the Linear account for a Space; absent selects Default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSpaceLinearAccountParams {
+    pub space_id: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetResolveMergedHandoffsParams {
@@ -1537,6 +1577,7 @@ pub enum WorkOutlineMutation {
     RejectWorkItemInstructionProposal(RejectWorkItemInstructionProposalParams),
     // ── Linear integration ──
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
+    SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
@@ -1584,6 +1625,7 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(p) => &p.operation_id,
             Self::RejectWorkItemInstructionProposal(p) => &p.operation_id,
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
+            Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
@@ -1628,6 +1670,7 @@ impl WorkOutlineMutation {
             Self::ApproveWorkItemInstructionProposal(_) => "approveWorkItemInstructionProposal",
             Self::RejectWorkItemInstructionProposal(_) => "rejectWorkItemInstructionProposal",
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
+            Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
@@ -2171,12 +2214,16 @@ mod tests {
 
         let waiting: WorkItemChanges = serde_json::from_value(json!({
             "waitingUntil": 1800000000000_i64, "waitingReason": null
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(waiting.waiting_until, FieldPatch::Set(1800000000000));
         assert_eq!(waiting.waiting_reason, FieldPatch::Clear);
-        assert_eq!(serde_json::to_value(waiting).unwrap(), json!({
-            "waitingUntil": 1800000000000_i64, "waitingReason": null
-        }));
+        assert_eq!(
+            serde_json::to_value(waiting).unwrap(),
+            json!({
+                "waitingUntil": 1800000000000_i64, "waitingReason": null
+            })
+        );
 
         let all = WorkItemChanges {
             title: Some("T".into()),
@@ -2806,10 +2853,14 @@ mod tests {
         let rule: ApprovalRule = serde_json::from_value(json!({
             "id": "r", "label": "Tests", "createdBy": "user", "harness": "claude-code",
             "argvPrefix": ["cargo", "test"]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!rule.enabled);
         assert_eq!(rule.harness, ApprovalRuleHarness::ClaudeCode);
-        assert_eq!(serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(), rule);
+        assert_eq!(
+            serde_json::from_value::<ApprovalRule>(serde_json::to_value(&rule).unwrap()).unwrap(),
+            rule
+        );
         let suggestions = suggested_approval_rules("space-1");
         assert_eq!(suggestions.len(), 3);
         assert!(suggestions.iter().all(|rule| !rule.enabled));

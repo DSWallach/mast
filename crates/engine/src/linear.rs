@@ -87,6 +87,27 @@ struct Backend {
     ttl: Duration,
 }
 
+/// Adapts a named credential to the existing single-account service.
+struct AccountKeyStore {
+    store: Arc<dyn LinearKeyStore>,
+    account_id: String,
+}
+
+impl LinearKeyStore for AccountKeyStore {
+    fn read(&self) -> Result<Option<String>, String> {
+        self.store.read_account(&self.account_id)
+    }
+    fn write(&self, key: &str) -> Result<(), String> {
+        self.store.write_account(&self.account_id, key)
+    }
+    fn delete(&self) -> Result<(), String> {
+        self.store.delete_account(&self.account_id)
+    }
+    fn is_keychain(&self) -> bool {
+        self.store.is_keychain()
+    }
+}
+
 type SharedCall = Shared<BoxFuture<'static, Result<Value, LinearError>>>;
 
 struct Inner {
@@ -107,6 +128,8 @@ struct Inner {
     project_details: SwrStore<LinearProjectDetail, LinearError>,
     /// Serializes key changes (set/clear/forget).
     key_change: tokio::sync::Mutex<()>,
+    /// Independent caches and credentials for each named account.
+    accounts: Mutex<HashMap<String, LinearService>>,
 }
 
 /// Cheap to clone; one per engine.
@@ -149,9 +172,13 @@ pub fn normalize_identifier(identifier: &str) -> Result<String, LinearError> {
 
 impl LinearService {
     pub fn new(config: LinearConfig) -> Self {
+        Self::with_backend(backend_of(config))
+    }
+
+    fn with_backend(backend: Arc<Backend>) -> Self {
         Self {
             inner: Arc::new(Inner {
-                backend: RwLock::new(backend_of(config)),
+                backend: RwLock::new(backend),
                 key: Mutex::new(None),
                 verified: Mutex::new(None),
                 issues: Mutex::new(HashMap::new()),
@@ -161,6 +188,7 @@ impl LinearService {
                 project_lists: SwrStore::new(LIST_CACHE_TTL),
                 project_details: SwrStore::new(LIST_CACHE_TTL),
                 key_change: tokio::sync::Mutex::new(()),
+                accounts: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -173,6 +201,33 @@ impl LinearService {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = backend_of(config);
         self.forget_caches();
+        lock(&self.inner.accounts).clear();
+    }
+
+    /// Return the service and caches belonging to one account. Absent selects
+    /// the existing Default service and its environment fallback.
+    pub fn for_account(&self, account_id: Option<&str>) -> Self {
+        let Some(account_id) = account_id.filter(|id| *id != credentials::DEFAULT_ACCOUNT_ID)
+        else {
+            return self.clone();
+        };
+        let mut accounts = lock(&self.inner.accounts);
+        accounts
+            .entry(account_id.to_owned())
+            .or_insert_with(|| {
+                let parent = self.backend();
+                let backend = Backend {
+                    client: parent.client.clone(),
+                    store: Arc::new(AccountKeyStore {
+                        store: parent.store.clone(),
+                        account_id: account_id.to_owned(),
+                    }),
+                    env: no_env_source(),
+                    ttl: parent.ttl,
+                };
+                Self::with_backend(Arc::new(backend))
+            })
+            .clone()
     }
 
     fn backend(&self) -> Arc<Backend> {
@@ -714,5 +769,46 @@ fn open_issues(nodes: &[Value]) -> Vec<LinearIssueSummary> {
 impl Default for LinearService {
     fn default() -> Self {
         Self::new(LinearConfig::production())
+    }
+}
+
+#[cfg(test)]
+mod account_service_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accounts_have_independent_credentials_and_default_only_env_fallback() {
+        let store = MemoryKeyStore::new();
+        store.write_account("personal", "personal-key").unwrap();
+        let mut config = LinearConfig::for_tests("http://localhost", store.clone());
+        config.env = Arc::new(|| Some("environment-key".into()));
+        let service = LinearService::new(config);
+        let personal = service.for_account(Some("personal"));
+        let missing = service.for_account(Some("missing"));
+        assert_eq!(
+            service.resolve_key().await.unwrap().unwrap().0,
+            "environment-key"
+        );
+        assert_eq!(
+            personal.resolve_key().await.unwrap().unwrap().0,
+            "personal-key"
+        );
+        assert!(missing.resolve_key().await.unwrap().is_none());
+        store.write_account("personal", "replacement-key").unwrap();
+        personal.forget_caches();
+        assert_eq!(
+            service
+                .for_account(Some("personal"))
+                .resolve_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            "replacement-key"
+        );
+        assert_eq!(
+            service.resolve_key().await.unwrap().unwrap().0,
+            "environment-key"
+        );
     }
 }
