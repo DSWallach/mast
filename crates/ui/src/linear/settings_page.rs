@@ -620,6 +620,8 @@ mod tests {
             _ => Ok(serde_json::json!({})),
         });
         state.read_with(vcx, |state, _| assert_eq!(state.linear.accounts.as_ref().unwrap().len(), 2));
+        vcx.update(|window, cx| { window.draw(cx).clear(); });
+        assert!(vcx.debug_bounds("linear-account-rename-personal").is_some());
         page.update(vcx, |page, cx| {
             page.open_account_form(AccountForm::Add, "Personal", cx);
             page.account_key.update(cx, |input, cx| input.insert("test-key", cx));

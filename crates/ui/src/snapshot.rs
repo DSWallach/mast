@@ -306,11 +306,19 @@ pub fn linear_overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview
     overview
 }
 
-/// Linear settings with an in-memory disconnected status and no RPC.
+/// Linear settings with in-memory account metadata and no RPC.
 pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     let state = cx.new(|_| {
         let mut state = crate::state::AppState::new();
-        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus::default()));
+        state.linear.status = Some(Ok(mast_proto::linear::LinearConnectionStatus {
+            configured: true,
+            source: mast_proto::linear::LinearKeySource::Keychain,
+            ..Default::default()
+        }));
+        state.linear.accounts = Some(vec![
+            mast_proto::linear::LinearAccount { id: "default".into(), label: "Default".into(), key_set: true },
+            mast_proto::linear::LinearAccount { id: "personal".into(), label: "Personal".into(), key_set: true },
+        ]);
         state
     });
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
