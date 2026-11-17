@@ -162,6 +162,12 @@ struct EditorContextMenu {
     availability: editor::EditorMenuAvailability,
 }
 
+enum PinnedDiff {
+    Loading,
+    Ready(Vec<(similar::ChangeTag, String)>),
+    Error(String),
+}
+
 pub struct FilesSurface {
     state: Entity<AppState>,
     chat_id: String,
@@ -174,6 +180,8 @@ pub struct FilesSurface {
     pinned_reference: Option<crate::code_ref::StagedCodeRef>,
     pinned_source: String,
     pinned_highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
+    pinned_diff: Option<PinnedDiff>,
+    pinned_diff_generation: u64,
     pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
@@ -502,6 +510,8 @@ impl FilesSurface {
             pinned_reference: None,
             pinned_source: String::new(),
             pinned_highlight: None,
+            pinned_diff: None,
+            pinned_diff_generation: 0,
             pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache::default(),
             request_context: None,
             target_change_pending: false,
@@ -715,6 +725,8 @@ impl FilesSurface {
             .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
         self.pinned_highlight = key.as_ref().and_then(|key| self.pinned_syntax_cache.get(key));
         self.pinned_source = source.clone();
+        self.pinned_diff = None;
+        self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
         self.pinned_reference = Some(reference);
         if self.pinned_highlight.is_none() && let Some(key) = key {
             cx.spawn(async move |this, cx| {
@@ -746,6 +758,8 @@ impl FilesSurface {
         if self.pinned_reference.take().is_some() {
             self.pinned_source.clear();
             self.pinned_highlight = None;
+            self.pinned_diff = None;
+            self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
             cx.notify();
         }
     }

@@ -4,6 +4,7 @@ pub(super) fn pinned_view(
     reference: &crate::code_ref::StagedCodeRef,
     source: &str,
     highlight: Option<&mast_syntax::HighlightedDocument>,
+    diff: Option<&super::PinnedDiff>,
     theme: &crate::theme::Theme,
     editor_text_size: f32,
     cx: &gpui::Context<super::FilesSurface>,
@@ -38,10 +39,33 @@ pub(super) fn pinned_view(
             .rounded(px(crate::theme::Theme::SPACE_XS)).bg(theme.warning.opacity(0.10))
             .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(12.0))
             .child("These lines no longer match the file. You are looking at the version that was sent."))
-        .child(crate::components::code_block::code_block(source, first_line, highlight, theme, px(editor_text_size).into()))
+        .child(match diff {
+            None => crate::components::code_block::code_block(source, first_line, highlight, theme, px(editor_text_size).into()).into_any_element(),
+            Some(super::PinnedDiff::Loading) => div().child("Loading current file…").into_any_element(),
+            Some(super::PinnedDiff::Error(message)) => div().text_color(theme.warning_muted).child(message.clone()).into_any_element(),
+            Some(super::PinnedDiff::Ready(lines)) => div().font_family(theme.font_mono.clone()).text_size(px(editor_text_size))
+                .child(div().text_color(theme.text_muted).child("Sent lines compared with current lines at the original range"))
+                .children(lines.iter().map(|(tag, line)| {
+                    let (marker, color) = match tag {
+                        similar::ChangeTag::Delete => ("− ", theme.danger),
+                        similar::ChangeTag::Insert => ("+ ", theme.success),
+                        similar::ChangeTag::Equal => ("  ", theme.text),
+                    };
+                    div().text_color(color).child(format!("{marker}{line}"))
+                })).into_any_element(),
+        })
         .when(source.len() < reference.snippet.len(), |view| view.child("Excerpt truncated"))
         .child(div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM)).pt(px(crate::theme::Theme::SPACE_MD))
-            .child(crate::components::button("pinned-add-to-chat", "Add to chat", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+            .child(if diff.is_some() {
+                crate::components::button("pinned-show-snapshot", "Show snapshot", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+                    .on_click(cx.listener(|this, _, _, cx| { this.pinned_diff = None; cx.notify(); }))
+            } else {
+                crate::components::button("pinned-show-diff", "Show diff vs current", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.show_reference_diff(cx)))
+            })
+            .child(crate::components::button("pinned-open-current", "Open current file", crate::components::ButtonVariant::Ghost, crate::components::ButtonSize::Sm, theme)
+                .on_click(cx.listener(|this, _, _, cx| this.clear_pinned_reference(cx))))
+            .child(crate::components::button("pinned-add-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                 .on_click(cx.listener(move |this, _, _, cx| this.stage_reference(staged.clone(), cx))))
             .child(crate::components::button("pinned-copy-reference", "Copy ref", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                 .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone())))))
@@ -51,6 +75,57 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
+    fn show_reference_diff(&mut self, cx: &mut gpui::Context<Self>) {
+        let (Some(reference), Some(context), Some(engine)) = (
+            self.pinned_reference.clone(), self.request_context.clone(), self.state.read(cx).engine().cloned(),
+        ) else {
+            self.pinned_diff = Some(super::PinnedDiff::Error("Current file is unavailable.".into()));
+            cx.notify();
+            return;
+        };
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.pinned_diff = Some(super::PinnedDiff::Error("Too many code references are loading.".into()));
+            cx.notify();
+            return;
+        };
+        let request = mast_proto::ReadWorkspaceFileRequest {
+            target: context.target.clone(), path: reference.reference.location.workspace_path(),
+        };
+        let client = super::client::WorkspaceFilesClient::new(engine, context.clone());
+        self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
+        let generation = self.pinned_diff_generation;
+        self.pinned_diff = Some(super::PinnedDiff::Loading);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
+            let result = client.read_file(request).await;
+            let task_reference = reference.clone();
+            let diff = cx.background_executor().spawn(async move {
+                let file = result.map_err(|_| "Could not read the current file.".to_string())?;
+                if task_reference.reference.location.worktree_id.as_ref().is_some_and(|id| id != &file.checkout_id) {
+                    return Err("The current file belongs to a different checkout.".into());
+                }
+                if file.truncated { return Err("The current file is too large to compare.".into()); }
+                let contents = file.text.ok_or_else(|| "The current file is not text.".to_string())?;
+                reference_diff(&task_reference, &contents)
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.pinned_diff_generation != generation || this.pinned_reference.as_ref() != Some(&reference) || !matches!(this.pinned_diff, Some(super::PinnedDiff::Loading)) { return; }
+                if this.request_context.as_ref() != Some(&context) {
+                    this.pinned_diff = Some(super::PinnedDiff::Error("Workspace changed while loading the current file.".into()));
+                    cx.notify();
+                    return;
+                }
+                this.pinned_diff = Some(match diff {
+                    Ok(lines) => super::PinnedDiff::Ready(lines),
+                    Err(message) => super::PinnedDiff::Error(message),
+                });
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn selection_actions(
         &self,
         theme: &crate::theme::Theme,
@@ -202,5 +277,47 @@ impl super::FilesSurface {
             snippet,
         };
         self.stage_reference(reference, cx);
+    }
+}
+
+fn reference_diff(reference: &crate::code_ref::StagedCodeRef, contents: &str) -> Result<Vec<(similar::ChangeTag, String)>, String> {
+    let source = crate::components::code_block::bounded_source(&reference.snippet);
+    if source.len() != reference.snippet.len() { return Err("The saved excerpt is too large to compare.".into()); }
+    let range = reference.reference.range.ok_or_else(|| "The saved excerpt has no line range.".to_string())?;
+    let count = range.end_line.checked_sub(range.start_line).and_then(|length| length.checked_add(1))
+        .filter(|count| range.start_line > 0 && *count > 0 && *count <= crate::components::code_block::MAX_LINES as u32)
+        .ok_or_else(|| "The saved line range is too large to compare.".to_string())?;
+    let mut current = String::new();
+    for (index, line) in contents.lines().skip(range.start_line.saturating_sub(1) as usize).take(count as usize).enumerate() {
+        if current.len().saturating_add(line.len()).saturating_add(1) > crate::components::code_block::MAX_BYTES {
+            return Err("The current excerpt is too large to compare.".into());
+        }
+        if index > 0 { current.push('\n'); }
+        current.push_str(line);
+    }
+    Ok(similar::TextDiff::from_lines(&source, &current).iter_all_changes()
+        .map(|change| (change.tag(), change.value().trim_end_matches('\n').to_owned())).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comparison_uses_original_range_and_preserves_empty_lines() {
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "ref".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange { start_line: 2, end_line: 3 }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "\nold".into(),
+        };
+        let changes = reference_diff(&reference, "before\n\nnew\nafter").unwrap();
+        assert_eq!(changes, vec![(similar::ChangeTag::Equal, "".into()), (similar::ChangeTag::Delete, "old".into()), (similar::ChangeTag::Insert, "new".into())]);
     }
 }
