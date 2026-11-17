@@ -958,6 +958,11 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   └── syn v3.0.3 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit-mut] (*)
 │   ├── base64 v0.22.1 [alloc,default,std]
 │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
+│   ├── chrono-tz v0.10.4 [default,std]
+│   │   ├── chrono v0.4.45 [alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link] (*)
+│   │   └── phf v0.12.1 []
+│   │       └── phf_shared v0.12.1 []
+│   │           └── siphasher v1.0.3 [default,std]
 │   ├── futures v0.3.34 [alloc,async-await,default,executor,futures-executor,std] (*)
 │   ├── gethostname v1.1.0 []
 │   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time]
@@ -2143,7 +2148,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── wayland-backend v0.3.16 [client_system,dlopen] (*)
 │   │   │   ├── wayland-client v0.31.15 [] (*)
 │   │   │   └── wayland-scanner v0.31.11 (proc-macro) [] (*)
-│   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p]
+│   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p]
 │   │       ├── async-broadcast v0.7.2 [] (*)
 │   │       ├── async-executor v1.14.0 []
 │   │       │   ├── async-task v4.7.1 [default,std]
@@ -2221,7 +2226,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       ├── uuid v1.24.0 [default,js,rng,serde,sha1,std,v4,v5,v7] (*)
 │   │       ├── windows-sys v0.61.2 [Wdk,Wdk_Foundation,Wdk_Storage,Wdk_Storage_FileSystem,Wdk_System,Wdk_System_IO,Win32,Win32_Foundation,Win32_Globalization,Win32_NetworkManagement,Win32_NetworkManagement_IpHelper,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Authorization,Win32_Storage,Win32_Storage_FileSystem,Win32_System,Win32_System_Com,Win32_System_Console,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Pipes,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_WindowsProgramming,Win32_UI,Win32_UI_Shell,default] (*)
 │   │       ├── winnow v1.0.4 [alloc,ascii,binary,default,parser,std]
-│   │       ├── zbus_macros v5.19.0 (proc-macro) [default,gvariant]
+│   │       ├── zbus_macros v5.19.0 (proc-macro) [blocking-api,default,gvariant]
 │   │       │   ├── proc-macro-crate v3.5.0 []
 │   │       │   │   └── toml_edit v0.25.13+spec-1.1.0 [parse]
 │   │       │   │       ├── indexmap v2.14.0 [default,serde,std] (*)
@@ -2274,7 +2279,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── enumflags2 v0.7.12 [serde] (*)
 │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   │   ├── static_assertions v1.1.0 []
-│   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   ├── zbus-lockstep v0.5.2 []
 │   │   │   │   ├── zbus_xml v5.2.1 []
 │   │   │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
@@ -2296,11 +2301,11 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   ├── atspi-proxies v0.14.0 [default,wrappers]
 │   │   │   │   ├── atspi-common v0.14.0 [default,wrappers,zbus] (*)
 │   │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
-│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   ├── futures-lite v2.6.1 [alloc,default,fastrand,futures-io,parking,race,std] (*)
-│   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   ├── atspi-proxies v0.14.0 [default,wrappers] (*)
-│   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   ├── base64 v0.22.1 [alloc,default,std]
 │   ├── block v0.1.6 []
 │   ├── block2 v0.6.2 [alloc,default,std] (*)
@@ -2425,7 +2430,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   │   ├── enumflags2 v0.7.12 [serde] (*)
 │   │   │   │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
 │   │   │   │   │   │   ├── static_assertions v1.1.0 []
-│   │   │   │   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   │   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   │   │   │   ├── zbus-lockstep v0.5.2 [] (*)
 │   │   │   │   │   │   ├── zbus-lockstep-macros v0.5.2 (proc-macro) [] (*)
 │   │   │   │   │   │   ├── zbus_names v4.3.4 [] (*)
@@ -2451,11 +2456,11 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   └── atspi-proxies v0.13.0 [default,wrappers]
 │   │   │   │   │       ├── atspi-common v0.13.0 [default,wrappers,zbus] (*)
 │   │   │   │   │       ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
-│   │   │   │   │       └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   │   │       └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   │   ├── futures-lite v2.6.1 [alloc,default,fastrand,futures-io,parking,race,std] (*)
 │   │   │   │   ├── futures-util v0.3.34 [alloc,async-await,async-await-macro,channel,default,futures-channel,futures-io,futures-macro,futures-sink,io,memchr,sink,slab,std] (*)
 │   │   │   │   ├── serde v1.0.229 [alloc,default,derive,rc,serde_derive,std] (*)
-│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   ├── anyhow v1.0.104 [default,std]
 │   │   │   ├── as-raw-xcb-connection v1.0.1 [alloc,default]
 │   │   │   ├── ashpd v0.13.13 [async-io,file_chooser,global_shortcuts,notification,open_uri,screenshot,secret,settings,trash,wayland,wayland-backend,wayland-client,wayland-protocols] (*)
@@ -2735,7 +2740,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   │   ├── windows v0.61.3 [Data,Data_Xml,Data_Xml_Dom,Foundation,Foundation_Collections,Foundation_Numerics,Globalization,Globalization_DateTimeFormatting,Storage,Storage_Search,Storage_Streams,System,System_Threading,UI,UI_Notifications,UI_ViewManagement,Wdk,Wdk_System,Wdk_System_SystemServices,Win32,Win32_Foundation,Win32_Globalization,Win32_Graphics,Win32_Graphics_Direct3D,Win32_Graphics_Direct3D11,Win32_Graphics_Direct3D_Fxc,Win32_Graphics_DirectComposition,Win32_Graphics_DirectManipulation,Win32_Graphics_DirectWrite,Win32_Graphics_Dwm,Win32_Graphics_Dxgi,Win32_Graphics_Dxgi_Common,Win32_Graphics_Gdi,Win32_Graphics_Hlsl,Win32_Graphics_Imaging,Win32_Media,Win32_Networking,Win32_Networking_WinSock,Win32_Security,Win32_Security_Credentials,Win32_Security_Cryptography,Win32_Storage,Win32_Storage_FileSystem,Win32_Storage_Packaging,Win32_Storage_Packaging_Appx,Win32_System,Win32_System_Com,Win32_System_Com_StructuredStorage,Win32_System_Console,Win32_System_DataExchange,Win32_System_Diagnostics,Win32_System_Diagnostics_Debug,Win32_System_IO,Win32_System_JobObjects,Win32_System_LibraryLoader,Win32_System_Memory,Win32_System_Ole,Win32_System_Performance,Win32_System_Pipes,Win32_System_Power,Win32_System_RestartManager,Win32_System_SystemInformation,Win32_System_SystemServices,Win32_System_Threading,Win32_System_Variant,Win32_System_WinRT,Win32_UI,Win32_UI_Controls,Win32_UI_HiDpi,Win32_UI_Input,Win32_UI_Input_Ime,Win32_UI_Input_KeyboardAndMouse,Win32_UI_Input_Pointer,Win32_UI_Shell,Win32_UI_Shell_Common,Win32_UI_Shell_PropertiesSystem,Win32_UI_WindowsAndMessaging,default,std] (*)
 │   │   │   │   │   └── windows-version v0.1.7 []
 │   │   │   │   │       └── windows-link v0.2.1 []
-│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
+│   │   │   │   └── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
 │   │   │   ├── oo7 v0.6.0 [async-std,native_crypto]
 │   │   │   │   ├── aes v0.8.4 [zeroize] (*)
 │   │   │   │   ├── ashpd v0.13.13 [async-io,file_chooser,global_shortcuts,notification,open_uri,screenshot,secret,settings,trash,wayland,wayland-backend,wayland-client,wayland-protocols] (*)
@@ -2771,8 +2776,8 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   │   │   ├── serde_bytes v0.11.19 [default,std] (*)
 │   │   │   │   ├── sha2 v0.10.9 [default,std] (*)
 │   │   │   │   ├── subtle v2.6.1 [default,i128,std]
-│   │   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,p2p] (*)
-│   │   │   │   ├── zbus_macros v5.19.0 (proc-macro) [default,gvariant] (*)
+│   │   │   │   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
+│   │   │   │   ├── zbus_macros v5.19.0 (proc-macro) [blocking-api,default,gvariant] (*)
 │   │   │   │   ├── zeroize v1.9.0 [aarch64,alloc,default,zeroize_derive] (*)
 │   │   │   │   └── zvariant v5.14.0 [default,enumflags2,gvariant,serde_bytes] (*)
 │   │   │   ├── open v5.4.1 []
@@ -3648,10 +3653,12 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │       ├── bitflags v2.13.1 [std]
 │   │       └── objc2 v0.6.4 [alloc,std]
 │   │           └── objc2-encode v4.1.0 [alloc,std]
-│   └── x11rb v0.14.0 [image]
-│       ├── gethostname v1.1.0 [] (*)
-│       ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
-│       └── x11rb-protocol v0.14.0 [std]
+│   ├── x11rb v0.14.0 [image]
+│   │   ├── gethostname v1.1.0 [] (*)
+│   │   ├── rustix v1.1.4 [alloc,default,event,fs,net,pipe,process,pty,shm,std,stdio,system,termios,time] (*)
+│   │   └── x11rb-protocol v0.14.0 [std]
+│   ├── zbus v5.19.0 [async-executor,async-fs,async-io,async-lock,async-process,async-task,blocking,blocking-api,default,p2p] (*)
+│   └── zvariant v5.14.0 [default,enumflags2,gvariant,serde_bytes] (*)
 ├── mast-update v0.2.82 (<workspace>/crates/update) [] (*)
 ├── mimalloc v0.1.52 [default,v2]
 │   └── libmimalloc-sys v0.1.49 [v2]
