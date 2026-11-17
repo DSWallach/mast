@@ -92,10 +92,26 @@ impl ScratchDirectories {
         let paths = EnvironmentPaths::validate(&root, &home, &data, &temporary, account_home)?;
         let stub_log = root.join("stub.log");
         std::fs::write(&stub_log, b"")?;
-        // Keep git disabled until its confinement checks cover every repository
-        // indirection. The prototype guard is tested separately below.
+        // Real git runs under the outer sandbox, whose write rule confines every
+        // write to the scratch root. The shim only logs and execs it.
+        let git_log = root.join("git.log");
+        std::fs::write(&git_log, b"")?;
+        let git_shim = shims.join("git");
+        let git_log_text = git_log
+            .to_str()
+            .filter(|text| {
+                !text
+                    .chars()
+                    .any(|c| c == '"' || c == '\\' || c == '$' || c == '`' || c.is_control())
+            })
+            .ok_or_else(|| io::Error::other("unsafe git log path"))?;
+        std::fs::write(
+            &git_shim,
+            include_str!("isolation/git_shim.sh").replace("@GIT_LOG@", git_log_text),
+        )?;
+        std::fs::set_permissions(&git_shim, std::fs::Permissions::from_mode(0o700))?;
         for program in [
-            "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh", "git",
+            "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh",
         ] {
             let path = shims.join(program);
             // The log location comes from the cleared child environment, not a
@@ -103,13 +119,89 @@ impl ScratchDirectories {
             std::fs::write(&path, b"#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" >> \"${MAST_DRIVER_STUB_LOG:?}\"\necho 'driver: command disabled' >&2\nexit 127\n")?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         }
-        std::fs::write(root.join("git.log"), b"")?;
         Ok(Self {
             paths,
             repositories,
             shims,
             stub_log,
         })
+    }
+
+    /// Rebuild the handle inside a process the startup guard already started
+    /// (`MAST_DRIVER_ROOT` and the account home come from the guarded
+    /// environment). Fails closed unless every path validates.
+    pub fn from_env() -> io::Result<Self> {
+        let var = |name: &str| {
+            std::env::var_os(name).map(PathBuf::from).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{name} is not set; run through the driver startup guard"),
+                )
+            })
+        };
+        let root = var("MAST_DRIVER_ROOT")?;
+        let account = var("MAST_DRIVER_ACCOUNT_HOME")?;
+        let paths = EnvironmentPaths::validate(
+            &root,
+            &root.join("home"),
+            &root.join("data"),
+            &root.join("tmp"),
+            &account,
+        )?;
+        let base = paths.root.clone();
+        Ok(Self {
+            repositories: base.join("repos"),
+            shims: base.join("shims"),
+            stub_log: base.join("stub.log"),
+            paths,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.paths.root
+    }
+    pub fn home(&self) -> &Path {
+        &self.paths.home
+    }
+    pub fn data(&self) -> &Path {
+        &self.paths.data
+    }
+    pub fn temporary(&self) -> &Path {
+        &self.paths.temporary
+    }
+    pub fn repositories(&self) -> &Path {
+        &self.repositories
+    }
+    pub fn git_log(&self) -> PathBuf {
+        self.paths.root.join("git.log")
+    }
+    pub fn stub_log(&self) -> &Path {
+        &self.stub_log
+    }
+
+    /// Run git through the logging shim with a cleared environment. The caller
+    /// is responsible for being inside the sandbox; the shim logs and execs.
+    pub fn git(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> io::Result<std::process::Output> {
+        let path = std::env::join_paths([
+            self.shims.as_path(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        std::process::Command::new(self.shims.join("git"))
+            .args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .env("HOME", &self.paths.home)
+            .env("TMPDIR", &self.paths.temporary)
+            .env("PATH", path)
+            .envs(env.iter().copied())
+            .output()
     }
 
     /// Copy a template data directory into an empty run directory. Symlinks are
@@ -152,7 +244,7 @@ impl ScratchDirectories {
     }
 
     /// Start a command only after the sandbox and startup guard are active.
-    pub(crate) fn run_isolated(
+    pub fn run_isolated(
         &self,
         account_home: &Path,
         executable: &Path,
@@ -200,6 +292,7 @@ impl ScratchDirectories {
             .env("MAST_SOAK", "1")
             .env("MAST_SOAK_SHIM_DIR", &self.shims)
             .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("RUST_BACKTRACE", "1")
             .env("PATH", path)
             .output()
     }
@@ -278,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn prototype_git_guard_refuses_common_overrides() {
+    fn git_shim_logs_and_commits_inside_repos() {
         let output = std::process::Command::new("/usr/bin/mktemp")
             .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
             .output()
@@ -286,71 +379,75 @@ mod tests {
         assert!(output.status.success());
         let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         let scratch = ScratchDirectories::create(&account).unwrap();
+        let run = |cwd: &Path, args: &[&str]| scratch.git(cwd, args, &[]).unwrap();
         let repo = scratch.repositories.join("space");
         fs::create_dir(&repo).unwrap();
-        let guard = scratch.paths.root.join("git_guard.py");
-        fs::write(&guard, include_str!("isolation/git_guard.py")).unwrap();
-        let run = |cwd: &Path, args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/python3");
-            command.arg(&guard);
-            command
-                .args(args)
-                .current_dir(cwd)
-                .env_clear()
-                .env("HOME", &scratch.paths.home)
-                .env("MAST_DRIVER_ROOT", &scratch.paths.root)
-                .output()
-                .unwrap()
-        };
         assert!(run(&repo, &["init", "-q", "-b", "main"]).status.success());
+        fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(run(&repo, &["add", "a.txt"]).status.success());
+        let commit = run(&repo, &["commit", "-q", "-m", "first"]);
         assert!(
-            run(&repo, &["commit", "-q", "--allow-empty", "-m", "initial"])
-                .status
-                .success()
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
         );
-        assert!(run(&repo, &["rev-parse", "--show-toplevel"])
-            .status
-            .success());
-        let linked = scratch.repositories.join("worktree");
-        assert!(run(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                linked.to_str().unwrap()
-            ]
-        )
-        .status
-        .success());
-        assert!(run(&linked, &["rev-parse", "--show-toplevel"])
-            .status
-            .success());
-        let outside = scratch.paths.data.join("outside-worktree");
-        assert!(!run(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                outside.to_str().unwrap()
-            ]
-        )
-        .status
-        .success());
-        assert!(!outside.exists());
-        assert!(!run(&repo, &["-C", "/", "status"]).status.success());
-        assert!(!run(&repo, &["--git-dir=/", "status"]).status.success());
-        assert!(!run(&repo, &["status", "--output=/tmp/out"])
-            .status
-            .success());
-        let log = fs::read_to_string(scratch.paths.root.join("git.log")).unwrap();
-        assert!(log.contains("A init\n"));
-        assert_eq!(log.lines().filter(|line| line.starts_with("R ")).count(), 4);
+        let head = run(&repo, &["log", "-1", "--format=%an <%ae>"]);
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "Driver fixture <driver@example.invalid>"
+        );
+        let log = fs::read_to_string(scratch.git_log()).unwrap();
+        assert!(log.contains("git init -q -b main\n") && log.contains("git commit -q -m first\n"));
+        assert_eq!(log.lines().count(), 4);
         fs::remove_dir_all(&scratch.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
+    }
+
+    /// Real git under the sandbox profile: a commit in repos/ works and a write
+    /// to a fake target beside the scratch root (same parent, not a user path)
+    /// is denied.
+    #[test]
+    #[ignore = "requires permission to apply a macOS sandbox"]
+    fn sandboxed_git_commits_in_repos_and_cannot_write_outside() {
+        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let scratch = ScratchDirectories::create(&account).unwrap();
+        let git = scratch.shims.join("git");
+        let run = |args: &[&str]| {
+            let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+            scratch.run_isolated(&account, &git, &args).unwrap()
+        };
+        let init = run(&["init", "-q", "-b", "main", "space"]);
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let commit = run(&[
+            "-C",
+            "space",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ]);
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        assert!(scratch.repositories.join("space/.git").is_dir());
+        let outside = scratch.paths.root.with_file_name(format!(
+            "{}-outside",
+            scratch.paths.root.file_name().unwrap().to_string_lossy()
+        ));
+        let denied = run(&["init", "-q", outside.to_str().unwrap()]);
+        assert!(!denied.status.success());
+        assert!(!outside.exists());
+        let log = fs::read_to_string(scratch.git_log()).unwrap();
+        assert_eq!(log.lines().count(), 3);
+        assert!(fs::read(&scratch.stub_log).unwrap().is_empty());
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
     }
 
     /// Requires permission to apply a macOS sandbox (the agent sandbox may
