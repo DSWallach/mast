@@ -283,6 +283,7 @@ pub(crate) fn settings_row<V: 'static>(
         .child(
             widgets::toggle_switch(theme, enabled)
                 .id("open-diagrams-automatically")
+                .debug_selector(|| "open-diagrams-automatically".into())
                 .cursor_pointer()
                 .on_click(cx.listener(move |_, _, _, cx| {
                     crate::settings::update(

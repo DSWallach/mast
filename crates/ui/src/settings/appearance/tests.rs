@@ -358,3 +358,16 @@ fn persisted_proportional_terminal_family_resolves_to_geist_mono(cx: &mut gpui::
         assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
     });
 }
+
+#[gpui::test]
+fn appearance_page_includes_automatic_diagram_setting(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let (_, vcx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
+    vcx.update(|window, cx| { window.draw(cx).clear(); });
+    assert!(vcx.debug_bounds("open-diagrams-automatically").is_some());
+}
