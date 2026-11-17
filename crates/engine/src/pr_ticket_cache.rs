@@ -424,6 +424,7 @@ impl PrTicketCache {
             lock(&self.inner.linear)
                 .as_ref()
                 .and_then(|(_, workspace)| workspace.space_linear_account(space))
+                .map(|account| account.filter(|id| id != "default"))
         });
         self.status_for_links_with_checkout(
             cwd,
