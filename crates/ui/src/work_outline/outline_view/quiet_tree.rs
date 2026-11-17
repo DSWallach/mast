@@ -62,6 +62,10 @@ fn count_label(count: impl Into<u64>, name: &str) -> String {
     format!("{count} {name}{}", if count == 1 { "" } else { "s" })
 }
 
+fn failed_tool_label(count: u64) -> String {
+    format!("{} failed", count_label(count, "tool call"))
+}
+
 pub(super) fn entries_label(count: usize) -> String {
     format!("{count} {}", if count == 1 { "entry" } else { "entries" })
 }
@@ -321,10 +325,7 @@ impl OutlineView {
             details.push(status_label.to_owned());
         }
         if let Some(failures) = &chat.tool_failures {
-            details.push(format!(
-                "{} failed",
-                count_label(failures.count, "tool call")
-            ));
+            details.push(failed_tool_label(failures.count));
         }
         if let Some(branch) = &chat.branch {
             details.push(format!("⎇ {branch}"));
@@ -415,10 +416,7 @@ mod tests {
         assert!(metadata.space_summaries["s1"].contains("user action required"));
         assert_eq!(entries_label(1), "1 entry");
         assert_eq!(entries_label(2), "2 entries");
-        assert_eq!(
-            format!("{} failed", count_label(1_u64, "tool call")),
-            "1 tool call failed"
-        );
+        assert_eq!(failed_tool_label(1), "1 tool call failed");
         for theme in [Theme::light(), Theme::dark()] {
             assert_eq!(notice_color(NoticeTone::Warning, &theme), theme.warning);
             assert_eq!(notice_color(NoticeTone::Muted, &theme), theme.text_muted);
