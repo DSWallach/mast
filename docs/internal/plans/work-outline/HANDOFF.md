@@ -1239,6 +1239,10 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 - **Environment:** since 2026-11-16 evening Xcode.app's git hangs on shell-script subcommands (`git submodule …`
   stalls at exec). Release runs and workers use `DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Mast's
   production code doesn't call `git submodule`. Opening Xcode once or a reboot probably clears it.
+- After 102 (integration, not installed): UI driver YAML scenarios (`scripts/ui-drive run <file>.yaml`, 3 scenarios,
+  report-only in release runs) and cleanup pass 2 (clippy 650 → 517). Release 103's gate failed only on the
+  test-only `world_template same_seed_same_hash…` driver flake (passes alone; now quarantined, item 85e3292a); its
+  soak passed (equal CPU/git, footprint 408 vs 456 MB). Rerun the gate on the current head to release it.
 - **Needs Mikey:** refactor plan Phase B/C review (mast-artifact:2ee3c40d3a47f5d2cda34f8afeee43c5); Perf gate
   instruction proposal; approval rule for niced cargo commands; review phase 6 (GitHub posting) call; older items.
 - Follow-ups: Changes width shaping off the render thread (changes widths; needs design); transcript sync still
