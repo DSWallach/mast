@@ -24,7 +24,7 @@ placeholder and uses the existing 2–15 second retry ladder.
 ```sh
 cargo test -p mast-proto -p mast-doc
 cargo test -p mast-engine generated_image
-cargo test -p mast-engine --test e2e --test device_routing --test workspace_sync
+cargo nextest run -p mast-engine -E 'binary(engine) & test(/^(e2e|device_routing|workspace_sync)::/)'
 cargo test -p mast-harness codex
 cargo test -p mast-harness --test codex
 cargo test -p mast-ui transcript
@@ -52,7 +52,7 @@ installation and a model/account provisioned for image generation.
 
 ```sh
 cargo test -p mast-harness --test codex real_image_generation_smoke -- --ignored
-cargo test -p mast-engine --test e2e real_image_generation_profile_smoke -- --ignored
+cargo test -p mast-engine --test engine e2e::real_image_generation_profile_smoke -- --ignored
 ```
 
 The harness smoke checks that the real provider returns an existing saved file;

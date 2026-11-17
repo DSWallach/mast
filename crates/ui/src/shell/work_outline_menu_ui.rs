@@ -215,7 +215,7 @@ impl Shell {
                 ),
             );
         }
-        if self.has_hand_off_workers(&chat_id, cx) {
+        if self.can_hand_off(&chat_id, cx) {
             menu.entries.insert(
                 at,
                 MenuEntry::new(
@@ -253,7 +253,7 @@ impl Shell {
             return;
         };
         let closeable = crate::chat_closeout::is_closeout_candidate(chat.cwd.as_deref());
-        if self.has_hand_off_workers(&chat_id, cx) {
+        if self.can_hand_off(&chat_id, cx) {
             menu.entries.push(MenuEntry::new(
                 "hand-off-chat",
                 "Hand off to new chat…",

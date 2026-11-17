@@ -9,6 +9,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod attribution;
+#[cfg(test)]
+use attribution::launch_agent_type;
+pub(crate) use attribution::{classify_origin, read_origin};
+mod insights;
 mod query;
 mod retention;
 #[cfg(test)]
@@ -34,6 +39,7 @@ struct Active {
     has_turn: bool,
     context: UsageContext,
     calls: HashMap<String, (String, String, std::time::Instant)>,
+    agent_types: HashMap<String, String>,
 }
 struct Inner {
     db: Connection,
@@ -97,6 +103,9 @@ impl TokenUsage {
             CREATE TABLE IF NOT EXISTS diagnostics(turn_id TEXT NOT NULL,source TEXT NOT NULL,category TEXT NOT NULL,label TEXT NOT NULL,revision TEXT,channel TEXT,bytes INTEGER NOT NULL,stage TEXT NOT NULL,method TEXT NOT NULL,is_error INTEGER,signature TEXT,elapsed_ms INTEGER,PRIMARY KEY(turn_id,source,category,stage));
             CREATE TABLE IF NOT EXISTS context_samples(turn_id TEXT NOT NULL,role TEXT NOT NULL,parent TEXT NOT NULL,at INTEGER NOT NULL,tokens INTEGER,window INTEGER,PRIMARY KEY(turn_id,parent,at));
             CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS usage_agents(turn_id TEXT NOT NULL,source TEXT NOT NULL,kind TEXT NOT NULL,agent_type TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(turn_id,source,kind));
+            CREATE INDEX IF NOT EXISTS usage_agents_type ON usage_agents(agent_type,turn_id);
+            DELETE FROM usage_agents WHERE NOT EXISTS(SELECT 1 FROM turns WHERE id=usage_agents.turn_id);
             CREATE INDEX IF NOT EXISTS turns_time ON turns(at);
             CREATE INDEX IF NOT EXISTS turns_chat ON turns(chat);
             CREATE INDEX IF NOT EXISTS measurements_model ON measurements(model,turn_id);
@@ -154,7 +163,7 @@ impl TokenUsage {
             });
             return;
         }
-        let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
+        let configuration = fingerprint(&serde_json::json!({"build":env!("CARGO_PKG_VERSION"), "buildRevision":env!("MAST_USAGE_BUILD_REVISION"), "harness": request.harness, "model":request.model, "reasoning":request.reasoning, "options":request.model_options, "instructions":request.instructions.as_ref().map(|d| &d.envelope.revision_hash)}).to_string());
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.insert(
             chat.into(),
@@ -170,6 +179,10 @@ impl TokenUsage {
                     reasoning: request.reasoning.map(|r| format!("{r:?}")),
                     configured_model: request.model.clone(),
                     build: Some(env!("CARGO_PKG_VERSION").into()),
+                    build_revision: Some(env!("MAST_USAGE_BUILD_REVISION").into()),
+                    agent_type: Some(
+                        attribution::launch_agent_type(activity, false, false, false).into(),
+                    ),
                     ..Default::default()
                 },
                 model: "Unknown model".into(),
@@ -366,7 +379,12 @@ impl TokenUsage {
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.active.retain(|_, active| active.owner != chat);
         let tx = inner.db.transaction().map_err(fail)?;
-        for table in ["measurements", "diagnostics", "context_samples"] {
+        for table in [
+            "measurements",
+            "diagnostics",
+            "context_samples",
+            "usage_agents",
+        ] {
             tx.execute(
                 &format!(
                     "DELETE FROM {table} WHERE turn_id IN (SELECT id FROM turns WHERE chat=?1)"
@@ -444,6 +462,19 @@ impl Inner {
                 ],
             )
             .map_err(fail)?;
+        let agent_type = if role == "main" {
+            active
+                .context
+                .agent_type
+                .clone()
+                .unwrap_or_else(|| "Unknown agent type".into())
+        } else {
+            active
+                .agent_types
+                .get(&parent)
+                .cloned()
+                .unwrap_or_else(|| "Unknown agent type".into())
+        };
         match leaf {
             AgentEvent::SessionStarted { model, tools, .. } if role == "main" => {
                 if !model.is_empty() {
@@ -501,19 +532,21 @@ impl Inner {
                 } else {
                     role
                 };
+                let source = if measurement.id.starts_with("provider:") {
+                    format!("provider:{chat}:{}", measurement.id)
+                } else {
+                    format!("{parent}{}", measurement.id)
+                };
                 write_measurement(
                     &self.db,
                     &turn,
-                    &if measurement.id.starts_with("provider:") {
-                        format!("provider:{chat}:{}", measurement.id)
-                    } else {
-                        format!("{parent}{}", measurement.id)
-                    },
+                    &source,
                     model,
                     role,
                     &measurement.scope,
                     &measurement.counts,
                 )?;
+                attribution::tag(&self.db, &turn, &source, "measurement", &agent_type, role)?;
             }
             AgentEvent::Usage {
                 input_tokens,
@@ -534,6 +567,11 @@ impl Inner {
                 )?;
             }
             AgentEvent::ToolCall { id, call } => {
+                if let Some(kind) = attribution::spawn_agent_type(call) {
+                    active
+                        .agent_types
+                        .insert(format!("{parent}{id}/"), kind.into());
+                }
                 let (channel, label) = tool_label(call);
                 let key = format!("{parent}{id}");
                 // Fingerprint only normalized input. The per-ledger secret
@@ -546,6 +584,13 @@ impl Inner {
                     ToolCall::Mcp {
                         input: Some(input), ..
                     } => Some(fingerprint(&format!("{}:{input}", self.signature_key))),
+                    ToolCall::ReadFile { .. } | ToolCall::Search { .. } | ToolCall::Glob { .. } => {
+                        Some(fingerprint(&format!(
+                            "{}:{}",
+                            self.signature_key,
+                            serde_json::to_string(call).map_err(fail)?
+                        )))
+                    }
                     _ => None,
                 };
                 active
@@ -634,6 +679,28 @@ impl Inner {
             }
             _ => {}
         }
+        let diagnostic_key = match leaf {
+            AgentEvent::ToolCall { id, .. } => {
+                Some((format!("{parent}{id}"), "toolCall:observedCall".to_owned()))
+            }
+            AgentEvent::ToolResult { id, .. } => Some((
+                format!("{parent}{id}"),
+                "retainedToolResult:retainedTranscript".to_owned(),
+            )),
+            AgentEvent::UsageDiagnostic { diagnostic } => Some((
+                format!("{parent}{}", diagnostic.id),
+                format!("{}:{}", diagnostic.category, diagnostic.stage),
+            )),
+            AgentEvent::SessionStarted { .. } if role == "main" => Some((
+                "toolNames".into(),
+                "toolCatalogNames:advertisedNamesOnly".into(),
+            )),
+            AgentEvent::Usage { .. } => Some((format!("{parent}legacy"), "measurement".into())),
+            _ => None,
+        };
+        if let Some((source, kind)) = diagnostic_key {
+            attribution::tag(&self.db, &turn, &source, &kind, &agent_type, role)?;
+        }
         Ok(())
     }
 }
@@ -651,7 +718,7 @@ fn write_measurement(
     Ok(())
 }
 fn write_diagnostic(db: &Connection, turn: &str, d: &UsageDiagnostic) -> Result<(), EngineError> {
-    db.execute("INSERT INTO diagnostics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(turn_id,source,category,stage) DO UPDATE SET bytes=MAX(bytes,excluded.bytes),label=excluded.label,channel=excluded.channel,is_error=excluded.is_error",params![turn,d.id,d.category,d.label,d.revision,d.channel,d.bytes.min(i64::MAX as u64),d.stage,d.method,d.is_error,d.signature,d.elapsed_ms]).map_err(fail)?;
+    db.execute("INSERT INTO diagnostics VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(turn_id,source,category,stage) DO UPDATE SET bytes=MAX(bytes,excluded.bytes),label=excluded.label,channel=excluded.channel,is_error=excluded.is_error,signature=CASE WHEN excluded.bytes>=bytes THEN COALESCE(excluded.signature,signature) ELSE signature END,elapsed_ms=COALESCE(elapsed_ms,excluded.elapsed_ms)",params![turn,d.id,d.category,d.label,d.revision,d.channel,d.bytes.min(i64::MAX as u64),d.stage,d.method,d.is_error,d.signature,d.elapsed_ms]).map_err(fail)?;
     Ok(())
 }
 fn tool_label(call: &ToolCall) -> (String, String) {

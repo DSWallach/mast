@@ -1,3 +1,5 @@
+experimental = ["setup-scripts"]
+
 # cargo-nextest configuration for the Mast workspace.
 #
 # Scope: engine, mcp, harness, proto and the other non-UI crates. The UI crate
@@ -14,7 +16,17 @@
 # The quarantine list is duplicated in `profile.release.default-filter` and
 # `profile.quarantine.default-filter` because nextest has no named filter sets.
 # Edit both together. Each entry is a `test(~name)` substring match, optionally
-# scoped by `binary(...)`.
+# scoped by a module-path test filter.
+
+# Keep native FSEvents for watcher coverage. Other isolated engine tests use
+# periodic repair, avoiding registration contention in the macOS daemon.
+[scripts.setup.engine-repair-only]
+command = { command-line = 'scripts/nextest-engine-repair-only.sh', relative-to = 'workspace-root' }
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(mast-engine) & not (test(/^workspace_files::/) | test(/m5_repos_diffs_terminals::diff_sync_publishes_without_rewriting_chat_branch$/))'
+setup = 'engine-repair-only'
 
 # Tests that open PTYs / spawn login shells and git processes time out when many
 # run at once (observed 2026-11-03: every m5_repos_diffs_terminals test hit the 3 min
@@ -23,15 +35,15 @@
 terminal-heavy = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+filter = '(binary(engine) & test(/^managed_accounts::/)) | (binary(engine) & test(/^m5_repos_diffs_terminals::/)) | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))'
 test-group = 'terminal-heavy'
 
 [[profile.release.overrides]]
-filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+filter = '(binary(engine) & test(/^managed_accounts::/)) | (binary(engine) & test(/^m5_repos_diffs_terminals::/)) | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))'
 test-group = 'terminal-heavy'
 
 [[profile.quarantine.overrides]]
-filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
+filter = '(binary(engine) & test(/^managed_accounts::/)) | (binary(engine) & test(/^m5_repos_diffs_terminals::/)) | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))'
 test-group = 'terminal-heavy'
 
 [profile.default]
@@ -59,14 +71,14 @@ not (
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
   | test(~cursor_login_flow_spawns_shim_and_auto_activates)
   | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
-  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
-  | (binary(external_import_links_repair) & test(~repair_))
+  | ((binary(engine) & test(/^instruction_delivery::/)) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
+  | ((binary(engine) & test(/^external_import_links_repair::/)) & test(~repair_))
   | test(~workspace_file_rpcs_list_search_read_write_and_watch)
   | test(~version_probe_bounds_hangs_and_rejects_nonzero)
   | test(~codex_login_honors_override_only_installation)
   | test(~login_child)
-  | binary(pr_ticket_cache_login_shell)
-  | (binary(managed_accounts) & (test(~sign_in)))
+  | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))
+  | ((binary(engine) & test(/^managed_accounts::/)) & (test(~sign_in)))
   | test(~setting_the_destination_syncs_the_space)
   | test(~git_status_stream)
   | test(~models_discovers_visible_catalog_with_pagination)
@@ -95,14 +107,14 @@ default-filter = '''
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
   | test(~cursor_login_flow_spawns_shim_and_auto_activates)
   | test(~codex_login_resolves_override_and_adds_its_directory_to_child_path)
-  | (binary(instruction_delivery) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
-  | (binary(external_import_links_repair) & test(~repair_))
+  | ((binary(engine) & test(/^instruction_delivery::/)) & (test(~a_missing_revision_waits_then_fails_and_never_substitutes) | test(~a_revision_that_syncs_during_the_wait_is_delivered)))
+  | ((binary(engine) & test(/^external_import_links_repair::/)) & test(~repair_))
   | test(~workspace_file_rpcs_list_search_read_write_and_watch)
   | test(~version_probe_bounds_hangs_and_rejects_nonzero)
   | test(~codex_login_honors_override_only_installation)
   | test(~login_child)
-  | binary(pr_ticket_cache_login_shell)
-  | (binary(managed_accounts) & (test(~sign_in)))
+  | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))
+  | ((binary(engine) & test(/^managed_accounts::/)) & (test(~sign_in)))
   | test(~setting_the_destination_syncs_the_space)
   | test(~git_status_stream)
   | test(~models_discovers_visible_catalog_with_pagination)

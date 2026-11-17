@@ -5254,7 +5254,7 @@ impl Shell {
             let mut page = crate::overview::Overview::new(state, weak, transcript, composer, cx);
             page.in_sidebar = true;
             page.outline_entity()
-                .update(cx, |outline, _| outline.set_single_click_opens(true));
+                .update(cx, |outline, cx| outline.set_sidebar(true, cx));
             page
         });
         self.overview_page = Some(page.clone());
@@ -5453,16 +5453,6 @@ impl Shell {
                                     state.set_sidebar_outline_sections(value, cx)
                                 });
                                 this.sidebar_prev_order.clear();
-                                this.schedule_save(cx);
-                                cx.notify();
-                            }
-                            AppearanceSettingsEvent::CompactSingleChatChanged(value) => {
-                                this.settings.compact_single_chat = value;
-                                if let Some(overview) = &this.overview_page {
-                                    overview.update(cx, |overview, cx| {
-                                        overview.set_compact_single_chat(value, cx)
-                                    });
-                                }
                                 this.schedule_save(cx);
                                 cx.notify();
                             }
@@ -9827,7 +9817,7 @@ impl Shell {
                 .get(&chat_id)
                 .and_then(|target| self.existing_branch_review(&chat_id, target, cx))
                 .is_some();
-            let has_workers = self.has_hand_off_workers(&chat_id, cx);
+            let can_hand_off = self.can_hand_off(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
             let is_admin = self.chat_is_admin(&chat_id, cx);
             let assistant_id = chat_id.clone();
@@ -9864,7 +9854,7 @@ impl Shell {
                             )),
                         )
                     })
-                    .when(has_workers, |menu| {
+                    .when(can_hand_off, |menu| {
                         menu.child(
                             popover::menu_row(
                                 &theme,

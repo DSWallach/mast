@@ -83,7 +83,7 @@ async fn login_child() {
 
 fn probe(path: &Path, override_path: Option<&Path>, expected: bool) {
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "login_child", "--nocapture"]);
+    command.args(["--exact", "codex_login_resolution::login_child", "--nocapture"]);
     for key in [
         "HOME",
         "USERPROFILE",
@@ -106,6 +106,11 @@ fn probe(path: &Path, override_path: Option<&Path>, expected: bool) {
         command.env("CODEX_EXECUTABLE", path);
     }
     let output = command.output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "child did not run exactly one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -148,6 +153,3 @@ fn codex_login_without_any_cli_fails_with_a_named_error() {
     let dir = tempfile::tempdir().unwrap();
     probe(dir.path(), None, false);
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

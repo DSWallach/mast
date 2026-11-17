@@ -74,6 +74,3 @@ async fn manual_and_setup_actions_preserve_long_multiline_commands() {
         }
     }
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

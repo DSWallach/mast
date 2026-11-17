@@ -6,7 +6,11 @@ It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
 surface. Overview is the persistent left column, with the Work Outline as its
 default presentation. Choose Sessions for the session list and its grouping
-controls. A Chat never needs a work item.
+controls. New Chats automatically get a work item unless they already belong
+under one. Children and side chats reuse their source's item. Chats created
+without a folder live in the host device's Personal Space and keep their own
+scratch directory. Older unassigned Chats gain an item when you hand them off
+or next run them.
 
 | Concept | What it is |
 | --- | --- |
@@ -87,8 +91,8 @@ inline editor, a picker, the search field, or any other text input.
 | First / last row | `Home` / `End` | `Home` / `End` |
 | Collapse / expand | `←` / `→` | `←` / `→` |
 | Previous / next sibling (skips subtrees) | `⌥↑` / `⌥↓` | `Alt+↑` / `Alt+↓` |
-| Open (Work Item Details; a compact single-Chat row opens its Chat) | `↩` | `Enter` |
-| Open Work Item Details on any item row, compact or not (a compact row's status glyph does the same on click) | `⌘I` | `Ctrl+I` |
+| Open the selected item or Chat | `↩` | `Enter` |
+| Open Work Item Details on an item row | `⌘I` | `Ctrl+I` |
 | Start a Chat in the selected work item (on a Chat row: in the Chat's work item; on a PR review item: review its PR, see [PR review sync](#pr-review-sync)) | `⌘↩` | `Ctrl+Enter` |
 | Rename (a work item in place; a Chat row opens the rename dialog) | `F2` or `R` | `F2` or `R` |
 | New sibling / new child | `N` / `⇧N` | `N` / `Shift+N` |

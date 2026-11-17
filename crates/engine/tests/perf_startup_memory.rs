@@ -75,7 +75,7 @@ async fn synthetic_startup_resident_memory() {
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "synthetic_startup_resident_memory",
+            "perf_startup_memory::synthetic_startup_resident_memory",
             "--ignored",
             "--nocapture",
             "--test-threads=1",
@@ -84,6 +84,11 @@ async fn synthetic_startup_resident_memory() {
         .output()
         .unwrap();
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "child did not run exactly one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(
         output.status.success(),
         "child failed: {}",

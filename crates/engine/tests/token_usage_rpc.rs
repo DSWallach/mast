@@ -3,7 +3,7 @@ use mast_proto::{AgentEvent, RunRequest, SandboxLevel, token_usage::*};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_device() {
+async fn token_usage_queries_filter_agents_and_reject_unknown_devices() {
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir.path(), "test-org", "test-user"),
@@ -12,7 +12,15 @@ async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_
         None,
     )
     .unwrap();
-    core.workspace.create_chat("fixture",None,Some(&core.device_id),None,Some(dir.path().display().to_string())).unwrap();
+    core.workspace
+        .create_chat(
+            "fixture",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(dir.path().display().to_string()),
+        )
+        .unwrap();
     let usage = core
         .sessions
         .token_usage()
@@ -56,13 +64,33 @@ async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_
     let value = client
         .call(
             mast_rpc::methods::TOKEN_USAGE,
-            serde_json::json!({"model":"model-a","tokenKind":"cacheRead"}),
+            serde_json::json!({"model":"model-a","tokenKind":"cacheRead","agentType":"main"}),
         )
         .await
         .unwrap();
     let snapshot: TokenUsageSnapshot = serde_json::from_value(value).unwrap();
     assert_eq!(snapshot.total, 60);
     assert_eq!(snapshot.details[0].chat_id, "fixture");
+    assert!(snapshot.insights_available);
+    assert_eq!(snapshot.details[0].agent_type, "main");
+    let other_agent = client
+        .call(
+            mast_rpc::methods::TOKEN_USAGE,
+            serde_json::json!({"agentType":"pr-review"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_agent["total"], 0);
+    client.call(mast_rpc::methods::MUTATE, serde_json::json!({"op":"createChat", "chatId":"child", "parentChatId":"fixture", "deviceId":core.device_id})).await.unwrap();
+    let parent = client
+        .call(
+            mast_rpc::methods::TOKEN_USAGE,
+            serde_json::json!({"agentType":"orchestrator"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(parent["total"], 120);
+    assert_eq!(parent["details"][0]["agentType"], "orchestrator");
     let absent = client
         .call(
             mast_rpc::methods::TOKEN_USAGE,
@@ -80,8 +108,26 @@ async fn token_usage_queries_filter_and_never_fall_back_to_local_for_an_unknown_
             .await
             .is_err()
     );
+    let mut legacy_device = core
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    legacy_device.id = "legacy-device".into();
+    legacy_device.capabilities = vec![mast_proto::capabilities::TOKEN_USAGE_V1.into()];
+    core.workspace.upsert_device_row(&legacy_device);
+    let unsupported = client
+        .call(
+            mast_rpc::methods::TOKEN_USAGE,
+            serde_json::json!({"targetDeviceId":"legacy-device", "agentType":"worker"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        unsupported.to_string().contains("Update Mast"),
+        "{unsupported}"
+    );
     core.shutdown().await;
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

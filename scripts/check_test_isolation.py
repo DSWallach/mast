@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 import re
 import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit("check_test_isolation.py requires Python 3.11 or newer")
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts/test_isolation_allowlist.jsonl"
@@ -44,11 +48,17 @@ def test_binaries():
     for tree in (ROOT / "crates", ROOT / "apps"):
         for manifest in sorted(tree.glob("*/Cargo.toml")):
             package = manifest.parent
+            metadata = tomllib.loads(manifest.read_text())
             for entry in [package / "src/lib.rs", package / "src/main.rs"]:
                 if entry.is_file():
                     yield entry
             yield from sorted((package / "src/bin").glob("*.rs"))
-            yield from sorted((package / "tests").glob("*.rs"))
+            if metadata.get("package", {}).get("autotests", True):
+                yield from sorted((package / "tests").glob("*.rs"))
+            for target in metadata.get("test", []):
+                path = package / target.get("path", f'tests/{target["name"]}.rs')
+                if path.is_file():
+                    yield path
             # Explicit binary targets may live outside src/bin (for example,
             # a native test fixture compiled as a binary target).
             for block in re.split(r'^\[\[bin\]\]\s*$', manifest.read_text(), flags=re.MULTILINE)[1:]:
@@ -68,6 +78,19 @@ def main():
                 raise ValueError(f"invalid allowlist entry at line {number}")
             permitted[key] = entry["reason"]
     failed = False
+    # With automatic discovery disabled, a new file must be registered in the
+    # consolidated suite or Cargo will silently omit its tests.
+    engine_tests = ROOT / "crates/engine/tests"
+    suite = engine_tests / "it/main.rs"
+    if suite.exists():
+        registered = {
+            (suite.parent / name).resolve()
+            for name in re.findall(r'#\[path = "([^"]+)"\]', suite.read_text())
+        }
+        for path in sorted(engine_tests.glob("*.rs")):
+            if path.resolve() not in registered:
+                print(f"{path.relative_to(ROOT)}: missing from engine integration suite")
+                failed = True
     found = set()
     for key, number in findings():
         found.add(key)

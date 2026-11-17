@@ -2,6 +2,16 @@
 
 The outline arranges a project's chats under work items. An item can be a workstream, a ticket, a PR or an investigation. Every key, menu and rule is in the [reference](../work-outline.md). This page covers what you use every day.
 
+New chats get a work item automatically. A chat started from an item, a child
+chat, or a side chat keeps its existing work ownership. Folderless chats appear
+in the host device's **Personal** Space, with a separate working directory for
+each chat. An automatically created item's title follows its original chat
+until you rename the item yourself.
+
+Choose **Hand off to new chat…** from a chat's menu to continue its work in a
+fresh conversation. This works for solo chats too. Older chats without an item
+get one as part of the handoff.
+
 ## Overview and Sessions
 
 Overview now occupies the left column beside your chat. Search, repository and
@@ -69,9 +79,11 @@ Agents ask for decisions on their item. Open **Required actions** in the outline
 
 Mast notifies you when an item goes from no requests to some.
 
-## Compact rows
+## Sidebar rows
 
-An item with exactly one live chat shows as one row. The row splits into an item row and chat rows when you add a second chat, a child item, or a sub-chat. Press `⌘I` on any row to open its Details. On a compact row you can also click the status glyph.
+In the sidebar, work items and chats have separate two-line rows. Work items use a folder icon and a stronger title; chats use a speech bubble and sit beneath their item with tree guides. The title is on the first line, with status and other metadata below it. Click anywhere on an entry to open the item or chat. Metadata is informational; open the item or chat to act on it. The disclosure arrow expands or collapses children. Hover over truncated text to read the full value.
+
+Press `⌘I` on an item row to open its Details.
 
 ## Undo
 
