@@ -63,10 +63,10 @@ impl EnvironmentPaths {
 /// a sandbox; callers must not start the driver until isolation is verified.
 #[derive(Debug)]
 pub struct ScratchDirectories {
-    pub paths: EnvironmentPaths,
-    pub repositories: PathBuf,
-    pub shims: PathBuf,
-    pub stub_log: PathBuf,
+    paths: EnvironmentPaths,
+    repositories: PathBuf,
+    shims: PathBuf,
+    stub_log: PathBuf,
 }
 
 impl ScratchDirectories {
