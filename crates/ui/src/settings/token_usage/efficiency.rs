@@ -96,9 +96,9 @@ impl TokenUsagePage {
         let mut content = div().flex().flex_col().gap_2()
             .child(widgets::field_label(theme, "Completion and failed attempts"))
             .child(widgets::section_card(theme)
-                .child(widgets::card_row(theme, true).child(average))
-                .child(widgets::card_row(theme, false).child(format!("{} completed · {} failed · {} cancelled · {} partial turns", summary.completed, summary.failed, summary.cancelled, summary.partial)))
-                .child(widgets::card_row(theme, false).child(format!("{} completed-turn tokens · {} failed/cancelled tokens · {} partial-turn tokens", summary.completed_tokens, summary.failed_tokens, summary.partial_tokens))))
+                .child(widgets::card_row(theme, true).child(div().flex_1().min_w_0().whitespace_normal().child(average)))
+                .child(widgets::card_row(theme, false).child(div().flex_1().min_w_0().whitespace_normal().child(format!("{} completed · {} failed · {} cancelled · {} partial turns", summary.completed, summary.failed, summary.cancelled, summary.partial))))
+                .child(widgets::card_row(theme, false).child(div().flex_1().min_w_0().whitespace_normal().child(format!("{} completed-turn tokens · {} failed/cancelled tokens · {} partial-turn tokens", summary.completed_tokens, summary.failed_tokens, summary.partial_tokens)))))
             .child(widgets::page_subtitle(theme, "Completed means the agent finished a turn, not that its work was verified. Compare the same task, model and outcome; Trends & comparisons separates work items and configurations."))
             .child(widgets::field_label(theme, "Repeated work to investigate"))
             .child(widgets::page_subtitle(theme, "Repetition, errors and empty results can be necessary. These are observed calls and bytes, not measured waste or promised token savings. Input and result rows describe separate stages."));
