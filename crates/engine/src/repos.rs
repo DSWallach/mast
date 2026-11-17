@@ -26,6 +26,18 @@ use mast_proto::{
 
 use crate::EngineError;
 
+mod branch_naming;
+mod checkout_layout;
+mod workspace_access_policy;
+use branch_naming::*;
+use checkout_layout::*;
+use workspace_access_policy::*;
+pub use branch_naming::worktree_branch_from_title;
+pub(crate) use branch_naming::{BRANCH_PREFIX, LEGACY_BRANCH_PREFIX, is_owned_branch, is_owned_branch_of};
+pub use checkout_layout::CheckoutIdentity;
+pub use workspace_access_policy::is_automatic_access_blocked;
+pub(crate) use workspace_access_policy::{home_dir, is_broad_workspace_root, is_broad_workspace_root_resolved};
+
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.
 const PATH_EXISTS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -47,175 +59,6 @@ const FILE_INDEX_MAX_ENTRIES: usize = 250_000;
 const RANK_BUFFER: usize = 1_024;
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
-
-/// Branch prefix of worktrees Mast creates (`mast/<name>`). Worktrees made
-/// before the rename carry `zeron/<name>` and are still recognised as ours:
-/// they are renamed from the chat title and deleted with their worktree.
-pub(crate) const BRANCH_PREFIX: &str = "mast/";
-pub(crate) const LEGACY_BRANCH_PREFIX: &str = "zeron/";
-
-/// A branch this app created for a worktree, under either spelling.
-pub(crate) fn is_owned_branch(branch: &str) -> bool {
-    branch.starts_with(BRANCH_PREFIX) || branch.starts_with(LEGACY_BRANCH_PREFIX)
-}
-
-/// Whether `branch` is the original auto-created branch of the worktree
-/// folder `folder` (either prefix).
-pub(crate) fn is_owned_branch_of(branch: &str, folder: &str) -> bool {
-    branch.strip_prefix(BRANCH_PREFIX) == Some(folder)
-        || branch.strip_prefix(LEGACY_BRANCH_PREFIX) == Some(folder)
-}
-
-const ADJECTIVES: &[&str] = &[
-    "swift", "calm", "bright", "bold", "keen", "brave", "clever", "lucky", "quiet", "warm", "cool",
-    "sharp", "gentle", "vivid", "amber", "cobalt",
-];
-const NOUNS: &[&str] = &[
-    "otter", "harbor", "falcon", "cedar", "meadow", "zeron", "delta", "ember", "lynx", "maple",
-    "onyx", "quartz", "raven", "summit", "willow", "aspen",
-];
-
-/// Canonical (worktree root, git dir) of the checkout containing `path`, read
-/// from the `.git` entry nearest `path` without spawning git. `None` means
-/// "ask git": nothing found, `GIT_DIR`/`GIT_WORK_TREE` set, `path` inside a git
-/// dir, a `.git` that is not a valid git dir, or an unreadable gitdir file.
-fn checkout_layout_from_fs(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
-        return None;
-    }
-    let start = std::fs::canonicalize(path).ok()?;
-    if start.components().any(|c| c.as_os_str() == ".git") {
-        return None;
-    }
-    let start = if start.is_dir() { start } else { start.parent()?.to_path_buf() };
-    for dir in start.ancestors() {
-        let dot_git = dir.join(".git");
-        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
-            continue;
-        };
-        let git_dir = if meta.is_dir() {
-            dot_git
-        } else if meta.is_file() {
-            let text = std::fs::read_to_string(&dot_git).ok()?;
-            let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
-            if target.is_empty() {
-                return None;
-            }
-            let target = Path::new(target);
-            if target.is_absolute() { target.to_path_buf() } else { dir.join(target) }
-        } else {
-            return None;
-        };
-        let git_dir = std::fs::canonicalize(git_dir).ok()?;
-        // Same test git applies before accepting a directory as a git dir.
-        if !git_dir.join("HEAD").is_file()
-            || (!git_dir.join("objects").is_dir() && !git_dir.join("commondir").is_file()) {
-            return None;
-        }
-        return Some((dir.to_path_buf(), git_dir));
-    }
-    None
-}
-
-/// [`checkout_layout_from_fs`] on the blocking pool, so a wedged mount cannot
-/// stall a runtime worker.
-async fn checkout_layout(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || checkout_layout_from_fs(&path))
-        .await
-        .ok()
-        .flatten()
-}
-
-/// Canonical identity shared by every chat operating in this exact worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckoutIdentity {
-    /// `sha256(deviceId ‖ NUL ‖ canonical git dir)` — device-scoped, path-stable.
-    pub id: String,
-    /// Canonical worktree root (`rev-parse --show-toplevel`, symlinks resolved).
-    pub root: PathBuf,
-    /// Canonical git dir (worktree-specific for linked worktrees).
-    pub git_dir: PathBuf,
-}
-
-/// Best-effort home directory (the `ListFolders` default and worktree root base).
-pub(crate) fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-/// Whether a path is too broad for automatic recursive filesystem work. A
-/// saved Space may legitimately retain HOME as historical chat context, but
-/// background indexing/watching it would reach macOS-protected descendants
-/// (Music, Pictures/Photos Library, Documents, and so on). Ancestors of HOME
-/// are broader still. Relative paths are rejected because their scope depends
-/// on the process cwd.
-pub(crate) fn is_broad_workspace_root(path: &Path) -> bool {
-    is_broad_workspace_root_with_home(path, &home_dir())
-}
-
-/// The same policy after resolving an existing path. Use this only on an
-/// explicit filesystem operation (not a background scan): canonicalization
-/// catches a saved symlink/`..` alias of HOME before a recursive consumer is
-/// allowed to proceed.
-pub(crate) fn is_broad_workspace_root_resolved(path: &Path) -> bool {
-    if is_broad_workspace_root(path) {
-        return true;
-    }
-    let Ok(resolved) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    let home = home_dir();
-    let resolved_home = std::fs::canonicalize(&home).unwrap_or(home);
-    is_broad_workspace_root_with_home(&resolved, &resolved_home)
-}
-
-fn is_broad_workspace_root_with_home(path: &Path, home: &Path) -> bool {
-    !path.is_absolute() || home.starts_with(path)
-}
-
-/// Whether unattended/background work must leave this root alone. In addition
-/// to HOME and its ancestors, this covers macOS privacy-managed HOME subtrees.
-/// A person may still explicitly open a project there; this guard is for boot
-/// reconciliation, imported-history discovery, and other automatic activity.
-pub fn is_automatic_access_blocked(path: &Path) -> bool {
-    is_automatic_access_blocked_with_home(path, &home_dir())
-}
-
-fn is_automatic_access_blocked_with_home(path: &Path, home: &Path) -> bool {
-    if is_broad_workspace_root_with_home(path, home) {
-        return true;
-    }
-    let Ok(relative) = path.strip_prefix(home) else {
-        return false;
-    };
-    let Some(std::path::Component::Normal(first)) = relative.components().next() else {
-        return false;
-    };
-    matches!(
-        first.to_str(),
-        Some("Desktop" | "Documents" | "Downloads" | "Movies" | "Music" | "Pictures" | "Library")
-    )
-}
-
-/// A first-level HOME entry whose metadata must not be probed merely to render
-/// the project picker. On macOS even a `stat`/`.git` existence check against
-/// these privacy-managed folders can raise a TCC prompt. Entering the folder is
-/// still allowed when the person explicitly selects it in the picker.
-fn is_protected_home_child_with_home(target: &Path, name: &str, home: &Path) -> bool {
-    target == home
-        && matches!(
-            name,
-            "Desktop" | "Documents" | "Downloads" | "Movies" | "Music" | "Pictures" | "Library"
-        )
-}
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `MAST_WORKTREES_DIR` overrides
@@ -2245,30 +2088,6 @@ fn rank_file_matches(
         .into_iter()
         .map(|(_, _, path, is_dir)| FileSearchMatch { path, is_dir })
         .collect()
-}
-
-/// Turn a generated chat title into the semantic portion of a Mast branch
-/// (port of zeron's `worktreeBranchFromTitle`). Mast NFKD-normalizes accented
-/// letters first; native keeps it ASCII-only (generated titles are Title Case
-/// English), so non-ASCII characters collapse into the `-` separator.
-pub fn worktree_branch_from_title(title: &str) -> String {
-    let mut slug = String::new();
-    for c in title.trim().chars() {
-        if matches!(c, '\'' | '"' | '`') {
-            continue; // dropped entirely (cafe's → cafes), not a separator
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    slug.truncate(48);
-    let slug = slug.trim_matches('-');
-    format!(
-        "{BRANCH_PREFIX}{}",
-        if slug.is_empty() { "update" } else { slug }
-    )
 }
 
 fn bounded_field(value: &str, max_chars: usize) -> String {
