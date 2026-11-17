@@ -5019,13 +5019,12 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
-        self.render_sidebar_collection_rows(theme, false, cx)
+        self.render_sidebar_collection_rows(theme, cx)
     }
 
     pub(super) fn render_sidebar_collection_rows(
         &mut self,
         theme: &Theme,
-        shortcuts_only: bool,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         #[cfg(test)]
@@ -5046,38 +5045,8 @@ impl Shell {
             let mut chats: Vec<_> = state
                 .sidebar_chats(now, filter.as_deref())
                 .into_iter()
-                .filter(|(_, chat)| {
-                    !shortcuts_only
-                        || self
-                            .overview_visible_chat_ids
-                            .as_ref()
-                            .is_none_or(|ids| ids.contains(&chat.id))
-                })
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
-            // Search must include matching historical task runs, not only
-            // the latest run normally projected into the sidebar.
-            if let Some(ids) = self
-                .overview_visible_chat_ids
-                .as_ref()
-                .filter(|_| shortcuts_only)
-            {
-                let present: std::collections::HashSet<_> =
-                    chats.iter().map(|(_, chat)| chat.id.clone()).collect();
-                chats.extend(
-                    state
-                        .chats
-                        .iter()
-                        .filter(|chat| {
-                            ids.contains(&chat.id)
-                                && !present.contains(&chat.id)
-                                && !chat.archived
-                                && chat.scheduled_task_info.is_some()
-                                && !state.personal_assistant.covers(chat)
-                        })
-                        .map(|chat| (state.display_status_for(chat, now), chat.clone())),
-                );
-            }
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
@@ -5128,11 +5097,7 @@ impl Shell {
                 .collect::<Vec<_>>(),
         );
 
-        let custom_sections = if shortcuts_only {
-            self.custom_sidebar_sections(cx)
-        } else {
-            self.active_sidebar_sections(cx)
-        };
+        let custom_sections = self.active_sidebar_sections(cx);
         let custom_count = custom_sections.len();
         let mut custom_groups: Vec<_> = custom_sections
             .iter()
@@ -5164,13 +5129,6 @@ impl Shell {
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
-        }
-        if shortcuts_only {
-            regular_groups.retain(|(group, _)| {
-                group
-                    .as_ref()
-                    .is_some_and(|(key, _)| key == SCHEDULED_GROUP_KEY)
-            });
         }
         move_scheduled_group_last(&mut regular_groups);
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
@@ -6266,6 +6224,10 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        #[cfg(test)]
+        {
+            self.archived_section_builds += 1;
+        }
         const INITIAL: usize = 10;
         const PAGE: usize = 25;
         let now = Utc::now();

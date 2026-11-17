@@ -1749,6 +1749,8 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     overview_page: Option<Entity<crate::overview::Overview>>,
     overview_navigation: Option<Entity<crate::overview::OverviewNavigation>>,
+    #[cfg(test)]
+    archived_section_builds: usize,
     overview_overlay_dismissed: bool,
     overview_visible_chat_ids: Option<std::collections::HashSet<String>>,
     scheduled_tasks_page: Option<Entity<crate::scheduled_tasks::ScheduledTasksPage>>,
@@ -2309,6 +2311,8 @@ impl Shell {
             devices_page: None,
             overview_page: None,
             overview_navigation: None,
+            #[cfg(test)]
+            archived_section_builds: 0,
             overview_overlay_dismissed: true,
             overview_visible_chat_ids: None,
             scheduled_tasks_page: None,
@@ -8432,7 +8436,7 @@ impl Shell {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
-        let session_rows = self.render_sidebar_collection_rows(theme, false, cx);
+        let session_rows = self.render_sidebar_collection_rows(theme, cx);
         let moving_row = session_rows
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));

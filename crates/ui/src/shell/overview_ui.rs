@@ -357,6 +357,13 @@ pub(super) mod tests {
         let sentinel = vec![("previous-session-order".to_string(), 61.0)];
         shell.update(vcx, |shell, cx| {
             shell.sidebar_prev_order = sentinel.clone();
+            shell.state.update(cx, |state, cx| {
+                let mut archived = state.chats[0].clone();
+                archived.id = "archived".into();
+                archived.archived = true;
+                state.chats.push(archived);
+                cx.notify();
+            });
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
             *shell.settings.sidebar_pins_mut(key) = vec!["chat".into()];
             cx.notify();
@@ -365,6 +372,7 @@ pub(super) mod tests {
             redraw_assistant(vcx);
             shell.read_with(vcx, |shell, _| {
                 assert_eq!(shell.sidebar_prev_order, sentinel);
+                assert_eq!(shell.archived_section_builds, 0);
             });
         }
         let sessions = vcx.debug_bounds("sidebar-sessions").unwrap().center();
@@ -372,6 +380,7 @@ pub(super) mod tests {
         redraw_assistant(vcx);
         shell.read_with(vcx, |shell, _| {
             assert_ne!(shell.sidebar_prev_order, sentinel);
+            assert!(shell.archived_section_builds > 0);
         });
         assert!(vcx.debug_bounds("sidebar-pinned-section").is_some());
     }
@@ -567,14 +576,7 @@ pub(super) mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        shell.update(vcx, |shell, cx| {
-            let theme = Theme::of(cx).clone();
-            let rows = shell.render_sidebar_collection_rows(&theme, true, cx);
-            assert_eq!(
-                rows.regular_count, 1,
-                "matching historical run remains in collections"
-            );
-        });
+        assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());
         let clear = vcx.debug_bounds("overview-clear-filters").unwrap().center();
         vcx.simulate_click(clear, gpui::Modifiers::default());
         vcx.run_until_parked();
@@ -640,8 +642,6 @@ pub(super) mod tests {
             let custom = shell.custom_sidebar_sections(cx);
             assert_eq!(custom.len(), 1);
             assert_eq!(custom[0].session_ids, vec!["chat"]);
-            let theme = Theme::of(cx).clone();
-            assert_eq!(shell.render_sidebar_collection_rows(&theme, true, cx).custom_count, 1);
         });
         redraw_assistant(vcx);
         assert!(vcx.debug_bounds("overview-shortcut-collections").is_none());

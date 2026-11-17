@@ -119,7 +119,7 @@ ignore it. The **Archive Chat** and **Archive…** menu entries show the key.
 
 `⌘F` (`Ctrl+F`) focuses Overview's search when navigation has focus, selecting
 the existing query. Search and the repository/attention filters apply to the
-Outline and shortcut collections. The fixed current-chat entry stays reachable.
+Outline. The fixed current-chat entry stays reachable.
 The file editor's own Find still wins inside a file; typing in the Chat composer
 keeps its existing Find behavior. In the search field, `Esc` clears a non-empty
 query, then returns to the tree; `↩` or `↓` selects and focuses the first result.
@@ -278,8 +278,8 @@ A single-Space Outline has no Space rows, so none of this applies there.
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
 - **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
-  and its Chats disappear from the Outline only. The Sessions presentation and shortcut collections
-  still show them. While any Space is hidden, the Outline toolbar shows
+  and its Chats disappear from the Outline only. The Sessions presentation
+  still shows them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
 - **Rename Space…** opens the same rename dialog as the sidebar's Space menu.
