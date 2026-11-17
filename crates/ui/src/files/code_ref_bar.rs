@@ -2,23 +2,11 @@ use gpui::{AnyElement, div, prelude::*, px};
 
 pub(super) fn pinned_view(
     reference: &crate::code_ref::StagedCodeRef,
+    source: &str,
+    highlight: Option<&mast_syntax::HighlightedDocument>,
     theme: &crate::theme::Theme,
 ) -> AnyElement {
     let first_line = reference.reference.range.map_or(1, |range| range.start_line);
-    let lines = reference.snippet.lines().enumerate().map(|(index, line)| {
-        div()
-            .flex()
-            .gap(px(crate::theme::Theme::SPACE_MD))
-            .child(
-                div()
-                    .w(px(crate::theme::Theme::SPACE_LG * 3.0))
-                    .flex_none()
-                    .text_right()
-                    .text_color(theme.text_faint)
-                    .child((first_line as usize + index).to_string()),
-            )
-            .child(div().child(line.to_owned()))
-    });
     div()
         .id("pinned-code-reference")
         .flex_1()
@@ -31,11 +19,7 @@ pub(super) fn pinned_view(
                 .text_color(theme.text_muted)
                 .child(format!("{} · pinned · read only", reference.label())),
         )
-        .child(
-            div()
-                .font_family(theme.font_mono.clone())
-                .children(lines),
-        )
+        .child(crate::components::code_block::code_block(source, first_line, highlight, theme))
         .into_any_element()
 }
 

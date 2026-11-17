@@ -2510,7 +2510,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(reference) = self.pinned_reference.as_ref() {
-            return super::code_ref_bar::pinned_view(reference, theme);
+            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), theme);
         }
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
@@ -2568,8 +2568,7 @@ impl FilesSurface {
                 if selection.is_empty() { None } else {
                     let input_bounds = state.input_bounds();
                     let (top, left) = state.range_to_bounds(&selection).map(|bounds| {
-                        let left = f32::from(bounds.origin.x - input_bounds.origin.x).clamp(0.0, (f32::from(input_bounds.size.width) - 160.0).max(0.0));
-                        (bounds.origin.y + bounds.size.height - input_bounds.origin.y, px(left))
+                        crate::components::code_ref::selection_action_position(bounds, input_bounds)
                     }).unwrap_or((px(12.0), px(12.0)));
                     Some(self.selection_actions(theme, top, left, cx))
                 }

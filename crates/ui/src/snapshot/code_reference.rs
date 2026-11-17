@@ -20,12 +20,7 @@ impl Render for CodeReferenceFixture {
         let state = self.editor.read(cx);
         let (top, left) = state
             .range_to_bounds(&state.selected_range())
-            .map(|bounds| {
-                (
-                    bounds.origin.y + bounds.size.height - state.input_bounds().origin.y,
-                    bounds.origin.x - state.input_bounds().origin.x,
-                )
-            })
+            .map(|bounds| crate::components::code_ref::selection_action_position(bounds, state.input_bounds()))
             .unwrap_or((px(90.0), px(30.0)));
         div()
             .size_full()

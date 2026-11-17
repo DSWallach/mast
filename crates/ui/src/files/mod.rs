@@ -172,6 +172,9 @@ pub struct FilesSurface {
     /// after the async file load creates its editor.
     pending_editor_location: Option<(u32, Option<u32>)>,
     pinned_reference: Option<crate::code_ref::StagedCodeRef>,
+    pinned_source: String,
+    pinned_highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
+    pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
     selected_editor_path: Option<String>,
@@ -497,6 +500,9 @@ impl FilesSurface {
             editor_path: editor_path.clone(),
             pending_editor_location: None,
             pinned_reference: None,
+            pinned_source: String::new(),
+            pinned_highlight: None,
+            pinned_syntax_cache: crate::syntax_cache::SyntaxHighlightCache::default(),
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -703,12 +709,45 @@ impl FilesSurface {
     }
 
     pub(crate) fn show_pinned_reference(&mut self, reference: crate::code_ref::StagedCodeRef, cx: &mut Context<Self>) {
+        let source = crate::components::code_block::bounded_source(&reference.snippet);
+        let path = reference.reference.location.path.clone();
+        let key = mast_syntax::language_for_path(&path)
+            .map(|language| crate::syntax_cache::DocumentHighlightKey::new(language, &source));
+        self.pinned_highlight = key.as_ref().and_then(|key| self.pinned_syntax_cache.get(key));
+        self.pinned_source = source.clone();
         self.pinned_reference = Some(reference);
+        if self.pinned_highlight.is_none() && let Some(key) = key {
+            cx.spawn(async move |this, cx| {
+                let task_source = source.clone();
+                let highlighted = cx.background_executor().spawn(async move {
+                    mast_syntax::highlight_with_limits(
+                        mast_syntax::HighlightRequest { source: &task_source, path: Some(&path), fence_tag: None },
+                        mast_syntax::HighlightLimits { max_source_bytes: crate::components::code_block::MAX_BYTES, max_spans: 20_000 },
+                        None,
+                    ).ok().map(std::sync::Arc::new)
+                }).await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(document) = highlighted {
+                        this.pinned_syntax_cache.insert(key, document.clone());
+                        if this.pinned_source == source && this.pinned_reference.as_ref().is_some_and(|reference| {
+                            mast_syntax::language_for_path(&reference.reference.location.path) == Some(key.language)
+                        }) {
+                            this.pinned_highlight = Some(document);
+                            cx.notify();
+                        }
+                    }
+                });
+            }).detach();
+        }
         cx.notify();
     }
 
     pub(crate) fn clear_pinned_reference(&mut self, cx: &mut Context<Self>) {
-        if self.pinned_reference.take().is_some() { cx.notify(); }
+        if self.pinned_reference.take().is_some() {
+            self.pinned_source.clear();
+            self.pinned_highlight = None;
+            cx.notify();
+        }
     }
 
     /// Reveal a 1-based source location once this editor is ready. Markdown
