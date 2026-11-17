@@ -294,6 +294,49 @@ pub struct LinearConnectionStatus {
 // RPC params and replies (method names: `mast_rpc::methods::LINEAR_*`)
 // --------------------------------------------------------------------------
 
+/// Public account metadata; credentials are never returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearAccount {
+    pub id: String,
+    pub label: String,
+    pub key_set: bool,
+}
+
+/// Account creation or key replacement. Debug output never includes the key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearAccountKeyParams {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for LinearAccountKeyParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearAccountKeyParams")
+            .field("account_id", &self.account_id)
+            .field("label", &self.label)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearRenameAccountParams {
+    pub account_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearRemoveAccountParams {
+    pub account_id: String,
+}
+
 /// `LinearStatus {}` → [`LinearConnectionStatus`]. Verifies the key with a
 /// `viewer` query at most once per engine run (cached).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +376,11 @@ pub struct LinearClearApiKeyParams {}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearIssueParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub identifier: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub force_refresh: bool,
@@ -344,6 +392,11 @@ pub struct LinearIssueParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearMyIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     /// Skip the engine's list cache.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -357,6 +410,11 @@ pub struct LinearMyIssuesParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearMyProjectsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -368,6 +426,11 @@ pub struct LinearMyProjectsParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearProjectIssuesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -381,6 +444,11 @@ pub struct LinearProjectIssuesParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearProjectDetailParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// Reject a read if the Space changed accounts before it was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_account_id: Option<String>,
     pub project_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,

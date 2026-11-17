@@ -10,6 +10,7 @@
 //!   follow Linear until the user edits them), run every 15 minutes, on
 //!   `LinearRefreshLinkedItems`, and when a Space turns Linear on.
 
+pub mod accounts;
 pub mod assigned;
 pub mod client;
 pub mod credentials;
@@ -18,6 +19,7 @@ pub mod sync;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
@@ -25,7 +27,7 @@ use futures::future::{BoxFuture, Shared};
 
 use crate::swr::SwrStore;
 use mast_proto::linear::{
-    LinearConnectionStatus, LinearError, LinearErrorCode, LinearIssueSummary, LinearKeySource,
+    LinearAccount, LinearConnectionStatus, LinearError, LinearErrorCode, LinearIssueSummary, LinearKeySource,
     LinearProjectDetail, LinearProjectSummary, MAX_LIST_ISSUES, MAX_PROJECT_UPDATES,
 };
 use serde_json::{Value, json};
@@ -87,12 +89,34 @@ struct Backend {
     ttl: Duration,
 }
 
+/// Adapts a named credential to the existing single-account service.
+struct AccountKeyStore {
+    store: Arc<dyn LinearKeyStore>,
+    account_id: String,
+}
+
+impl LinearKeyStore for AccountKeyStore {
+    fn read(&self) -> Result<Option<String>, String> {
+        self.store.read_account(&self.account_id)
+    }
+    fn write(&self, key: &str) -> Result<(), String> {
+        self.store.write_account(&self.account_id, key)
+    }
+    fn delete(&self) -> Result<(), String> {
+        self.store.delete_account(&self.account_id)
+    }
+    fn is_keychain(&self) -> bool {
+        self.store.is_keychain()
+    }
+}
+
 type SharedCall = Shared<BoxFuture<'static, Result<Value, LinearError>>>;
 
 struct Inner {
     backend: RwLock<Arc<Backend>>,
     /// `None` = not resolved yet; `Some(None)` = no key anywhere.
     key: Mutex<Option<Option<(String, LinearKeySource)>>>,
+    key_revision: AtomicU64,
     /// The last successful `viewer` check.
     verified: Mutex<Option<LinearConnectionStatus>>,
     issues: Mutex<HashMap<String, (Instant, LinearIssueSummary)>>,
@@ -107,6 +131,10 @@ struct Inner {
     project_details: SwrStore<LinearProjectDetail, LinearError>,
     /// Serializes key changes (set/clear/forget).
     key_change: tokio::sync::Mutex<()>,
+    /// Independent caches and credentials for each named account.
+    accounts: Mutex<HashMap<String, LinearService>>,
+    catalog: Mutex<accounts::AccountCatalog>,
+    catalog_change: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; one per engine.
@@ -149,10 +177,15 @@ pub fn normalize_identifier(identifier: &str) -> Result<String, LinearError> {
 
 impl LinearService {
     pub fn new(config: LinearConfig) -> Self {
+        Self::with_backend(backend_of(config))
+    }
+
+    fn with_backend(backend: Arc<Backend>) -> Self {
         Self {
             inner: Arc::new(Inner {
-                backend: RwLock::new(backend_of(config)),
+                backend: RwLock::new(backend),
                 key: Mutex::new(None),
+                key_revision: AtomicU64::new(0),
                 verified: Mutex::new(None),
                 issues: Mutex::new(HashMap::new()),
                 attachments: Mutex::new(HashMap::new()),
@@ -161,6 +194,9 @@ impl LinearService {
                 project_lists: SwrStore::new(LIST_CACHE_TTL),
                 project_details: SwrStore::new(LIST_CACHE_TTL),
                 key_change: tokio::sync::Mutex::new(()),
+                accounts: Mutex::new(HashMap::new()),
+                catalog: Mutex::new(accounts::AccountCatalog::default()),
+                catalog_change: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -173,6 +209,38 @@ impl LinearService {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = backend_of(config);
         self.forget_caches();
+        lock(&self.inner.accounts).clear();
+    }
+
+    /// Changes whenever this account's credential caches are invalidated.
+    pub fn credential_revision(&self) -> u64 {
+        self.inner.key_revision.load(Ordering::SeqCst)
+    }
+
+    /// Return the service and caches belonging to one account. Absent selects
+    /// the existing Default service and its environment fallback.
+    pub fn for_account(&self, account_id: Option<&str>) -> Self {
+        let Some(account_id) = account_id.filter(|id| *id != credentials::DEFAULT_ACCOUNT_ID)
+        else {
+            return self.clone();
+        };
+        let mut accounts = lock(&self.inner.accounts);
+        accounts
+            .entry(account_id.to_owned())
+            .or_insert_with(|| {
+                let parent = self.backend();
+                let backend = Backend {
+                    client: parent.client.clone(),
+                    store: Arc::new(AccountKeyStore {
+                        store: parent.store.clone(),
+                        account_id: account_id.to_owned(),
+                    }),
+                    env: no_env_source(),
+                    ttl: parent.ttl,
+                };
+                Self::with_backend(Arc::new(backend))
+            })
+            .clone()
     }
 
     fn backend(&self) -> Arc<Backend> {
@@ -184,13 +252,122 @@ impl LinearService {
     }
 
     fn forget_caches(&self) {
-        *lock(&self.inner.key) = None;
+        {
+            let mut key = lock(&self.inner.key);
+            self.inner.key_revision.fetch_add(1, Ordering::SeqCst);
+            *key = None;
+        }
         *lock(&self.inner.verified) = None;
         lock(&self.inner.issues).clear();
         lock(&self.inner.attachments).clear();
         self.inner.issue_lists.clear();
         self.inner.project_lists.clear();
         self.inner.project_details.clear();
+    }
+
+    /// Load device-local account labels. Credentials remain in the key store.
+    pub fn set_account_catalog_path(&self, path: &std::path::Path) -> Result<(), String> {
+        match accounts::AccountCatalog::open(path) {
+            Ok(catalog) => { *lock(&self.inner.catalog) = catalog; Ok(()) }
+            Err(error) => { *lock(&self.inner.catalog) = accounts::AccountCatalog::unavailable(); Err(error) }
+        }
+    }
+
+    /// Serialize account selection with account removal.
+    pub async fn lock_account_changes(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.catalog_change.lock().await
+    }
+
+    pub fn account_exists(&self, account_id: Option<&str>) -> bool {
+        account_id.is_none_or(|id| id == credentials::DEFAULT_ACCOUNT_ID ||
+            lock(&self.inner.catalog).list().iter().any(|account| account.id == id))
+    }
+
+    /// Account labels and credential presence, never the credentials themselves.
+    pub async fn list_accounts(&self) -> Vec<LinearAccount> {
+        let labels = lock(&self.inner.catalog).list().to_vec();
+        let default_label = labels.iter().find(|a| a.id == credentials::DEFAULT_ACCOUNT_ID)
+            .map_or("Default", |a| a.label.as_str());
+        let mut result = vec![LinearAccount {
+            id: credentials::DEFAULT_ACCOUNT_ID.into(),
+            label: default_label.to_owned(),
+            key_set: self.has_key().await,
+        }];
+        for account in labels.into_iter().filter(|a| a.id != credentials::DEFAULT_ACCOUNT_ID) {
+            let key_set = self.for_account(Some(&account.id)).has_key().await;
+            result.push(LinearAccount { id: account.id, label: account.label, key_set });
+        }
+        result
+    }
+
+    /// Add an account only after the key has been accepted and stored.
+    pub async fn add_account(&self, label: &str, key: &str) -> Result<LinearAccount, LinearError> {
+        let label = validate_account_label(label)?;
+        let _guard = self.inner.catalog_change.lock().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let account = self.for_account(Some(&id));
+        if let Err(error) = account.set_api_key(key).await {
+            lock(&self.inner.accounts).remove(&id);
+            return Err(error);
+        }
+        let saved = {
+            let mut catalog = lock(&self.inner.catalog);
+            let mut labels = catalog.list().to_vec();
+            labels.push(accounts::LinearAccountLabel { id: id.clone(), label: label.clone() });
+            catalog.replace(labels)
+        };
+        if saved.is_err() {
+            let _ = account.clear_api_key().await;
+            lock(&self.inner.accounts).remove(&id);
+            return Err(LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"));
+        }
+        Ok(LinearAccount { id, label, key_set: true })
+    }
+
+    pub async fn rename_account(&self, id: &str, label: &str) -> Result<(), LinearError> {
+        let label = validate_account_label(label)?;
+        let _guard = self.inner.catalog_change.lock().await;
+        let mut catalog = lock(&self.inner.catalog);
+        let mut labels = catalog.list().to_vec();
+        if let Some(account) = labels.iter_mut().find(|account| account.id == id) {
+            account.label = label;
+        } else if id == credentials::DEFAULT_ACCOUNT_ID {
+            labels.push(accounts::LinearAccountLabel { id: id.into(), label });
+        } else {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        catalog.replace(labels).map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"))
+    }
+
+    /// Replace a known account's key and discard that account's caches.
+    pub async fn replace_account_key(&self, id: &str, key: &str) -> Result<(), LinearError> {
+        let _guard = self.inner.catalog_change.lock().await;
+        if id != credentials::DEFAULT_ACCOUNT_ID && !lock(&self.inner.catalog).list().iter().any(|a| a.id == id) {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        self.for_account(Some(id)).set_api_key(key).await?;
+        Ok(())
+    }
+
+    /// Remove an account only when no Space selects it, including disabled Spaces.
+    pub async fn remove_account(&self, id: &str, workspace: &crate::workspace_host::WorkspaceHost) -> Result<(), LinearError> {
+        let _guard = self.inner.catalog_change.lock().await;
+        if id != credentials::DEFAULT_ACCOUNT_ID && !lock(&self.inner.catalog).list().iter().any(|a| a.id == id) {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        let spaces = workspace.read_spaces().map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not read Spaces"))?;
+        let using: Vec<String> = spaces.iter().filter(|space| {
+            workspace.space_linear_account_id(&space.id).as_deref().unwrap_or(credentials::DEFAULT_ACCOUNT_ID) == id
+        }).map(|space| space.display_name().to_owned()).collect();
+        if !using.is_empty() {
+            return Err(LinearError::new(LinearErrorCode::Invalid, format!("Used by Spaces: {}", using.join(", "))));
+        }
+        self.for_account(Some(id)).clear_api_key().await?;
+        let mut catalog = lock(&self.inner.catalog);
+        let labels = catalog.list().iter().filter(|a| a.id != id).cloned().collect();
+        catalog.replace(labels).map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"))?;
+        lock(&self.inner.accounts).remove(id);
+        Ok(())
     }
 
     /// Keep the list caches under `dir` so a cold start can show the last
@@ -210,22 +387,27 @@ impl LinearService {
     /// The key and its source, reading the store once (off the async
     /// workers: the Keychain is a `security` process).
     async fn resolve_key(&self) -> Result<Option<(String, LinearKeySource)>, LinearError> {
-        if let Some(known) = lock(&self.inner.key).clone() {
-            return Ok(known);
+        loop {
+            let revision = {
+                let key = lock(&self.inner.key);
+                if let Some(known) = key.clone() { return Ok(known); }
+                self.inner.key_revision.load(Ordering::SeqCst)
+            };
+            let backend = self.backend();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let stored = backend.store.read()?;
+                Ok::<_, String>(match stored {
+                    Some(key) => Some((key, LinearKeySource::Keychain)),
+                    None => (backend.env)().map(|key| (key, LinearKeySource::Environment)),
+                })
+            }).await
+                .map_err(|e| LinearError::new(LinearErrorCode::Network, e.to_string()))?
+                .map_err(|message| LinearError::new(LinearErrorCode::MissingKey, message))?;
+            let mut key = lock(&self.inner.key);
+            if self.inner.key_revision.load(Ordering::SeqCst) != revision { continue; }
+            *key = Some(resolved.clone());
+            return Ok(resolved);
         }
-        let backend = self.backend();
-        let resolved = tokio::task::spawn_blocking(move || {
-            let stored = backend.store.read()?;
-            Ok::<_, String>(match stored {
-                Some(key) => Some((key, LinearKeySource::Keychain)),
-                None => (backend.env)().map(|key| (key, LinearKeySource::Environment)),
-            })
-        })
-        .await
-        .map_err(|e| LinearError::new(LinearErrorCode::Network, e.to_string()))?
-        .map_err(|message| LinearError::new(LinearErrorCode::MissingKey, message))?;
-        *lock(&self.inner.key) = Some(resolved.clone());
-        Ok(resolved)
     }
 
     /// Whether a key is available (reads the store at most once).
@@ -240,6 +422,8 @@ impl LinearService {
             .resolve_key()
             .await?
             .ok_or_else(LinearError::missing_key)?;
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
+        let rejected_key = key.clone();
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         hasher.update([0]);
@@ -262,18 +446,27 @@ impl LinearService {
         };
         let result = shared.await;
         lock(&self.inner.inflight).remove(&slot);
+        let changed = self.inner.key_revision.load(Ordering::SeqCst) != revision ||
+            lock(&self.inner.key).as_ref().and_then(|key| key.as_ref()).is_none_or(|(key, _)| key != &rejected_key);
+        if changed {
+            return Err(LinearError::new(LinearErrorCode::Network, "Linear account changed during the request"));
+        }
         if let Err(error) = &result
             && error.code == LinearErrorCode::Unauthorized
         {
-            self.forget_key(source).await;
+            self.forget_key(source, revision, &rejected_key).await;
         }
         result
     }
 
     /// After a 401: delete a stored key (an environment key cannot be
     /// deleted, it is only reported) and drop the caches.
-    async fn forget_key(&self, source: LinearKeySource) {
+    async fn forget_key(&self, source: LinearKeySource, revision: u64, rejected_key: &str) {
         let _guard = self.inner.key_change.lock().await;
+        if self.inner.key_revision.load(Ordering::SeqCst) != revision ||
+            lock(&self.inner.key).as_ref().and_then(|key| key.as_ref()).is_none_or(|(key, _)| key != rejected_key) {
+            return;
+        }
         if source == LinearKeySource::Keychain {
             let backend = self.backend();
             let deleted = tokio::task::spawn_blocking(move || backend.store.delete()).await;
@@ -414,6 +607,7 @@ impl LinearService {
         if !force && let Some(issue) = self.cached_issue(&id) {
             return Ok(issue);
         }
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
         let data = self.call(&queries::issue(), json!({ "id": id })).await?;
         let issue = data
             .get("issue")
@@ -423,6 +617,7 @@ impl LinearService {
                 LinearError::new(LinearErrorCode::NotFound, format!("{id} was not found"))
             })?;
         let mut cache = lock(&self.inner.issues);
+        if self.inner.key_revision.load(Ordering::SeqCst) != revision { return Ok(issue); }
         cache.insert(id.clone(), (Instant::now(), issue.clone()));
         if issue.identifier != id {
             // A moved issue answers under its new identifier.
@@ -448,6 +643,7 @@ impl LinearService {
         {
             return Ok(cached.clone());
         }
+        let revision = self.inner.key_revision.load(Ordering::SeqCst);
         let data = self
             .call(&queries::issue_attachments(), json!({ "id": id }))
             .await?;
@@ -457,7 +653,10 @@ impl LinearService {
                 "Linear answered issue attachments in an unexpected shape",
             )
         })?;
-        lock(&self.inner.attachments).insert(id, (Instant::now(), attachments.clone()));
+        let mut cache = lock(&self.inner.attachments);
+        if self.inner.key_revision.load(Ordering::SeqCst) == revision {
+            cache.insert(id, (Instant::now(), attachments.clone()));
+        }
         Ok(attachments)
     }
 
@@ -699,6 +898,14 @@ impl LinearService {
     }
 }
 
+fn validate_account_label(label: &str) -> Result<String, LinearError> {
+    let label = label.trim();
+    if label.is_empty() || label.chars().count() > 100 {
+        return Err(LinearError::new(LinearErrorCode::Invalid, "Enter a Linear account label"));
+    }
+    Ok(label.to_owned())
+}
+
 fn not_cached() -> LinearError {
     LinearError::new(LinearErrorCode::NotFound, "nothing cached yet")
 }
@@ -714,5 +921,62 @@ fn open_issues(nodes: &[Value]) -> Vec<LinearIssueSummary> {
 impl Default for LinearService {
     fn default() -> Self {
         Self::new(LinearConfig::production())
+    }
+}
+
+#[cfg(test)]
+mod account_service_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_list_contains_metadata_and_never_keys() {
+        let store = MemoryKeyStore::with_key("private-default");
+        store.write_account("personal", "private-personal").unwrap();
+        let service = LinearService::new(LinearConfig::for_tests("http://localhost", store));
+        lock(&service.inner.catalog).replace(vec![accounts::LinearAccountLabel {
+            id: "personal".into(), label: "Personal".into(),
+        }]).unwrap();
+        let accounts = service.list_accounts().await;
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().all(|account| account.key_set));
+        let wire = serde_json::to_string(&accounts).unwrap();
+        assert!(!wire.contains("private-default"));
+        assert!(!wire.contains("private-personal"));
+    }
+
+    #[tokio::test]
+    async fn accounts_have_independent_credentials_and_default_only_env_fallback() {
+        let store = MemoryKeyStore::new();
+        store.write_account("personal", "personal-key").unwrap();
+        let mut config = LinearConfig::for_tests("http://localhost", store.clone());
+        config.env = Arc::new(|| Some("environment-key".into()));
+        let service = LinearService::new(config);
+        let personal = service.for_account(Some("personal"));
+        let missing = service.for_account(Some("missing"));
+        assert_eq!(
+            service.resolve_key().await.unwrap().unwrap().0,
+            "environment-key"
+        );
+        assert_eq!(
+            personal.resolve_key().await.unwrap().unwrap().0,
+            "personal-key"
+        );
+        assert!(missing.resolve_key().await.unwrap().is_none());
+        store.write_account("personal", "replacement-key").unwrap();
+        personal.forget_caches();
+        assert_eq!(
+            service
+                .for_account(Some("personal"))
+                .resolve_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            "replacement-key"
+        );
+        assert_eq!(
+            service.resolve_key().await.unwrap().unwrap().0,
+            "environment-key"
+        );
     }
 }

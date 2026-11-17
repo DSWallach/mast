@@ -549,6 +549,18 @@ impl EngineRpc {
         }
     }
 
+    fn linear_for_space(&self, space_id: Option<&str>, expected_account_id: Option<&str>) -> Result<crate::linear::LinearService, RpcError> {
+        let Some(space_id) = space_id else { return Ok(self.linear.clone()); };
+        if self.workspace.space(space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+            return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+        }
+        let account = self.workspace.space_linear_account_id(space_id);
+        if expected_account_id.is_some_and(|expected| expected != account.as_deref().unwrap_or("default")) {
+            return Err(RpcError::Failed("linear/network: Linear account changed; retry the request".into()));
+        }
+        Ok(self.linear.for_account(account.as_deref()))
+    }
+
     /// `linear/disabledForSpace` for a Space-scoped Linear mutation in a
     /// Space with Linear off.
     fn linear_mutation_gate(
@@ -2725,6 +2737,13 @@ impl RpcService for EngineRpc {
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;
+                let _account_guard = if let mast_proto::WorkOutlineMutation::SetSpaceLinearAccount(p) = &mutation {
+                    let guard = self.linear.lock_account_changes().await;
+                    if !self.linear.account_exists(p.account_id.as_deref()) {
+                        return Err(RpcError::Failed("linear/notFound: Linear account not found".into()));
+                    }
+                    Some(guard)
+                } else { None };
                 let enabled_space = match &mutation {
                     mast_proto::WorkOutlineMutation::SetSpaceLinearEnabled(p) if p.enabled => {
                         Some(p.space_id.clone())
@@ -2764,8 +2783,7 @@ impl RpcService for EngineRpc {
                     let work_outline = self.work_outline.clone();
                     let pr_review_sync = self.pr_review_sync.clone();
                     tokio::spawn(async move {
-                        if linear.has_key().await
-                            && let Err(error) = crate::linear::sync::sync_space(
+                        if let Err(error) = crate::linear::sync::sync_space(
                                 &linear,
                                 &work_outline,
                                 Some(&pr_review_sync),
@@ -2896,34 +2914,60 @@ impl RpcService for EngineRpc {
                 let accepted = self.artifacts.render().respond(p);
                 RpcReply::value(&mast_proto::ArtifactRenderResultReply { accepted })
             }
+            methods::LINEAR_LIST_ACCOUNTS => RpcReply::value(&self.linear.list_accounts().await),
+            methods::LINEAR_ADD_ACCOUNT => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                Self::linear_reply(self.linear.add_account(p.label.as_deref().unwrap_or(""), &p.api_key).await).await
+            }
+            methods::LINEAR_RENAME_ACCOUNT => {
+                let p: mast_proto::linear::LinearRenameAccountParams = parse_params(params)?;
+                Self::linear_reply(self.linear.rename_account(&p.account_id, &p.label).await.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REPLACE_ACCOUNT_KEY => {
+                let p: mast_proto::linear::LinearAccountKeyParams = parse_params(params)?;
+                let id = p.account_id.as_deref().unwrap_or("");
+                let result = self.linear.replace_account_key(id, &p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
+            methods::LINEAR_REMOVE_ACCOUNT => {
+                let p: mast_proto::linear::LinearRemoveAccountParams = parse_params(params)?;
+                let result = self.linear.remove_account(&p.account_id, &self.workspace).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account(&p.account_id); }
+                Self::linear_reply(result.map(|()| serde_json::json!({}))).await
+            }
             methods::LINEAR_STATUS => {
                 let p: mast_proto::LinearStatusParams = parse_params(params)?;
                 Self::linear_reply(self.linear.status(p.force_refresh).await).await
             }
             methods::LINEAR_SET_API_KEY => {
                 let p: mast_proto::LinearSetApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.set_api_key(&p.api_key).await).await
+                let result = self.linear.set_api_key(&p.api_key).await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_CLEAR_API_KEY => {
                 let _: mast_proto::LinearClearApiKeyParams = parse_params(params)?;
-                Self::linear_reply(self.linear.clear_api_key().await).await
+                let result = self.linear.clear_api_key().await;
+                if result.is_ok() && let Some(cache) = &self.pr_ticket_cache { cache.invalidate_linear_account("default"); }
+                Self::linear_reply(result).await
             }
             methods::LINEAR_ISSUE => {
                 let p: mast_proto::LinearIssueParams = parse_params(params)?;
-                Self::linear_reply(self.linear.issue(&p.identifier, p.force_refresh).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.issue(&p.identifier, p.force_refresh).await).await
             }
             methods::LINEAR_MY_ISSUES => {
                 let p: mast_proto::LinearMyIssuesParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_issues(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_issues(p.force, p.cached_only).await).await
             }
             methods::LINEAR_MY_PROJECTS => {
                 let p: mast_proto::LinearMyProjectsParams = parse_params(params)?;
-                Self::linear_reply(self.linear.my_projects(p.force, p.cached_only).await).await
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?.my_projects(p.force, p.cached_only).await).await
             }
             methods::LINEAR_PROJECT_ISSUES => {
                 let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
                         .project_issues(&p.project_id, p.force, p.cached_only)
                         .await,
                 )
@@ -2932,7 +2976,7 @@ impl RpcService for EngineRpc {
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;
                 Self::linear_reply(
-                    self.linear
+                    self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
                         .project_detail(&p.project_id, p.force, p.cached_only)
                         .await,
                 )

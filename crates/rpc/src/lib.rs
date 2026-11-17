@@ -273,6 +273,12 @@ pub mod methods {
     // linear-contract.md). All local/IPC (the key is this device's), never
     // forwardable. Failures are `linear/<code>: <message>`
     // (`mast_proto::LinearError::from_wire_message`).
+    /// Device-local Linear account management.
+    pub const LINEAR_LIST_ACCOUNTS: &str = "LinearListAccounts";
+    pub const LINEAR_ADD_ACCOUNT: &str = "LinearAddAccount";
+    pub const LINEAR_RENAME_ACCOUNT: &str = "LinearRenameAccount";
+    pub const LINEAR_REPLACE_ACCOUNT_KEY: &str = "LinearReplaceAccountKey";
+    pub const LINEAR_REMOVE_ACCOUNT: &str = "LinearRemoveAccount";
     /// `LinearStatusParams` → `LinearConnectionStatus`.
     pub const LINEAR_STATUS: &str = "LinearStatus";
     /// `LinearSetApiKeyParams {apiKey}` → `LinearConnectionStatus` (validates

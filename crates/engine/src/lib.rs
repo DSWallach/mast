@@ -497,6 +497,9 @@ impl EngineCore {
         #[cfg(feature = "startup-bench")]
         let cache_started = std::time::Instant::now();
         linear.set_cache_dir(&data_dir.join("cache"));
+        if linear.set_account_catalog_path(&data_dir.join("linear-accounts.json")).is_err() {
+            tracing::warn!("linear: could not load account labels");
+        }
         #[cfg(feature = "startup-bench")]
         eprintln!("BENCH phase | linear_cache_setup | ms={:.3}", cache_started.elapsed().as_secs_f64() * 1000.0);
         if !soak {

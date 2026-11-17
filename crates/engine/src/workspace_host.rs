@@ -1287,6 +1287,16 @@ impl WorkspaceHost {
         self.read(|doc| doc.space_linear_enabled(space_id))
     }
 
+    /// The account selected by a Space, including disabled Spaces.
+    pub fn space_linear_account_id(&self, space_id: &str) -> Option<String> {
+        self.read(|doc| doc.space_linear_account_id(space_id))
+    }
+
+    /// The account selected by an enabled Space, or `None` if disabled.
+    pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
+        self.read(|doc| doc.space_linear_account(space_id))
+    }
+
     /// Live Spaces with Linear turned on.
     pub fn linear_enabled_space_ids(&self) -> Vec<String> {
         self.read(|doc| doc.linear_enabled_space_ids())

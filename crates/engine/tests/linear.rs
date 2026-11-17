@@ -96,6 +96,7 @@ struct MockState {
     attachments: HashMap<String, Vec<Value>>,
     /// Answer attachment queries with a GraphQL validation error.
     attachments_error: bool,
+    accept_other_key: bool,
     delay: Duration,
 }
 
@@ -178,7 +179,7 @@ fn page(nodes: Vec<Value>, next: Option<&str>) -> Value {
 }
 
 fn route(state: &MockState, operation: &str, auth: Option<&str>, variables: &Value) -> Reply {
-    if auth != Some(KEY) {
+    if auth != Some(KEY) && !(state.accept_other_key && auth == Some(OTHER_KEY)) {
         return Reply {
             status: 401,
             headers: Vec::new(),
@@ -1336,3 +1337,90 @@ async fn project_detail_is_read_only_cached_and_served_stored() {
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test]
+async fn named_account_removal_reports_disabled_spaces_and_rpc_hides_keys() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = tokio::time::timeout(Duration::from_secs(5), rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    }))).await.expect("add timed out").unwrap();
+    let id = account["id"].as_str().unwrap();
+    assert_eq!(account["label"], "Personal");
+    assert!(account["keySet"].as_bool().unwrap());
+    assert!(!account.to_string().contains(OTHER_KEY));
+    tokio::time::timeout(Duration::from_secs(5), rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"
+    }))).await.expect("select timed out").unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(5), rig.linear_err(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id}))).await.expect("remove timed out");
+    assert!(error.message.contains("off"));
+    assert_eq!(rig.snapshot(OFF_SPACE).space_settings.linear_account_id.as_deref(), Some(id));
+    rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": null, "operationId": "select-default"
+    })).await.unwrap();
+    rig.call(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id})).await.unwrap();
+    let accounts = rig.call(methods::LINEAR_LIST_ACCOUNTS, json!({})).await.unwrap();
+    assert_eq!(accounts.as_array().unwrap().len(), 1);
+    assert!(!accounts.to_string().contains(KEY));
+    assert!(!rig.seen.lock().unwrap().iter().any(|reply| reply.contains(OTHER_KEY)));
+    let captured = logs().0.lock().unwrap();
+    assert!(!String::from_utf8_lossy(&captured).contains(OTHER_KEY));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_queries_resolve_space_account_and_isolate_cached_results() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    })).await.unwrap();
+    let id = account["id"].as_str().unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"})).await.unwrap();
+    rig.mock.set_issue(issue_node("ENG-1", "Default issue", None, "started"));
+    let default = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    rig.mock.script(Reply::ok(json!({"issue": issue_node("ENG-1", "Personal issue", None, "started")})));
+    let personal = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(default["title"], "Default issue");
+    assert_eq!(personal["title"], "Personal issue");
+    let calls: Vec<_> = rig.mock.recorded().into_iter().filter(|r| r.operation == "MastLinearIssue").collect();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].authorization.as_deref() == Some(KEY));
+    assert!(calls[1].authorization.as_deref() == Some(OTHER_KEY));
+    let cached = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(cached["title"], "Default issue");
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+    let error = rig.linear_err(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE,
+        "expectedAccountId": "default", "identifier": "ENG-1"})).await;
+    assert_eq!(error.code, LinearErrorCode::Network);
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linear_sync_uses_the_selected_space_account() {
+    let rig = rig().await;
+    rig.mock.state.lock().unwrap().accept_other_key = true;
+    rig.mock.set_issue(issue_node("ENG-1", "Updated", None, "started"));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    })).await.unwrap();
+    let id = account["id"].as_str().unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "sync-personal-account"})).await.unwrap();
+    rig.enable(SPACE, true).await;
+    rig.enable(OFF_SPACE, true).await;
+    for (space, op) in [(SPACE, "default-sync-item"), (OFF_SPACE, "personal-sync-item")] {
+        rig.mutate(json!({"op": "createWorkItemFromLinear", "spaceId": space,
+            "placement": {"type": "last"}, "operationId": op,
+            "issue": {"id": "uuid-ENG-1", "identifier": "ENG-1", "title": "Original",
+                "url": "https://linear.app/example/issue/ENG-1"}})).await.unwrap();
+        rig.call(methods::LINEAR_REFRESH_LINKED_ITEMS, json!({"spaceId": space})).await.unwrap();
+    }
+    let calls: Vec<_> = rig.mock.recorded().into_iter().filter(|r| r.operation == "MastLinearIssue").collect();
+    assert!(calls.iter().any(|call| call.authorization.as_deref() == Some(KEY)));
+    assert!(calls.iter().any(|call| call.authorization.as_deref() == Some(OTHER_KEY)));
+    assert_eq!(rig.snapshot(SPACE).item(&derive_id("default-sync-item", roles::ITEM)).unwrap().title, "ENG-1 · Updated");
+    assert_eq!(rig.snapshot(OFF_SPACE).item(&derive_id("personal-sync-item", roles::ITEM)).unwrap().title, "ENG-1 · Updated");
+}
