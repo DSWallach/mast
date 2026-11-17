@@ -115,22 +115,13 @@ impl ScratchDirectories {
     /// Copy a template data directory into an empty run directory. Symlinks are
     /// rejected rather than followed, including links back to the template.
     pub(crate) fn copy_template_data(&self, template: &ScratchDirectories) -> io::Result<()> {
-        fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
+        fn validate_directory(source: &Path) -> io::Result<()> {
             for entry in std::fs::read_dir(source)? {
                 let entry = entry?;
                 let kind = entry.file_type()?;
-                let target = destination.join(entry.file_name());
                 if kind.is_dir() {
-                    std::fs::create_dir(&target)?;
-                    copy_directory(&entry.path(), &target)?;
-                } else if kind.is_file() {
-                    let mut input = std::fs::File::open(entry.path())?;
-                    let mut output = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(target)?;
-                    io::copy(&mut input, &mut output)?;
-                } else {
+                    validate_directory(&entry.path())?;
+                } else if !kind.is_file() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "template contains a link or special file",
@@ -147,7 +138,17 @@ impl ScratchDirectories {
                 "run data directory must be empty and distinct",
             ));
         }
-        copy_directory(&template.paths.data, &self.paths.data)
+        validate_directory(&template.paths.data)?;
+        let status = std::process::Command::new("/bin/cp")
+            .args(["-c", "-R"])
+            .arg(template.paths.data.join("."))
+            .arg(&self.paths.data)
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("template clone failed"))
+        }
     }
 
     /// Start a command only after the sandbox and startup guard are active.
@@ -258,7 +259,9 @@ mod tests {
         let profile = fs::read_to_string(scratch.write_sandbox_profile(&account).unwrap()).unwrap();
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains(".claude"));
-        for program in ["gh", "claude", "codex"] {
+        for program in [
+            "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh",
+        ] {
             let status = std::process::Command::new(scratch.shims.join(program))
                 .env_clear()
                 .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
@@ -268,7 +271,7 @@ mod tests {
         }
         assert_eq!(
             fs::read_to_string(&scratch.stub_log).unwrap(),
-            "gh\nclaude\ncodex\n"
+            "gh\nclaude\ncodex\nsecurity\nnpm\nnode\ncurl\nssh\n"
         );
         fs::remove_dir_all(&scratch.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
@@ -306,6 +309,22 @@ mod tests {
                 .success()
         );
         assert!(run(&repo, &["rev-parse", "--show-toplevel"])
+            .status
+            .success());
+        let linked = scratch.repositories.join("worktree");
+        assert!(run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        assert!(run(&linked, &["rev-parse", "--show-toplevel"])
             .status
             .success());
         assert!(!run(&repo, &["-C", "/", "status"]).status.success());

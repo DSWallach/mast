@@ -52,6 +52,7 @@ def main():
         else:
             git_dir = os.path.realpath(git_entry)
         allowed = allowed and bool(git_dir) and contained(git_dir, root) and os.path.isdir(git_dir)
+        common_dir = git_dir
         common_file = os.path.join(git_dir, "commondir")
         if allowed and os.path.isfile(common_file):
             if not contained(os.path.realpath(common_file), root):
@@ -60,6 +61,50 @@ def main():
             with open(common_file, encoding="utf-8") as entry:
                 common_dir = os.path.realpath(os.path.join(git_dir, entry.read(4096).strip()))
             allowed = contained(common_dir, root) and os.path.isdir(common_dir)
+        if allowed:
+            # Git metadata can redirect object reads and config includes outside
+            # the fixture. Refuse links and alternates, and only accept the
+            # simple core config produced by the fixture's git init.
+            count = 0
+            for directory, names, files in os.walk(common_dir, followlinks=False):
+                count += len(names) + len(files)
+                if count > 10000 or any(os.path.islink(os.path.join(directory, name)) for name in names + files):
+                    allowed = False
+                    break
+            worktrees_dir = os.path.join(common_dir, "worktrees")
+            if allowed and os.path.isdir(worktrees_dir):
+                for name in os.listdir(worktrees_dir):
+                    pointer = os.path.join(worktrees_dir, name, "gitdir")
+                    try:
+                        with open(pointer, encoding="utf-8") as entry:
+                            target = os.path.realpath(entry.read(4096).strip())
+                        if not contained(target, root):
+                            allowed = False
+                            break
+                    except (OSError, UnicodeError):
+                        allowed = False
+                        break
+            if os.path.lexists(os.path.join(common_dir, "objects", "info", "alternates")):
+                allowed = False
+            if os.path.lexists(os.path.join(git_dir, "config.worktree")):
+                allowed = False
+            config = os.path.join(common_dir, "config")
+            try:
+                with open(config, encoding="utf-8") as entry:
+                    lines = entry.read(16385).splitlines()
+                if sum(len(line) for line in lines) > 16384:
+                    allowed = False
+                keys = {"repositoryformatversion", "filemode", "bare", "logallrefupdates", "ignorecase", "precomposeunicode"}
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith(("#", ";")) or line.lower() == "[core]":
+                        continue
+                    key, separator, value = line.partition("=")
+                    if not separator or key.strip().lower() not in keys or value.strip().lower() not in ("0", "true", "false"):
+                        allowed = False
+                        break
+            except (OSError, UnicodeError):
+                allowed = False
     rest = args[1:]
     # Only commands and options with explicitly understood effects are allowed.
     # The fixture creates an empty commit and detached linked worktrees.

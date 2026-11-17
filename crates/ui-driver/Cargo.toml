@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+mast-harness.workspace = true
 mast-ui = { workspace = true, features = ["snapshot"] }
 
 [dev-dependencies]

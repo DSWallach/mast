@@ -3,6 +3,7 @@
 import errno
 import os
 import pwd
+import shutil
 import socket
 import sys
 
@@ -50,6 +51,10 @@ def main():
     error = validate_paths(root, paths, account, os.path.realpath("/private/tmp"))
     if error:
         fail(error)
+    git = shutil.which("git")
+    expected_git = os.path.join(root, "shims", "git")
+    if not git or os.path.realpath(git) != expected_git:
+        fail("git does not resolve to the scratch shim")
     if len(sys.argv) < 2 or not os.path.isabs(sys.argv[1]):
         fail("absolute executable path is required")
     # This must be an explicit sandbox denial. A timeout or routing failure
