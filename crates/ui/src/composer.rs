@@ -3902,6 +3902,10 @@ impl Render for ComposerInput {
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
             .aria_placeholder(self.placeholder.clone())
+            .when(window.is_a11y_active(), |el| {
+                el.aria_value(SharedString::from(self.content.clone()))
+            })
+            .debug_selector(|| "composer-input".to_string())
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)

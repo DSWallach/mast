@@ -15,10 +15,14 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 mast-ui = { workspace = true, features = ["snapshot"] }
-
-[dev-dependencies]
+# Test-only crate (never a normal dependency of mast or mast-ui), so the
+# test-support features stay out of the installed graph.
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true, features = ["test-support"] }
+gpui_tokio.workspace = true
 gpui-base.workspace = true
 mast-theme.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true

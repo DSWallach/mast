@@ -876,7 +876,7 @@ impl UsageSchedule {
 /// Show (or update) the status item; hide it with `None`. Main thread only; a
 /// no-op under test and off macOS.
 pub fn apply(view: Option<&MenuView>) {
-    if cfg!(test) {
+    if crate::status_light::native_chrome_suppressed() {
         return;
     }
     platform::apply(view);

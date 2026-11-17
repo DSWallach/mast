@@ -7489,6 +7489,10 @@ impl Shell {
             let select_id = id.clone();
             let menu_id = id.clone();
             return row
+                .debug_selector({ let selector = row_id.clone(); move || selector })
+                .role(gpui::Role::Button)
+                .aria_label(title.clone())
+                .aria_selected(selected)
                 .when(!preview, |el| el.cursor_pointer()
                     .on_hover({
                         let hover_id = row_id.clone();
@@ -7667,6 +7671,9 @@ impl Shell {
                 change_request.is_some(),
                 theme.ui_style.tokens,
             ), search_query.is_some(), &fade_key, rest_text, text, rest_bg, hover_bg)
+            .role(gpui::Role::Button)
+            .aria_label(title.clone())
+            .aria_selected(selected)
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's
@@ -15564,6 +15571,34 @@ impl Shell {
     /// Skip the startup splash for deterministic offscreen fixtures.
     pub fn fixture_snapshot_ready(&mut self) {
         self.splash = SplashPhase::Gone;
+    }
+
+    /// Boot the real in-process engine behind a fixture shell. Call it only
+    /// after the window has opened and drawn once: attaching fires the state
+    /// observer, which cannot run while the window is still being created.
+    pub(crate) fn fixture_boot_params(&self) -> (Entity<AppState>, EngineBootConfig) {
+        (self.state.clone(), self.boot.clone())
+    }
+
+    /// One line of shell state for the driver's header and for diagnosing a
+    /// blank tree.
+    pub fn fixture_status(&self, cx: &App) -> String {
+        let state = self.state.read(cx);
+        format!(
+            "connection={:?} chats={} selected={} splash={}",
+            state.connection,
+            state.chats.len(),
+            state.selected_chat.as_deref().unwrap_or("-"),
+            if matches!(self.splash, SplashPhase::Gone) { "gone" } else { "visible" },
+        )
+    }
+
+    /// The engine is attached, the connection is up and its chats have arrived.
+    pub fn fixture_engine_ready(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state.engine().is_some()
+            && matches!(state.connection, crate::state::ConnectionStatus::Ready)
+            && !state.chats.is_empty()
     }
 
     pub fn fixture_snapshot_model_catalog(&mut self, cx: &mut Context<Self>) {

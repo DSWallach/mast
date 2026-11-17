@@ -3,7 +3,10 @@
 
 pub mod environment;
 pub mod materialize;
+pub mod serve;
+pub mod session;
 pub mod template;
+pub mod tree;
 pub mod world;
 
 /// Reuse the engine's soak gate before assembling the in-process driver.

@@ -1508,12 +1508,12 @@ pub fn conversation_send_key(
             .text_color(text)
             .into_any_element()
     };
+    let control_name = if stop { "composer-stop" } else { "composer-send" };
     div()
-        .id(if stop {
-            "composer-stop"
-        } else {
-            "composer-send"
-        })
+        .id(control_name)
+        .debug_selector(move || control_name.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(if stop { "Stop" } else { "Send" })
         .size(px(28.0))
         .when(key, |el| el.size(px(theme.ui_style.tokens.control_size)))
         .when(guided, |el| {
