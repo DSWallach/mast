@@ -96,3 +96,16 @@ Builds with tracked source changes are marked **uncommitted**. Comparisons
 should use clean commits: multiple uncommitted variants of one base revision
 are not distinguished from each other. Source archives without Git metadata
 report an unknown revision. Older rows can have an unrecorded revision.
+
+The **Tools**, **Instructions & rules**, and context-occupancy sections use
+turn-level selection for agent filters: if a turn contains the selected agent,
+they include the whole turn's diagnostics and context samples. They cannot
+isolate that child's share of the parent context. The provider-token rankings
+and Efficiency candidates use per-observation agent attribution instead.
+
+Packaged and development-app builds pass provenance explicitly through
+`MAST_USAGE_BUILD_REVISION`, using `sh scripts/build-revision.sh`. For a manual
+build, export that value before invoking Cargo. Cargo tracks the environment
+value even in the shared cache. Builds without explicit provenance report
+**unknown**, rather than risking another worktree's commit label. This metadata
+does not cause engine rebuilds on unrelated UI edits.

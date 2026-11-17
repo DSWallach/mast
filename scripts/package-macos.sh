@@ -28,6 +28,7 @@ UPDATE_APP_DIRNAME="Zeron.app"
 DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
+export MAST_USAGE_BUILD_REVISION="$(sh "$ROOT/scripts/build-revision.sh")"
 BINARY="$(cargo build --release -p mast --message-format=json-render-diagnostics | python3 -c '
 import json, sys
 binary = None

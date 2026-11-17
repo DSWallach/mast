@@ -729,3 +729,68 @@ fn comparison_groups_retain_build_identity_even_with_the_same_package_version() 
     );
     assert_eq!(all.total, 22);
 }
+
+#[test]
+#[ignore = "synthetic ledger timing; run explicitly when evaluating monitoring overhead"]
+fn large_ledger_snapshot_and_capture_overhead() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenUsage::open(dir.path()).unwrap();
+    store.begin("seed", "seed", &request(), "Conversation");
+    store.observe("seed", &measurement("seed", "model", "turn", 10, 1));
+    store.observe("seed", &done());
+    store.flush().unwrap();
+    {
+        let mut inner = store.0.lock().unwrap();
+        let tx = inner.db.transaction().unwrap();
+        tx.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+            INSERT INTO turns SELECT 'perf:'||x,'benchmark','Conversation','config',x,'completed','{}' FROM n;
+            INSERT INTO measurements SELECT id,'measurement','model','main','turn',10,1,5,0,0 FROM turns WHERE chat='benchmark';
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10)
+            INSERT INTO diagnostics SELECT t.id,'call:'||x,'toolCall','read',NULL,'native',100,'toolArguments','bytesOnly',0,'same-input',NULL FROM turns t CROSS JOIN n WHERE t.chat='benchmark';
+            INSERT INTO usage_agents SELECT turn_id,source,'measurement','worker','main' FROM measurements WHERE turn_id LIKE 'perf:%';
+            INSERT INTO usage_agents SELECT turn_id,source,category||':'||stage,'worker','main' FROM diagnostics WHERE turn_id LIKE 'perf:%';").unwrap();
+        tx.commit().unwrap();
+    }
+    for agent in [None, Some("worker".to_owned())] {
+        let start = std::time::Instant::now();
+        let snapshot = store
+            .snapshot(&TokenUsageQuery {
+                agent_type: agent.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot.total,
+            if agent.is_some() { 110000 } else { 110011 }
+        );
+        assert!(snapshot.insights.iter().any(|row| row.repeated == 99999));
+        println!(
+            "10,000 turns / 100,000 diagnostics, agent={agent:?}: snapshot {:?}",
+            start.elapsed()
+        );
+    }
+    store.begin("capture", "capture", &request(), "Conversation");
+    let start = std::time::Instant::now();
+    for index in 0..1000 {
+        store.observe(
+            "capture",
+            &AgentEvent::ToolCall {
+                id: format!("write:{index}"),
+                call: ToolCall::ReadFile {
+                    path: "/fixture/file".into(),
+                },
+            },
+        );
+        if index % 100 == 99 {
+            store.flush().unwrap();
+        }
+    }
+    store.flush().unwrap();
+    assert_eq!(store.2.as_ref().unwrap().dropped(), 0);
+    assert_eq!(store.0.lock().unwrap().db.query_row("SELECT COUNT(*) FROM diagnostics WHERE turn_id='capture:0' AND category='toolCall'", [], |r| r.get::<_, u64>(0)).unwrap(), 1000);
+    println!(
+        "1,000 captured tool events including attribution upserts and ten batch flushes: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(store.0.lock().unwrap().capture_failures, 0);
+}

@@ -158,3 +158,22 @@ The ledger retains an additive attribution table; existing measurement and
 turn table shapes remain readable by older engines. Older engines cannot
 serve the new agent filters; the UI checks response support before presenting
 filtered totals.
+
+### Efficiency capture overhead check
+
+Explicit ignored test `large_ledger_snapshot_and_capture_overhead` creates
+10,000 turns and 100,000 attributed tool diagnostics in an isolated WAL ledger.
+On this Mac in an unoptimized debug build during concurrent validation, the
+all-agent snapshot took 2.086 s and the worker-filtered snapshot took 1.436 s.
+Capturing 1,000 read events, including attribution writes and ten batch barriers,
+took 161.967 ms with no dropped events or capture failures. These are local
+measurements, not latency guarantees. The snapshot uses a separate read-only WAL
+connection after its writer barrier, so the history scan does not hold the
+collector mutex. Large all-history scans remain a cost to track as ledgers grow.
+Run it with `cargo test -p mast-engine --lib
+large_ledger_snapshot_and_capture_overhead -- --ignored --nocapture`.
+
+Build provenance is supplied explicitly by packaging/dev-app commands through
+`MAST_USAGE_BUILD_REVISION`. Ad hoc builds without it report unknown. This avoids
+both stale worktree revision attribution in the shared target and recursive
+source-directory watches that rebuild the engine after unrelated UI edits.

@@ -45,6 +45,7 @@ impl TokenUsage {
         let mut result=TokenUsageSnapshot{updated_at:crate::now_ms(),coverage:vec![
             "Recorded on this device since rollout. Earlier history is not included.".into(),
             "Provider counts and observed payload bytes are separate. Bytes are not billed tokens.".into(),
+            "Tools, instruction diagnostics and context occupancy use whole-turn selection when filtering by agent type; Efficiency candidates and provider totals use observation-level attribution.".into(),
             "Agent CLIs started inside shell tools are not independently metered. Their model token usage may be absent from this ledger.".into(),
             "Tool schemas, hidden prompts, repeated request inclusion, exact rule token costs and causal savings are unavailable unless the harness exposes them.".into(),
             "Claude role totals combine main and subagent usage; a precise Claude subagent split is unavailable. First results after Claude resume establish a baseline and use only observed current-process requests, so those turns may be incomplete. Claude per-model cumulative results are differenced within a harness process and include children. Request observations may be partial until a result arrives. Other harnesses may report input/output only.".into(),
