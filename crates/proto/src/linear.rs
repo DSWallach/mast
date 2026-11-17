@@ -294,6 +294,15 @@ pub struct LinearConnectionStatus {
 // RPC params and replies (method names: `mast_rpc::methods::LINEAR_*`)
 // --------------------------------------------------------------------------
 
+/// Public account metadata; credentials are never returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearAccount {
+    pub id: String,
+    pub label: String,
+    pub key_set: bool,
+}
+
 /// `LinearStatus {}` → [`LinearConnectionStatus`]. Verifies the key with a
 /// `viewer` query at most once per engine run (cached).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

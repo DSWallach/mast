@@ -10,6 +10,7 @@
 //!   follow Linear until the user edits them), run every 15 minutes, on
 //!   `LinearRefreshLinkedItems`, and when a Space turns Linear on.
 
+pub mod accounts;
 pub mod assigned;
 pub mod client;
 pub mod credentials;
@@ -25,7 +26,7 @@ use futures::future::{BoxFuture, Shared};
 
 use crate::swr::SwrStore;
 use mast_proto::linear::{
-    LinearConnectionStatus, LinearError, LinearErrorCode, LinearIssueSummary, LinearKeySource,
+    LinearAccount, LinearConnectionStatus, LinearError, LinearErrorCode, LinearIssueSummary, LinearKeySource,
     LinearProjectDetail, LinearProjectSummary, MAX_LIST_ISSUES, MAX_PROJECT_UPDATES,
 };
 use serde_json::{Value, json};
@@ -130,6 +131,8 @@ struct Inner {
     key_change: tokio::sync::Mutex<()>,
     /// Independent caches and credentials for each named account.
     accounts: Mutex<HashMap<String, LinearService>>,
+    catalog: Mutex<accounts::AccountCatalog>,
+    catalog_change: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; one per engine.
@@ -189,6 +192,8 @@ impl LinearService {
                 project_details: SwrStore::new(LIST_CACHE_TTL),
                 key_change: tokio::sync::Mutex::new(()),
                 accounts: Mutex::new(HashMap::new()),
+                catalog: Mutex::new(accounts::AccountCatalog::default()),
+                catalog_change: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -246,6 +251,97 @@ impl LinearService {
         self.inner.issue_lists.clear();
         self.inner.project_lists.clear();
         self.inner.project_details.clear();
+    }
+
+    /// Load device-local account labels. Credentials remain in the key store.
+    pub fn set_account_catalog_path(&self, path: &std::path::Path) -> Result<(), String> {
+        match accounts::AccountCatalog::open(path) {
+            Ok(catalog) => { *lock(&self.inner.catalog) = catalog; Ok(()) }
+            Err(error) => { *lock(&self.inner.catalog) = accounts::AccountCatalog::unavailable(); Err(error) }
+        }
+    }
+
+    /// Account labels and credential presence, never the credentials themselves.
+    pub async fn list_accounts(&self) -> Vec<LinearAccount> {
+        let labels = lock(&self.inner.catalog).list().to_vec();
+        let default_label = labels.iter().find(|a| a.id == credentials::DEFAULT_ACCOUNT_ID)
+            .map_or("Default", |a| a.label.as_str());
+        let mut result = vec![LinearAccount {
+            id: credentials::DEFAULT_ACCOUNT_ID.into(),
+            label: default_label.to_owned(),
+            key_set: self.has_key().await,
+        }];
+        for account in labels.into_iter().filter(|a| a.id != credentials::DEFAULT_ACCOUNT_ID) {
+            let key_set = self.for_account(Some(&account.id)).has_key().await;
+            result.push(LinearAccount { id: account.id, label: account.label, key_set });
+        }
+        result
+    }
+
+    /// Add an account only after the key has been accepted and stored.
+    pub async fn add_account(&self, label: &str, key: &str) -> Result<LinearAccount, LinearError> {
+        let label = validate_account_label(label)?;
+        let _guard = self.inner.catalog_change.lock().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let account = self.for_account(Some(&id));
+        account.set_api_key(key).await?;
+        let saved = {
+            let mut catalog = lock(&self.inner.catalog);
+            let mut labels = catalog.list().to_vec();
+            labels.push(accounts::LinearAccountLabel { id: id.clone(), label: label.clone() });
+            catalog.replace(labels)
+        };
+        if saved.is_err() {
+            let _ = account.clear_api_key().await;
+            return Err(LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"));
+        }
+        Ok(LinearAccount { id, label, key_set: true })
+    }
+
+    pub async fn rename_account(&self, id: &str, label: &str) -> Result<(), LinearError> {
+        let label = validate_account_label(label)?;
+        let _guard = self.inner.catalog_change.lock().await;
+        let mut catalog = lock(&self.inner.catalog);
+        let mut labels = catalog.list().to_vec();
+        if let Some(account) = labels.iter_mut().find(|account| account.id == id) {
+            account.label = label;
+        } else if id == credentials::DEFAULT_ACCOUNT_ID {
+            labels.push(accounts::LinearAccountLabel { id: id.into(), label });
+        } else {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        catalog.replace(labels).map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"))
+    }
+
+    /// Replace a known account's key and discard that account's caches.
+    pub async fn replace_account_key(&self, id: &str, key: &str) -> Result<(), LinearError> {
+        let _guard = self.inner.catalog_change.lock().await;
+        if id != credentials::DEFAULT_ACCOUNT_ID && !lock(&self.inner.catalog).list().iter().any(|a| a.id == id) {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        self.for_account(Some(id)).set_api_key(key).await?;
+        Ok(())
+    }
+
+    /// Remove an account only when no Space selects it, including disabled Spaces.
+    pub async fn remove_account(&self, id: &str, workspace: &crate::workspace_host::WorkspaceHost) -> Result<(), LinearError> {
+        let _guard = self.inner.catalog_change.lock().await;
+        if id != credentials::DEFAULT_ACCOUNT_ID && !lock(&self.inner.catalog).list().iter().any(|a| a.id == id) {
+            return Err(LinearError::new(LinearErrorCode::NotFound, "Linear account not found"));
+        }
+        let spaces = workspace.read_spaces().map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not read Spaces"))?;
+        let using: Vec<String> = spaces.iter().filter(|space| {
+            workspace.space_linear_account_id(&space.id).as_deref().unwrap_or(credentials::DEFAULT_ACCOUNT_ID) == id
+        }).map(|space| space.display_name().to_owned()).collect();
+        if !using.is_empty() {
+            return Err(LinearError::new(LinearErrorCode::Invalid, format!("Used by Spaces: {}", using.join(", "))));
+        }
+        self.for_account(Some(id)).clear_api_key().await?;
+        let mut catalog = lock(&self.inner.catalog);
+        let labels = catalog.list().iter().filter(|a| a.id != id).cloned().collect();
+        catalog.replace(labels).map_err(|_| LinearError::new(LinearErrorCode::Invalid, "Could not save Linear accounts"))?;
+        lock(&self.inner.accounts).remove(id);
+        Ok(())
     }
 
     /// Keep the list caches under `dir` so a cold start can show the last
@@ -754,6 +850,14 @@ impl LinearService {
     }
 }
 
+fn validate_account_label(label: &str) -> Result<String, LinearError> {
+    let label = label.trim();
+    if label.is_empty() || label.chars().count() > 100 {
+        return Err(LinearError::new(LinearErrorCode::Invalid, "Enter a Linear account label"));
+    }
+    Ok(label.to_owned())
+}
+
 fn not_cached() -> LinearError {
     LinearError::new(LinearErrorCode::NotFound, "nothing cached yet")
 }
@@ -775,6 +879,22 @@ impl Default for LinearService {
 #[cfg(test)]
 mod account_service_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn account_list_contains_metadata_and_never_keys() {
+        let store = MemoryKeyStore::with_key("private-default");
+        store.write_account("personal", "private-personal").unwrap();
+        let service = LinearService::new(LinearConfig::for_tests("http://localhost", store));
+        lock(&service.inner.catalog).replace(vec![accounts::LinearAccountLabel {
+            id: "personal".into(), label: "Personal".into(),
+        }]).unwrap();
+        let accounts = service.list_accounts().await;
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().all(|account| account.key_set));
+        let wire = serde_json::to_string(&accounts).unwrap();
+        assert!(!wire.contains("private-default"));
+        assert!(!wire.contains("private-personal"));
+    }
 
     #[tokio::test]
     async fn accounts_have_independent_credentials_and_default_only_env_fallback() {

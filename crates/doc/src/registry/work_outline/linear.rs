@@ -166,6 +166,12 @@ impl RegistryDoc {
         .linear_enabled
     }
 
+    /// The account selected by a Space, even while Linear is disabled.
+    pub fn space_linear_account_id(&self, space_id: &str) -> Option<String> {
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id);
+        decode_space_settings(row.as_ref()).linear_account_id
+    }
+
     /// The selected account for an enabled Space; `None` means disabled.
     pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
         let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id);
