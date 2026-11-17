@@ -1002,6 +1002,28 @@ async fn external_edits_become_revisions_without_a_note() {
     assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
 }
 
+/// Perf pass 2026-11-17: the 2 s watcher decoded every artifact row on every poll. With
+/// nothing changed it must decode them once, not once per poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_watcher_polls_do_not_re_decode_every_artifact() {
+    let rig = rig().await;
+    std::fs::write(rig.worktree.join("plan.md"), "v1\n").unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": "plan.md", "title": "Plan", "note": "n", "idempotencyKey": "k" }),
+    )
+    .await;
+    for _ in 0..50 {
+        assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+    }
+    assert!(
+        rig.core.artifacts.watch_index_builds() <= 2,
+        "50 idle polls rebuilt the artifact index {} times",
+        rig.core.artifacts.watch_index_builds()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn promote_copies_into_docs_plans_without_overwriting() {
     let rig = rig().await;

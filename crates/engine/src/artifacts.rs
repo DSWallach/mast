@@ -683,6 +683,13 @@ struct Inner {
     /// Serializes every artifact write and the watcher; holds the watcher
     /// cache keyed by stored path.
     gate: Mutex<HashMap<String, SeenFile>>,
+    /// The watcher's file list (`(artifact id, stored path)` of this device's live
+    /// artifacts) with the artifact-rows generation it was built at. The watcher polls
+    /// every [`WATCH_INTERVAL`]; decoding every row (revision lists included) each time
+    /// just to `stat` their files was the idle engine's top steady allocator.
+    watch_index: Mutex<Option<(u64, Vec<(String, String)>)>>,
+    /// How many times `watch_index` was rebuilt (budget test).
+    watch_index_builds: std::sync::atomic::AtomicU64,
     render: Arc<RenderBroker>,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
@@ -741,6 +748,8 @@ impl ArtifactsService {
                 snapshots,
                 questions: Mutex::new(HashMap::new()),
                 gate: Mutex::new(HashMap::new()),
+                watch_index: Mutex::new(None),
+                watch_index_builds: std::sync::atomic::AtomicU64::new(0),
                 render: Arc::new(RenderBroker::default()),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
@@ -1267,17 +1276,21 @@ impl ArtifactsService {
     pub fn scan_external_edits(&self) -> usize {
         let mut seen = lock(&self.inner.gate);
         let mut recorded = 0;
-        for mut view in self.workspace().all_artifacts() {
-            if view.device_id != self.device_id() || view.archived_at.is_some() {
-                continue;
-            }
-            let Ok(meta) = std::fs::metadata(&view.stored_path) else {
+        for (id, stored_path) in self.watch_files() {
+            let Ok(meta) = std::fs::metadata(&stored_path) else {
                 continue;
             };
             let stamp = (meta.modified().ok(), meta.len());
-            if let Some((mtime, size, _)) = seen.get(&view.stored_path)
+            if let Some((mtime, size, _)) = seen.get(&stored_path)
                 && (*mtime, *size) == stamp
             {
+                continue;
+            }
+            // Only a file that moved pays for decoding its row.
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            if view.device_id != self.device_id() || view.archived_at.is_some() {
                 continue;
             }
             let Ok(bytes) = read_file(Path::new(&view.stored_path)) else {
@@ -1323,6 +1336,39 @@ impl ArtifactsService {
             }
         }
         recorded
+    }
+
+    /// This device's live artifacts as `(id, stored path)`, rebuilt only when the
+    /// artifact rows changed.
+    fn watch_files(&self) -> Vec<(String, String)> {
+        // Generation first: a change landing during the rebuild leaves the stored
+        // generation stale, so the next poll rebuilds again.
+        let generation = self.workspace().artifacts_generation();
+        let mut index = lock(&self.inner.watch_index);
+        if let Some((built_at, files)) = index.as_ref()
+            && *built_at == generation
+        {
+            return files.clone();
+        }
+        let files: Vec<(String, String)> = self
+            .workspace()
+            .all_artifacts()
+            .into_iter()
+            .filter(|view| view.device_id == self.device_id() && view.archived_at.is_none())
+            .map(|view| (view.id, view.stored_path))
+            .collect();
+        self.inner
+            .watch_index_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *index = Some((generation, files.clone()));
+        files
+    }
+
+    /// Times the watcher decoded all artifact rows (budget test).
+    pub fn watch_index_builds(&self) -> u64 {
+        self.inner
+            .watch_index_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Poll stored files every [`WATCH_INTERVAL`] for the process lifetime.
