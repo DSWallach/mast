@@ -7698,6 +7698,11 @@ fn user_bubble_text(
         }
         runs.push(chip_run(span.range.len()));
         at = span.range.end;
+        if let Some(badge) = &span.badge_range {
+            if at < badge.start { runs.push(body_run(badge.start - at)); }
+            runs.push(body_run(badge.len()));
+            at = badge.end;
+        }
     }
     if at < text.len() {
         runs.push(body_run(text.len() - at));
@@ -7722,6 +7727,11 @@ fn user_bubble_text(
                         if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { border } else { gpui::transparent_black() },
                         if matches!(span.resolution, Some(crate::code_ref::Resolution::Changed)) { BorderStyle::Dashed } else { BorderStyle::default() },
                     ));
+                }
+                if let Some(badge) = &span.badge_range {
+                    for rect in render::range_rects(&layout, badge, 0.0, 2.0) {
+                        window.paint_quad(quad(rect, px(5.0), wash, px(1.0), border, BorderStyle::default()));
+                    }
                 }
             }
             render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);

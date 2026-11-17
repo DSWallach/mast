@@ -228,7 +228,7 @@ impl Changes {
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.text_dim)
-                    .child(SharedString::from(comment.body.clone())),
+                    .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
             .into_any_element()
     }
@@ -423,7 +423,7 @@ impl Changes {
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.text_dim)
-                    .child(SharedString::from(comment.body.clone())),
+                    .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
             .into_any_element()
     }
@@ -1203,7 +1203,7 @@ impl Changes {
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(theme.text_dim)
-                            .child(SharedString::from(comment.body.clone())),
+                            .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
                     ),
             );
         }

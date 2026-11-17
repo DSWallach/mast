@@ -939,7 +939,7 @@ impl Render for Walkthrough {
                     .children(self.review.highlights.iter().map(|highlight| {
                         div()
                             .text_color(theme.text_muted)
-                            .child(highlight.text.clone())
+                            .child(crate::components::code_block::inline_code(&highlight.text, &theme, theme.text_muted))
                     }))
                 })
                 .when(!self.review.questions.is_empty(), |el| {
@@ -954,7 +954,7 @@ impl Render for Walkthrough {
                             .questions
                             .iter()
                             .filter_map(review_question_text)
-                            .map(|question| div().text_color(theme.text_muted).child(question)),
+                            .map(|question| div().text_color(theme.text_muted).child(crate::components::code_block::inline_code(&question, &theme, theme.text_muted))),
                     )
                 })
                 .when_some(self.step_input.clone(), |el, input| {

@@ -5,8 +5,15 @@ pub(super) fn pinned_view(
     source: &str,
     highlight: Option<&mast_syntax::HighlightedDocument>,
     theme: &crate::theme::Theme,
+    cx: &gpui::Context<super::FilesSurface>,
 ) -> AnyElement {
     let first_line = reference.reference.range.map_or(1, |range| range.start_line);
+    let staged = reference.clone();
+    let copied = reference.reference.location.workspace_path();
+    let copied = match reference.reference.range {
+        Some(range) => format!("{}:{}-{}", copied, range.start_line, range.end_line),
+        None => copied,
+    };
     div()
         .id("pinned-code-reference")
         .flex_1()
@@ -15,11 +22,17 @@ pub(super) fn pinned_view(
         .p(px(12.0))
         .text_color(theme.text)
         .child(
-            div()
+            div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM))
                 .text_color(theme.text_muted)
-                .child(format!("{} · pinned · read only", reference.label())),
+                .child(reference.label())
+                .child(div().text_color(theme.danger_muted).child("Changed"))
+                .child(div().id("pinned-add-to-chat").cursor_pointer().child("Add to chat")
+                    .on_click(cx.listener(move |this, _, _, cx| this.stage_reference(staged.clone(), cx))))
+                .child(div().id("pinned-copy-reference").cursor_pointer().child("Copy ref")
+                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone())))),
         )
         .child(crate::components::code_block::code_block(source, first_line, highlight, theme))
+        .when(source.len() < reference.snippet.len(), |view| view.child("Excerpt truncated"))
         .into_any_element()
 }
 

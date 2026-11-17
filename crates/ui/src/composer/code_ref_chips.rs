@@ -13,7 +13,7 @@ impl Composer {
             .code_refs(&self.current_key)
             .iter()
             .filter(|reference| reference.reference.kind != mast_proto::CodeRefKind::File)
-            .map(|reference| (reference.id.clone(), reference.label()))
+            .cloned()
             .collect();
         if references.is_empty() {
             return None;
@@ -28,10 +28,12 @@ impl Composer {
             .overflow_hidden()
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
-        for (index, (id, label)) in references.into_iter().enumerate() {
-            let label: SharedString = label.into();
+        for (index, reference) in references.into_iter().enumerate() {
+            let id = reference.id.clone();
+            let label: SharedString = reference.label().into();
             row = row.child(
                 crate::components::conversation_skill_chip(theme, index)
+                    .tooltip(move |_, cx| cx.new(|cx| crate::components::code_ref::ReferenceCard::new(reference.clone(), cx)).into())
                     .child(label)
                     .child(
                         crate::components::conversation_skill_remove(theme, index)

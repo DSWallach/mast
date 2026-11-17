@@ -2510,7 +2510,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(reference) = self.pinned_reference.as_ref() {
-            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), theme);
+            return super::code_ref_bar::pinned_view(reference, &self.pinned_source, self.pinned_highlight.as_deref(), theme, cx);
         }
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
@@ -2859,7 +2859,7 @@ impl FilesSurface {
                     .text_size(px(12.0))
                     .line_height(px(comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
-                    .child(SharedString::from(comment.body)),
+                    .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
             .into_any_element()

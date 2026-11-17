@@ -132,17 +132,26 @@ fn project_resolutions(
                     }
                     _ => format!("{name}:{}-{}", range.start_line, range.end_line),
                 };
-                display.push_str(&format!("{label} moved"));
+                display.push_str(&label);
                 span.path = format!("{}:{}", workspace_path, range.start_line).into();
             }
             Some(crate::code_ref::Resolution::Changed) => {
                 display.push_str(&text[span.range.clone()]);
-                display.push_str(" changed");
             }
             _ => display.push_str(&text[span.range.clone()]),
         }
         offset = span.range.end;
         span.range = start..display.len();
+        span.badge_range = match span.resolution {
+            Some(crate::code_ref::Resolution::Moved(_)) => Some("moved"),
+            Some(crate::code_ref::Resolution::Changed) => Some("changed"),
+            _ => None,
+        }.map(|label| {
+            display.push(' ');
+            let start = display.len();
+            display.push_str(label);
+            start..display.len()
+        });
         projected.push(span);
     }
     display.push_str(&text[offset..]);
@@ -297,6 +306,7 @@ mod tests {
         let text = "Inspect file.rs:2-3";
         let span = crate::composer::SentMentionSpan {
             range: 8..19,
+            badge_range: None,
             path: "src/file.rs:2".into(),
             is_dir: false,
             code_ref: Some(Arc::new(reference.clone())),
@@ -315,6 +325,8 @@ mod tests {
         );
         let (display, spans) = project_resolutions(text, std::slice::from_ref(&span), &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:4-5 moved");
+        assert_eq!(&display[spans[0].range.clone()], "file.rs:4-5");
+        assert_eq!(&display[spans[0].badge_range.clone().unwrap()], "moved");
         assert_eq!(spans[0].path.as_ref(), "src/file.rs:4");
         resolutions.insert(
             crate::code_ref::resolution_key(&reference),
@@ -322,6 +334,8 @@ mod tests {
         );
         let (display, spans) = project_resolutions(text, &[span], &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:2-3 changed");
+        assert_eq!(&display[spans[0].range.clone()], "file.rs:2-3");
+        assert_eq!(&display[spans[0].badge_range.clone().unwrap()], "changed");
         assert_eq!(
             spans[0].resolution,
             Some(crate::code_ref::Resolution::Changed)

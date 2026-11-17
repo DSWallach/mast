@@ -38,6 +38,40 @@ pub(crate) fn code_block(
     div().font_family(theme.font_mono.clone()).text_size(crate::typography::ui_rems(12.0)).children(lines)
 }
 
+/// Render inline backtick spans without changing the surrounding prose.
+pub(crate) fn inline_code(source: &str, theme: &Theme, color: gpui::Hsla) -> StyledText {
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    let mut remaining = source;
+    while let Some(open) = remaining.find('`') {
+        let rest = &remaining[open..];
+        let count = rest.bytes().take_while(|byte| *byte == b'`').count();
+        let delimiter = &rest[..count];
+        let Some(close) = rest[count..].find(delimiter) else { break };
+        let plain = &remaining[..open];
+        text.push_str(plain);
+        if !plain.is_empty() { runs.push(inline_run(plain.len(), false, theme, color)); }
+        let code = &rest[count..count + close];
+        text.push_str(code);
+        if !code.is_empty() { runs.push(inline_run(code.len(), true, theme, color)); }
+        remaining = &rest[count + close + count..];
+    }
+    text.push_str(remaining);
+    if !remaining.is_empty() { runs.push(inline_run(remaining.len(), false, theme, color)); }
+    StyledText::new(text).with_runs(runs)
+}
+
+fn inline_run(len: usize, code: bool, theme: &Theme, color: gpui::Hsla) -> gpui::TextRun {
+    gpui::TextRun {
+        len,
+        font: gpui::font(if code { theme.font_mono.clone() } else { theme.font_sans.clone() }),
+        color: if code { theme.code_text } else { color },
+        background_color: code.then_some(theme.code_wash),
+        underline: None,
+        strikethrough: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
