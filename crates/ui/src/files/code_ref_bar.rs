@@ -2,6 +2,7 @@ use gpui::{AnyElement, div, prelude::*, px};
 
 pub(super) fn pinned_view(
     reference: &crate::code_ref::StagedCodeRef,
+    moved_to: Option<mast_proto::CodeRefRange>,
     source: &str,
     highlight: Option<&mast_syntax::HighlightedDocument>,
     diff: Option<&super::PinnedDiff>,
@@ -27,12 +28,19 @@ pub(super) fn pinned_view(
                 .text_color(theme.text_muted)
                 .child(reference.reference.location.workspace_path())
                 .child(reference.reference.range.map(|range| format!("L{}–{}", range.start_line, range.end_line)).unwrap_or_default())
-                .child(crate::components::code_ref::changed_reference_badge(theme))
+                .child(match moved_to {
+                    Some(range) => crate::components::code_ref::moved_reference_badge(theme, range),
+                    None => crate::components::code_ref::changed_reference_badge(theme),
+                })
                 .child(div().flex_1())
                 .children(mast_syntax::language_for_path(&reference.reference.location.path)
                     .map(|language| div().text_color(theme.text_faint).child(format!("{language:?}")))),
         )
-        .child(crate::components::code_ref::changed_reference_banner(theme))
+        .child(if moved_to.is_some() {
+            crate::components::code_ref::pinned_reference_notice(theme)
+        } else {
+            crate::components::code_ref::changed_reference_banner(theme)
+        })
         .child(match diff {
             None => crate::components::code_block::code_block(source, first_line, highlight, theme, px(editor_text_size).into()).into_any_element(),
             Some(super::PinnedDiff::Loading) => div().child("Loading current file…").into_any_element(),
@@ -50,15 +58,23 @@ pub(super) fn pinned_view(
         })
         .when(source.len() < reference.snippet.len(), |view| view.child("Excerpt truncated"))
         .child(div().flex().items_center().gap(px(crate::theme::Theme::SPACE_SM)).pt(px(crate::theme::Theme::SPACE_MD))
-            .child(if diff.is_some() {
+            .child(if let Some(range) = moved_to {
+                crate::components::button("pinned-open-moved", format!("Open at L{}–{}", range.start_line, range.end_line), crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+                    .debug_selector(|| "pinned-open-moved".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.clear_pinned_reference(cx);
+                        this.reveal_editor_location(range.start_line, None, cx);
+                    }))
+            } else if diff.is_some() {
                 crate::components::button("pinned-show-snapshot", "Show snapshot", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
                     .on_click(cx.listener(|this, _, _, cx| { this.pinned_diff = None; cx.notify(); }))
             } else {
                 crate::components::button("pinned-show-diff", "Show diff vs current", crate::components::ButtonVariant::Primary, crate::components::ButtonSize::Sm, theme)
+                    .debug_selector(|| "pinned-show-diff".into())
                     .on_click(cx.listener(|this, _, _, cx| this.show_reference_diff(cx)))
             })
-            .child(crate::components::button("pinned-open-current", "Open current file", crate::components::ButtonVariant::Ghost, crate::components::ButtonSize::Sm, theme)
-                .on_click(cx.listener(|this, _, _, cx| this.clear_pinned_reference(cx))))
+            .when(moved_to.is_none(), |actions| actions.child(crate::components::button("pinned-open-current", "Open current file", crate::components::ButtonVariant::Ghost, crate::components::ButtonSize::Sm, theme)
+                .on_click(cx.listener(|this, _, _, cx| this.clear_pinned_reference(cx)))))
             .child(crate::components::button("pinned-add-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                 .on_click(cx.listener(|this, _, _, cx| this.add_pinned_reference_to_chat(cx))))
             .child(crate::components::button("pinned-copy-reference", "Copy ref", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
@@ -313,6 +329,44 @@ fn reference_diff(reference: &crate::code_ref::StagedCodeRef, contents: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn moved_snapshot_opens_the_reanchored_location(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
+        let state = cx.new(|_| crate::state::AppState::new());
+        let (surface, vcx) = cx.add_window_view(move |_, cx| super::super::FilesSurface::new_editor(
+            state, "chat".into(), "file.rs".into(), false, 1000, 13.0, false, false, cx,
+        ));
+        let original = mast_proto::CodeRefRange { start_line: 2, end_line: 3 };
+        let moved = mast_proto::CodeRefRange { start_line: 9, end_line: 10 };
+        let reference = crate::code_ref::StagedCodeRef {
+            id: "reference".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(original), symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "one\ntwo".into(),
+        };
+        surface.update(vcx, |surface, cx| surface.show_pinned_reference(reference.clone(), None, cx));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("pinned-changed-banner").is_some());
+        assert!(vcx.debug_bounds("pinned-show-diff").is_some());
+        surface.update(vcx, |surface, cx| surface.show_pinned_reference(reference, Some(moved), cx));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("pinned-moved-badge").is_some());
+        assert!(vcx.debug_bounds("pinned-changed-banner").is_none());
+        assert!(vcx.debug_bounds("pinned-show-diff").is_none());
+        surface.read_with(vcx, |surface, _| assert_eq!(surface.pinned_reference.as_ref().unwrap().reference.range, Some(original)));
+        let button = vcx.debug_bounds("pinned-open-moved").unwrap().center();
+        vcx.simulate_click(button, gpui::Modifiers::default());
+        surface.read_with(vcx, |surface, _| {
+            assert!(surface.pinned_reference.is_none());
+            assert_eq!(surface.pending_location_for_test(), Some((moved.start_line, None)));
+        });
+    }
 
     #[gpui::test]
     fn restaging_pinned_reference_preserves_origin_and_assigns_unique_ids(cx: &mut gpui::TestAppContext) {

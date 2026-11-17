@@ -3,16 +3,28 @@ use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
 pub(crate) fn changed_reference_badge(theme: &Theme) -> gpui::Div {
-    div().px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
+    div().debug_selector(|| "pinned-changed-badge".into()).px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
         .rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12))
         .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(11.0)).child("Changed")
 }
 
 pub(crate) fn changed_reference_banner(theme: &Theme) -> gpui::Div {
-    div().my(px(Theme::SPACE_SM)).p(px(Theme::SPACE_SM))
+    div().debug_selector(|| "pinned-changed-banner".into()).my(px(Theme::SPACE_SM)).p(px(Theme::SPACE_SM))
         .rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.10))
         .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(12.0))
         .child("These lines no longer match the file. You are looking at the version that was sent.")
+}
+
+pub(crate) fn moved_reference_badge(theme: &Theme, range: mast_proto::CodeRefRange) -> gpui::Div {
+    div().debug_selector(|| "pinned-moved-badge".into()).px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
+        .rounded(px(Theme::SPACE_XS)).bg(theme.accent.opacity(0.12))
+        .text_color(theme.accent).text_size(crate::typography::ui_rems(11.0))
+        .child(format!("Moved to L{}–{}", range.start_line, range.end_line))
+}
+
+pub(crate) fn pinned_reference_notice(theme: &Theme) -> gpui::Div {
+    div().my(px(Theme::SPACE_SM)).text_color(theme.text_muted)
+        .text_size(crate::typography::ui_rems(12.0)).child("Pinned when this was sent. Read only.")
 }
 
 #[derive(Default)]

@@ -173,7 +173,30 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
 }
 
 pub fn pinned_link(reference: &StagedCodeRef) -> String {
-    let bytes = serde_json::to_vec(reference).expect("reference serializes");
+    encode_pinned_link(reference, None)
+}
+
+#[derive(serde::Deserialize)]
+struct PinnedLink {
+    #[serde(flatten)]
+    reference: StagedCodeRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_to: Option<CodeRefRange>,
+}
+
+pub fn moved_pinned_link(reference: &StagedCodeRef, moved_to: CodeRefRange) -> String {
+    encode_pinned_link(reference, Some(moved_to))
+}
+
+fn encode_pinned_link(reference: &StagedCodeRef, moved_to: Option<CodeRefRange>) -> String {
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        #[serde(flatten)]
+        reference: &'a StagedCodeRef,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        moved_to: Option<CodeRefRange>,
+    }
+    let bytes = serde_json::to_vec(&Payload { reference, moved_to }).expect("reference serializes");
     format!(
         "mast-code-ref:{}",
         bytes
@@ -184,6 +207,10 @@ pub fn pinned_link(reference: &StagedCodeRef) -> String {
 }
 
 pub fn decode_pinned_link(target: &str) -> Option<StagedCodeRef> {
+    decode_pinned_target(target).map(|(reference, _)| reference)
+}
+
+pub fn decode_pinned_target(target: &str) -> Option<(StagedCodeRef, Option<CodeRefRange>)> {
     let encoded = target.strip_prefix("mast-code-ref:")?;
     if encoded.len() % 2 != 0 || encoded.len() > 20_000_000 {
         return None;
@@ -193,7 +220,9 @@ pub fn decode_pinned_link(target: &str) -> Option<StagedCodeRef> {
         .as_chunks::<2>().0.iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect();
-    serde_json::from_slice(&bytes?).ok()
+    let payload: PinnedLink = serde_json::from_slice(&bytes?).ok()?;
+    if payload.moved_to.is_some_and(|range| range.start_line == 0 || range.end_line < range.start_line) { return None; }
+    Some((payload.reference, payload.moved_to))
 }
 
 /// Hash the full file so an unchanged working tree is recognized cheaply.
@@ -370,6 +399,11 @@ mod tests {
         assert_eq!(taken, vec![staged]);
         let pinned = pinned_link(&taken[0]);
         assert_eq!(decode_pinned_link(&pinned), Some(taken[0].clone()));
+        assert_eq!(decode_pinned_target(&pinned), Some((taken[0].clone(), None)));
+        let moved = CodeRefRange { start_line: 9, end_line: 10 };
+        assert_eq!(decode_pinned_target(&moved_pinned_link(&taken[0], moved)), Some((taken[0].clone(), Some(moved))));
+        let invalid = CodeRefRange { start_line: 0, end_line: 1 };
+        assert!(decode_pinned_target(&moved_pinned_link(&taken[0], invalid)).is_none());
         assert!(decode_pinned_link("mast-code-ref:xyz").is_none());
         let prompt = with_code_refs("Review", &taken);
         assert!(

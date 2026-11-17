@@ -324,13 +324,7 @@ pub(super) fn activate(
         let Some(resolution) = resolution else {
             return;
         };
-        let target = match resolution {
-            crate::code_ref::Resolution::Unchanged(range)
-            | crate::code_ref::Resolution::Moved(range) => {
-                format!("{}:{}", reference.reference.location.workspace_path(), range.start_line)
-            }
-            crate::code_ref::Resolution::Changed => crate::code_ref::pinned_link(&reference),
-        };
+        let target = activation_target(&reference, resolution);
         let _ = handle.update(cx, |_, window, cx| {
             render::activate_link(
                 crate::markdown::links::LinkTarget::new("", &target),
@@ -342,6 +336,14 @@ pub(super) fn activate(
         });
     })
     .detach();
+}
+
+fn activation_target(reference: &crate::code_ref::StagedCodeRef, resolution: crate::code_ref::Resolution) -> String {
+    match resolution {
+        crate::code_ref::Resolution::Unchanged(range) => format!("{}:{}", reference.reference.location.workspace_path(), range.start_line),
+        crate::code_ref::Resolution::Moved(range) => crate::code_ref::moved_pinned_link(reference, range),
+        crate::code_ref::Resolution::Changed => crate::code_ref::pinned_link(reference),
+    }
 }
 
 #[cfg(feature = "snapshot")]
@@ -537,6 +539,10 @@ mod tests {
         );
         let (display, spans) = project_resolutions(text, std::slice::from_ref(&span), &resolutions);
         assert_eq!(display.as_ref(), "Inspect file.rs:4-5 moved");
+        let moved = mast_proto::CodeRefRange { start_line: 4, end_line: 5 };
+        let target = activation_target(&reference, crate::code_ref::Resolution::Moved(moved));
+        assert_eq!(crate::code_ref::decode_pinned_target(&target), Some((reference.clone(), Some(moved))));
+        assert_eq!(activation_target(&reference, crate::code_ref::Resolution::Unchanged(moved)), "src/file.rs:4");
         assert_eq!(&display[spans[0].range.clone()], "file.rs:4-5");
         assert_eq!(&display[spans[0].badge_range.clone().unwrap()], "moved");
         assert_eq!(spans[0].path.as_ref(), "src/file.rs:4");

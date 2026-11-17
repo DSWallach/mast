@@ -178,6 +178,7 @@ pub struct FilesSurface {
     /// after the async file load creates its editor.
     pending_editor_location: Option<(u32, Option<u32>)>,
     pinned_reference: Option<crate::code_ref::StagedCodeRef>,
+    pinned_moved_to: Option<mast_proto::CodeRefRange>,
     pinned_source: String,
     pinned_highlight: Option<std::sync::Arc<mast_syntax::HighlightedDocument>>,
     pinned_diff: Option<PinnedDiff>,
@@ -507,6 +508,7 @@ impl FilesSurface {
             editor_path: editor_path.clone(),
             pending_editor_location: None,
             pinned_reference: None,
+            pinned_moved_to: None,
             pinned_source: String::new(),
             pinned_highlight: None,
             pinned_diff: None,
@@ -716,7 +718,7 @@ impl FilesSurface {
         }
     }
 
-    pub(crate) fn show_pinned_reference(&mut self, reference: crate::code_ref::StagedCodeRef, cx: &mut Context<Self>) {
+    pub(crate) fn show_pinned_reference(&mut self, reference: crate::code_ref::StagedCodeRef, moved_to: Option<mast_proto::CodeRefRange>, cx: &mut Context<Self>) {
         let source = crate::components::code_block::bounded_source(&reference.snippet);
         let path = reference.reference.location.path.clone();
         let key = mast_syntax::language_for_path(&path)
@@ -726,6 +728,7 @@ impl FilesSurface {
         self.pinned_diff = None;
         self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
         self.pinned_reference = Some(reference);
+        self.pinned_moved_to = moved_to;
         if self.pinned_highlight.is_none() && let Some(key) = key && let Some(queue_permit) = crate::components::code_ref::try_queue_highlight() {
             cx.spawn(async move |this, cx| {
                 let _queue_permit = queue_permit;
@@ -757,6 +760,7 @@ impl FilesSurface {
     pub(crate) fn clear_pinned_reference(&mut self, cx: &mut Context<Self>) {
         if self.pinned_reference.take().is_some() {
             self.pinned_source.clear();
+            self.pinned_moved_to = None;
             self.pinned_highlight = None;
             self.pinned_diff = None;
             self.pinned_diff_generation = self.pinned_diff_generation.wrapping_add(1);
