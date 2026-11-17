@@ -1274,6 +1274,38 @@ fn streaming_deltas_do_not_rescan_every_row(cx: &mut TestAppContext) {
     assert!(map_builds <= 2, "rail rebuilt its row map on {map_builds} of {DELTAS} deltas");
 }
 
+/// `Transcript::sync` restricts its tool-group passes (previous-tool map and
+/// live group loop) to the diff range: a streamed delta touches a few rows,
+/// not every row of the chat.
+#[gpui::test]
+fn streaming_deltas_do_not_scan_tool_groups_of_every_row(cx: &mut TestAppContext) {
+    const DELTAS: usize = 40;
+    let (shell, state, vcx, _counters, _input) = long_chat_fixture(cx, LONG_CHAT_BUDGET_ENTRIES);
+    let transcript = shell.read_with(vcx, |s, _| s.transcript.clone());
+    let rows = transcript.read_with(vcx, |t, _| t.rows().len());
+    let base = crate::transcript::perf_bench::long_chat(LONG_CHAT_BUDGET_ENTRIES);
+    let stream = prepare_stream(&base, DELTAS + 4);
+    start_streaming(&state, vcx, base);
+    transcript.update(vcx, |t, cx| t.test_scroll_to_bottom(cx));
+    vcx.update(|window, cx| window.draw(cx).clear());
+    let mut stream = stream.into_iter();
+    for _ in 0..4 {
+        let (frame, prepared) = stream.next().unwrap();
+        apply_delta(&state, vcx, frame, prepared);
+    }
+    let before = crate::transcript::SYNC_TOOL_SCAN_ROWS.with(|c| c.get());
+    for (frame, prepared) in stream {
+        apply_delta(&state, vcx, frame, prepared);
+    }
+    let visits = crate::transcript::SYNC_TOOL_SCAN_ROWS.with(|c| c.get()) - before;
+    eprintln!("BUDGET tool-group scan: {visits} row visits over {DELTAS} deltas of {rows} rows");
+    // A full scan visits every row twice per delta.
+    assert!(
+        visits < DELTAS * rows / 4,
+        "sync scanned tool groups of every row per delta: {visits} visits for {rows} rows"
+    );
+}
+
 // The transcript is a cached view: every input that changes its pixels must
 // notify it (or refresh the window). These drive real pointer events.
 

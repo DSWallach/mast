@@ -97,3 +97,18 @@ Audited `transcript.rs` and the markdown handlers:
 Tests (`shell/perf_tests.rs`, real pointer events in the full Shell): `hovering_a_row_repaints_the_cached_transcript`,
 `selection_drag_repaints_the_cached_transcript`, `streamed_text_repaints_the_cached_transcript_without_other_notifies`.
 Not covered headless: scrollbar fade timing and copy-button reveal (they notify on the owning entity; check in the app).
+
+## Pass 2 (`perf/ui-pass-2`)
+
+Same debug-profile benches, two runs each, before = incremental scan disabled.
+
+- **Transcript sync is diff-range only.** The previous-tool map and the live tool-group loop scan only the rows
+  `diff_rows` marks changed, and the reveal map drops only groups that left that range. Full scan kept on attach,
+  baseline change and replay baseline. Budget test `streaming_deltas_do_not_scan_tool_groups_of_every_row`: 81,680 row
+  visits over 40 deltas of 1,020 rows before, 80 after. Stream delta + draw at 3,060 rows: 3.77–4.12 ms → 3.19–3.23 ms.
+  Stream tick at 17,000 rows: 11.4–12.0 ms → 8.7–8.8 ms. Subscription chunk at 17,000 rows: 15.2–16.8 → 12.5–12.6 ms.
+  Still O(rows) per delta: the `new_rows` clone, the veil/markdown `active_markdown` set and its three retains.
+- **Changes: monospace advance cached** (`diff_ch_advance`). The expanded-context path ran `resolve_font` + `ch_advance`
+  per rendered row. Test `font_advance_is_not_looked_up_per_row`: 430 lookups over 10 redraws before, 0 after.
+- **Changes width shaping not moved off-thread.** `native_diff_font_geometry` shows widths depend on the highlight
+  runs on a proportional font, so keeping the previous width until a background shape lands moves the scrollbar. Left as is.
