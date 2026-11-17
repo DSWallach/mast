@@ -158,7 +158,8 @@ pub(crate) fn artifact_card(
                 card.child(
                     div()
                         .w_full()
-                        .h(px(200.0))
+                        .aspect_ratio(736.0 / 420.0)
+                        .bg(theme.surface_raised)
                         .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(8.0)))
                         .border_1()
                         .border_color(theme.border)

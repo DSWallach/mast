@@ -161,7 +161,15 @@ pub(crate) fn thumbnail<V: 'static>(
     };
     cache.insert(key.clone(), Entry::Pending(attempt));
     let renders = cache.renders.clone();
-    let fragment_theme = FragmentTheme::from_theme(theme);
+    let mut fragment_theme = FragmentTheme::from_theme(theme);
+    // The host document paints the viewport background into the snapshot.
+    // Match the card so the preview has no contrasting letterbox.
+    let card_background = fragment_theme.vars.iter().find(|(name, _)| *name == "--secondary").map(|(_, value)| value.clone());
+    if let Some(background) = card_background {
+        if let Some((_, value)) = fragment_theme.vars.iter_mut().find(|(name, _)| *name == "--background") {
+            *value = background;
+        }
+    }
     let target_device_id = (state.read(cx).local_device_id.as_deref()
         != Some(artifact.device.as_str()))
     .then(|| artifact.device.clone());
