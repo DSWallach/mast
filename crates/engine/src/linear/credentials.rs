@@ -383,6 +383,19 @@ mod migration_tests {
     }
 
     #[test]
+    fn default_reads_api_key_entry_in_place() {
+        let items = HashMap::from([((KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT), "stored")]);
+        let mut writes = 0;
+        let value = read_migrated_key(
+            |service| Ok(items.get(&(service, keychain_account(DEFAULT_ACCOUNT_ID))).map(|key| (*key).to_owned())),
+            |_, _| { writes += 1; Ok(()) },
+        ).unwrap();
+        assert_eq!(value.as_deref(), Some("stored"));
+        assert_eq!(writes, 0);
+        assert_eq!(items.get(&(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)), Some(&"stored"));
+    }
+
+    #[test]
     fn reports_copy_failure_without_removing_legacy_item() {
         let result = read_migrated_key(
             |service| Ok((service == LEGACY_KEYCHAIN_SERVICE).then(|| "legacy".to_owned())),

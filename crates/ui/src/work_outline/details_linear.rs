@@ -43,6 +43,8 @@ pub(crate) struct LinearDetailsState {
     pub(crate) status_line: Option<String>,
     pub(crate) refreshing: bool,
     pub(crate) toggling: bool,
+    pub(crate) observed_accounts: Option<Vec<mast_proto::linear::LinearAccount>>,
+    pub(crate) observed_configured: Option<bool>,
     /// The one-time hint after a Linear URL was pasted with Linear off.
     pub(crate) paste_hint: bool,
     toggle_op: OperationSlot,
