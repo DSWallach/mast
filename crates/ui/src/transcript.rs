@@ -575,6 +575,53 @@ fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineR
     }
 }
 
+fn runs_text(runs: &[InlineRun]) -> String {
+    runs.iter().map(|run| run.text.as_str()).collect()
+}
+
+/// Plain text of a block, for the accessibility tree (screen readers and the
+/// headless UI driver read message text from it).
+fn block_plain_text(block: &Block) -> String {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => runs_text(runs),
+        Block::CodeBlock { code, .. } => code.clone(),
+        Block::BlockQuote { children } => children
+            .iter()
+            .map(block_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::List { items, .. } => items
+            .iter()
+            .map(|item| {
+                item.iter()
+                    .map(block_plain_text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Table { header, rows, .. } => std::iter::once(header)
+            .chain(rows.iter())
+            .map(|row| row.iter().map(|cell| runs_text(cell)).collect::<Vec<_>>().join(" | "))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Text a transcript row exposes to the accessibility tree; `None` for rows
+/// with no readable text of their own (tool groups, chips, images).
+fn row_accessible_text(kind: &RowKind) -> Option<SharedString> {
+    let text = match kind {
+        RowKind::User { text, .. } => text.to_string(),
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+            block_plain_text(&tree.blocks.get(*block_ix)?.block)
+        }
+        _ => return None,
+    };
+    (!text.is_empty()).then(|| SharedString::from(text))
+}
+
 /// One markdown block into thought detail lines, `indent` spaces deep.
 fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
     match block {
@@ -6632,8 +6679,12 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let accessible_text = row_accessible_text(&row.kind);
         div()
             .id(row.id.clone())
+            .when_some(accessible_text, |el, text| {
+                el.role(gpui::Role::Paragraph).aria_label(text)
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));

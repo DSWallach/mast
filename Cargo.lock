@@ -5467,6 +5467,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "gpui_tokio",
  "mast-doc",
  "mast-engine",
  "mast-harness",
@@ -5478,6 +5479,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

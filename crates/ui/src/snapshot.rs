@@ -190,10 +190,14 @@ pub struct WorldRows {
     pub transcript: Vec<serde_json::Value>,
 }
 
-/// Offline shell whose state is filled from [`WorldRows`] before the shell
-/// exists, the same way [`chat_fixture`] does. The engine is not booted: its
-/// attach path fires the shell's state observer headlessly and panics.
+/// Shell whose state is filled from [`WorldRows`] before the shell exists, the
+/// same way [`chat_fixture`] does. The engine is not booted here: attaching
+/// fires the shell's state observer, which panics ("Leases must be ended")
+/// while the window is still being created. Call [`world_boot_engine`] once
+/// `open_window` has returned and the first frame has drawn.
 pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<crate::shell::Shell> {
+    // A real engine runs behind this shell; keep it off the host's Dock and menu bar.
+    crate::status_light::NATIVE_CHROME_SUPPRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
     let selected = rows.selected_chat.clone();
     let selected_space = selected
         .as_ref()
@@ -228,7 +232,10 @@ pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<c
         edge_url: String::new(),
         edge_token: None,
         org_id: None,
-        workos_client_id: None,
+        // Without a WorkOS client the engine picks the Development profile and
+        // never sees the stores the world was written to; with one and no
+        // saved session it opens the Local profile, as an installed app does.
+        workos_client_id: Some("mast-ui-driver".into()),
         default_harness: mast_proto::HarnessId::Mock,
     };
     cx.new(|cx| {
@@ -236,6 +243,18 @@ pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<c
         shell.fixture_snapshot_ready();
         shell
     })
+}
+
+/// Boot the real in-process engine behind a [`world_shell`] on its data dir.
+/// Only valid after the window exists and has drawn.
+pub fn world_boot_engine(shell: &Entity<crate::shell::Shell>, cx: &mut App) {
+    let (state, boot) = shell.read(cx).fixture_boot_params();
+    crate::state::AppState::bootstrap(state, boot, cx);
+}
+
+/// Connection, chat count, selection and splash state of a [`world_shell`].
+pub fn world_status(shell: &Entity<crate::shell::Shell>, cx: &App) -> String {
+    shell.read(cx).fixture_status(cx)
 }
 
 /// Construct the chat fixture with its hand-off dialog open.
