@@ -161,7 +161,7 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         for name in ["keep.txt", "mod.txt", "gone.txt", "old name.txt", "both.txt"] {
-            std::fs::write(dir.join(name), format!("{name}\n".repeat(20))).unwrap();
+            std::fs::write(dir.join(name), format!("{}\n", name).repeat(20)).unwrap();
         }
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "one"]);
