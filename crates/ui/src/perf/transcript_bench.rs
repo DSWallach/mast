@@ -137,7 +137,7 @@ fn bench_transcript_long_chat(cx: &mut gpui::TestAppContext) {
     measure_n(
         "transcript",
         "stream tick (revision bump + sync + draw)",
-        30,
+        std::env::var("BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
         |i| {
             transcript.update(vcx, |this, cx| {
                 this.state.update(cx, |state, _| {
