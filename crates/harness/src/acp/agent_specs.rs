@@ -551,33 +551,6 @@ pub(super) fn antigravity_spec() -> AcpAgentSpec {
     }
 }
 
-/// how long a sign-in may wait on the browser: the antigravity server gives
-/// its loopback redirect 300s, plus room for the token exchange.
-const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(330);
-/// sign-out is local credential removal; this bound covers the server's cold
-/// start.
-const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// milestones of [`AcpHarness::sign_in`] a caller can surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignInProgress {
-    /// the server is being downloaded before sign-in can start.
-    /// the agent is waiting on the user at this sign-in url.
-    OpenBrowser(String),
-}
-
-fn sign_in_url(line: &str) -> Option<String> {
-    let start = [line.find("https://"), line.find("http://")]
-        .into_iter()
-        .flatten()
-        .min()?;
-    let url = line[start..]
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(['.', ',', ';', ')', ']', '}']);
-    reqwest::Url::parse(url).ok().map(|url| url.to_string())
-}
-
 pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
     antigravity_paths::home()
 }
