@@ -1271,6 +1271,43 @@ fn menu_choice_relays_and_resolves_once(cx: &mut gpui::TestAppContext) {
     assert_eq!(resolves(&calls)[0]["via"], "card");
 }
 
+/// A menu decision whose resolve fails after the reply went out retries the
+/// resolve only, and both resolves carry a provenance the engine accepts.
+#[gpui::test]
+fn failed_menu_resolve_retries_with_via_card(cx: &mut gpui::TestAppContext) {
+    use mast_proto::work_outline_user_actions::{RequestOption, UserActionKind};
+    use crate::menu_bar::RequestDecision;
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = m4::snapshot("s1");
+    let request = snapshot.user_action_requests.iter_mut().find(|request| request.id == m4::R_UI).unwrap();
+    request.kind = Some(UserActionKind::Choose);
+    request.options = vec![RequestOption { id: "b".into(), label: "Palette B".into(), detail: None }];
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = fail.clone();
+    let (overview, calls, vcx) = m4_overview(cx, dir.path(), snapshot, move |params| {
+        if is_resolve(params) && flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Err(mast_rpc::RpcError::Failed("work-outline/invalid: Invalid resolution provenance".into()))
+        } else {
+            reply_started(params)
+        }
+    });
+    let list = open_global(&overview, vcx);
+    list.update(vcx, |list, cx| {
+        list.external_decision(m4::R_UI.into(), RequestDecision::Choose("b".into()), cx)
+    });
+    vcx.run_until_parked();
+    list.read_with(vcx, |list, _| {
+        assert!(list.error.as_deref().is_some_and(|error| error.contains("Your reply was sent")))
+    });
+    list.update(vcx, |list, cx| list.choose_option(m4::R_UI.into(), "b".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(sends(&calls).len(), 1, "the retry must not send the reply again");
+    let recorded = resolves(&calls);
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded.iter().all(|resolve| resolve["via"] == "card"));
+    list.read_with(vcx, |list, _| assert!(list.error.is_none()));
+}
+
 #[gpui::test]
 fn inline_ask_reply_relays_and_resolves(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
