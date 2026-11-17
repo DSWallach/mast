@@ -428,14 +428,13 @@ struct PublishArgs {
 }
 
 fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
-        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        && let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
             .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
             .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
         {
             return kind;
         }
-    }
     ArtifactKind::from_path(&path.to_string_lossy())
 }
 
@@ -2514,15 +2513,13 @@ impl ArtifactsService {
             head_sha,
             base_sha,
         }) = &target
-        {
-            if !review.pr.repo.eq_ignore_ascii_case(repo)
+            && (!review.pr.repo.eq_ignore_ascii_case(repo)
                 || review.pr.number != *number
                 || !review.pr.head_sha.eq_ignore_ascii_case(head_sha)
-                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha)
+                || !review.pr.base_sha.eq_ignore_ascii_case(base_sha))
             {
                 return Err(ArtifactError::invalid("review.pr does not match target"));
             }
-        }
         review.target = target;
         crate::review_sidecar::validate_review(Path::new(&cwd), &mut review, &head)
             .map_err(ArtifactError::invalid)?;
@@ -2615,16 +2612,15 @@ impl ArtifactsService {
                     continue;
                 }
             }
-            if let Some(pr) = &requested {
-                if review.pr.number != pr.number
+            if let Some(pr) = &requested
+                && (review.pr.number != pr.number
                     || !review
                         .pr
                         .repo
-                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo))
+                        .eq_ignore_ascii_case(&format!("{}/{}", pr.owner, pr.repo)))
                 {
                     continue;
                 }
-            }
             self.normalize_review_hashes(&caller.chat_id, &mut review);
             let branch_head = match &review.target {
                 Some(mast_proto::ReviewTarget::Branch {
@@ -2727,8 +2723,8 @@ impl ArtifactsService {
             Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
         }).unwrap_or_default();
         let mut warnings = Vec::<String>::new();
-        if kind == Some(ArtifactKind::Plan) {
-            if let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
+        if kind == Some(ArtifactKind::Plan)
+            && let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
                 && let Ok(bytes) = self.current_bytes(&artifact)
                 && let Ok(source) = std::str::from_utf8(&bytes)
                 && let Ok(plan) = mast_proto::plan::Plan::parse(source)
@@ -2740,7 +2736,6 @@ impl ArtifactsService {
                 });
                 if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
             }
-        }
         Ok(json!({
             "warnings": warnings,
             "artifactId": reply.artifact_id,
@@ -3129,6 +3124,13 @@ fn encode_reply(
     }
 }
 
+fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => text[..cut].trim_end().to_owned(),
+        None => text.to_owned(),
+    }
+}
+
 #[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
@@ -3310,12 +3312,5 @@ mod tests {
             ArtifactErrorCode::RateLimited
         );
         broker.check_rate("run-2").unwrap();
-    }
-}
-
-fn clip_chars(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((cut, _)) => text[..cut].trim_end().to_owned(),
-        None => text.to_owned(),
     }
 }

@@ -2020,11 +2020,10 @@ impl AgentToolsService {
     fn project_scope_chats(&self, context: &CallContext) -> Value {
         let chat_ids: Vec<String> = context
             .current_item_id()
-            .and_then(|root| {
+            .map(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
                 let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
-                Some(
-                    snapshot
+                snapshot
                         .assignments
                         .iter()
                         .filter(|a| {
@@ -2033,8 +2032,7 @@ impl AgentToolsService {
                                 .is_some_and(|item| snapshot.is_within(&project, item))
                         })
                         .map(|a| a.chat_id.clone())
-                        .collect(),
-                )
+                        .collect()
             })
             .unwrap_or_default();
         json!({ "chatIds": chat_ids })

@@ -421,15 +421,13 @@ fn has_distribution_binary(directory: &Path) -> bool {
 #[cfg(unix)]
 fn ensure_headless_binary_aliases(directory: &Path) -> anyhow::Result<()> {
     for (alias, target) in [("mast", "zeron"), ("zeron", "mast")] {
-        if !directory.join(alias).exists() && directory.join(target).is_file() {
-            if let Err(error) = std::os::unix::fs::symlink(target, directory.join(alias)) {
-                if error.kind() != std::io::ErrorKind::AlreadyExists
-                    || !directory.join(alias).is_file()
+        if !directory.join(alias).exists() && directory.join(target).is_file()
+            && let Err(error) = std::os::unix::fs::symlink(target, directory.join(alias))
+                && (error.kind() != std::io::ErrorKind::AlreadyExists
+                    || !directory.join(alias).is_file())
                 {
                     return Err(error.into());
                 }
-            }
-        }
     }
     Ok(())
 }

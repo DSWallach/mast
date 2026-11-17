@@ -240,8 +240,7 @@ pub fn measure(
                 if role == "coordinator"
                     && !is_relayed_or_system_message(&body)
                     && is_status_question(&body)
-                {
-                    if let Some(date) = DateTime::from_timestamp_millis(entry.created_at) {
+                    && let Some(date) = DateTime::from_timestamp_millis(entry.created_at) {
                         let day = date.format("%Y-%m-%d").to_string();
                         update(&mut groups, &group_keys, |a| {
                             *a.aggregate
@@ -250,7 +249,6 @@ pub fn measure(
                                 .or_default() += 1
                         });
                     }
-                }
                 if body.starts_with("[Mast system message, not from the user: auto-continue ") {
                     update(&mut groups, &group_keys, |a| {
                         a.aggregate.auto_continue_messages += 1
