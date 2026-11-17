@@ -69,7 +69,9 @@ Mast notifies you when an item goes from no requests to some.
 
 ## Compact rows
 
-An item with exactly one live chat shows as one row. The row splits into an item row and chat rows when you add a second chat, a child item, or a sub-chat. Press `⌘I` on any row to open its Details. On a compact row you can also click the status glyph.
+In the sidebar, work items and chats have separate two-line rows. Work items use a folder icon and a stronger title; chats use a speech bubble and sit beneath their item with tree guides. The title is on the first line, with status and other metadata below it. Click anywhere on an entry to open the item or chat. Metadata is informational; open the item or chat to act on it. The disclosure arrow expands or collapses children. Hover over truncated text to read the full value.
+
+Press `⌘I` on an item row to open its Details.
 
 ## Undo
 

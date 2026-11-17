@@ -77,6 +77,152 @@ fn shown(vcx: &mut gpui::VisualTestContext, key: &str) -> bool {
 }
 
 #[gpui::test]
+fn sidebar_quiet_tree_keeps_titles_above_metadata_and_chats_separate(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, outline, _calls, _events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
+    let original_height = row_bounds(vcx, format!("outline-row-{}", item_key(API_AUTH)))
+        .unwrap().size.height;
+    outline.update(vcx, |outline, cx| {
+        outline.set_sidebar(true, cx);
+        cx.notify();
+    });
+    draw(vcx);
+    for key in [item_key(API_AUTH), row_key::chat(CHAT_AUTH)] {
+        let row = row_bounds(vcx, format!("outline-row-{key}")).expect("separate row");
+        let title = row_bounds(vcx, format!("outline-title-{key}")).expect("title line");
+        let metadata = row_bounds(vcx, format!("outline-metadata-{key}")).expect("metadata line");
+        assert!(title.bottom() <= metadata.top());
+        assert!(title.left() >= row.left() && metadata.right() <= row.right());
+        assert!(metadata.bottom() <= row.bottom());
+        assert_eq!(row.size.height, original_height * 2.0);
+    }
+    outline.read_with(vcx, |outline, _| {
+        let item = outline
+            .model()
+            .rows
+            .iter()
+            .find(|row| row.key == item_key(API_AUTH))
+            .unwrap();
+        assert!(item.item().unwrap().compact_chat.is_none());
+        let chat = outline
+            .model()
+            .rows
+            .iter()
+            .find(|row| row.key == row_key::chat(CHAT_AUTH))
+            .unwrap();
+        assert_eq!(chat.depth, item.depth + 1);
+    });
+    outline.update(vcx, |outline, cx| outline.set_sidebar(false, cx));
+    draw(vcx);
+    let row = row_bounds(vcx, format!("outline-row-{}", item_key(API_AUTH))).unwrap();
+    assert_eq!(row.size.height, original_height);
+    assert!(!shown(vcx, &row_key::chat(CHAT_AUTH)));
+}
+
+#[gpui::test]
+fn sidebar_quiet_tree_fits_narrow_columns_and_large_fonts_in_each_style(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, outline, _calls, _events, vcx) = compact_overview(
+        cx, dir.path(), crate::work_outline::instructions::fixture::snapshot("s1"),
+    );
+    overview.update(vcx, |overview, cx| overview.state.update(cx, |state, cx| {
+        let chat = state.chats.iter_mut().find(|chat| chat.id == CHAT_AUTH).unwrap();
+        chat.title = Some("A long session title that must leave its metadata on the second line".into());
+        chat.branch = Some("david/a-very-long-branch-name-that-must-truncate-before-the-model".into());
+        cx.notify();
+    }));
+    outline.update(vcx, |outline, cx| outline.set_sidebar(true, cx));
+    vcx.simulate_resize(gpui::size(gpui::px(320.0), gpui::px(1200.0)));
+    for style in crate::ui_style::UiStyleId::ALL {
+        vcx.update(|window, cx| {
+            crate::ui_style::set_style(*style, window, cx);
+            crate::typography::set_font_size(crate::typography::UiFontSize::ALL[6], window, cx);
+        });
+        draw(vcx);
+        for key in [item_key(API_AUTH), row_key::chat(CHAT_AUTH), row_key::chat(CHAT_GHOST)] {
+            let row = row_bounds(vcx, format!("outline-row-{key}")).unwrap();
+            let title = row_bounds(vcx, format!("outline-title-{key}")).unwrap();
+            let meta = row_bounds(vcx, format!("outline-metadata-{key}")).unwrap();
+            assert!(title.bottom() <= meta.top(), "{style:?}: {key}");
+            assert!(meta.bottom() <= row.bottom(), "{style:?}: {key}");
+            assert!(meta.right() <= row.right(), "{style:?}: {key}");
+        }
+    }
+}
+
+#[gpui::test]
+fn sidebar_quiet_tree_metadata_and_title_open_the_same_chat(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, outline, _calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::instructions::fixture::snapshot("s1"),
+    );
+    outline.update(vcx, |outline, cx| {
+        outline.set_sidebar(true, cx);
+        cx.notify();
+    });
+    draw(vcx);
+    for selector in ["outline-title-", "outline-metadata-"] {
+        events.lock().unwrap().clear();
+        let bounds = row_bounds(vcx, format!("{selector}{}", row_key::chat(CHAT_AUTH))).unwrap();
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(events.lock().unwrap().iter().any(|event| match event {
+            OutlineEvent::OpenChatFromClick(id) => id == CHAT_AUTH,
+            _ => false,
+        }));
+        assert!(details_events(&events).is_empty());
+    }
+    events.lock().unwrap().clear();
+    let metadata = row_bounds(vcx, format!("outline-metadata-{}", item_key(API_AUTH))).unwrap();
+    vcx.simulate_click(metadata.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(details_events(&events), [API_AUTH]);
+}
+
+#[gpui::test]
+fn sidebar_quiet_tree_disclosure_collapses_without_opening(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, outline, _calls, events, vcx) = compact_overview(
+        cx,
+        dir.path(),
+        crate::work_outline::store::fixture_snapshot("s1"),
+    );
+    outline.update(vcx, |outline, cx| {
+        outline.set_sidebar(true, cx);
+        cx.notify();
+    });
+    draw(vcx);
+    events.lock().unwrap().clear();
+    let arrow = row_bounds(vcx, format!("outline-disclosure-{}", item_key(API_AUTH))).unwrap();
+    vcx.simulate_click(arrow.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    outline.read_with(vcx, |outline, _| {
+        assert!(
+            outline
+                .model()
+                .position(&row_key::chat(CHAT_AUTH))
+                .is_none()
+        );
+    });
+    assert!(!events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        OutlineEvent::OpenChat(_)
+            | OutlineEvent::OpenChatFromClick(_)
+            | OutlineEvent::OpenDetails { .. }
+    )));
+}
+
+#[gpui::test]
 fn industrial_outline_renders_in_both_appearances(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (_overview, _outline, _calls, _events, vcx) = compact_overview(

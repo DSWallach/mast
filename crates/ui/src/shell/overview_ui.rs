@@ -469,6 +469,8 @@ pub(super) mod tests {
                     task_name: "Task".into(),
                     run_id: "old".into(),
                     session_created_at: Some(1),
+                    legacy_task_id: None,
+                    retired: false,
                 });
                 let mut latest = historical.clone();
                 latest.id = "latest".into();
