@@ -67,7 +67,7 @@ Agents ask for decisions on their item. Open **Required actions** in the outline
 
 Mast notifies you when an item goes from no requests to some.
 
-## Compact rows
+## Sidebar rows
 
 In the sidebar, work items and chats have separate two-line rows. Work items use a folder icon and a stronger title; chats use a speech bubble and sit beneath their item with tree guides. The title is on the first line, with status and other metadata below it. Click anywhere on an entry to open the item or chat. Metadata is informational; open the item or chat to act on it. The disclosure arrow expands or collapses children. Hover over truncated text to read the full value.
 

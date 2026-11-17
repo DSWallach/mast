@@ -38,7 +38,7 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `↑` `↓` | Previous / next row |
 | `←` `→` | Collapse / expand |
 | `⌥↑` `⌥↓` | Previous / next sibling |
-| `↩` | Open Details (a compact row opens its chat) |
+| `↩` | Open the selected item or chat |
 | `⌘I` | Open Work Item Details on any item row |
 | `⌘↩` | Start a chat in the selected item |
 | `F2` or `R` | Rename |

@@ -3,6 +3,7 @@ use super::*;
 const ICON_SIZE: f32 = 12.0;
 const ICON_GAP: f32 = 6.0;
 const MODEL_MAX_WIDTH: f32 = 90.0;
+const STATUS_MAX_WIDTH: f32 = 140.0;
 pub(super) const METADATA_LINE_HEIGHT: f32 = 14.0;
 pub(super) const LINE_GAP: f32 = 3.0;
 
@@ -10,6 +11,7 @@ pub(super) const LINE_GAP: f32 = 3.0;
 pub(super) struct SidebarMetadata {
     references: std::collections::HashMap<String, std::collections::HashMap<String, Vec<String>>>,
     drift: HashSet<String>,
+    space_summaries: std::collections::HashMap<String, String>,
 }
 
 impl SidebarMetadata {
@@ -19,6 +21,17 @@ impl SidebarMetadata {
             let Some(snapshot) = space.load.snapshot() else {
                 continue;
             };
+            let mut summary = Vec::new();
+            if let Some(totals) = super::super::required_actions::space_totals(snapshot) {
+                summary.push(totals.label());
+            }
+            let proposals = super::super::required_actions::pending_proposal_count(snapshot, None);
+            if proposals > 0 {
+                summary.push(super::super::required_actions::proposals_label(proposals));
+            }
+            result
+                .space_summaries
+                .insert(space.id.clone(), summary.join(" · "));
             let references = result.references.entry(space.id.clone()).or_default();
             for reference in &snapshot.external_references {
                 let label = match &reference.cached_title {
@@ -44,7 +57,8 @@ impl SidebarMetadata {
     }
 }
 
-fn count_label(count: u32, name: &str) -> String {
+fn count_label(count: impl Into<u64>, name: &str) -> String {
+    let count = count.into();
     format!("{count} {name}{}", if count == 1 { "" } else { "s" })
 }
 
@@ -92,7 +106,7 @@ fn metadata_line(key: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .min_w_0()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(ICON_GAP))
         .pl(px(ICON_SIZE + ICON_GAP))
         .line_height(crate::typography::ui_rems(METADATA_LINE_HEIGHT))
         .text_size(crate::typography::ui_rems(11.0))
@@ -115,26 +129,40 @@ fn two_lines(key: &str, title: AnyElement, metadata: AnyElement, tip: SharedStri
 }
 
 impl OutlineView {
+    pub(super) fn quiet_space_summary(&self, space_id: &str, count: usize) -> String {
+        let mut text = format!("{count} {}", if count == 1 { "entry" } else { "entries" });
+        if let Some(summary) = self
+            .sidebar_metadata
+            .space_summaries
+            .get(space_id)
+            .filter(|summary| !summary.is_empty())
+        {
+            text.push_str(&format!(" · {summary}"));
+        }
+        text
+    }
+
     pub(super) fn quiet_group_body(
         &self,
         key: &str,
         title: &str,
-        count: usize,
+        summary: String,
+        color: gpui::Hsla,
         theme: &Theme,
     ) -> AnyElement {
-        let summary = if count > 0 {
-            format!("{count} entries")
+        let tip: SharedString = if summary.is_empty() {
+            title.to_owned()
         } else {
-            String::new()
-        };
-        let tip: SharedString = format!("{title} · {summary}").into();
+            format!("{title} · {summary}")
+        }
+        .into();
         let title = div()
             .w_full()
             .min_w_0()
             .truncate()
             .line_height(crate::typography::ui_rems(16.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text_muted)
+            .text_color(color)
             .child(SharedString::from(title.to_owned()))
             .into_any_element();
         let metadata = metadata_line(key, theme)
@@ -205,19 +233,37 @@ impl OutlineView {
         if item.follows_template {
             details.push("Follows template".into());
         }
+        let artifacts = self
+            .state
+            .read(cx)
+            .artifacts()
+            .for_work_item(&item.space_id, &item.item_id);
+        if !artifacts.is_empty() {
+            details.push(count_label(artifacts.len() as u32, "artifact"));
+            let viewed = crate::settings::current(cx).artifact_last_viewed;
+            if artifacts.iter().any(|artifact| {
+                crate::artifacts::questions_ui::list_marker(
+                    &artifact.id,
+                    artifact.current_revision,
+                    &viewed,
+                )
+                .is_some()
+            }) {
+                details.push("Artifacts updated".into());
+            }
+        }
         let summary: SharedString = details.join(" · ").into();
         let tip: SharedString = format!("{} · {status} · {summary}", item.title).into();
         let metadata = metadata_line(key, theme)
             .child(
                 div()
                     .min_w_0()
-                    .max_w(px(140.0))
+                    .max_w(px(STATUS_MAX_WIDTH))
                     .truncate()
                     .text_color(color)
                     .child(status),
             )
-            .child(div().flex_1().min_w_0().truncate().child(summary))
-            .children(self.artifact_count_chip(key, item, theme, cx));
+            .child(div().flex_1().min_w_0().truncate().child(summary));
         two_lines(
             key,
             title_line(key, &item.title, true, theme),
@@ -264,7 +310,10 @@ impl OutlineView {
             details.push(status_label.to_owned());
         }
         if let Some(failures) = &chat.tool_failures {
-            details.push(format!("{} tool calls failed", failures.count));
+            details.push(format!(
+                "{} failed",
+                count_label(failures.count, "tool call")
+            ));
         }
         if let Some(branch) = &chat.branch {
             details.push(format!("⎇ {branch}"));

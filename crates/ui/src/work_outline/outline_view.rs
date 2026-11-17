@@ -608,6 +608,7 @@ impl OutlineView {
     pub(crate) fn set_sidebar(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.sidebar != value {
             self.sidebar = value;
+            self.sidebar_metadata = quiet_tree::SidebarMetadata::new(&self.inputs);
             self.reflatten();
             cx.notify();
         }
@@ -627,6 +628,9 @@ impl OutlineView {
         self.inputs = inputs;
         self.retire_shown_optimistic();
         self.overlay_optimistic();
+        if self.sidebar {
+            self.sidebar_metadata = quiet_tree::SidebarMetadata::new(&self.inputs);
+        }
         self.reflatten();
         cx.notify();
     }
@@ -812,9 +816,6 @@ impl OutlineView {
     }
 
     fn reflatten(&mut self) {
-        if self.sidebar {
-            self.sidebar_metadata = quiet_tree::SidebarMetadata::new(&self.inputs);
-        }
         let previous = std::mem::take(&mut self.model);
         self.model = self.flatten_inputs(&self.collapsed);
         self.refresh_guides();
@@ -2895,17 +2896,37 @@ impl OutlineView {
         let body: AnyElement = match &row.kind {
             OutlineRowKind::Space {
                 label,
+                space_id,
                 hidden: false,
-                ..
+            } if self.sidebar => self.quiet_group_body(
+                &key,
+                label,
+                self.quiet_space_summary(space_id, row.child_count),
+                theme.text,
+                theme,
+            ),
+            OutlineRowKind::Unassociated { label, .. } if self.sidebar => {
+                let summary = format!(
+                    "{} {}",
+                    row.child_count,
+                    if row.child_count == 1 {
+                        "entry"
+                    } else {
+                        "entries"
+                    }
+                );
+                self.quiet_group_body(&key, label, summary, theme.text_muted, theme)
             }
-            | OutlineRowKind::Unassociated { label, .. }
-                if self.sidebar =>
-            {
-                self.quiet_group_body(&key, label, row.child_count, theme)
-            }
-            OutlineRowKind::Notice { text, .. } if self.sidebar => {
-                self.quiet_group_body(&key, text, 0, theme)
-            }
+            OutlineRowKind::Notice { text, tone, .. } if self.sidebar => self.quiet_group_body(
+                &key,
+                text,
+                String::new(),
+                match tone {
+                    NoticeTone::Warning => theme.warning,
+                    NoticeTone::Muted => theme.text_muted,
+                },
+                theme,
+            ),
             OutlineRowKind::Space {
                 label,
                 space_id,
