@@ -40,6 +40,12 @@ const CACHE_TTL: Duration = Duration::from_secs(180);
 /// cadence.
 const DIFF_STAT_TTL: Duration = Duration::from_secs(25);
 /// Sweep tick interval.
+/// How long a "no PR found" result stays fresh. Most worktree branches have no PR, and
+/// each miss costs a `gh pr view` in the checkout plus one per submodule, so re-asking
+/// every `CACHE_TTL` kept the sweep busy forever. A PR Mast opens is linked durably (by
+/// URL), so this only delays noticing a PR opened elsewhere.
+const NEGATIVE_PR_TTL: Duration = Duration::from_secs(600);
+
 const SWEEP_INTERVAL: Duration = Duration::from_secs(20);
 /// Pending keys drained per sweep tick, per kind (PR, ticket, diff-stat) —
 /// matches the reference's `PR_KEYS_PER_SWEEP`/`TICKET_IDS_PER_SWEEP = 3`.
@@ -274,6 +280,13 @@ impl<T> Entry<T> {
     }
 }
 
+impl Entry<PrStatus> {
+    /// Freshness for a branch/URL PR lookup: a miss is kept longer than a hit.
+    fn fresh_pr(&self) -> bool {
+        self.fresh(if self.data.is_none() { NEGATIVE_PR_TTL } else { CACHE_TTL })
+    }
+}
+
 struct Inner {
     merged_wakes: Mutex<Option<crate::pr_merged_wakes::PrMergedWakes>>,
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
@@ -495,7 +508,7 @@ impl PrTicketCache {
             let key = PrKey::Url(link.url.clone());
             let cache = lock(&self.inner.pr_cache);
             let detail = match cache.get(&key) {
-                Some(entry) if entry.fresh(CACHE_TTL) => entry.data.clone(),
+                Some(entry) if entry.fresh_pr() => entry.data.clone(),
                 _ => {
                     drop(cache);
                     lock(&self.inner.pending_pr).insert(key);
@@ -544,7 +557,7 @@ impl PrTicketCache {
         if let Some(key) = branch_key {
             let cache = lock(&self.inner.pr_cache);
             match cache.get(&key) {
-                Some(entry) if entry.fresh(CACHE_TTL) => {
+                Some(entry) if entry.fresh_pr() => {
                     if let Some(detail) = entry.data.clone() {
                         let inferred_url = detail.url.clone().unwrap_or_default();
                         if !inferred_url.is_empty()
@@ -1423,6 +1436,35 @@ mod tests {
 
         pr.is_draft = true;
         assert!(pr.action_reasons().is_empty());
+    }
+
+    #[test]
+    fn a_no_pr_result_is_not_re_asked_every_cache_ttl() {
+        let cache = PrTicketCache::new();
+        let key = PrKey::Branch {
+            cwd: PathBuf::from("/tmp/repo"),
+            branch: "feature-without-pr".to_string(),
+        };
+        // A miss fetched 5 minutes ago: past CACHE_TTL, inside NEGATIVE_PR_TTL.
+        lock(&cache.inner.pr_cache).insert(
+            key.clone(),
+            Entry {
+                data: None,
+                fetched_at: Instant::now() - (CACHE_TTL + Duration::from_secs(120)),
+            },
+        );
+        cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
+        assert!(lock(&cache.inner.pending_pr).is_empty(), "miss re-queued too early");
+        // Past the negative TTL it is asked again.
+        lock(&cache.inner.pr_cache).insert(
+            key,
+            Entry {
+                data: None,
+                fetched_at: Instant::now() - (NEGATIVE_PR_TTL + Duration::from_secs(1)),
+            },
+        );
+        cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
+        assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
     }
 
     #[test]
