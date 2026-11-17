@@ -609,9 +609,31 @@ fn block_plain_text(block: &Block) -> String {
     }
 }
 
+/// Attach a row's text to the a11y tree. The text is built only while a11y is
+/// active (a screen reader or the headless driver); otherwise nothing is
+/// computed on the render path.
+fn with_accessible_text(
+    el: gpui::Stateful<gpui::Div>,
+    kind: &RowKind,
+    a11y_active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    if !a11y_active {
+        return el;
+    }
+    match row_accessible_text(kind) {
+        Some(text) => el.role(gpui::Role::Paragraph).aria_label(text),
+        None => el,
+    }
+}
+
+#[cfg(test)]
+thread_local! { static ACCESSIBLE_TEXT_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Text a transcript row exposes to the accessibility tree; `None` for rows
 /// with no readable text of their own (tool groups, chips, images).
 fn row_accessible_text(kind: &RowKind) -> Option<SharedString> {
+    #[cfg(test)]
+    ACCESSIBLE_TEXT_BUILDS.with(|count| count.set(count.get() + 1));
     let text = match kind {
         RowKind::User { text, .. } => text.to_string(),
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
@@ -6679,12 +6701,11 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
-        let accessible_text = row_accessible_text(&row.kind);
+        let a11y_active = window.is_a11y_active();
+        let row_kind = &row.kind;
         div()
             .id(row.id.clone())
-            .when_some(accessible_text, |el, text| {
-                el.role(gpui::Role::Paragraph).aria_label(text)
-            })
+            .map(|el| with_accessible_text(el, row_kind, a11y_active))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -14135,3 +14156,25 @@ impl Transcript {
 #[cfg(test)]
 #[path = "perf/transcript_bench.rs"]
 mod perf_bench;
+
+#[cfg(test)]
+mod accessible_text_tests {
+    use super::*;
+
+    #[test]
+    fn row_text_is_not_built_unless_a11y_is_active() {
+        let kind = RowKind::User {
+            source: crate::message_source::MessageSource::Human,
+            text: "hello".into(),
+            mentions: Arc::new(Vec::new()),
+            attachments: Arc::new(Vec::new()),
+            badges: Arc::new(Vec::new()),
+            pending: false,
+        };
+        ACCESSIBLE_TEXT_BUILDS.with(|c| c.set(0));
+        let _ = with_accessible_text(div().id("row"), &kind, false);
+        assert_eq!(ACCESSIBLE_TEXT_BUILDS.with(|c| c.get()), 0);
+        let _ = with_accessible_text(div().id("row"), &kind, true);
+        assert_eq!(ACCESSIBLE_TEXT_BUILDS.with(|c| c.get()), 1);
+    }
+}
