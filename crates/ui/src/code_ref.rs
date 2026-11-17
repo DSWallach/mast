@@ -113,7 +113,7 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
         }
         let bytes: Option<Vec<_>> = encoded
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| {
                 let value = std::str::from_utf8(pair).ok()?;
                 u8::from_str_radix(value, 16).ok()
@@ -132,8 +132,8 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
             reference,
             snippet,
         };
-        if staged.reference.kind == mast_proto::CodeRefKind::File {
-            if let Some(span) = spans.iter_mut().find(|span| {
+        if staged.reference.kind == mast_proto::CodeRefKind::File
+            && let Some(span) = spans.iter_mut().find(|span| {
                 span.path.as_ref() == staged.reference.location.path && span.code_ref.is_none()
             }) {
                 span.resolution_key = Some(resolution_key(&staged).into());
@@ -141,7 +141,6 @@ pub fn project_sent_refs(raw: &str) -> Option<(String, Vec<crate::composer::Sent
                 remaining = rest;
                 continue;
             }
-        }
         if !result.is_empty() {
             result.push(' ');
         }
@@ -190,7 +189,7 @@ pub fn decode_pinned_link(target: &str) -> Option<StagedCodeRef> {
     }
     let bytes: Option<Vec<_>> = encoded
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect();
     serde_json::from_slice(&bytes?).ok()
@@ -301,6 +300,35 @@ pub fn reanchor(contents: &str, original: CodeRefRange, pinned_snippet: &str) ->
     }
 }
 
+/// Resolve the repository identity on the device that owns the workspace.
+pub async fn repository_identity(
+    engine: &crate::state::EngineHandle,
+    context: &crate::files::client::FilesRequestContext,
+) -> Option<mast_proto::ExecutionRepositoryIdentity> {
+    let params = mast_proto::DescribeExecutionRepositoryParams {
+        path: context.cwd.clone(),
+        target_device_id: context.target_device_id.clone(),
+    };
+    let value = engine
+        .client()
+        .call(
+            mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY,
+            serde_json::to_value(params).ok()?,
+        )
+        .await
+        .ok()?;
+    let identity: mast_proto::ExecutionRepositoryIdentity = serde_json::from_value(value).ok()?;
+    if identity.repo_id.is_empty()
+        || context
+            .checkout_id
+            .as_ref()
+            .is_some_and(|expected| expected != &identity.checkout_id)
+    {
+        return None;
+    }
+    Some(identity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +360,7 @@ mod tests {
         };
         let mut state = crate::state::AppState::new();
         state.add_code_ref("chat", staged.clone());
-        assert_eq!(state.code_refs("chat"), &[staged.clone()]);
+        assert_eq!(state.code_refs("chat"), std::slice::from_ref(&staged));
         assert!(state.code_refs("other").is_empty());
         state.remove_code_ref("chat", "reference");
         assert!(state.code_refs("chat").is_empty());
@@ -439,33 +467,4 @@ mod tests {
         assert_eq!(reanchor("one\nfour", range, &pinned), Resolution::Changed);
         assert_ne!(content_hash(text), content_hash("one\nfour"));
     }
-}
-
-/// Resolve the repository identity on the device that owns the workspace.
-pub async fn repository_identity(
-    engine: &crate::state::EngineHandle,
-    context: &crate::files::client::FilesRequestContext,
-) -> Option<mast_proto::ExecutionRepositoryIdentity> {
-    let params = mast_proto::DescribeExecutionRepositoryParams {
-        path: context.cwd.clone(),
-        target_device_id: context.target_device_id.clone(),
-    };
-    let value = engine
-        .client()
-        .call(
-            mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY,
-            serde_json::to_value(params).ok()?,
-        )
-        .await
-        .ok()?;
-    let identity: mast_proto::ExecutionRepositoryIdentity = serde_json::from_value(value).ok()?;
-    if identity.repo_id.is_empty()
-        || context
-            .checkout_id
-            .as_ref()
-            .is_some_and(|expected| expected != &identity.checkout_id)
-    {
-        return None;
-    }
-    Some(identity)
 }

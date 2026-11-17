@@ -1454,7 +1454,7 @@ mod tests {
         assert_eq!(notice_outputs(&settings, false), (false, false));
         settings.sound_input_enabled = true;
         settings.sound_enabled = false;
-        assert_eq!(notice_outputs(&settings, false).0, false);
+        assert!(!notice_outputs(&settings, false).0);
     }
 
     #[test]

@@ -859,7 +859,7 @@ impl Shell {
                 |id| crate::review_chats::fact_from_state(state, id),
             ));
         }
-        chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.updated));
         crate::review_chats::primary(&chats).map(|chat| chat.chat_id.clone())
     }
 

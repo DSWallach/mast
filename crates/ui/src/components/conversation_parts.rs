@@ -51,11 +51,10 @@ pub fn conversation_model_label(
     label: SharedString,
     suffix: Option<(SharedString, Option<Hsla>)>,
 ) -> (SharedString, Option<(SharedString, Option<Hsla>)>) {
-    if theme.ui_style.conversation == ConversationVariant::Industrial {
-        if let Some((suffix, _)) = suffix {
+    if theme.ui_style.conversation == ConversationVariant::Industrial
+        && let Some((suffix, _)) = suffix {
             return (format!("{label} {suffix}").into(), None);
         }
-    }
     (label, suffix)
 }
 
@@ -1441,33 +1440,6 @@ pub fn conversation_composer_width(theme: &Theme, width: f32, gutter: f32) -> f3
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn horizon_composer_has_three_lines_and_matches_conversation_width() {
-        let mut theme = Theme::light();
-        theme.ui_style = crate::ui_style::UiStyle::HORIZON;
-        assert!(conversation_composer_expanded(&theme, false, None));
-        assert_eq!(
-            conversation_composer_content_height(&theme, 22.0, 22.0),
-            66.0
-        );
-        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 752.0);
-        theme.ui_style = crate::ui_style::UiStyle::MINIMAL;
-        assert!(!conversation_composer_expanded(&theme, false, Some(400.0)));
-        theme.ui_style = crate::ui_style::UiStyle::INDUSTRIAL;
-        assert!(conversation_composer_expanded(&theme, false, Some(400.0)));
-        assert!(!conversation_composer_expanded(&theme, false, Some(600.0)));
-        assert_eq!(
-            conversation_composer_content_height(&theme, 22.0, 22.0),
-            22.0
-        );
-        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 768.0);
-    }
-}
-
 /// Send, queue, and interrupt control; callers attach the corresponding action.
 pub fn conversation_send_key(
     theme: &Theme,
@@ -1916,4 +1888,31 @@ pub fn conversation_tool_patch_header(
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn horizon_composer_has_three_lines_and_matches_conversation_width() {
+        let mut theme = Theme::light();
+        theme.ui_style = crate::ui_style::UiStyle::HORIZON;
+        assert!(conversation_composer_expanded(&theme, false, None));
+        assert_eq!(
+            conversation_composer_content_height(&theme, 22.0, 22.0),
+            66.0
+        );
+        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 752.0);
+        theme.ui_style = crate::ui_style::UiStyle::MINIMAL;
+        assert!(!conversation_composer_expanded(&theme, false, Some(400.0)));
+        theme.ui_style = crate::ui_style::UiStyle::INDUSTRIAL;
+        assert!(conversation_composer_expanded(&theme, false, Some(400.0)));
+        assert!(!conversation_composer_expanded(&theme, false, Some(600.0)));
+        assert_eq!(
+            conversation_composer_content_height(&theme, 22.0, 22.0),
+            22.0
+        );
+        assert_eq!(conversation_composer_width(&theme, 768.0, 16.0), 768.0);
+    }
 }

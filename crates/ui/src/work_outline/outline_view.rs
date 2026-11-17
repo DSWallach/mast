@@ -1617,7 +1617,7 @@ impl OutlineView {
                     && !associated.contains(chat.id.as_str())
             })
             .collect();
-        chats.sort_by(|a, b| b.activity.cmp(&a.activity));
+        chats.sort_by_key(|a| std::cmp::Reverse(a.activity));
         if chats.is_empty() {
             return Err("No unassociated chats in this Space");
         }
@@ -3149,7 +3149,7 @@ impl OutlineView {
         let drop_label = drop_zone.and_then(|_| self.drop_label_element(theme));
         let guides = self.guide_layer(ix, compact, theme, cx);
         let flash = self.move_flash_overlay(&key, theme);
-        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), if crate::components::outline_uses_rounded_nesting(&theme) { 8.0 } else { Self::indent(row.depth) }, theme)
+        crate::components::outline_row(SharedString::from(format!("outline-row-{key}")), Self::row_height(compact, theme.ui_style.tokens), if crate::components::outline_uses_rounded_nesting(theme) { 8.0 } else { Self::indent(row.depth) }, theme)
             .when(highlighted, |el| el.border_color(crate::components::outline_row_highlight(theme)))
             .when((selected || in_group) && focused, |el| {
                 el.bg(theme.element_active)
@@ -3161,7 +3161,7 @@ impl OutlineView {
                 el.hover(|el| el.bg(theme.element_hover.opacity(0.6)))
             })
             .when(true, |el| crate::components::outline_row_selection(el, theme, selected))
-            .when(crate::components::outline_uses_rounded_nesting(&theme), |el| el.max_w(px(10000.)))
+            .when(crate::components::outline_uses_rounded_nesting(theme), |el| el.max_w(px(10000.)))
             .when(dimmed, |el| el.opacity(0.6))
             .relative()
             .when(drop_zone == Some(DropZone::Into), |el| {

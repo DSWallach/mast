@@ -119,7 +119,7 @@ impl Composer {
                     })
                 })
             });
-            let _ = state_handle.update(cx, |state, cx| {
+            state_handle.update(cx, |state, cx| {
                 state.end_code_ref_load(&key);
                 cx.notify();
             });

@@ -1196,8 +1196,7 @@ mod tests {
 
     #[test]
     fn selection_message_preserves_side_range_and_patch() {
-        let lines = vec![
-            DiffLine {
+        let lines = [DiffLine {
                 kind: LineKind::Del,
                 old_no: Some(4),
                 new_no: None,
@@ -1208,8 +1207,7 @@ mod tests {
                 old_no: None,
                 new_no: Some(4),
                 text: "after".into(),
-            },
-        ];
+            }];
         let message = selection_question(
             "src/lib.rs",
             SourceSide::Old,

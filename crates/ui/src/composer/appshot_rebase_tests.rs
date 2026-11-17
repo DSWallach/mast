@@ -33,7 +33,7 @@ fn failed_send_restores_complete_appshots_without_duplicates(cx: &mut TestAppCon
         fresh.id = "fresh".into();
         composer.stage_appshot_for("minted".into(), original.clone(), cx);
         composer.stage_appshot(fresh, cx);
-        composer.restore_failed_appshots(&[original.clone()], "minted", "");
+        composer.restore_failed_appshots(std::slice::from_ref(&original), "minted", "");
         assert_eq!(composer.staged_appshots().len(), 2);
         assert_eq!(
             composer.staged_appshots()[0].accessibility,

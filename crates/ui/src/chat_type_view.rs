@@ -643,9 +643,7 @@ impl ChatTypeView {
             },
             |pr| {
                 (
-                    (pr.number > 0)
-                        .then(|| format!("#{}", pr.number))
-                        .unwrap_or_else(|| "PR".to_string()),
+                    if pr.number > 0 { format!("#{}", pr.number) } else { "PR".to_string() },
                     pr.title.clone().unwrap_or_else(|| "Linked PR".to_string()),
                     pr.state.clone().unwrap_or_else(|| "linked".to_string()),
                     pr.branch

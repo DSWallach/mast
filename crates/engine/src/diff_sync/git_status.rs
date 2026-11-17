@@ -117,6 +117,47 @@ pub(super) fn publish(
     });
 }
 
+/// Rewrite `status --porcelain=v2 --branch -z` output as the `--porcelain=v1 -z`
+/// bytes the capture parses, so one `git status` can serve both. `None` for
+/// anything unexpected (the caller then runs its own v1 status).
+pub(super) fn v2_to_v1(v2: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(v2.len());
+    let mut records = v2.split(|b| *b == 0).peekable();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            if records.peek().is_none() {
+                break;
+            }
+            return None;
+        }
+        let record = std::str::from_utf8(record).ok()?;
+        let (fields, with_origin) = match record.as_bytes()[0] {
+            b'#' => continue,
+            b'?' => {
+                out.extend_from_slice(b"?? ");
+                out.extend_from_slice(record.get(2..)?.as_bytes());
+                out.push(0);
+                continue;
+            }
+            b'1' => (9, false),
+            b'2' => (10, true),
+            b'u' => (11, false),
+            _ => return None,
+        };
+        let xy = record.get(2..4)?;
+        let path = record.splitn(fields, ' ').last()?;
+        out.extend(xy.bytes().map(|c| if c == b'.' { b' ' } else { c }));
+        out.push(b' ');
+        out.extend_from_slice(path.as_bytes());
+        out.push(0);
+        if with_origin {
+            out.extend_from_slice(records.next()?);
+            out.push(0);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,45 +240,4 @@ mod tests {
         assert_eq!(files[0].index, GitFileState::Deleted);
         assert_eq!(files[0].worktree, GitFileState::Untracked);
     }
-}
-
-/// Rewrite `status --porcelain=v2 --branch -z` output as the `--porcelain=v1 -z`
-/// bytes the capture parses, so one `git status` can serve both. `None` for
-/// anything unexpected (the caller then runs its own v1 status).
-pub(super) fn v2_to_v1(v2: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(v2.len());
-    let mut records = v2.split(|b| *b == 0).peekable();
-    while let Some(record) = records.next() {
-        if record.is_empty() {
-            if records.peek().is_none() {
-                break;
-            }
-            return None;
-        }
-        let record = std::str::from_utf8(record).ok()?;
-        let (fields, with_origin) = match record.as_bytes()[0] {
-            b'#' => continue,
-            b'?' => {
-                out.extend_from_slice(b"?? ");
-                out.extend_from_slice(record.get(2..)?.as_bytes());
-                out.push(0);
-                continue;
-            }
-            b'1' => (9, false),
-            b'2' => (10, true),
-            b'u' => (11, false),
-            _ => return None,
-        };
-        let xy = record.get(2..4)?;
-        let path = record.splitn(fields, ' ').last()?;
-        out.extend(xy.bytes().map(|c| if c == b'.' { b' ' } else { c }));
-        out.push(b' ');
-        out.extend_from_slice(path.as_bytes());
-        out.push(0);
-        if with_origin {
-            out.extend_from_slice(records.next()?);
-            out.push(0);
-        }
-    }
-    Some(out)
 }

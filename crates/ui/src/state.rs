@@ -4198,8 +4198,8 @@ fn spawn_transcript_watch(
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
-                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        if let Err(err) = state.receive_prepared_opening_transcript_update(
+                    if state.selected_chat.as_deref() == Some(chat_id.as_str())
+                        && let Err(err) = state.receive_prepared_opening_transcript_update(
                             &chat_id,
                             update,
                             prepared,
@@ -4209,7 +4209,6 @@ fn spawn_transcript_watch(
                             tracing::warn!(%chat_id, error = %err, "resubscribing transcript");
                             desync = true;
                         }
-                    }
                 });
                 if alive.is_err() {
                     return;

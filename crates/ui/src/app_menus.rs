@@ -464,7 +464,7 @@ mod native_quit {
                 let app = app.clone();
                 executor
                     .spawn(async move {
-                        let _ = app.update(request_quit);
+                        app.update(request_quit);
                     })
                     .detach();
             }));

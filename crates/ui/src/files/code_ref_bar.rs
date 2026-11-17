@@ -108,7 +108,7 @@ impl super::FilesSurface {
             let _queue_permit = queue_permit;
             let _permit = crate::code_ref::acquire_io_permit().await;
             let identity = crate::code_ref::repository_identity(&engine, &context).await;
-            let _ = state_handle.update(cx, |state, cx| {
+            state_handle.update(cx, |state, cx| {
                 state.end_code_ref_load(&key);
                 cx.notify();
             });

@@ -170,7 +170,7 @@ pub(crate) fn compare_render_plan(content_height: u32, scale: f32) -> (u32, Opti
     let area = f64::from(COMPARE_VIEWPORT_WIDTH) * f64::from(height);
     let affordable = (COMPARE_MAX_PIXELS as f64 / area).sqrt() as f32;
     let effective = affordable.clamp(1.0, scale);
-    let width = (effective < scale).then(|| (COMPARE_VIEWPORT_WIDTH as f32 * effective) as u32);
+    let width = (effective < scale).then_some((COMPARE_VIEWPORT_WIDTH as f32 * effective) as u32);
     (height, width)
 }
 
@@ -187,7 +187,7 @@ pub(crate) fn coverage_notice((compared, total): (u32, u32)) -> String {
         let digits = n.to_string();
         let mut out = String::new();
         for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
                 out.push(',');
             }
             out.push(c);

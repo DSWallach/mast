@@ -422,7 +422,7 @@ impl Changes {
                 Some((
                     owner.chat_id.clone(),
                     owner.cwd.clone()?,
-                    self.active_diff(cx).map(|diff| self.parse_key(&diff))?,
+                    self.active_diff(cx).map(|diff| self.parse_key(diff))?,
                 ))
             }) else {
                 return;
@@ -652,7 +652,7 @@ impl Changes {
         if parsed.truncated
             || self
                 .active_diff(cx)
-                .is_none_or(|diff| self.parse_key(&diff) != parsed.key)
+                .is_none_or(|diff| self.parse_key(diff) != parsed.key)
         {
             return;
         }

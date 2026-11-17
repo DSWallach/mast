@@ -733,7 +733,7 @@ impl Render for ShortcutsPage {
             }
             groups.push(
                 div()
-                    .debug_selector(move || format!("shortcuts-group-{name}").into())
+                    .debug_selector(move || format!("shortcuts-group-{name}"))
                     .flex()
                     .flex_col()
                     .gap(px(8.0))

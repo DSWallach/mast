@@ -3873,7 +3873,7 @@ impl Shell {
             window,
             move |this: &mut Self, source, event, window, cx| {
                 if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                    && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
                     return;
                 }
@@ -4891,11 +4891,10 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
-        if section == SettingsSection::Agents {
-            if let Some(page) = &self.accounts_page {
+        if section == SettingsSection::Agents
+            && let Some(page) = &self.accounts_page {
                 page.update(cx, |page, cx| page.refresh_managed_accounts(cx));
             }
-        }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
         self.close_user_menu(cx);
@@ -5653,7 +5652,6 @@ impl Shell {
             if changed {
                 self.schedule_save(cx);
             }
-            return;
         }
         // Remote pins come exclusively from per-pin registry records.
     }
@@ -8703,7 +8701,7 @@ impl Shell {
                                 .into_any_element()
                         }
                     };
-                    menu.child(row).child(popover::menu_separator(&theme))
+                    menu.child(row).child(popover::menu_separator(theme))
                 })
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
@@ -10174,7 +10172,7 @@ impl Shell {
                         .inset_0(),
                     )
                     .child(status)
-                    .children(self.render_outside_file_prompt(&theme, cx))
+                    .children(self.render_outside_file_prompt(theme, cx))
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(crate::composer_dock::docked_composer(

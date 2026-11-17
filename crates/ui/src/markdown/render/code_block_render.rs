@@ -311,7 +311,7 @@ pub(super) fn render_code_block_source_with_actions(
     };
 
     let scrollbar = (!fit_content)
-        .then(|| code_ui.as_ref())
+        .then_some(code_ui.as_ref())
         .flatten()
         .and_then(|ui| {
             let bar = ui.scrollbar.as_ref()?;

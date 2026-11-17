@@ -490,11 +490,10 @@ fn diff_ch_advance(
     );
     CH_ADVANCE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some((cached_key, advance)) = cache.as_ref() {
-            if *cached_key == key {
+        if let Some((cached_key, advance)) = cache.as_ref()
+            && *cached_key == key {
                 return *advance;
             }
-        }
         #[cfg(test)]
         CH_ADVANCE_LOOKUPS.with(|count| count.set(count.get() + 1));
         let mono = font(theme.font_mono.clone());
@@ -4041,9 +4040,8 @@ impl Changes {
     }
 
     fn cancel_draft(&mut self, cx: &mut Context<Self>) {
-        if let Some(draft) = self.draft.take() {
-            if let Some(local) = draft.local { self.cancel_local_edit(local, cx); }
-        }
+        if let Some(draft) = self.draft.take()
+            && let Some(local) = draft.local { self.cancel_local_edit(local, cx); }
         self.sync_comment_rows(cx);
         cx.notify();
     }

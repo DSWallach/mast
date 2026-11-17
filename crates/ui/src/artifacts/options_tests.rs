@@ -285,12 +285,12 @@ fn project_detail() -> serde_json::Value {
     })
 }
 
-fn plan_tab<'a>(
-    cx: &'a mut TestAppContext,
+fn plan_tab(
+    cx: &mut TestAppContext,
     linear_enabled: bool,
     pinned: bool,
     detail: Result<serde_json::Value, mast_rpc::RpcError>,
-) -> (Entity<ArtifactTab>, Calls, &'a mut VisualTestContext) {
+) -> (Entity<ArtifactTab>, Calls, &mut VisualTestContext) {
     let reply: Reply = Arc::new(move |method, params| match method {
         methods::ARTIFACT_DRIFT => Ok(json!({ "artifactId": params["artifactId"] })),
         methods::ARTIFACT_CONTENT => Ok(content_reply(

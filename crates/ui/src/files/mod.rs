@@ -276,7 +276,7 @@ impl FilesSurface {
                         .border_color(theme.border)
                         .bg(crate::theme::wash(0.04))
                         .hover(|style| style.bg(crate::theme::wash(0.09)))
-                        .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Retry))
+                        .when(true, |element| crate::components::file_action(element, theme, crate::components::FileAction::Retry))
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -346,7 +346,7 @@ impl FilesSurface {
                                 .aria_label("Refresh workspace files now")
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
-                                .when(true, |element| crate::components::file_action(element, &theme, crate::components::FileAction::Refresh))
+                                .when(true, |element| crate::components::file_action(element, theme, crate::components::FileAction::Refresh))
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
@@ -631,7 +631,7 @@ impl FilesSurface {
                 editor::EditorContextAction::Paste,
                 cx,
             ))
-            .child(crate::popover::menu_separator(&theme))
+            .child(crate::popover::menu_separator(theme))
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-select-all",
@@ -1078,10 +1078,10 @@ impl FilesSurface {
                     } else {
                         "Show all files (even hidden)"
                     },
-                    &theme,
+                    theme,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
-                .when(true, |element| crate::components::file_toolbar_selection(element, &theme, include_ignored))
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, include_ignored))
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_ignored(cx);

@@ -1861,7 +1861,7 @@ impl Shell {
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
             if group == 2 {
-                groups.push(popover::menu_separator(&theme).into_any_element());
+                groups.push(popover::menu_separator(theme).into_any_element());
             }
             let open = submenu == Some(group);
             let entity = cx.entity().downgrade();
@@ -2035,7 +2035,7 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        groups.push(popover::menu_separator(&theme).into_any_element());
+        groups.push(popover::menu_separator(theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-view-compact-hover")
@@ -2082,7 +2082,7 @@ impl Shell {
                 )
                 .into_any_element(),
         );
-        groups.push(popover::menu_separator(&theme).into_any_element());
+        groups.push(popover::menu_separator(theme).into_any_element());
         groups.push(
             div()
                 .id("sidebar-create-section-hover")

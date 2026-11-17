@@ -2004,12 +2004,11 @@ impl RequiredActionsList {
         // way); a heading with its count opens each group that has rows.
         let mut group: Option<NeedsGroup> = None;
         let mut open_rows = rows.open;
-        if let Some(id) = &self.selected_request {
-            if let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
+        if let Some(id) = &self.selected_request
+            && let Some(index) = open_rows.iter().position(|row| &row.request_id == id) {
                 let selected = open_rows.remove(index);
                 body = body.child(self.render_row(selected, now, theme, window, cx));
             }
-        }
         let counts: Vec<usize> = NeedsGroup::ALL
             .iter()
             .map(|g| rows_in_group(&open_rows, *g))
@@ -2124,7 +2123,7 @@ fn legacy_pr_links(source: &str) -> Vec<String> {
         .filter_map(|word| {
             let start = word.find("https://github.com/")?;
             let url =
-                word[start..].trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+                word[start..].trim_end_matches(['.', ',', ')', ']', '>']);
             let path = url.strip_prefix("https://github.com/")?;
             let parts: Vec<_> = path.split('/').collect();
             (parts.len() == 4

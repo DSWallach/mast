@@ -85,7 +85,7 @@ fn editing_staged_diff_comments_preserves_identity_and_cancellation(
                 changes.cancel_draft(cx);
                 assert_eq!(
                     changes.state.read(cx).review_comments(""),
-                    &[original.clone()]
+                    std::slice::from_ref(&original)
                 );
 
                 changes.edit_comment(&original.id, window, cx);

@@ -2727,8 +2727,8 @@ impl FilesSurface {
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))
-                                .when(true, |el| crate::components::file_reveal(el, &theme, group))
-                                .when(true, |el| crate::components::file_comment_action(el, &theme, crate::components::FileCommentAction::Add))
+                                .when(true, |el| crate::components::file_reveal(el, theme, group))
+                                .when(true, |el| crate::components::file_comment_action(el, theme, crate::components::FileCommentAction::Add))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -2841,7 +2841,7 @@ impl FilesSurface {
                             .justify_center()
                             .when(true, |el| crate::components::file_comment_action(el, theme, crate::components::FileCommentAction::Remove))
                             .cursor_pointer()
-                            .when(true, |el| crate::components::file_reveal(el, &theme, group))
+                            .when(true, |el| crate::components::file_reveal(el, theme, group))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_editor_comment(&id, cx)
                             }))

@@ -296,6 +296,50 @@ pub(crate) fn settings_row<V: 'static>(
         .into_any_element()
 }
 
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render + use<>> {
+    struct Fixture;
+    impl gpui::Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            use gpui::px;
+            let theme = Theme::of(cx).clone();
+            let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="190" viewBox="0 0 600 190"><rect width="600" height="190" fill="#f5f6f8"/><g fill="#e1e9f5" stroke="#6785a8" stroke-width="2"><rect x="32" y="55" width="145" height="70" rx="8"/><rect x="228" y="55" width="145" height="70" rx="8"/><rect x="423" y="55" width="145" height="70" rx="8"/></g><g fill="#243b53" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="104" y="96">Draft</text><text x="300" y="96">Review</text><text x="495" y="96">Submit</text></g><path d="M177 90h48m148 0h48" stroke="#6785a8" stroke-width="3"/></svg>"##;
+            let svg = String::from_utf8_lossy(svg);
+            let svg = if theme.appearance.is_dark() {
+                svg.replace("#f5f6f8", "#202632")
+                    .replace("#e1e9f5", "#354660")
+                    .replace("#243b53", "#edf2f7")
+            } else {
+                svg.into_owned()
+            };
+            let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()));
+            let card = super::cards::CardModel {
+                title: "review_flow.mermaid".into(),
+                icon: super::model::kind_icon(ArtifactKind::Mermaid),
+                detail: "Mermaid · diagram · r1".into(),
+                url: "mast-artifact:fixture".into(),
+                registered: true,
+                preview: None,
+            };
+            div()
+                .size_full()
+                .p(px(32.0))
+                .bg(theme.surface)
+                .text_color(theme.text)
+                .child("Drafts stay local until you submit.")
+                .child(super::cards::artifact_card(
+                    "diagram-preview",
+                    card,
+                    None,
+                    &theme,
+                    Some(image),
+                ))
+                .child(settings_row(&theme, false, cx))
+        }
+    }
+    cx.new(|_| Fixture)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,48 +515,4 @@ mod tests {
         artifact.kind = ArtifactKind::Markdown;
         assert!(!eligible(&artifact));
     }
-}
-
-#[cfg(feature = "snapshot")]
-pub(crate) fn snapshot_fixture(cx: &mut gpui::App) -> Entity<impl gpui::Render + use<>> {
-    struct Fixture;
-    impl gpui::Render for Fixture {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            use gpui::px;
-            let theme = Theme::of(cx).clone();
-            let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="190" viewBox="0 0 600 190"><rect width="600" height="190" fill="#f5f6f8"/><g fill="#e1e9f5" stroke="#6785a8" stroke-width="2"><rect x="32" y="55" width="145" height="70" rx="8"/><rect x="228" y="55" width="145" height="70" rx="8"/><rect x="423" y="55" width="145" height="70" rx="8"/></g><g fill="#243b53" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="104" y="96">Draft</text><text x="300" y="96">Review</text><text x="495" y="96">Submit</text></g><path d="M177 90h48m148 0h48" stroke="#6785a8" stroke-width="3"/></svg>"##;
-            let svg = String::from_utf8_lossy(svg);
-            let svg = if theme.appearance.is_dark() {
-                svg.replace("#f5f6f8", "#202632")
-                    .replace("#e1e9f5", "#354660")
-                    .replace("#243b53", "#edf2f7")
-            } else {
-                svg.into_owned()
-            };
-            let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()));
-            let card = super::cards::CardModel {
-                title: "review_flow.mermaid".into(),
-                icon: super::model::kind_icon(ArtifactKind::Mermaid),
-                detail: "Mermaid · diagram · r1".into(),
-                url: "mast-artifact:fixture".into(),
-                registered: true,
-                preview: None,
-            };
-            div()
-                .size_full()
-                .p(px(32.0))
-                .bg(theme.surface)
-                .text_color(theme.text)
-                .child("Drafts stay local until you submit.")
-                .child(super::cards::artifact_card(
-                    "diagram-preview",
-                    card,
-                    None,
-                    &theme,
-                    Some(image),
-                ))
-                .child(settings_row(&theme, false, cx))
-        }
-    }
-    cx.new(|_| Fixture)
 }

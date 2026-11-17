@@ -220,11 +220,10 @@ pub fn world_shell(data_dir: PathBuf, rows: WorldRows, cx: &mut App) -> Entity<c
         state
     });
     state.update(cx, |state, cx| {
-        if state.selected_chat.is_some() {
-            if let Ok(reset) = serde_json::from_value(serde_json::Value::Array(transcript)) {
+        if state.selected_chat.is_some()
+            && let Ok(reset) = serde_json::from_value(serde_json::Value::Array(transcript)) {
                 state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset }, cx).ok();
             }
-        }
     });
     let boot = crate::EngineBootConfig {
         data_dir,
