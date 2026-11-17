@@ -1915,6 +1915,21 @@ impl Inner {
         }
     }
 
+    fn set_todo_progress(&self, chat_id: &str, progress: mast_proto::TodoProgress) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else { return; };
+            if entry.todo_progress == Some(progress) { return; }
+            entry.todo_progress = Some(progress);
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(workspace) = self.workspace() { workspace.record_session(&session); }
+    }
+
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.set_status_with_completion(chat_id, status, fresh_start, None);
     }
@@ -1936,6 +1951,10 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
+        let previous_todo = if lock(&self.statuses).contains_key(chat_id) { None } else {
+            self.workspace().and_then(|workspace| workspace.session(chat_id))
+                .and_then(|session| session.todo_progress)
+        };
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -1943,7 +1962,7 @@ impl Inner {
                 .or_insert_with(|| Session {
                     last_completed_turn: None,
                     awaiting_input: None,
-                    last_turn_tool_failures: None,
+                    last_turn_tool_failures: None, todo_progress: previous_todo,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
@@ -3568,6 +3587,10 @@ async fn drive_run(
             _ => {}
         }
 
+        if let Some(progress) = todo_progress_for_event(harness_id, &event) {
+            inner.set_todo_progress(&chat_id, progress);
+        }
+
         // Durable PR links (ticket 0xx design item 4): tap tool calls/results
         // for GitHub PR URLs, best-effort — mining never blocks or fails the
         // run, and a write that loses precedence or hits a missing chat row
@@ -3992,6 +4015,12 @@ async fn drive_run(
     }
 }
 
+fn todo_progress_for_event(harness: HarnessId, event: &AgentEvent) -> Option<mast_proto::TodoProgress> {
+    if !matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex) { return None; }
+    let AgentEvent::ToolCall { call: mast_proto::ToolCall::Todo { items }, .. } = event else { return None; };
+    Some(mast_proto::TodoProgress { done: items.iter().filter(|item| item.done).count(), total: items.len() })
+}
+
 fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool {
     (0..freshness_ms).contains(&now.saturating_sub(marked_at)) && marked_at <= now
 }
@@ -3999,6 +4028,23 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_events_update_session_progress_for_supported_harnesses() {
+        let event = AgentEvent::ToolCall { id: "todo".into(), call: mast_proto::ToolCall::Todo { items: vec![
+            mast_proto::TodoItem { text: "one".into(), done: true },
+            mast_proto::TodoItem { text: "two".into(), done: false },
+        ] } };
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        assert_eq!(todo_progress_for_event(HarnessId::ClaudeCode, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Codex, &event), Some(progress));
+        assert_eq!(todo_progress_for_event(HarnessId::Mock, &event), None);
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        engine.inner.set_status("chat", SessionStatus::Working, true);
+        engine.inner.set_todo_progress("chat", progress);
+        assert_eq!(engine.session_status("chat").unwrap().todo_progress, Some(progress));
+    }
 
     #[test]
     fn usage_limit_cache_recovers_updates_and_clears() {

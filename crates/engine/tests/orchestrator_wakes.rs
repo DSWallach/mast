@@ -578,7 +578,7 @@ fn session(chat: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
         awaiting_input: None,
-        last_turn_tool_failures: None,
+        last_turn_tool_failures: None, todo_progress: None,
         chat_id: chat.into(),
         device_id: "d".into(),
         status,

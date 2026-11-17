@@ -73,6 +73,10 @@ impl WorkerState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerPr {
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub branch: Option<String>,
+    pub head_sha: Option<String>,
     pub number: u64,
     pub url: String,
     pub checks: Option<ChecksStatus>,
@@ -85,6 +89,10 @@ pub(crate) struct WorkerPr {
 impl WorkerPr {
     fn of(number: u64, url: String, detail: Option<&PrStatus>) -> Self {
         Self {
+            additions: detail.and_then(|pr| pr.additions),
+            deletions: detail.and_then(|pr| pr.deletions),
+            branch: detail.and_then(|pr| pr.branch.clone()),
+            head_sha: detail.and_then(|pr| pr.head_sha.clone()),
             number,
             url,
             checks: detail.and_then(|pr| pr.checks),
@@ -119,6 +127,9 @@ impl WorkerPr {
             out.push_str(" \u{b7} ");
             out.push_str(review);
         }
+        if let (Some(additions), Some(deletions)) = (self.additions, self.deletions) {
+            out.push_str(&format!(" · +{additions} −{deletions}"));
+        }
         out
     }
 }
@@ -137,6 +148,7 @@ pub(crate) struct WorkerFacts {
     pub chat_id: String,
     /// The worker's item title, else its chat title.
     pub title: String,
+    pub work_item_title: Option<String>,
     pub state: WorkerState,
     pub last_active: Option<DateTime<Utc>>,
     /// One line: the last message's first line, clipped.
@@ -457,6 +469,7 @@ pub(crate) fn worker_with_index(
     WorkerFacts {
         chat_id: chat.id.clone(),
         title,
+        work_item_title: item.map(|item| item.title.trim()).filter(|title| !title.is_empty()).map(str::to_owned),
         state,
         last_active: chat.last_message_at.or(Some(chat.created_at)),
         activity: chat.last_message_preview.as_deref().and_then(|text| activity_line(&crate::message_source::preview(text))),
@@ -489,6 +502,7 @@ mod tests {
                 .map(|(i, (state, ready))| WorkerFacts {
                     chat_id: format!("c{i}"),
                     title: format!("w{i}"),
+                    work_item_title: Some(format!("w{i}")),
                     state: *state,
                     last_active: None,
                     activity: None,
@@ -539,6 +553,7 @@ mod tests {
     #[test]
     fn pr_chips_carry_checks_and_review() {
         let pr = WorkerPr {
+            branch: None, head_sha: None, additions: Some(312), deletions: Some(48),
             number: 12,
             url: "u".into(),
             checks: Some(ChecksStatus::Passing),
@@ -546,7 +561,7 @@ mod tests {
             draft: false,
             state: "OPEN".into(),
         };
-        assert_eq!(pr.label(), "PR #12 \u{b7} checks passing \u{b7} approved");
+        assert_eq!(pr.label(), "PR #12 \u{b7} checks passing \u{b7} approved · +312 −48");
     }
 
     #[test]
@@ -569,7 +584,7 @@ mod tests {
             review: false, merged: false,
         });
         worker.diff = Some((2, 0));
-        worker.prs.push(WorkerPr { number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
+        worker.prs.push(WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 12, url: "u".into(), checks: Some(ChecksStatus::Pending),
             review: Some("approved"), draft: false, state: "OPEN".into() });
         assert_eq!(worker.tracker_stages(), TrackerStages {
             chat_started: true, changes: true, pr_open: true, checks: true,

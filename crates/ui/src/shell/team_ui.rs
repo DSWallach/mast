@@ -36,6 +36,11 @@ pub(super) struct TrackerState {
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
     stalled: std::collections::HashMap<String, (String, bool)>,
+    todos: std::collections::HashMap<String, mast_proto::TodoProgress>,
+    review_progress: std::collections::HashMap<(String, Option<String>), (usize, usize)>,
+    review_targets: std::collections::HashMap<String, (String, Option<String>)>,
+    review_generation: u64,
+    review_task: Option<Task<()>>,
     filter: TrackerFilter,
     wake_settings_open: bool,
     #[cfg(test)]
@@ -64,6 +69,19 @@ fn tracker_counts(workers: &[&WorkerFacts], tickets_done: usize) -> [usize; 6] {
         pr_count("open"), pr_count("merged"), tickets_done]
 }
 
+fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallback: &str) -> String {
+    ticket.and_then(|ticket| ticket.title.as_deref()).filter(|title| !title.is_empty()).unwrap_or(fallback).to_owned()
+}
+
+fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
+    format!("{}/{}", progress.done, progress.total)
+}
+
+fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Option<&str>) -> usize {
+    state.filter(|state| head.is_some_and(|head| state.head_sha.as_deref().is_some_and(|saved| saved.eq_ignore_ascii_case(head))))
+        .map_or(0, |state| state.viewed_files.len())
+}
+
 fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
     let labels = ["Chat started", "Changes", "PR open", "Checks", "Review", "Merged"];
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
@@ -85,7 +103,7 @@ mod tracker_tests {
     use crate::team::WorkerState;
 
     fn worker(id: &str, state: WorkerState) -> WorkerFacts {
-        WorkerFacts { chat_id: id.into(), title: id.into(), state, last_active: None, activity: None,
+        WorkerFacts { chat_id: id.into(), title: id.into(), work_item_title: Some(id.into()), state, last_active: None, activity: None,
             branch: None, prs: Vec::new(), ticket: None, diff: None, ready: None, archived: false, archivable: None }
     }
 
@@ -93,20 +111,81 @@ mod tracker_tests {
     fn tracker_rollup_counts_unique_pull_requests() {
         let mut first = worker("first", WorkerState::Working);
         let mut second = worker("second", WorkerState::Waiting);
-        let pr = WorkerPr { number: 1, url: "https://example.com/1".into(), checks: None,
+        let pr = WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 1, url: "https://example.com/1".into(), checks: None,
             review: None, draft: false, state: "OPEN".into() };
         first.prs.push(pr.clone());
         second.prs.push(pr);
-        second.prs.push(WorkerPr { number: 2, url: "https://example.com/2".into(), checks: None,
+        second.prs.push(WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 2, url: "https://example.com/2".into(), checks: None,
             review: None, draft: false, state: "MERGED".into() });
         assert_eq!(tracker_counts(&[&first, &second], 3), [1, 1, 0, 1, 1, 3]);
         assert!(tracker_matches(&first, TrackerFilter::OpenPrs));
         assert!(!tracker_matches(&first, TrackerFilter::NeedsYou));
         assert!(tracker_matches(&second, TrackerFilter::MergedPrs));
     }
+
+    #[test]
+    fn tracker_headline_uses_ticket_title_or_work_item() {
+        let mut ticket = crate::chat_metadata::HeaderTicket { identifier: "ENG-42".into(), title: Some("Review changes".into()), ..Default::default() };
+        assert_eq!(tracker_headline(Some(&ticket), "Work item"), "Review changes");
+        ticket.title = None;
+        assert_eq!(tracker_headline(Some(&ticket), "Work item"), "Work item");
+    }
+
+    #[test]
+    fn tracker_todo_label_is_a_count() {
+        assert_eq!(tracker_todo_label(mast_proto::TodoProgress { done: 3, total: 7 }), "3/7");
+    }
+
+    #[test]
+    fn tracker_review_marks_require_the_current_head() {
+        let mut state = mast_proto::DiffReviewState { target: "pr:example/project#1".into(), head_sha: Some("abc".into()), ..Default::default() };
+        state.viewed_files.insert("file.rs".into());
+        assert_eq!(reviewed_files_at_head(Some(state.clone()), Some("ABC")), 1);
+        assert_eq!(reviewed_files_at_head(Some(state.clone()), Some("def")), 0);
+        assert_eq!(reviewed_files_at_head(Some(state), None), 0);
+    }
 }
 
 impl Shell {
+    pub(super) fn invalidate_tracker_review(&mut self) {
+        self.tracker.key = None;
+    }
+
+    fn open_tracker_review(&mut self, chat_id: String, branch: Option<String>, pr_url: String, head_sha: Option<String>, cx: &mut Context<Self>) {
+        self.open_request_diff(chat_id.clone(), branch.clone(), cx);
+        let Some(pr) = crate::chat_work_context::parse_pr_url(&pr_url) else { return; };
+        let Some(artifact) = self.review_artifact(cx) else { return; };
+        let state = self.state.read(cx);
+        let target_device_id = (state.local_device_id.as_deref() != Some(artifact.device_id.as_str()))
+            .then(|| artifact.device_id.clone());
+        let call = state.artifact_actions().content(mast_proto::ArtifactContentParams {
+            artifact_id: artifact.id.clone(), revision: None, companion: None, target_device_id,
+        });
+        let expected_pr = format!("pr:{}", pr.external_id().to_lowercase());
+        let expected_branch = branch.map(|branch| format!("branch:{}/{}#{branch}", pr.owner.to_lowercase(), pr.repo.to_lowercase()));
+        cx.spawn(async move |shell, cx| {
+            let Ok(reply) = call.await else { return; };
+            if reply.encoding != mast_proto::ArtifactContentEncoding::Utf8 { return; }
+            let Ok(document) = serde_json::from_str::<serde_json::Value>(&reply.content) else { return; };
+            let target = document.get("target").cloned().or_else(|| {
+                let mut pr = document.get("pr")?.clone();
+                pr.as_object_mut()?.insert("kind".into(), "pr".into());
+                Some(pr)
+            });
+            let Some(target) = target.and_then(|value| serde_json::from_value::<mast_proto::ReviewTarget>(value).ok()) else { return; };
+            let target_head = match &target { mast_proto::ReviewTarget::PullRequest { head_sha, .. } | mast_proto::ReviewTarget::Branch { head_sha, .. } => head_sha };
+            if !head_sha.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(target_head)) { return; }
+            let key = target.state_key();
+            if key != expected_pr && expected_branch.as_deref() != Some(key.as_str()) { return; }
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.active_chat == chat_id && matches!(shell.resolved_right_active(cx), RightSurface::Diff(_)) && shell.review_artifact(cx).as_ref().is_some_and(|current| current.id == artifact.id && current.current_revision == artifact.current_revision) {
+                    shell.set_right_active(RightSurface::Review, cx);
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
     pub(crate) fn board_links_revision(&self) -> u64 { self.board_links_revision }
 
     pub(crate) fn board_link_versions(&self, ids: &[String]) -> Vec<u64> {
@@ -163,7 +242,7 @@ impl Shell {
                         chat_id: id, device_id: "local".into(),
                         status: if index == 5 { mast_proto::SessionStatus::AwaitingInput } else { mast_proto::SessionStatus::Errored },
                         started_at: Some(now), updated_at: now, last_completed_turn: None,
-                        awaiting_input: None, last_turn_tool_failures: None,
+                        awaiting_input: None, last_turn_tool_failures: None, todo_progress: Some(mast_proto::TodoProgress { done: 3, total: 7 }),
                     });
                 }
             }
@@ -183,20 +262,31 @@ impl Shell {
                 links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
+            snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
+                id: "fixture-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-root".into(),
+                chat_id: "fixture-worker-5".into(), text: "Use the compact layout first?".into(),
+                kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
+                origin_kind: Default::default(), message_id: None, tool_call_id: None, info: None, options: Vec::new(),
+                links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
+                state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
+            });
             state.set_work_outline_for_test(snapshot);
         });
         for index in 0..8 {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
+            let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
+                "Add filtering", "Verify light themes", "Inspect status facts", "Test the expanded view"];
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
-            let pr = (index < 4).then(|| PrStatus {
+            let pr = (index < 4 || index == 7).then(|| PrStatus {
+                additions: Some(312), deletions: Some(48),
                 number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
-                title: None, branch: None, head_sha: None, mergeable: String::new(),
+                title: None, branch: Some(format!("tracker/task-{index}")), head_sha: Some("fixture-head".into()), mergeable: String::new(),
                 has_reviewer_requested: false, merged_at: None,
             });
             let status = ChatLinkStatus {
-                pr, ticket: Some(TicketStatus { identifier: format!("EX-{}", index + 100), title: None, url: None, status: None }),
+                pr, ticket: Some(TicketStatus { identifier: format!("EX-{}", index + 100), title: Some(titles[index as usize].into()), url: None, status: None }),
                 diff_stat: Some(DiffStat { files_changed: 1, lines_added: 4, lines_removed: 2 }),
                 ..Default::default()
             };
@@ -263,6 +353,7 @@ impl Shell {
             metadata.insert(chat.id.clone(), (chat.title.clone().unwrap_or_else(|| "New session".into()), harness, model));
         }
         let mut requests = std::collections::HashMap::new();
+        let todos = state.sessions.iter().filter_map(|session| session.todo_progress.map(|progress| (session.chat_id.clone(), progress))).collect();
         let stalled = state.sessions.iter().filter_map(|session| {
             if session.status == mast_proto::SessionStatus::AwaitingInput {
                 Some((session.chat_id.clone(), ("waiting for input".to_owned(), false)))
@@ -277,6 +368,14 @@ impl Shell {
                     && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi) {
                     requests.entry(request.chat_id.clone()).or_insert_with(|| request.text.clone());
                 }
+            }
+        }
+        for session in &state.sessions {
+            if session.status == mast_proto::SessionStatus::AwaitingInput
+                && let Some(question) = session.awaiting_input.as_ref().and_then(|input| input.questions.first())
+                && !question.question.trim().is_empty()
+            {
+                requests.entry(session.chat_id.clone()).or_insert_with(|| question.question.clone());
             }
         }
         let items = snapshot.as_ref().and_then(|snapshot| {
@@ -296,6 +395,33 @@ impl Shell {
         let not_started = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
         let completed_items = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
+        let review_targets: std::collections::HashMap<_, _> = facts.live().filter_map(|worker| {
+            if let Some(pr) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")
+                && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch)) {
+                let target = crate::chat_work_context::parse_pr_url(&pr.url)?;
+                return Some((worker.chat_id.clone(), (format!("pr:{}", target.external_id().to_lowercase()), pr.head_sha.clone())));
+            }
+            if !worker.prs.is_empty() { return None; }
+            let member = state.selected_execution_member(&worker.chat_id)?;
+            if !member.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(member_branch, worker_branch)| member_branch == worker_branch) { return None; }
+            let target = self.branch_review_targets.get(&worker.chat_id).filter(|target| {
+                matches!(target, mast_proto::ReviewTarget::Branch { checkout_path: Some(path), branch: Some(branch), .. }
+                    if *path == member.checkout_path && Some(branch.as_str()) == member.branch.as_deref())
+            }).map(mast_proto::ReviewTarget::state_key).or_else(|| {
+                let chat = state.chats.iter().find(|chat| chat.id == worker.chat_id)?;
+                Some(format!("diff:{}:{}", chat.device_id, member.checkout_path))
+            })?;
+            Some((worker.chat_id.clone(), (target, member.head_sha)))
+        }).collect();
+        let visible_targets: std::collections::HashSet<_> = review_targets.values().cloned().collect();
+        self.tracker.review_targets = review_targets;
+        // Review marks may have changed on another surface or device since the
+        // previous board revision. Re-read them once for this revision.
+        self.tracker.review_progress.clear();
+        let review_targets: Vec<_> = visible_targets.into_iter().collect();
+        self.tracker.review_generation = self.tracker.review_generation.wrapping_add(1);
+        let generation = self.tracker.review_generation;
+        self.tracker.review_task = None;
         self.tracker.key = Some(key);
         self.tracker.facts = facts.clone();
         self.tracker.not_started = not_started;
@@ -304,11 +430,39 @@ impl Shell {
         self.tracker.metadata = metadata;
         self.tracker.requests = requests;
         self.tracker.stalled = stalled;
+        self.tracker.todos = todos;
         #[cfg(test)] { self.tracker.rebuilds += 1; }
         let shell = cx.weak_entity();
         cx.defer(move |cx| {
             let _ = shell.update(cx, |shell, cx| {
                 for id in shell.board_links_due(&ids, cx) { shell.ensure_chat_header_links(id, cx); }
+                if shell.tracker.review_generation != generation { return; }
+                shell.tracker.review_task = Some(cx.spawn(async move |shell, cx| {
+                    for (target, head) in review_targets {
+                        let tasks = shell.update(cx, |shell, cx| {
+                            if shell.tracker.review_generation != generation { return None; }
+                            Some(shell.state.update(cx, |state, cx| {
+                                let review = state.chat_diff_rpc(mast_rpc::methods::GET_DIFF_REVIEW_STATE, serde_json::json!({"target": target, "readOnly": true}), cx);
+                                let drafts = state.chat_diff_rpc(mast_rpc::methods::GET_REVIEW_DRAFTS, serde_json::json!({"target": target}), cx);
+                                (review, drafts)
+                            }))
+                        }).ok().flatten();
+                        let Some((review, drafts)) = tasks else { return; };
+                        let review = review.await.ok().and_then(|value| serde_json::from_value::<mast_proto::DiffReviewStateReply>(value).ok());
+                        let drafts = drafts.await.ok().and_then(|value| serde_json::from_value::<Vec<mast_proto::ReviewDraft>>(value).ok());
+                        if let (Some(review), Some(drafts)) = (review, drafts) {
+                            let viewed = reviewed_files_at_head(review.state, head.as_deref());
+                            let _ = shell.update(cx, |shell, cx| {
+                                if shell.tracker.review_generation == generation {
+                                    if viewed > 0 || !drafts.is_empty() {
+                                        shell.tracker.review_progress.insert((target, head), (viewed, drafts.len()));
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }));
             });
         });
         facts
@@ -446,16 +600,20 @@ impl Shell {
                 if show_not_started {
                     for item in &self.tracker.not_started {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
-                            .child(crate::components::shell_parts::worker_title(&theme, item.title.clone()))
-                            .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::worker_metadata(&theme, ticket, theme.text_faint)))
+                            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
+                                .child(div().size(px(7.0)).rounded_full().bg(theme.border))
+                                .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
+                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
                             .child(tracker_stage_track(&item.id, [false; 6], &theme)));
                     }
                 }
                 if show_completed {
                     for item in self.tracker.completed_items.iter().filter(|item| self.tracker.filter != TrackerFilter::Done || item.ticket.is_some()) {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
-                            .child(crate::components::shell_parts::worker_title(&theme, item.title.clone()))
-                            .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::worker_metadata(&theme, ticket, theme.text_faint)))
+                            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
+                                .child(div().size(px(7.0)).rounded_full().bg(theme.success))
+                                .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
+                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
                             .child(tracker_stage_track(&item.id, [false; 6], &theme)));
                     }
                 }
@@ -466,45 +624,56 @@ impl Shell {
     }
 
     fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::team::TrackerGroup;
         let id = worker.chat_id.clone();
         let open_id = id.clone();
         let menu_id = id.clone();
-        let changes_id = id.clone();
-        let changes_branch = worker.branch.clone();
-        let (title, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
-        let identity = [Some(harness).filter(|s| !s.is_empty()), model].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-        let mut references = div().flex().flex_wrap().gap(px(Theme::SPACE_SM));
+        let (_, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
+        let identity = model.filter(|model| !model.is_empty()).unwrap_or(harness);
+        let group = worker.tracker_group();
+        let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
+            && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
+        let status = if group == TrackerGroup::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
+        let status_color = crate::status_style::status_style(status, theme.appearance).color;
+        let stalled = self.tracker.stalled.get(&id).cloned();
+        let title = tracker_headline(worker.ticket.as_ref(), worker.work_item_title.as_deref().unwrap_or("Unassigned work"));
+        let mut header = div().flex().items_center().gap(px(Theme::SPACE_SM))
+            .debug_selector({ let id = id.clone(); move || format!("tracker-heading-{id}") })
+            .child(div().flex_none().size(px(7.0)).rounded_full().bg(status_color));
         if let Some(ticket) = &worker.ticket {
             let url = ticket.url.clone();
-            references = references.child(Self::chip(theme, format!("team-ticket-{id}"), ticket.identifier.clone(), ChipTone::Link)
-                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+            header = header.child(crate::components::shell_parts::tracker_mono(theme, ticket.identifier.clone(), theme.text_faint)
+                .id(SharedString::from(format!("team-ticket-{id}"))).cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if let Some(url) = &url { this.open_web_reference(url, window.modifiers().secondary(), window, cx); }
                 })));
         }
-        if let Some(branch) = &worker.branch {
-            references = references.child(Self::chip(theme, format!("team-branch-{id}"), branch.clone(), ChipTone::Dim));
+        header = header.child(crate::components::shell_parts::worker_title(theme, title));
+        if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
+            let tip = SharedString::from(format!("Unseen by the orchestrator:\n{}", unseen.join("\n")));
+            header = header.child(crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
+                .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
         }
-        for (index, pr) in worker.prs.iter().enumerate() {
-            let mut label = pr.label();
-            if !pr.state.is_empty() { label.push_str(&format!(" · {}", pr.state.to_lowercase())); }
-            let url = pr.url.clone();
-            references = references.child(Self::chip(theme, format!("team-pr-{id}-{index}"), label, Self::pr_tone(pr))
-                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    if !url.is_empty() { this.open_web_reference(&url, window.modifiers().secondary(), window, cx); }
-                })));
-        }
-        let activity = self.tracker.requests.get(&id).or(worker.activity.as_ref()).cloned().unwrap_or_default();
-        let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
-        let status = if worker.tracker_group() == crate::team::TrackerGroup::ReadyToMerge {
-            crate::status_style::Status::Ready
-        } else { worker.state.into() };
-        let status_color = crate::status_style::status_style(status, theme.appearance).color;
         let stages = worker.tracker_stages();
         let track = tracker_stage_track(&id, [stages.chat_started, stages.changes, stages.pr_open, stages.checks, stages.review, stages.merged], theme);
-        let stalled = self.tracker.stalled.get(&id).cloned();
-        let unseen = unseen.cloned().unwrap_or_default();
+        let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
+            .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
+        if let Some(todo) = self.tracker.todos.get(&id) {
+            progress = progress.child(crate::components::shell_parts::tracker_checklist(theme, *todo, tracker_todo_label(*todo)));
+        }
+        let mut identity_line = div().flex().items_center().gap(px(Theme::SPACE_SM)).min_w_0()
+            .debug_selector({ let id = id.clone(); move || format!("tracker-identity-{id}") });
+        let has_identity = !identity.is_empty();
+        if has_identity { identity_line = identity_line.child(crate::components::shell_parts::tracker_metadata(theme, identity)); }
+        if let Some(branch) = &worker.branch {
+            if has_identity { identity_line = identity_line.child(crate::components::shell_parts::worker_metadata(theme, "·".into(), theme.text_faint)); }
+            identity_line = identity_line.child(div().id(SharedString::from(format!("team-branch-{id}")))
+                .debug_selector({ let id = id.clone(); move || format!("team-branch-{id}") })
+                .flex().items_center().gap(px(Theme::SPACE_XS)).min_w_0().text_color(theme.text_faint)
+                .child(crate::icons::icon(crate::icons::GIT_BRANCH).size(px(11.0)))
+                .child(crate::components::shell_parts::tracker_mono(theme, branch.clone(), theme.text_faint)));
+        }
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("team-worker-{id}"))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 let closeable = crate::chat_closeout::is_closeout_candidate(this.state.read(cx).chats.iter()
@@ -514,43 +683,89 @@ impl Shell {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
-            .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
-                .child(div().flex_none().size(px(7.0)).rounded_full().bg(status_color))
-                .child(crate::components::shell_parts::worker_title(theme, title))
-                .child(crate::components::shell_parts::worker_metadata(theme, identity, theme.text_faint))
-                .children((!unseen.is_empty()).then(|| {
-                    let tip = SharedString::from(format!("Unseen by the orchestrator:\n{}", unseen.join("\n")));
-                    crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
-                        .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into())
-                }))
-                .child(crate::components::shell_parts::worker_metadata(theme, stalled.as_ref().map(|(label, _)| label.clone()).unwrap_or_else(|| if worker.tracker_group() == crate::team::TrackerGroup::ReadyToMerge { "ready to merge".into() } else { worker.state.label().into() }), if stalled.as_ref().is_some_and(|(_, failed)| *failed) { theme.danger } else { status_color })
-                    .debug_selector({ let id = id.clone(); let has_stall = stalled.is_some(); move || if has_stall { format!("team-worker-stalled-{id}") } else { format!("tracker-status-{id}") } }))
-                .child(crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Changes")
-                    .id(SharedString::from(format!("team-worker-changes-{id}")))
-                    .debug_selector({ let id = id.clone(); move || format!("team-worker-changes-{id}") })
-                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx); }))))
-            .child(track)
-            .child(references);
-        if let Some(report) = report {
+            .child(header).child(progress).child(identity_line);
+        for (index, pr) in worker.prs.iter().enumerate() {
+            let url = pr.url.clone();
+            let mut line = crate::components::shell_parts::tracker_pr_line(theme, format!("team-pr-{id}-{index}"))
+                .child(SharedString::from(if pr.number == 0 { "PR".into() } else { format!("#{} {}", pr.number, pr.state.to_lowercase()) }));
+            if let Some(checks) = pr.checks {
+                let (label, color) = match checks {
+                    mast_engine::pr_ticket_cache::ChecksStatus::Passing => ("checks passing", theme.success),
+                    mast_engine::pr_ticket_cache::ChecksStatus::Failing => ("checks failing", theme.danger),
+                    mast_engine::pr_ticket_cache::ChecksStatus::Pending => ("checks running", theme.text_muted),
+                };
+                line = line.child(" · ").child(crate::components::shell_parts::worker_metadata(theme, label.into(), color));
+            }
+            if let Some(review) = pr.review { line = line.child(SharedString::from(format!(" · {review}"))); }
+            if let (Some(added), Some(removed)) = (pr.additions, pr.deletions) {
+                line = line.child(" · ").child(crate::components::shell_parts::tracker_mono(theme, format!("+{added}"), theme.success))
+                    .child(crate::components::shell_parts::tracker_mono(theme, format!("−{removed}"), theme.danger));
+            }
+            if index == 0 && let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
+                line = line.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
+            }
+            row = row.child(line.on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if !url.is_empty() { this.open_web_reference(&url, window.modifiers().secondary(), window, cx); }
+            })));
+        }
+        if worker.prs.is_empty() && let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
+            row = row.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
+        }
+        let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
+        let request = self.tracker.requests.get(&id);
+        let activity = request.map(|request| if group == TrackerGroup::NeedsYou { format!("Asked: {request}") } else { request.clone() })
+            .or_else(|| worker.activity.clone())
+            .or_else(|| stalled.as_ref().map(|(label, _)| label.clone())).unwrap_or_default();
+        let activity = [activity, age.clone()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
+        if let Some(report) = report.filter(|_| request.is_none()) {
             let expanded = self.wakes.expanded_reports.contains(&id);
             let toggle_id = id.clone();
-            row = row.child(crate::components::shell_parts::worker_report_toggle(theme, format!("team-worker-report-toggle-{id}"), format!("team-worker-activity-{id}"), format!("{} Report: {}", if expanded { "▾" } else { "▸" }, crate::team::activity_line(report).unwrap_or_default()))
+            let summary = [crate::team::activity_line(report).unwrap_or_default(), age].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
+            row = row.child(crate::components::shell_parts::worker_report_toggle(theme, format!("team-worker-report-toggle-{id}"), format!("team-worker-activity-{id}"), format!("{} Report: {summary}", if expanded { "▾" } else { "▸" }))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_report_expanded(&toggle_id, cx); })));
             if expanded { row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-report-{id}"), report.clone(), true)); }
-            if let Some(request) = self.tracker.requests.get(&id) {
-                row = row.child(crate::components::shell_parts::worker_activity(theme, format!("tracker-request-{id}"), request.clone(), false));
-            }
         } else {
-            row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), [age, activity].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "), false));
+            row = row.child(crate::components::shell_parts::worker_activity(theme, format!("team-worker-activity-{id}"), activity, false)
+                .when(stalled.is_some(), |el| el.debug_selector({ let id = id.clone(); move || format!("team-worker-stalled-{id}") })));
         }
+        let mut actions = div().flex().items_center().gap(px(Theme::SPACE_SM))
+            .debug_selector({ let id = id.clone(); move || format!("tracker-actions-{id}") });
+        if group == TrackerGroup::NeedsYou {
+            let answer_id = id.clone();
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-answer-{id}"), "Answer", true)
+                .debug_selector({ let id = id.clone(); move || format!("tracker-answer-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_chat(answer_id.clone(), cx); })));
+        } else if group == TrackerGroup::ReadyToMerge && open_pr.is_some() {
+            let pr = open_pr.unwrap();
+            let review_id = id.clone();
+            let review_branch = worker.branch.clone();
+            let review_url = pr.url.clone();
+            let review_head = pr.head_sha.clone();
+            let merge_url = pr.url.clone();
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-review-{id}"), "Review PR", true)
+                .debug_selector({ let id = id.clone(); move || format!("tracker-review-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.tracker.key = None;
+                    this.tracker.review_progress.clear();
+                    this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
+                    this.tracker.review_task = None;
+                    this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), review_head.clone(), cx);
+                })))
+                .child(crate::components::shell_parts::tracker_action(theme, format!("tracker-merge-{id}"), "Merge…", false)
+                    .debug_selector({ let id = id.clone(); move || format!("tracker-merge-{id}") })
+                    .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx); })));
+        } else {
+            let changes_id = id.clone();
+            let changes_branch = worker.branch.clone();
+            actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("team-worker-changes-{id}"), "Changes", false)
+                .debug_selector({ let id = id.clone(); move || format!("team-worker-changes-{id}") })
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx); })));
+        }
+        row = row.child(actions);
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
-        }
-        if worker.ready.is_some() {
-            row = row.child(div().flex().child(crate::components::shell_parts::worker_action_link(theme, crate::icons::ARROW_RIGHT, "Jump")
-                .id(SharedString::from(format!("team-worker-jump-{id}")))
-                .debug_selector({ let id = id.clone(); move || format!("team-worker-jump-{id}") })
-                .on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.open_item_tab(cx); }))));
         }
         row.into_any_element()
     }

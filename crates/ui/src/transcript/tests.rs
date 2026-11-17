@@ -3148,7 +3148,7 @@ mod user_fold_scroll {
                     state.sessions.push(mast_proto::Session {
                         last_completed_turn: None,
                         awaiting_input: None,
-                        last_turn_tool_failures: None,
+                        last_turn_tool_failures: None, todo_progress: None,
                         chat_id: "chat".into(),
                         device_id: "test".into(),
                         status: mast_proto::SessionStatus::Working,

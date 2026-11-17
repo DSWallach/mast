@@ -1834,6 +1834,7 @@ impl RegistryDoc {
             ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
         ]);
@@ -1849,6 +1850,12 @@ impl RegistryDoc {
             .collect();
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
+    }
+
+    pub fn session(&self, chat_id: &str) -> Option<Session> {
+        self.overlay_row(KIND_SESSIONS, chat_id)
+            .and_then(|row| row_to::<crate::workspace::RawSession>(&row))
+            .map(Session::from)
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────
@@ -2012,6 +2019,7 @@ impl RegistryDoc {
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
             ("awaitingInput", json!(session.awaiting_input)),
             ("lastTurnToolFailures", json!(session.last_turn_tool_failures)),
+            ("todoProgress", json!(session.todo_progress)),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                 ]),

@@ -3790,6 +3790,9 @@ impl RpcService for EngineRpc {
                     .workspace
                     .diff_review_state(target)
                     .map_err(|error| RpcError::Failed(error.to_string()))?;
+                if params.get("readOnly").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return RpcReply::value(&mast_proto::DiffReviewStateReply { state });
+                }
                 // A PR can inherit the marks recorded while its branch was
                 // reviewed. Only initialize an absent PR row; subsequent reads
                 // must not resurrect marks the reviewer explicitly cleared.

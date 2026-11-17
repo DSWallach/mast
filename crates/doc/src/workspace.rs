@@ -539,6 +539,10 @@ impl WorkspaceDoc {
             "lastCompletedTurn",
             session.last_completed_turn.as_deref(),
         )?;
+        match &session.todo_progress {
+            Some(progress) => row.insert("todoProgress", LoroValue::from(serde_json::to_value(progress)?))?,
+            None => row.delete("todoProgress")?,
+        }
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
         self.doc.commit();
@@ -855,6 +859,8 @@ pub(crate) struct RawSession {
     awaiting_input: Option<mast_proto::AwaitingInput>,
     #[serde(default)]
     last_turn_tool_failures: Option<mast_proto::ToolFailures>,
+    #[serde(default)]
+    todo_progress: Option<mast_proto::TodoProgress>,
     chat_id: String,
     device_id: String,
     status: SessionStatus,
@@ -870,6 +876,7 @@ impl From<RawSession> for Session {
             last_completed_turn: raw.last_completed_turn,
             awaiting_input: raw.awaiting_input,
             last_turn_tool_failures: raw.last_turn_tool_failures,
+            todo_progress: raw.todo_progress,
             chat_id: raw.chat_id,
             device_id: raw.device_id,
             status: raw.status,
@@ -983,7 +990,7 @@ mod tests {
         Session {
             last_completed_turn: None,
             awaiting_input: None,
-            last_turn_tool_failures: None,
+            last_turn_tool_failures: None, todo_progress: None,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             status,
