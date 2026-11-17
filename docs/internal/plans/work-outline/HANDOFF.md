@@ -1219,6 +1219,31 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 07:00; coordinator da545eee, overnight run)
+
+- **Installed: release 102** (58d531d05). Mikey's running Mast is still 96 (up since 2026-11-16 17:20); one restart picks
+  up 97–102. Every install went through the enforced perf gate (release-test + soak stamps).
+- Overnight releases: 99 (sidebar spinner rows cached 2268→264 builds/30 frames; freeze watchdog writes
+  `freeze-*.txt` next to mast-headed.log on a ≥2 s main-thread stall, `MAST_FREEZE_WATCHDOG=0` disables; Add to chat
+  on submodule hunks via CodeRef `repoRoot`), 100 (UI driver B4/B5, cleanup pass 1: clippy 743→650 and the last
+  direct spawns through mast_harness, engine startup pass: first sync 6→4 git per checkout, indexed artifact
+  watcher, no-PR cache 10 min), 101 (refactor Phase A batches 1–3: ~43k lines of inline tests/panels moved out of
+  the biggest files as proven pure moves; UI perf: cached transcript view 4.1→1.0 ms per keystroke, Changes
+  active_diff by reference, transcript sync scans only changed rows, cached diff font advance), 102 (repair-tick
+  backoff for quiet watched checkouts, missed-change bound 600 s; ABBA soak order).
+- **Headless UI driver** (plan mast-artifact:10cf07e3bdb339761d5962e11b1ea3f8): B0–B5 done. crates/ui-driver
+  (test-only, `scripts/check-installed-clean.sh` in every release run keeps it out of the installed binary),
+  GPUI from `Pluto8195/zui` branch `mast/test-support` (one test-support commit on gaelcado/zui@53869c2),
+  `scripts/ui-drive start|tree|click|type|key|png|stop` in a sandboxed seeded world, first flow test
+  `first_flow_send_approve_finish`. Next: scenario/batch mode, medium and Mikey-scale presets, cue-driven fake agent.
+- **Environment:** since 2026-11-16 evening Xcode.app's git hangs on shell-script subcommands (`git submodule …`
+  stalls at exec). Release runs and workers use `DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Mast's
+  production code doesn't call `git submodule`. Opening Xcode once or a reboot probably clears it.
+- **Needs Mikey:** refactor plan Phase B/C review (mast-artifact:2ee3c40d3a47f5d2cda34f8afeee43c5); Perf gate
+  instruction proposal; approval rule for niced cargo commands; review phase 6 (GitHub posting) call; older items.
+- Follow-ups: Changes width shaping off the render thread (changes widths; needs design); transcript sync still
+  clones new_rows; result_large_err clippy (374) needs an error-boxing design; soak memory noise ~55 MB.
+
 ## In flight (snapshot 2026-11-16 20:35; coordinator da545eee)
 
 - **Installed: release 98** (84cfe6629), the first install through the enforced perf gate (release-test + soak stamps).
