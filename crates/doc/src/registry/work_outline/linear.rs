@@ -166,6 +166,13 @@ impl RegistryDoc {
         .linear_enabled
     }
 
+    /// The selected account for an enabled Space; `None` means disabled.
+    pub fn space_linear_account(&self, space_id: &str) -> Option<Option<String>> {
+        let row = self.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, space_id);
+        let settings = decode_space_settings(row.as_ref());
+        settings.linear_enabled.then_some(settings.linear_account_id)
+    }
+
     /// Live Spaces with Linear turned on (sorted).
     pub fn linear_enabled_space_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self
