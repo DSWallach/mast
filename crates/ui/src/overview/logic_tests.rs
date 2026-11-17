@@ -2225,6 +2225,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
             window.draw(cx).clear();
         });
     };
+    vcx.simulate_resize(gpui::size(px(1200.0), px(1400.0)));
     draw(vcx);
 
     assert!(

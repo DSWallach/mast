@@ -63,7 +63,16 @@ impl OutlineView {
         if self.board_visible {
             self.board_visible = false;
             if let Some(shell) = self.shell.as_ref().and_then(|shell| shell.upgrade()) {
-                shell.update(cx, |shell, _| shell.cancel_board_links());
+                // Suspension can be called while the Shell renders its sidebar.
+                // Wait until that entity is released, and retain a board reopened meanwhile.
+                let view = cx.weak_entity();
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        if !this.board_visible {
+                            shell.update(cx, |shell, _| shell.cancel_board_links());
+                        }
+                    });
+                });
             }
             self.state.update(cx, |state, cx| {
                 state.set_board_watch_docs(Default::default(), cx)

@@ -971,6 +971,7 @@ mod tests {
         let fixture = crate::work_outline::store::fixture_snapshot("s1");
         let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
         for compact in [false, true] {
+            shell.update(cx, |shell, _| shell.settings.compact_single_chat = compact);
             outline.update(cx, |outline, cx| {
                 outline.set_compact_single_chat(compact, cx)
             });
@@ -1004,12 +1005,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hand_off_entry_requires_a_live_child(cx: &mut gpui::TestAppContext) {
+    fn hand_off_entry_is_available_without_a_child(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let fixture = crate::work_outline::store::fixture_snapshot("s1");
         let (shell, _outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
         right_click(cx, &row_key::chat(CHAT_API));
-        assert!(!ids(&shell, cx).contains(&"hand-off-chat"));
+        assert!(ids(&shell, cx).contains(&"hand-off-chat"));
         press(cx, "escape");
         settle(&shell, cx);
         shell.update(cx, |shell, cx| {
@@ -1189,6 +1190,7 @@ mod tests {
                 "remove-from-item",
                 "compare-instructions",
                 "apply-instructions",
+                "hand-off-chat",
                 "personal-assistant",
                 "grant-admin",
                 "pin",

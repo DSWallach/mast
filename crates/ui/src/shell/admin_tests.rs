@@ -273,7 +273,9 @@ fn compact_item_admin_entries(
         let ids: Vec<_> = menu.entries.iter().map(|e| e.id).collect();
         // Spliced right after the Chat's Archive; the rest is unchanged.
         if ids.contains(&"grant-admin") {
-            assert_eq!(&ids[..3], ["open-chat", "archive-chat", "grant-admin"]);
+            let archive = ids.iter().position(|id| *id == "archive-chat").unwrap();
+            assert_eq!(ids[archive + 1], "personal-assistant");
+            assert_eq!(ids[archive + 2], "grant-admin");
             assert_eq!(*ids.last().unwrap(), "copy-path");
         }
         menu.entries

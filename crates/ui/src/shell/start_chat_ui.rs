@@ -2614,6 +2614,9 @@ mod tests {
         assert!(focused(cx, &approval_chip));
         cx.simulate_keystrokes("space");
         draw(cx);
+        assert!(pickers.read_with(cx, |pickers, cx| pickers.resolved(cx).approval_rules));
+        cx.simulate_keystrokes("space");
+        draw(cx);
         assert!(pickers.read_with(cx, |pickers, cx| pickers.resolved(cx).auto_approve));
         cx.simulate_keystrokes("shift-tab");
         draw(cx);
