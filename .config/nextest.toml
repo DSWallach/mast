@@ -21,6 +21,9 @@
 # limit at 8 threads). Limit them to two concurrent tests; the rest still run wide.
 [test-groups]
 terminal-heavy = { max-threads = 2 }
+# Each diff_sync binary registers dozens of FSEvents watchers (two at a time per process);
+# several in parallel saturate fseventsd and time out on "startup settles" (releases 105/106).
+fsevents-heavy = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
@@ -34,11 +37,17 @@ test-group = 'terminal-heavy'
 filter = 'binary(managed_accounts) | binary(m5_repos_diffs_terminals) | binary(pr_ticket_cache_login_shell)'
 test-group = 'terminal-heavy'
 
-# Watch attach for 50 checkouts takes ~50 s alone; under a parallel release run the whole
-# test passed 3 min (2026-11-17). Its assertions are git-spawn counts, not time.
+# Watch attach for 50 checkouts takes ~50 s alone; under a parallel release run these
+# tests passed 3 min (2026-11-17). Their assertions are git-spawn counts, not time. Run
+# them one at a time with a 5-minute limit.
 [[profile.release.overrides]]
-filter = 'binary(diff_sync_repair_backoff)'
+filter = 'binary(/^diff_sync_/)'
+test-group = 'fsevents-heavy'
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'binary(/^diff_sync_/)'
+test-group = 'fsevents-heavy'
 
 [profile.default]
 test-threads = 8
