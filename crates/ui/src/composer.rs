@@ -1680,6 +1680,7 @@ fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBind
 
 /// Bind the composer keymap. Call once at app boot.
 pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
+    cx.bind_keys([KeyBinding::new("cmd-c", Copy, Some("QuestionPanel")), KeyBinding::new("ctrl-c", Copy, Some("QuestionPanel"))]);
     let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, false);
     generic_bindings.push(KeyBinding::new(
         "enter",
@@ -8274,14 +8275,7 @@ impl Composer {
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    window.focus(&this.wizard_focus, cx);
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if crate::markdown::selection::selected_text().is_none() {
-                        this.wizard_select(ix, cx);
-                    }
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                 .child(
                     div()
                         .flex_1()
@@ -8293,7 +8287,7 @@ impl Composer {
                         } else {
                             theme.text.opacity(0.9)
                         })
-                        .child(crate::markdown::render::plain_text(label.clone(), &theme)),
+                        .child(SharedString::from(label.clone())),
                 )
                 .when(ix < 9, |el| {
                     el.child(
@@ -8323,7 +8317,7 @@ impl Composer {
 
         crate::components::conversation_wizard_surface(div()
             .id("question-panel")
-            .key_context(GENERIC_COMPOSER_CONTEXT)
+            .key_context("QuestionPanel")
             .track_focus(&self.wizard_focus)
             .on_action(cx.listener(|_, _: &Copy, _, cx| {
                 if let Some(text) = crate::markdown::selection::selected_text() {
@@ -8355,15 +8349,12 @@ impl Composer {
                             .gap(px(10.0))
                             .child(
                                 div()
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                                        window.focus(&this.wizard_focus, cx);
-                                    }))
                                     .text_size(crate::typography::ui_rems(10.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
-                                    .child(crate::markdown::render::plain_text(
-                                        crate::popover::tracked_upper(&question.header), &theme,
-                                    )),
+                                    .child(SharedString::from(crate::popover::tracked_upper(
+                                        &question.header,
+                                    ))),
                             )
                             .when(wizard.questions.len() > 1, |el| {
                                 el.child(
