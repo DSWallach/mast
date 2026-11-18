@@ -427,7 +427,7 @@ impl ReviewDocument {
 
 fn note_body() -> gpui::Div {
     div()
-        .when(true, crate::components::review_body)
+        .when(true, crate::components::changes_body_text)
         .line_height(crate::typography::ui_rems(16.0))
 }
 
@@ -846,7 +846,7 @@ impl Render for Walkthrough {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .when(true, crate::components::review_body)
+                .when(true, crate::components::changes_body_text)
                 .when(true, |el| crate::components::walkthrough_guidance(el, &theme, |el| {
                     el.child(format!(
                         "Step {} of {}",
@@ -1073,7 +1073,7 @@ impl Render for Walkthrough {
             .flex_col()
             .gap_2()
             .p_2()
-            .when(true, crate::components::review_body)
+            .when(true, crate::components::changes_body_text)
             .text_color(theme.text)
             .bg(theme.bg)
             .children(crate::components::walkthrough_empty_decoration(&theme, self.files.is_empty()))
@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn note_body_uses_secondary_text_size() {
         let mut body = note_body();
-        let mut secondary = div().when(true, crate::components::review_body);
+        let mut secondary = div().when(true, crate::components::changes_body_text);
         assert_eq!(
             body.style().text.font_size,
             secondary.style().text.font_size

@@ -5583,14 +5583,14 @@ impl Changes {
             .id("changes-scope-trigger")
             .debug_selector(|| "changes-scope-trigger".into())
             .h(px(crate::surface_chrome::CONTROL_SIZE))
-            .px(px(8.0))
+            .px(px(Theme::SPACE_SM))
             .max_w(px(250.0))
             .min_w_0()
             .flex_shrink(1.0)
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(Theme::SPACE_SM))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
@@ -5620,7 +5620,7 @@ impl Changes {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
                     .line_height(px(14.0))
                     .text_color(theme.text)
                     .child(SharedString::from(scope.label())),
@@ -5639,7 +5639,7 @@ impl Changes {
                 .max_w(px(160.0))
                 .truncate()
                 .h(px(crate::surface_chrome::CONTROL_SIZE))
-                .px(px(8.0))
+                .px(px(Theme::SPACE_SM))
                 .flex_shrink(1.0)
                 .flex()
                 .items_center()
@@ -5662,13 +5662,13 @@ impl Changes {
                 .id("changes-range-title")
                 .debug_selector(|| "changes-range-title".into())
                 .h(px(crate::surface_chrome::CONTROL_SIZE))
-                .px(px(8.0))
+                .px(px(Theme::SPACE_SM))
                 .max_w(px(250.0))
                 .min_w_0()
                 .flex_shrink(1.0)
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(Theme::SPACE_SM))
                 .child(
                     crate::icons::icon(crate::icons::GIT_BRANCH)
                         .size(px(12.0))
@@ -5679,7 +5679,7 @@ impl Changes {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.0))
+                        .when(true, crate::components::changes_body_text)
                         .line_height(px(14.0))
                         .text_color(theme.text)
                         .child(SharedString::from(label)),
@@ -5777,7 +5777,7 @@ impl Changes {
                 // The 2px row gap every other menu carries — rows straight on
                 // the card abutted, adjacent washes read as one slab (user
                 // report).
-                div().flex().flex_col().gap(px(2.0)).children(
+                div().flex().flex_col().gap(px(Theme::SPACE_XS)).children(
                     DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
                         popover::menu_row(
                             theme,
@@ -5907,7 +5907,7 @@ impl Changes {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(Theme::SPACE_SM))
                 // Extra room off the scope dropdown (row gap alone read
                 // cramped — user report).
                 .ml(px(crate::surface_chrome::CONTROL_GAP))
@@ -5951,9 +5951,9 @@ impl Changes {
 
         let list: AnyElement = if rows.is_empty() {
             div()
-                .px(px(8.0))
-                .py(px(6.0))
-                .text_size(px(12.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(Theme::SPACE_SM))
+                .when(true, crate::components::changes_body_text)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(if branches.is_empty() {
                     "No branches"
@@ -5966,7 +5966,7 @@ impl Changes {
                 .id("changes-ref-list")
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
+                .gap(px(Theme::SPACE_XS))
                 .max_h(px(240.0))
                 .overflow_y_scroll()
                 .track_scroll(&list_scroll)
@@ -5991,7 +5991,7 @@ impl Changes {
                             .min_w_0()
                             .truncate()
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(12.0))
+                            .when(true, crate::components::changes_body_text)
                             .child(SharedString::from(label)),
                     )
                 }))

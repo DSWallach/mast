@@ -56,7 +56,7 @@ pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
     element.text_size(crate::typography::ui_rems(11.0))
 }
 
-pub(crate) fn review_body<T: Styled>(element: T) -> T {
+pub(crate) fn changes_body_text<T: Styled>(element: T) -> T {
     element.text_size(crate::typography::ui_rems(12.0))
 }
 

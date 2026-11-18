@@ -605,7 +605,7 @@ impl Changes {
                     )
                     .child(
                         div()
-                            .when(true, crate::components::review_body)
+                            .when(true, crate::components::changes_body_text)
                             .text_color(theme.text_dim)
                             .child(SharedString::from(draft.body.clone())),
                     )
@@ -657,7 +657,7 @@ impl Changes {
                             )
                             .child(
                                 div()
-                                    .when(true, crate::components::review_body)
+                                    .when(true, crate::components::changes_body_text)
                                     .text_color(theme.text_dim)
                                     .child(SharedString::from(body.clone())),
                             )
@@ -1213,7 +1213,7 @@ impl Changes {
                     )
                     .child(
                         div()
-                            .when(true, crate::components::review_body)
+                            .when(true, crate::components::changes_body_text)
                             .line_height(px(18.0))
                             .text_color(theme.text_dim)
                             .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
