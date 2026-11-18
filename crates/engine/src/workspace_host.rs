@@ -1497,20 +1497,22 @@ impl WorkspaceHost {
         let mut rows = self.watch_session_rows();
         let mut local = local;
         let device_id = self.inner.config.device_id.clone();
-        let (tx, rx) = watch::channel(merge_sessions(&device_id, &rows.borrow(), &local.borrow()));
+        let mut index = MergedSessionIndex::default();
+        index.update(&device_id, &rows.borrow(), &local.borrow());
+        let (tx, rx) = watch::channel(index.snapshot());
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     changed = rows.changed() => if changed.is_err() { break },
                     changed = local.changed() => if changed.is_err() { break },
+                    _ = tx.closed() => break,
                 }
-                let merged = merge_sessions(
-                    &device_id,
-                    &rows.borrow_and_update(),
-                    &local.borrow_and_update(),
-                );
-                if tx.send(merged).is_err() {
-                    break; // no receivers left
+                if index.update(&device_id, &rows.borrow_and_update(), &local.borrow_and_update()) {
+                    #[cfg(test)]
+                    crate::sessions::publication_metrics::EMISSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if tx.send(index.snapshot()).is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -2574,20 +2576,62 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     Some(dot_git.parent()?.to_string_lossy().into_owned())
 }
 
-/// Local live statuses win for this device's chats; every other device's rows come
-/// from the registry. Sorted by chat id (stable stream output).
-fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<Session> {
-    let mut merged: std::collections::HashMap<String, Session> = rows
-        .iter()
-        .filter(|s| s.device_id != device_id)
-        .map(|s| (s.chat_id.clone(), s.clone()))
-        .collect();
-    for session in local {
-        merged.insert(session.chat_id.clone(), session.clone());
+/// Index both sources independently so a registry mirror of a local update
+/// does not rebuild or publish the same merged snapshot again.
+#[derive(Default)]
+struct MergedSessionIndex {
+    remote: std::collections::BTreeMap<String, Session>,
+    local: std::collections::BTreeMap<String, Session>,
+    merged: std::collections::BTreeMap<String, Session>,
+}
+
+impl MergedSessionIndex {
+    fn update(&mut self, device_id: &str, rows: &[Session], local: &[Session]) -> bool {
+        #[cfg(test)]
+        let publication_start = crate::sessions::publication_metrics::cpu_ns();
+        let mut changed = std::collections::HashSet::new();
+        fn update_source<'a>(index: &mut std::collections::BTreeMap<String, Session>, rows: impl Iterator<Item = &'a Session>, changed: &mut std::collections::HashSet<String>) {
+            let mut present = std::collections::HashSet::new();
+            for row in rows {
+                present.insert(row.chat_id.as_str());
+                if index.get(&row.chat_id) != Some(row) {
+                    index.insert(row.chat_id.clone(), row.clone());
+                    changed.insert(row.chat_id.clone());
+                }
+            }
+            index.retain(|id, _| {
+                if present.contains(id.as_str()) { true } else {
+                    changed.insert(id.clone());
+                    false
+                }
+            });
+        }
+        update_source(&mut self.remote, rows.iter().filter(|row| row.device_id != device_id), &mut changed);
+        update_source(&mut self.local, local.iter(), &mut changed);
+        let mut output_changed = false;
+        for id in changed {
+            let next = self.local.get(&id).or_else(|| self.remote.get(&id));
+            if self.merged.get(&id) != next {
+                output_changed = true;
+                match next {
+                    Some(row) => { self.merged.insert(id, row.clone()); }
+                    None => { self.merged.remove(&id); }
+                }
+            }
+        }
+        #[cfg(test)]
+        crate::sessions::publication_metrics::record(&crate::sessions::publication_metrics::MERGES, &crate::sessions::publication_metrics::MERGE_CPU, publication_start);
+        output_changed
     }
-    let mut list: Vec<Session> = merged.into_values().collect();
-    list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    list
+
+    fn snapshot(&self) -> Vec<Session> {
+        #[cfg(test)]
+        let start = crate::sessions::publication_metrics::cpu_ns();
+        let snapshot = self.merged.values().cloned().collect();
+        #[cfg(test)]
+        crate::sessions::publication_metrics::MERGE_CPU.fetch_add(crate::sessions::publication_metrics::cpu_ns() - start, std::sync::atomic::Ordering::Relaxed);
+        snapshot
+    }
 }
 
 /// Background task: relay-verified presence. Every [`RELAY_PROBE_INTERVAL_MS`],
@@ -2874,6 +2918,53 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    fn session_row(chat: &str, device: &str, status: mast_proto::SessionStatus) -> mast_proto::Session {
+        mast_proto::Session { chat_id: chat.into(), device_id: device.into(), status,
+            started_at: None, updated_at: chrono::Utc::now(), last_completed_turn: None,
+            awaiting_input: None, last_turn_tool_failures: None, todo_progress: None }
+    }
+
+    #[test]
+    fn merged_session_index_preserves_precedence_order_and_removals() {
+        use super::MergedSessionIndex;
+        use mast_proto::SessionStatus::{Idle, Working};
+        let remote = session_row("b", "remote", Idle);
+        let local = session_row("b", "device", Working);
+        let other = session_row("a", "remote", Working);
+        let own_registry = session_row("c", "device", Working);
+        let mut index = MergedSessionIndex::default();
+        assert!(index.update("device", &[remote.clone(), other.clone(), own_registry], &[local.clone()]));
+        assert_eq!(index.snapshot(), vec![other.clone(), local.clone()]);
+        assert!(!index.update("device", &[remote.clone(), other.clone()], &[local.clone()]));
+        assert!(index.update("device", &[remote.clone(), other.clone()], &[]));
+        assert_eq!(index.snapshot(), vec![other, remote]);
+        assert!(index.update("device", &[], &[]));
+        assert!(index.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_session_watch_late_subscribe_and_disconnect() {
+        use crate::{EngineCore, HarnessId, default_registry};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let core = EngineCore::assemble(dir.path(), Arc::new(default_registry()), HarnessId::Mock, None).unwrap();
+        let row = session_row("chat", &core.device_id, mast_proto::SessionStatus::Working);
+        let (sender, local) = tokio::sync::watch::channel(vec![row.clone()]);
+        let mut merged = core.workspace.merged_sessions_watch(local);
+        assert_eq!(*merged.borrow(), vec![row.clone()]);
+        let updated = session_row("chat", &core.device_id, mast_proto::SessionStatus::Idle);
+        sender.send_replace(vec![updated.clone()]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), merged.changed()).await.unwrap().unwrap();
+        assert_eq!(*merged.borrow(), vec![updated.clone()]);
+        let late = merged.clone();
+        assert_eq!(*late.borrow(), vec![updated]);
+        drop(merged);
+        drop(late);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while sender.receiver_count() != 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn workflow_pack_batch_applies_instruction_after_preview() {
