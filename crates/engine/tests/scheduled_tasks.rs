@@ -25,6 +25,7 @@ fn draft(root: &std::path::Path) -> ScheduledTaskDraft {
         cutover_confirmed: false,
         work_item_id: None,
         output: Default::default(),
+        after_success: Default::default(),
     }
 }
 #[tokio::test]
@@ -1029,8 +1030,10 @@ async fn background_tasks_require_an_item_and_launch_a_hidden_run() {
     );
 
     draft.work_item_id = Some(item.clone());
+    draft.after_success = ScheduledTaskAfterSuccess::Keep;
     service.request(save(draft.clone())).await.unwrap();
     draft.output = ScheduledTaskOutput::Interactive;
+    draft.after_success = ScheduledTaskAfterSuccess::Archive;
     let update = |revision| {
         serde_json::to_value(ScheduledTasksRequest::Save {
             id: "background".into(),
@@ -1042,11 +1045,13 @@ async fn background_tasks_require_an_item_and_launch_a_hidden_run() {
     };
     let legacy = update(1);
     assert!(legacy.pointer("/draft/output").is_none());
+    assert!(legacy.pointer("/draft/afterSuccess").is_none());
     let edited: ScheduledTasksSnapshot = client
         .call_as(mast_rpc::methods::SCHEDULED_TASKS, legacy)
         .await
         .unwrap();
     assert_eq!(edited.tasks[0].draft.output, ScheduledTaskOutput::Background);
+    assert_eq!(edited.tasks[0].draft.after_success, ScheduledTaskAfterSuccess::Keep);
 
     let queued = service
         .request(ScheduledTasksRequest::RunNow {
@@ -1089,6 +1094,7 @@ async fn background_tasks_require_an_item_and_launch_a_hidden_run() {
         history.runs[0].snapshot.output,
         ScheduledTaskOutput::Background
     );
+    assert_eq!(history.runs[0].snapshot.after_success, ScheduledTaskAfterSuccess::Keep);
 
     let error = client
         .call(
@@ -1329,5 +1335,290 @@ async fn a_run_its_harness_cannot_start_leaves_no_chat_behind() {
     assert_eq!(runs[0].state, ScheduledRunState::Failed);
     assert!(runs[0].detail.as_deref().is_some_and(|d| d.contains("instructions")));
     assert!(core.workspace.chat(&chat_id).unwrap().is_none());
+    core.shutdown().await;
+}
+
+async fn save_lifecycle_task(
+    core: &EngineCore,
+    id: &str,
+    revision: u64,
+    draft: ScheduledTaskDraft,
+) {
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: id.into(),
+            expected_revision: revision,
+            draft,
+            operation_id: format!("save-{id}-{revision}"),
+        })
+        .await
+        .unwrap();
+}
+
+async fn claim_lifecycle_run(core: &EngineCore, task: &str, operation: &str) -> ScheduledRun {
+    let snapshot = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow {
+            id: task.into(),
+            operation_id: operation.into(),
+        })
+        .await
+        .unwrap();
+    let id = mast_proto::work_outline::derive_id(
+        &format!("{}\0{task}", core.workspace.device_id()),
+        &format!("manual:{operation}"),
+    );
+    snapshot.runs.into_iter().find(|run| run.id == id).unwrap()
+}
+
+async fn wait_for_run_state(core: &EngineCore, run: &ScheduledRun, state: ScheduledRunState) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let snapshot = core
+            .scheduled_tasks
+            .request(ScheduledTasksRequest::List)
+            .await
+            .unwrap();
+        let current = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+        if current.state == state {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {state:?}, got {current:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn only_archive_policy_background_runs_are_auto_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for (id, output, policy, archived) in [
+        (
+            "archive",
+            ScheduledTaskOutput::Background,
+            ScheduledTaskAfterSuccess::Archive,
+            true,
+        ),
+        (
+            "keep",
+            ScheduledTaskOutput::Background,
+            ScheduledTaskAfterSuccess::Keep,
+            false,
+        ),
+        (
+            "interactive",
+            ScheduledTaskOutput::Interactive,
+            ScheduledTaskAfterSuccess::Archive,
+            false,
+        ),
+    ] {
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.output = output;
+        draft.after_success = policy;
+        save_lifecycle_task(&core, id, 0, draft).await;
+        let run = claim_lifecycle_run(&core, id, &format!("run-{id}")).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+        let chat = run.chat_id.as_deref().unwrap();
+        assert_eq!(
+            core.workspace.chat(chat).unwrap().unwrap().archived,
+            archived
+        );
+
+        // An additional tick writes no lifecycle changes.
+        let changes = core.workspace.watch_changes();
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert!(!changes.has_changed().unwrap());
+        if archived {
+            core.workspace.set_chat_archived(chat, false).unwrap();
+            core.scheduled_tasks
+                .tick(chrono::Utc::now().timestamp_millis() + 60_000)
+                .await
+                .unwrap();
+            assert!(!core.workspace.chat(chat).unwrap().unwrap().archived);
+        }
+    }
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_failures_update_one_action_and_success_resolves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item));
+    draft.output = ScheduledTaskOutput::Background;
+    draft.prompt = "[crash]".into();
+    save_lifecycle_task(&core, "routine", 0, draft.clone()).await;
+    let actions = || {
+        mast_doc::materialize_work_outline(
+            ITEM_SPACE,
+            &core.workspace.work_outline_inputs(ITEM_SPACE),
+        )
+        .user_action_requests
+        .into_iter()
+        .filter(|request| request.dedupe_key.as_deref() == Some("scheduled-run-failed:routine"))
+        .collect::<Vec<_>>()
+    };
+    let mut request_id = None;
+    for operation in ["first-failure", "second-failure"] {
+        let run = claim_lifecycle_run(&core, "routine", operation).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Failed).await;
+        let id = run.chat_id.unwrap();
+        assert!(!core.workspace.chat(&id).unwrap().unwrap().archived);
+        let requests = actions();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].is_open());
+        assert!(requests[0].text.contains("Scheduled integration"));
+        assert!(requests[0].text.contains("failed"));
+        assert_eq!(requests[0].links[0].target, RequestLinkTarget::Chat { id });
+        assert_eq!(
+            request_id.get_or_insert_with(|| requests[0].id.clone()),
+            &requests[0].id
+        );
+    }
+    draft.prompt = "This run should succeed".into();
+    save_lifecycle_task(&core, "routine", 1, draft).await;
+    let run = claim_lifecycle_run(&core, "routine", "recovery").await;
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    let requests = actions();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].is_open());
+    assert!(
+        requests[0]
+            .resolution
+            .as_ref()
+            .unwrap()
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("completed successfully")
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn pending_archive_survives_restart_and_respects_open_actions_and_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let harness = mast_harness::mock::InstructionMockHarness::default();
+    let (core, _, item) = item_core_with(&root, harness.clone()).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    draft.prompt = "[hold]".into();
+    let mut protected = Vec::new();
+    for task_id in ["pinned", "assistant", "action"] {
+        save_lifecycle_task(&core, task_id, 0, draft.clone()).await;
+        let run = claim_lifecycle_run(&core, task_id, &format!("run-{task_id}")).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Running).await;
+        let chat_id = run.chat_id.as_deref().unwrap();
+        match task_id {
+            "pinned" => core
+                .workspace
+                .change_sidebar_pin(&SidebarPinChange::Pin {
+                    session_id: chat_id.into(),
+                    after: None,
+                    before: None,
+                })
+                .unwrap(),
+            "assistant" => {
+                let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+                core.sessions.agent_tokens().personal_assistant().set(&chat);
+            }
+            _ => {
+                core.workspace
+                    .work_outline_mutate(
+                        &WorkOutlineMutation::CreateUserActionRequest(
+                            CreateUserActionRequestParams {
+                                work_item_id: item.clone(),
+                                origin: UserActionRequestOrigin {
+                                    kind: UserActionOriginKind::System,
+                                    ..Default::default()
+                                },
+                                text: "Review the run".into(),
+                                info: None,
+                                dedupe_key: None,
+                                operation_id: "action-protects-run".into(),
+                                options: vec![],
+                                links: vec![RequestLink {
+                                    label: "Open run".into(),
+                                    target: RequestLinkTarget::Chat { id: chat_id.into() },
+                                }],
+                                facts: vec![],
+                                kind: Some(UserActionKind::Ask),
+                                priority: None,
+                            },
+                        ),
+                        &WorkOutlineActor {
+                            kind: WorkOutlineActorKind::System,
+                            device_id: core.workspace.device_id().into(),
+                            chat_id: None,
+                            message_id: None,
+                        },
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+        harness.release();
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+        assert!(!core.workspace.chat(chat_id).unwrap().unwrap().archived);
+        protected.push(chat_id.to_owned());
+    }
+    core.shutdown().await;
+    drop(core);
+
+    let (core, client, _) = item_core(&root).await;
+    let request_id = mast_proto::work_outline::derive_id(
+        "action-protects-run",
+        mast_proto::work_outline::roles::REQUEST,
+    );
+    client
+        .call(
+            mast_rpc::methods::WORK_OUTLINE_MUTATE,
+            serde_json::json!({
+                "op": "resolveUserActionRequest", "userActionRequestId": request_id,
+                "operationId": "resolve-archive-blocker",
+            }),
+        )
+        .await
+        .unwrap();
+    core.scheduled_tasks
+        .tick(chrono::Utc::now().timestamp_millis() + 60_000)
+        .await
+        .unwrap();
+    assert!(
+        !core
+            .workspace
+            .chat(&protected[0])
+            .unwrap()
+            .unwrap()
+            .archived
+    );
+    assert!(
+        !core
+            .workspace
+            .chat(&protected[1])
+            .unwrap()
+            .unwrap()
+            .archived
+    );
+    assert!(
+        core.workspace
+            .chat(&protected[2])
+            .unwrap()
+            .unwrap()
+            .archived
+    );
     core.shutdown().await;
 }

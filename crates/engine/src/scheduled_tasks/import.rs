@@ -189,6 +189,7 @@ pub fn preview(
                     cutover_confirmed: false,
                     work_item_id: None,
                     output: Default::default(),
+                    after_success: Default::default(),
                     grace_minutes: if sub_hourly { 30 } else { 360 },
                 },
                 warnings,

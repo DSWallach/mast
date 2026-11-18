@@ -100,6 +100,7 @@ mod tests {
                 cutover_confirmed: false,
                 work_item_id: None,
                 output: Default::default(),
+                after_success: Default::default(),
             },
             created_at: 0,
             updated_at: 0,

@@ -486,6 +486,36 @@ impl RegistryDoc {
             .map(|r| r.view)
     }
 
+    /// Open requests raised by the scheduler for a task, even if it has
+    /// moved to another Work Outline item since a failed edition.
+    pub fn scheduled_task_actions(&self, key: &str, device: &str) -> Vec<UserActionRequestView> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .iter()
+            .filter(|row| row.fields.get("dedupeKey").and_then(Value::as_str) == Some(key))
+            .filter_map(|row| decode_request(row).ok().map(|request| request.view))
+            .filter(|request| {
+                request.is_open()
+                    && request.origin_kind == UserActionOriginKind::System
+                    && request.created_by.as_ref().is_some_and(|actor| actor.device_id == device)
+            })
+            .collect()
+    }
+
+    /// Includes system requests that point to the chat through a link.
+    pub fn has_open_action_for_chat(&self, chat_id: &str) -> bool {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS).iter().any(|row| {
+            let fields = &row.fields;
+            let mentions_chat = fields.get("chatId").and_then(Value::as_str) == Some(chat_id)
+                || fields.get("links").and_then(Value::as_array).is_some_and(|links| {
+                    links.iter().any(|link| {
+                        link.pointer("/target/type").and_then(Value::as_str) == Some("chat")
+                            && link.pointer("/target/id").and_then(Value::as_str) == Some(chat_id)
+                    })
+                });
+            mentions_chat && decode_request(row).is_ok_and(|r| r.view.is_open())
+        })
+    }
+
     /// One live proposal with its effective status.
     pub fn instruction_proposal(&self, id: &str) -> Option<WorkItemInstructionProposalView> {
         let row = self.overlay_row(KIND_WORK_ITEM_INSTRUCTION_PROPOSALS, id)?;

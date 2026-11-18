@@ -2207,6 +2207,41 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
+        self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
+    }
+
+    /// Recheck registry protections together with the archive write. Returns
+    /// false when a transient protection should defer the scheduled follow-up.
+    pub(crate) fn archive_scheduled_run_if(
+        &self,
+        chat_id: &str,
+        expected: impl FnOnce(&Chat) -> bool,
+        ready: impl FnOnce() -> Result<bool, EngineError>,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(true);
+            };
+            if chat.device_id != self.device_id()
+                || chat.archived
+                || doc.scheduled_success_archived(chat_id)
+                || !expected(&chat)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == chat_id)
+                })
+            {
+                return Ok(true);
+            }
+            if doc.has_open_action_for_chat(chat_id) || !ready()? {
+                return Ok(false);
+            }
+            doc.archive_scheduled_success(chat_id)?;
+            Ok(true)
+        })
+    }
+
     /// Stamp stable run provenance and the compatible legacy task name together.
     pub fn set_chat_scheduled_task_info(
         &self,
@@ -2478,6 +2513,12 @@ impl WorkspaceHost {
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
     pub fn flush(&self) {
         self.inner.save_snapshot();
+    }
+
+    /// Persist scheduled follow-up registry writes before acknowledging their
+    /// queue entries in the scheduler database.
+    pub(crate) fn persist_scheduled_followups(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides

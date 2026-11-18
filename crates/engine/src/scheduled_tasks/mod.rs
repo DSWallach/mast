@@ -2,6 +2,7 @@
 pub mod evaluator;
 mod identity;
 pub(crate) mod import;
+mod lifecycle;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
@@ -66,13 +67,14 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
-        self.request_from_client(request, true).await
+        self.request_from_client(request, true, true).await
     }
 
     pub(crate) async fn request_from_client(
         &self,
         request: ScheduledTasksRequest,
         output_provided: bool,
+        after_success_provided: bool,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
@@ -84,6 +86,15 @@ impl ScheduledTasks {
                 if draft.output == ScheduledTaskOutput::Interactive)
         {
             input.push_str("\noutput=interactive");
+        }
+        // The default is omitted in stored drafts. An explicit Archive on a
+        // Background save can reset a previously saved Keep.
+        if after_success_provided
+            && matches!(&request, ScheduledTasksRequest::Save { draft, .. }
+                if draft.after_success == ScheduledTaskAfterSuccess::Archive
+                    && draft.output == ScheduledTaskOutput::Background)
+        {
+            input.push_str("\nafterSuccess=archive");
         }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
@@ -151,6 +162,11 @@ impl ScheduledTasks {
                 // Keep the stored mode until a client explicitly changes it.
                 if !output_provided && let Some(task) = &old {
                     draft.output = task.draft.output;
+                }
+                if let Some(task) = &old
+                    && (!after_success_provided || draft.output == ScheduledTaskOutput::Interactive)
+                {
+                    draft.after_success = task.draft.after_success;
                 }
                 self.validate(&draft)?;
                 if draft.enabled {
@@ -450,7 +466,7 @@ impl ScheduledTasks {
                 continue;
             }
             let msg = crate::work_outline_launch::scheduled_id(&r.id, "message");
-            let (command, _) = self.0.host.message_command_state(&chat, &msg)?;
+            let (command, landed) = self.0.host.message_command_state(&chat, &msg)?;
             let mut awaiting = None;
             if command
                 .as_ref()
@@ -471,7 +487,7 @@ impl ScheduledTasks {
                     .awaiting_input
                     .filter(|_| r.state == ScheduledRunState::AwaitingInput);
             } else {
-                r.state = match command.map(|c| c.status) {
+                r.state = match command.as_ref().map(|c| c.status) {
                     Some(SessionCommandStatus::Pending) => ScheduledRunState::Queued,
                     Some(SessionCommandStatus::Rejected | SessionCommandStatus::Expired) => {
                         ScheduledRunState::Failed
@@ -479,8 +495,18 @@ impl ScheduledTasks {
                     Some(SessionCommandStatus::Cancelled | SessionCommandStatus::Superseded) => {
                         ScheduledRunState::Cancelled
                     }
+                    Some(SessionCommandStatus::Applied) if landed => {
+                        match store::blocking(|| self.0.sessions.last_journaled_turn_outcome(&chat))? {
+                            Some(DoneStatus::Completed) => ScheduledRunState::Completed,
+                            Some(DoneStatus::Errored) => ScheduledRunState::Failed,
+                            Some(DoneStatus::Interrupted) | None => ScheduledRunState::Interrupted,
+                        }
+                    }
                     _ => ScheduledRunState::Interrupted,
                 };
+            }
+            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled) {
+                r.detail = command.and_then(|c| c.resolution);
             }
             let request = awaiting.as_ref().map(|a| a.request_id.clone());
             if request != r.awaiting_request_id {
@@ -515,7 +541,9 @@ impl ScheduledTasks {
                 r.finished_at = Some(now);
             }
             if r != previous {
-                self.0.store.update_run(&r)?;
+                let followup = r.state != previous.state
+                    || r.awaiting_request_id != previous.awaiting_request_id;
+                self.record_run(&r, followup.then_some(now))?;
             }
         }
         let active = self.0.store.active()?;
@@ -567,7 +595,8 @@ impl ScheduledTasks {
             if cancelled {
                 r.state = ScheduledRunState::Cancelled;
                 r.finished_at = Some(now);
-                self.0.store.update_run(&r)?;
+                r.detail = Some("The task was paused or deleted before dispatch".into());
+                self.record_run(&r, Some(now))?;
                 continue;
             }
             let deadline_base = if r.manual {
@@ -612,8 +641,12 @@ impl ScheduledTasks {
                     r.finished_at = Some(now);
                 }
             }
-            self.0.store.update_run(&r)?;
+            self.record_run(&r, Some(now))?;
         }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.reconcile_followups(now))
+            .await
+            .map_err(fail)??;
         Ok(())
     }
     fn launch(&self, r: &ScheduledRun) -> Result<(), EngineError> {

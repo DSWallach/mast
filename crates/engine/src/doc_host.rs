@@ -4790,6 +4790,24 @@ impl DocHost {
             .map_or(0, |queue| queue.len())
     }
 
+    /// Read the live document or its persisted snapshot without opening a
+    /// session, joining a room, or starting command drains.
+    pub(crate) fn scheduled_run_doc(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<Arc<SessionDoc>>, EngineError> {
+        if let Some(handle) = self.loaded(chat_id) {
+            return Ok(Some(handle.doc.clone()));
+        }
+        let Some(snapshot) = self.inner.store.load_snapshot(chat_id)? else {
+            return Ok(None);
+        };
+        let raw = loro::LoroDoc::new();
+        raw.import(&snapshot)
+            .map_err(|error| EngineError::Other(format!("snapshot import failed: {error}")))?;
+        Ok(Some(Arc::new(SessionDoc::from_doc(raw))))
+    }
+
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }

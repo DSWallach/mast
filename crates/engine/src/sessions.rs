@@ -681,6 +681,20 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    /// A scheduled turn can finish before shutdown and before the scheduler
+    /// observes its live status. Check the recovered journal on the next boot.
+    pub(crate) fn last_journaled_turn_outcome(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<DoneStatus>, EngineError> {
+        Ok(self.inner.journal.find_rev(chat_id, |_, event| {
+            Some(match event {
+                AgentEvent::Done { status, .. } => Some(status),
+                _ => None,
+            })
+        })?.flatten())
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }

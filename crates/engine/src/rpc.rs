@@ -5466,10 +5466,11 @@ impl RpcService for EngineRpc {
             }
             methods::SCHEDULED_TASKS => {
                 let output_provided = params.pointer("/draft/output").is_some();
+                let after_success_provided = params.pointer("/draft/afterSuccess").is_some();
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
                 let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
                 let result = service
-                    .request_from_client(request, output_provided)
+                    .request_from_client(request, output_provided, after_success_provided)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&result)

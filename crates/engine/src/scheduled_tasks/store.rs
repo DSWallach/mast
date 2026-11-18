@@ -9,6 +9,29 @@ use std::{
 
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>, Arc<String>);
+
+#[derive(Clone, Copy)]
+pub(super) enum Followup {
+    Action,
+    Archive,
+}
+
+impl Followup {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Action => "action",
+            Self::Archive => "archive",
+        }
+    }
+
+    fn id(self, run: &ScheduledRun) -> &str {
+        match self {
+            Self::Action => &run.task_id,
+            Self::Archive => &run.id,
+        }
+    }
+}
+
 impl Store {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         blocking(|| {
@@ -26,7 +49,9 @@ impl Store {
             let tx = c.transaction().map_err(fail)?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, slot TEXT NOT NULL, created_at INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'launching', UNIQUE(task_id,slot));
-              CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);").map_err(fail)?;
+              CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS run_followups(kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, due INTEGER NOT NULL, PRIMARY KEY(kind,id));
+              CREATE INDEX IF NOT EXISTS run_followups_due ON run_followups(kind,due,id);").map_err(fail)?;
             if version == 1 {
                 tx.execute_batch("ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'launching'; UPDATE runs SET state=json_extract(body,'$.state');").map_err(fail)?;
             }
@@ -137,15 +162,78 @@ impl Store {
         })
     }
     pub fn update_run(&self, run: &ScheduledRun) -> Result<(), EngineError> {
+        self.write_run(run, None)
+    }
+
+    /// Record the transition and its follow-ups in one transaction. An action
+    /// represents the latest outcome per task; archiving is per chat.
+    pub(super) fn write_run(
+        &self,
+        run: &ScheduledRun,
+        followup_at: Option<i64>,
+    ) -> Result<(), EngineError> {
         blocking(|| {
-            self.0
-                .lock()
+            let mut c = self.0.lock().map_err(fail)?;
+            let tx = c.transaction().map_err(fail)?;
+            let body = serde_json::to_string(run).map_err(fail)?;
+            tx.execute(
+                "UPDATE runs SET body=?2,state=json_extract(?2,'$.state') WHERE id=?1",
+                params![run.id, body],
+            )
+            .map_err(fail)?;
+            if let Some(at) = followup_at {
+                let enqueue = |followup: Followup| {
+                    let (kind, id) = (followup.kind(), followup.id(run));
+                    tx.execute(
+                        "INSERT INTO run_followups VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,due=excluded.due",
+                        params![kind, id, body, at],
+                    )
+                    .map_err(fail)
+                };
+                enqueue(Followup::Action)?;
+                if run.state == ScheduledRunState::Completed
+                    && run.snapshot.output == ScheduledTaskOutput::Background
+                    && run.snapshot.after_success == ScheduledTaskAfterSuccess::Archive
+                {
+                    enqueue(Followup::Archive)?;
+                }
+            }
+            tx.commit().map_err(fail)
+        })
+    }
+
+    pub(super) fn due_followups(
+        &self,
+        followup: Followup,
+        now: i64,
+    ) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q = c.prepare(
+                "SELECT body FROM run_followups WHERE kind=?1 AND due<=?2 ORDER BY due,id LIMIT 32",
+            ).map_err(fail)?;
+            q.query_map(params![followup.kind(), now], |r| r.get::<_, String>(0))
                 .map_err(fail)?
-                .execute(
-                    "UPDATE runs SET body=?2,state=json_extract(?2,'$.state') WHERE id=?1",
-                    params![run.id, serde_json::to_string(run).map_err(fail)?],
-                )
-                .map_err(fail)?;
+                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+                .collect()
+        })
+    }
+
+    pub(super) fn finish_followup(
+        &self,
+        followup: Followup,
+        run: &ScheduledRun,
+        retry_at: Option<i64>,
+    ) -> Result<(), EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let (kind, id) = (followup.kind(), followup.id(run));
+            if let Some(at) = retry_at {
+                c.execute("UPDATE run_followups SET due=?3 WHERE kind=?1 AND id=?2", params![kind, id, at])
+            } else {
+                c.execute("DELETE FROM run_followups WHERE kind=?1 AND id=?2", params![kind, id])
+            }.map_err(fail)?;
             Ok(())
         })
     }
@@ -268,6 +356,7 @@ mod tests {
                 cutover_confirmed: false,
                 work_item_id: None,
                 output: Default::default(),
+                after_success: Default::default(),
             },
             created_at: 0,
             updated_at: 0,

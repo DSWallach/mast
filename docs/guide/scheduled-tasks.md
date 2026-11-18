@@ -60,6 +60,17 @@ edition without changing the recurring next-run time. **Pause** stops future
 dispatches; it does not stop an agent already running. Stop that agent from its
 session. **Delete** removes the schedule while retaining its run history.
 
+For Background tasks, **After a successful run** defaults to **Archive**.
+Mast archives the chat after the run completes and any open Required Action,
+input request or queued turn clears. Pinned chats and the personal assistant
+stay open. Choose **Keep** to leave successful runs unarchived. The control
+requires an updated execution device.
+
+A Background run that fails, stops early or waits for input leaves its chat
+unarchived. Look for the task's Required Action on its work item. It links to
+the run chat when one exists and updates as new runs need attention. A successful
+run resolves the action.
+
 ## Read editions
 
 The sidebar and Overview show the latest unarchived run per task on each device
@@ -71,7 +82,8 @@ choose **History** to see past runs. Reading or replying to an older edition
 does not promote it. The task manager lists
 configured schedules. Choose **Edit** to see a task's settings, with its own
 **Run history** at the bottom of that page. A scheduled session's **Run history**
-button opens the same task page. Choose an edition there to open its transcript.
+button opens the same task page. History shows recorded run outcomes and marks
+archived chats. Choose an edition there to open its transcript.
 An older session also offers **Latest run**. A new run does not interrupt the
 edition you are reading.
 
