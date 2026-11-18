@@ -16314,8 +16314,8 @@ mod right_tab_mouse_regressions {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
         let plus = cx.debug_bounds("right-surface-add").unwrap();
-        // Chips and the `+` block the strip's own hitbox, so a drop lands in
-        // the free space beside them.
+        // Chips and the `+` block the outer row's drop hitbox, so a drop
+        // lands in the free space beside them.
         let target = gpui::point(plus.right() + px(24.), plus.center().y);
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
