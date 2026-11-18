@@ -280,7 +280,7 @@ impl Store {
                 awaiting_request_id: None,
                 awaiting_since: None,
             };
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
                 params![
                     run.id,
@@ -291,7 +291,10 @@ impl Store {
                 ],
             )
             .map_err(fail)?;
-            remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+            // A duplicate claim leaves the first run row, and so its setting, alone.
+            if inserted == 1 {
+                remember_notion_writes(&tx, "run", &run.id, run.snapshot.write_to_notion)?;
+            }
             if manual.is_none() {
                 let mut task = task.clone();
                 task.next_due = evaluator::next(&task.draft.schedule, now).map_err(fail)?;
@@ -484,6 +487,28 @@ mod tests {
         assert_eq!(by_task("on"), (Some(true), Some(true)));
         assert_eq!(by_task("legacy"), (None, None));
         assert_eq!(store.active().unwrap().iter().filter(|r| r.snapshot.write_to_notion == Some(false)).count(), 1);
+    }
+    #[test]
+    fn a_duplicate_claim_keeps_the_first_runs_notion_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut first = task(dir.path());
+        first.draft.write_to_notion = Some(false);
+        store.save(first.clone(), 0, "save", "inputs").unwrap();
+        store.claim(&first, 60_000, 60_000, None, None).unwrap();
+        // The same slot claimed again, after the task was edited the other way.
+        let mut second = first.clone();
+        second.draft.write_to_notion = Some(true);
+        store.claim(&second, 60_000, 60_000, None, None).unwrap();
+        drop(store);
+        let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
+        c.execute_batch("UPDATE runs SET body=json_remove(body,'$.snapshot.writeToNotion');")
+            .unwrap();
+        drop(c);
+        let store = Store::open(dir.path()).unwrap();
+        let runs = store.runs(None, None).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].snapshot.write_to_notion, Some(false));
     }
     #[test]
     fn a_rare_task_keeps_its_newest_run_beyond_the_history_page() {

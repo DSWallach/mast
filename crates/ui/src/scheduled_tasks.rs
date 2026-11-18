@@ -2011,6 +2011,119 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_save_action_sends_the_notion_setting_and_reopens_both_ways(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            for (id, capabilities) in [
+                ("current", vec![capabilities::SCHEDULED_TASK_NOTION_WRITES_V1]),
+                ("older", vec![]),
+            ] {
+                s.devices.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "name": id, "platform": "macos", "capabilities": capabilities,
+                    }))
+                    .unwrap(),
+                );
+            }
+        });
+        // Records every request the page sends, like the shell's `record_engine`.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let guard = runtime.enter();
+        let (out, mut sent) = tokio::sync::mpsc::channel::<String>(32);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(4);
+        let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+        std::mem::forget(_replies);
+        state.update(cx, |s, _| s.set_test_engine(engine));
+        drop(guard);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is offered")).center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // The Save request the page just sent, as the host would receive it.
+        let saved = |sent: &mut tokio::sync::mpsc::Receiver<String>| {
+            std::iter::from_fn(|| sent.try_recv().ok())
+                .map(|line| serde_json::from_str::<serde_json::Value>(&line).unwrap())
+                .filter(|call| call["method"] == mast_rpc::methods::SCHEDULED_TASKS)
+                .map(|call| call["params"].clone())
+                .find(|params| params.get("draft").is_some())
+                .expect("Save was sent")
+        };
+        let reopen = |cx: &mut gpui::VisualTestContext, params: serde_json::Value| {
+            let ScheduledTasksRequest::Save { draft, .. } = serde_json::from_value(params).unwrap() else {
+                panic!("a Save request");
+            };
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                p.edit(
+                    Some(ScheduledTask {
+                        id: "task".into(),
+                        revision: 1,
+                        device_id: "current".into(),
+                        draft,
+                        created_at: 0,
+                        updated_at: 0,
+                        next_due: None,
+                        deleted: false,
+                        import_source: None,
+                        source_handoff_at: None,
+                    }),
+                    cx,
+                );
+                p.error = None;
+            });
+            cx.run_until_parked();
+        };
+        let setting = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+
+        // Off (the new-task default) -> on.
+        click(cx, "task-notion-writes");
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], true);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(true));
+        // On -> off.
+        click(cx, "task-notion-writes");
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], false);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(false));
+
+        // A host that predates the setting never receives the field.
+        page.update(cx, |p, cx| {
+            p.busy = false;
+            p.target = Some("older".into());
+            p.edit(None, cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            if let Some(e) = p.editor.as_mut() {
+                e.draft.write_to_notion = Some(true);
+            }
+            cx.notify();
+        });
+        click(cx, "task-save");
+        assert!(saved(&mut sent)["draft"].get("writeToNotion").is_none());
+        drop(runtime);
+    }
+
+    #[gpui::test]
     fn task_list_opens_settings_with_only_that_tasks_history_including_background_runs(
         cx: &mut gpui::TestAppContext,
     ) {
