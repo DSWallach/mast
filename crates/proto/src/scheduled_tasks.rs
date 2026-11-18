@@ -13,6 +13,10 @@ pub struct ScheduledChat {
     /// The identity an imported run carried before it joined its native task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_task_id: Option<String>,
+    /// An imported run's prompt file (its tag's `file`), which the source
+    /// registry row lists as `filePath`. `None` for native runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
     /// The run's task was deleted or never became a native task; default
     /// views hide it, the Scheduled tasks page still lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -268,7 +272,11 @@ mod tests {
             ..Default::default()
         };
         let value = serde_json::to_value(&info).unwrap();
-        assert!(value.get("retired").is_none() && value.get("legacyTaskId").is_none());
+        assert!(
+            value.get("retired").is_none()
+                && value.get("legacyTaskId").is_none()
+                && value.get("sourceFile").is_none()
+        );
         let draft: serde_json::Value =
             serde_json::json!({"retired": true, "taskId": "t", "taskName": "n", "runId": "r"});
         assert!(

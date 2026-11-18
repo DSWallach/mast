@@ -2588,6 +2588,7 @@ impl Overview {
         let by_id: HashMap<&str, &OverviewRow> =
             rows.iter().map(|row| (row.chat.id.as_str(), row)).collect();
         let state = self.state.read(cx);
+        let hidden_runs = mast_proto::hidden_task_chat_ids(&state.chats);
         state
             .chats
             .iter()
@@ -2611,6 +2612,7 @@ impl Overview {
                 });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 let visible = shown_by_toggles
+                    && !hidden_runs.contains(chat.id.as_str())
                     && self
                         .sidebar_scope
                         .as_deref()
@@ -9163,7 +9165,7 @@ mod logic_tests {
                 "id": id, "deviceId": "host", "archived": false, "cwd": "/work/alpha",
                 "createdAt": "2026-01-01T00:00:00Z",
                 "scheduledTaskInfo": {
-                    "taskId": task, "taskName": "stall-watch", "runId": id,
+                    "taskId": task, "taskName": "routine-a", "runId": id,
                     "sessionCreatedAt": created, "retired": retired
                 }
             }))
@@ -9193,7 +9195,7 @@ mod logic_tests {
                 "id": "watch", "revision": 1, "deviceId": "host", "createdAt": 0,
                 "updatedAt": 0, "nextDue": 1_800_000_000_000i64,
                 "draft": {
-                    "name": "Codespace Stall Watch", "prompt": "p", "cwd": "/work",
+                    "name": "Workspace health check", "prompt": "p", "cwd": "/work",
                     "spaceId": null, "enabled": true, "graceMinutes": 30,
                     "schedule": {"type": "cron", "expression": "*/30 9-17 * * 1-5",
                         "timezone": "America/New_York"},
@@ -9230,12 +9232,32 @@ mod logic_tests {
                 .unwrap()
                 .chat;
             let (task, _) = o.task_for(latest).expect("the host reported the task");
-            assert_eq!(task.draft.name, "Codespace Stall Watch");
+            assert_eq!(task.draft.name, "Workspace health check");
+            // The Work Outline sees every run but shows only the latest.
+            let visible = |id: &str| {
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == id)
+                    .unwrap_or_else(|| panic!("{id} reaches the outline"))
+                    .visible
+            };
+            assert!(visible("latest") && visible("plain"));
+            assert!(!visible("older") && !visible("gone"));
         });
         assert!(vcx.debug_bounds("overview-task-row-watch").is_some());
         assert!(vcx.debug_bounds("overview-task-history-watch").is_some());
         assert!(vcx.debug_bounds("overview-list-chat-latest").is_none());
         assert!(vcx.debug_bounds("overview-list-chat-plain").is_some());
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    struct ScheduledTaskOverviewFixture(Entity<Overview>);
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    impl Render for ScheduledTaskOverviewFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+        }
     }
 
     #[cfg(all(feature = "snapshot", target_os = "macos"))]
@@ -9259,7 +9281,7 @@ mod logic_tests {
                         });
                         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
                         let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
-                        cx.new(|cx| {
+                        let overview = cx.new(|cx| {
                             let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
                             overview.view_mode = OverviewMode::List;
                             let task = serde_json::from_value(serde_json::json!({
@@ -9274,10 +9296,79 @@ mod logic_tests {
                                 device_id:"host".into(), tasks:vec![task], ..Default::default()
                             })));
                             overview
-                        })
+                        });
+                        cx.new(|_| ScheduledTaskOverviewFixture(overview))
                     },
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_outline_snapshot() -> anyhow::Result<()> {
+        for (name, appearance) in [
+            ("light", crate::theme::Appearance::Light),
+            ("dark", crate::theme::Appearance::Dark),
+        ] {
+            crate::snapshot::render_to_png(
+                &format!("scheduled-task-outline-{name}"),
+                gpui::size(px(1100.0), px(480.0)),
+                crate::ui_style::UiStyleId::Default,
+                appearance,
+                |_, cx| {
+                    let _ = crate::typography::register_fonts(cx);
+                    let state = cx.new(|_| AppState::new());
+                    state.update(cx, |s, _| {
+                        s.spaces = vec![serde_json::from_value(serde_json::json!({
+                            "id": "s1", "path": "/work/project", "deviceId": "host",
+                            "createdAt": "2026-11-16T12:00:00Z",
+                        })).unwrap()];
+                        s.chats = [
+                            ("latest", "Health check · latest run", 2),
+                            ("earlier", "Health check · earlier run", 1),
+                        ]
+                        .into_iter()
+                        .map(|(id, title, created)| serde_json::from_value(serde_json::json!({
+                            "id": id, "title": title, "deviceId": "host", "spaceId": "s1",
+                            "archived": false, "createdAt": "2026-11-16T12:00:00Z",
+                            "scheduledTaskInfo": {
+                                "taskId": "routine", "taskName": "Health check", "runId": id,
+                                "sessionCreatedAt": created
+                            }
+                        })).unwrap())
+                        .collect();
+                    });
+                    let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+                    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                    let overview = cx.new(|cx| {
+                        let mut overview = Overview::new(
+                            state, gpui::WeakEntity::new_invalid(), transcript, composer, cx,
+                        );
+                        let mut item = crate::work_outline::store::fixture_snapshot("s1").items.remove(0);
+                        item.title = "Workspace health".into();
+                        item.child_ids.clear();
+                        item.chat_ids = vec!["earlier".into(), "latest".into()];
+                        item.rollup = Default::default();
+                        let snapshot = WorkOutlineSnapshot {
+                            space_id: "s1".into(),
+                            available: true,
+                            synced: true,
+                            root_work_item_ids: vec![item.id.clone()],
+                            items: vec![item],
+                            ..Default::default()
+                        };
+                        // Keep both associations in the fixture so this isolates
+                        // Overview's visibility check from engine materialization.
+                        overview.set_outline_loads(fixture_loads(Some(snapshot)), cx);
+                        overview.set_mode(OverviewMode::Outline, cx);
+                        overview
+                    });
+                    cx.new(|_| ScheduledTaskOverviewFixture(overview))
+                },
+            )?;
         }
         Ok(())
     }

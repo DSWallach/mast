@@ -76,6 +76,18 @@ impl Store {
                 .collect()
         })
     }
+    /// Each task's newest run, which the paginated history can leave out
+    /// for a task that runs rarely.
+    pub fn latest_per_task(&self) -> Result<Vec<ScheduledRun>, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let mut q=c.prepare("SELECT body FROM runs r WHERE NOT EXISTS (SELECT 1 FROM runs n WHERE n.task_id=r.task_id AND (n.created_at>r.created_at OR (n.created_at=r.created_at AND n.id>r.id)))").map_err(fail)?;
+            q.query_map([], |r| r.get::<_, String>(0))
+                .map_err(fail)?
+                .map(|r| serde_json::from_str(&r.map_err(fail)?).map_err(fail))
+                .collect()
+        })
+    }
     pub fn active(&self) -> Result<Vec<ScheduledRun>, EngineError> {
         blocking(|| {
             // Active runs must not disappear behind the paginated history limit.
@@ -282,6 +294,25 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.active().unwrap().len(), 1);
         assert_eq!(store.runs(None, None).unwrap()[0].snapshot.name, "Daily");
+    }
+    #[test]
+    fn a_rare_task_keeps_its_newest_run_beyond_the_history_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut rare = task(dir.path());
+        rare.id = "rare".into();
+        let busy = task(dir.path());
+        store.save(rare.clone(), 0, "save-rare", "rare").unwrap();
+        store.save(busy.clone(), 0, "save-busy", "busy").unwrap();
+        store.claim(&rare, 1, 1, None, Some("missed")).unwrap();
+        for at in 2..=120 {
+            store.claim(&busy, at, at, None, Some("missed")).unwrap();
+        }
+        assert!(store.runs(None, None).unwrap().iter().all(|r| r.task_id == "task"));
+        let latest = store.latest_per_task().unwrap();
+        assert_eq!(latest.len(), 2);
+        assert!(latest.iter().any(|r| r.task_id == "rare" && r.created_at == 1));
+        assert!(latest.iter().any(|r| r.task_id == "task" && r.created_at == 120));
     }
     #[test]
     fn revisions_and_idempotency() {

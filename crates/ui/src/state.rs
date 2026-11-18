@@ -1963,9 +1963,10 @@ impl AppState {
         now: DateTime<Utc>,
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let covers = self.personal_assistant.coverage(&self.chats);
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| !self.personal_assistant.covers(chat))
+            .filter(|(_, chat)| !covers(chat))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
@@ -6452,6 +6453,42 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(rows, ["b"]);
+    }
+
+    #[test]
+    fn an_assistant_designated_on_an_imported_run_leaves_the_sidebar_after_the_merge() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let run = |id: &str, ix: i64, task: &str, legacy: Option<&str>| {
+            let mut c = chat(id, ix, Some(ix));
+            c.scheduled_task_info = Some(mast_proto::ScheduledChat {
+                task_id: task.into(),
+                task_name: "Routine".into(),
+                run_id: id.into(),
+                session_created_at: Some(ix),
+                legacy_task_id: legacy.map(Into::into),
+                ..Default::default()
+            });
+            c
+        };
+        let imported = run("imported", 0, "legacy", None);
+        state.apply_chats(vec![imported.clone(), chat("b", 2, Some(0))]);
+        state.personal_assistant.apply(mast_proto::PersonalAssistantReply {
+            assistant: Some(mast_proto::PersonalAssistant::for_chat(&imported, 0)),
+        });
+        // The engine merges the imported run into its native task, which then runs again.
+        state.apply_chats(vec![
+            run("imported", 0, "native", Some("legacy")),
+            run("native-run", 1, "native", None),
+            chat("b", 2, Some(0)),
+        ]);
+        assert!(state.is_personal_assistant("native-run"));
+        let rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(rows, ["b"], "the assistant section is its only place");
     }
 
     #[test]

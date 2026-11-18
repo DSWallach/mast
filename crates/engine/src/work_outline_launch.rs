@@ -75,6 +75,23 @@ pub(crate) fn launch_scheduled_chat(
         .as_deref()
         .ok_or_else(|| EngineError::Other("Missing scheduled chat identity".into()))?;
     let draft = &run.snapshot;
+    let request = prompt_request(
+        &WorkItemPrompt {
+            text: draft.prompt.clone(),
+            attachments: vec![],
+        },
+        Some(&draft.config),
+        &draft.cwd,
+    );
+    // Check before the first write, like an item launch: a run that cannot
+    // start leaves no chat behind to become its task's latest run.
+    let item = match draft.work_item_id.as_deref() {
+        Some(item) => Some((
+            item,
+            validate_scheduled_item(workspace, host, sessions, run, chat_id, item, &request)?,
+        )),
+        None => None,
+    };
     workspace.create_chat(
         chat_id,
         draft.space_id.as_deref(),
@@ -97,18 +114,10 @@ pub(crate) fn launch_scheduled_chat(
     }
     let message_id = scheduled_id(&run.id, roles::MESSAGE);
     let command_id = scheduled_id(&run.id, roles::COMMAND);
-    let request = prompt_request(
-        &WorkItemPrompt {
-            text: draft.prompt.clone(),
-            attachments: vec![],
-        },
-        Some(&draft.config),
-        &draft.cwd,
-    );
-    let payload = match draft.work_item_id.as_deref() {
-        Some(item) => scheduled_item_payload(
-            workspace, host, sessions, run, chat_id, item, &message_id, request,
-        )?,
+    let payload = match item {
+        Some((item, deliver)) => {
+            scheduled_item_payload(workspace, run, chat_id, item, &message_id, request, deliver)?
+        }
         None => SessionCommandPayload::Run {
             request,
             message_id,
@@ -118,27 +127,61 @@ pub(crate) fn launch_scheduled_chat(
     Ok(())
 }
 
-/// Attach a scheduled run to its task's work item (steps 4 and 6 of the item
-/// launch, with the run as the operation) and pick the first Turn's payload:
-/// pinned to the item's instructions when it has any. Replay-safe: a retry
-/// finds the assignment, revision and application it already wrote.
-#[allow(clippy::too_many_arguments)]
-fn scheduled_item_payload(
+/// The checks an item launch makes before writing anything: Work Outline
+/// writes are on, the item still exists, and the harness can receive its
+/// instructions when the run delivers them. Returns whether it delivers:
+/// the same stable decision as an item launch, so a revision this run
+/// already created means it delivers, whatever the item holds now.
+fn validate_scheduled_item(
     workspace: &WorkspaceHost,
     host: &DocHost,
     sessions: &SessionsEngine,
     run: &mast_proto::ScheduledRun,
     chat_id: &str,
     work_item_id: &str,
-    message_id: &str,
-    request: RunRequest,
-) -> Result<SessionCommandPayload, EngineError> {
-    let failed = |e: WorkOutlineError| EngineError::Other(e.message);
+    request: &RunRequest,
+) -> Result<bool, EngineError> {
     if crate::work_outline::writes_disabled() {
         return Err(EngineError::Other(
             "Work Outline changes are turned off on this device".into(),
         ));
     }
+    let space = workspace
+        .work_item_space(work_item_id)
+        .ok_or_else(|| EngineError::Other("The task's work item was deleted".into()))?;
+    let deliver = workspace.registry_row_state(
+        mast_doc::KIND_INSTRUCTION_REVISIONS,
+        &derive_id(&run.id, roles::REVISION),
+    ) != RowState::Absent
+        || !mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space))
+            .effective_instructions(work_item_id)
+            .entries
+            .is_empty();
+    if deliver
+        && let mast_harness::InstructionSupport::Unsupported { reason, .. } =
+            sessions.instruction_support(host.harness_for_request(chat_id, request))?
+    {
+        return Err(EngineError::Other(format!(
+            "This harness cannot receive the work item's instructions: {reason}"
+        )));
+    }
+    Ok(deliver)
+}
+
+/// Attach a scheduled run to its task's work item (steps 4 and 6 of the item
+/// launch, with the run as the operation) and pick the first Turn's payload:
+/// pinned to the item's instructions when `deliver`. Replay-safe: a retry
+/// finds the assignment, revision and application it already wrote.
+fn scheduled_item_payload(
+    workspace: &WorkspaceHost,
+    run: &mast_proto::ScheduledRun,
+    chat_id: &str,
+    work_item_id: &str,
+    message_id: &str,
+    request: RunRequest,
+    deliver: bool,
+) -> Result<SessionCommandPayload, EngineError> {
+    let failed = |e: WorkOutlineError| EngineError::Other(e.message);
     let actor = WorkOutlineActor {
         kind: WorkOutlineActorKind::User,
         device_id: workspace.device_id().to_owned(),
@@ -161,32 +204,11 @@ fn scheduled_item_payload(
             )
             .map_err(failed)?;
     }
-    // Same stable decision as an item launch: a revision this run already
-    // created means it delivers instructions, whatever the item holds now.
-    let space = workspace
-        .work_item_space(work_item_id)
-        .ok_or_else(|| EngineError::Other("The task's work item was deleted".into()))?;
-    let deliver = workspace.registry_row_state(
-        mast_doc::KIND_INSTRUCTION_REVISIONS,
-        &derive_id(&run.id, roles::REVISION),
-    ) != RowState::Absent
-        || !mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space))
-            .effective_instructions(work_item_id)
-            .entries
-            .is_empty();
     if !deliver {
         return Ok(SessionCommandPayload::Run {
             request,
             message_id: message_id.to_owned(),
         });
-    }
-    let harness = host.harness_for_request(chat_id, &request);
-    if let mast_harness::InstructionSupport::Unsupported { reason, .. } =
-        sessions.instruction_support(harness)?
-    {
-        return Err(EngineError::Other(format!(
-            "This harness cannot receive the work item's instructions: {reason}"
-        )));
     }
     let revision_id = workspace
         .work_outline_mutate(

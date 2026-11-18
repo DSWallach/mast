@@ -69,7 +69,7 @@ pub fn outline_sidebar_sections(snapshot: &WorkOutlineSnapshot) -> Vec<SidebarSe
             continue;
         }
         if item.parent_work_item_id.is_none()
-            && item.chat_ids.is_empty()
+            && snapshot.listed_chat_ids(item).next().is_none()
             && !item.child_ids.is_empty()
             && item
                 .child_ids
@@ -109,7 +109,7 @@ pub fn outline_sidebar_sections(snapshot: &WorkOutlineSnapshot) -> Vec<SidebarSe
         if let Some(index) = indices.get(&id) {
             sections[*index]
                 .session_ids
-                .extend(item.chat_ids.iter().cloned());
+                .extend(snapshot.listed_chat_ids(item).cloned());
         }
     }
     for section in &mut sections {
