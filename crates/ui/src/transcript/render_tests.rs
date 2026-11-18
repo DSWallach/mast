@@ -49,6 +49,7 @@ fn hover_moves_between_rows_of_the_same_entry(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
+        cx.set_reduce_motion(true);
         crate::settings::init(Default::default(), dir.path(), cx);
     });
     let state = cx.new(|_| AppState::new());
@@ -62,7 +63,7 @@ fn hover_moves_between_rows_of_the_same_entry(cx: &mut gpui::TestAppContext) {
             copy_text: (index == 1).then(|| "copied text".into()),
         }).collect();
     });
-    let (_, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
+    let (fixture, vcx) = cx.add_window_view(|_, _| RowFixture(transcript.clone()));
     vcx.run_until_parked();
     let first = vcx.debug_bounds("first-row").unwrap().center();
     vcx.simulate_mouse_move(first, None, gpui::Modifiers::default());
@@ -75,6 +76,12 @@ fn hover_moves_between_rows_of_the_same_entry(cx: &mut gpui::TestAppContext) {
         assert_eq!(this.hovered_entry.as_ref().map(|(row, entry)| (row.as_ref(), entry.as_ref())), Some(("row-1", "entry")));
         assert_eq!(this.list.logical_scroll_top().item_ix, 0);
     });
+    fixture.update(vcx, |_, cx| cx.notify());
+    vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+    let bounds = vcx.debug_bounds("second-row").unwrap();
+    let copy = gpui::point(bounds.center().x - px(crate::settings::TRANSCRIPT_WIDTH_DEFAULT / 2.0) + px(125.0), bounds.origin.y + px(45.0));
+    vcx.simulate_click(copy, gpui::Modifiers::default());
+    transcript.read_with(vcx, |this, _| assert_eq!(this.copied_message.as_deref(), Some("entry")));
 }
 
 #[gpui::test]
@@ -148,6 +155,58 @@ fn live_markdown_seeds_historical_text_before_rendering(cx: &mut gpui::TestAppCo
             assert!(veil.borrow_mut().advance(0, "Historical text", Instant::now()).is_empty());
             assert_eq!(this.list.logical_scroll_top().item_ix, 0);
         });
+    });
+}
+
+#[gpui::test]
+fn live_frame_statistics_count_only_valid_live_rows(cx: &mut gpui::TestAppContext) {
+    const CHILD: &str = "MAST_RENDER_STATS_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transcript::render_tests::live_frame_statistics_count_only_valid_live_rows", "--nocapture"])
+            .env(CHILD, "1").env("MAST_FRAME_STATS", "1").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    #[derive(Clone)]
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = LogWriter(log.clone());
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let (_, vcx) = cx.add_window_view(|_, _| EmptyFixture);
+        vcx.update(|window, cx| transcript.update(cx, |this, cx| {
+            let tree = Arc::new(crate::markdown::parse_full("Live text"));
+            this.rows = vec![Row {
+                id: "live".into(), version: 0, turn_start: true,
+                kind: RowKind::LiveMarkdown { tree: tree.clone(), block_ix: 0 },
+                entry_id: "entry".into(), timestamp: None, copy_text: None,
+            }];
+            for _ in 0..FRAME_STATS_WINDOW - 1 { let _ = this.render_row(0, window, cx); }
+            this.rows[0].kind = RowKind::Markdown { tree: tree.clone(), block_ix: 0 };
+            let _ = this.render_row(0, window, cx);
+            this.rows[0].kind = RowKind::LiveMarkdown { tree: tree.clone(), block_ix: 1 };
+            let _ = this.render_row(0, window, cx);
+            assert!(!String::from_utf8_lossy(&log.lock().unwrap()).contains("live-row render cost"));
+            this.rows[0].kind = RowKind::LiveMarkdown { tree, block_ix: 0 };
+            let _ = this.render_row(0, window, cx);
+            assert!(String::from_utf8_lossy(&log.lock().unwrap()).contains("live-row render cost"));
+        }));
     });
 }
 
