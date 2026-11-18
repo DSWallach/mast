@@ -142,90 +142,20 @@ impl Composer {
         let engine = &send.engine;
         let message_id = &send.message_id;
         let chat_id = &send.chat_id;
-        let workspace_choice = send.workspace_choice;
         let resolved = &send.resolved;
         let host_device_id = &send.host_device_id;
-        let space_path = &send.space_path;
         let staged_appshots = &send.staged_appshots;
         let staged = &send.staged;
         let text = &send.text;
         let queue = send.queue;
         let clean_queue_attachment_text = send.clean_queue_attachment_text;
-        let workspace_message = &send.workspace_message;
-        let worktree_name_source = &send.worktree_name_source;
         #[cfg(test)]
         let fail_send_before_dispatch = send.fail_send_before_dispatch;
         let (content, attachment_paths, transfers) = Self::stage_send_attachments(send, this, cx).await?;
 
-        let (mut cwd, run_worktree) = Self::create_send_chat(send, cx).await;
+        let (cwd, run_worktree) = Self::create_send_chat(send, cx).await;
 
-                // Worktree chip pre-dispatch step (new chats only; after
-                // createChat so the engine has a row to stamp the worktree
-                // cwd onto). Never fails the send: every error path falls
-                // back to the base checkout.
-                if let (Some(choice), Some(repo_path)) = (workspace_choice, &space_path) {
-                    use crate::workspace_chip as wc;
-                    let set_outcome = |outcome: wc::WorkspaceOutcome, failure: Option<String>, cx: &mut gpui::AsyncApp| {
-                        let chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer
-                                .pickers
-                                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, outcome, cx));
-                            if let Some(failure) = failure {
-                                composer.failure = Some(failure.into());
-                                composer.failure_key = Some(chat_id.clone());
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                    };
-                    let mut create = choice.first_step() == wc::PreSendStep::Create;
-                    let mut plan_reply: Option<wc::PlanReply> = None;
-                    if choice.first_step() == wc::PreSendStep::Plan {
-                        let planned = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::PLAN_CHAT_WORKSPACE,
-                            serde_json::json!({ "message": workspace_message, "cwd": repo_path }),
-                            wc::PLAN_TIMEOUT,
-                        )
-                        .await
-                        .and_then(|value| wc::decode_plan(&value));
-                        if wc::should_create_after_plan(&planned) {
-                            create = true;
-                            plan_reply = planned.ok();
-                            set_outcome(wc::WorkspaceOutcome::Creating, None, cx);
-                        } else {
-                            if let Err(err) = &planned {
-                                tracing::warn!(error = %err, "PlanChatWorkspace failed; using the main checkout");
-                            }
-                            set_outcome(wc::main_after_plan(planned), None, cx);
-                        }
-                    }
-                    if create {
-                        let created = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::CREATE_CHAT_WORKTREE,
-                            serde_json::json!({
-                                "chatId": chat_id,
-                                "repoPath": repo_path,
-                                "name": wc::worktree_name(&worktree_name_source),
-                            }),
-                            wc::CREATE_TIMEOUT,
-                        )
-                        .await;
-                        let resolution = wc::resolve_create(created, plan_reply);
-                        if let Some(worktree) = resolution.cwd {
-                            // The engine already stamped the chat's dispatch
-                            // cwd; the Run request agrees with it.
-                            cwd = worktree;
-                        } else if let Some(failure) = &resolution.failure {
-                            tracing::warn!(error = %failure, "CreateChatWorktree failed; dispatching in the base checkout");
-                        }
-                        set_outcome(resolution.outcome, resolution.failure, cx);
-                    }
-                }
+        let cwd = Self::resolve_send_workspace(send, this, cx, cwd).await;
 
                 #[cfg(test)]
                 if fail_send_before_dispatch {
@@ -383,6 +313,84 @@ impl Composer {
                     .ok();
                 }
                 Ok(None)
+    }
+
+    async fn resolve_send_workspace(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, mut cwd: String) -> String {
+        let engine = &send.engine;
+        let chat_id = &send.chat_id;
+        let workspace_choice = send.workspace_choice;
+        let space_path = &send.space_path;
+        let workspace_message = &send.workspace_message;
+        let worktree_name_source = &send.worktree_name_source;
+                // Worktree chip pre-dispatch step (new chats only; after
+                // createChat so the engine has a row to stamp the worktree
+                // cwd onto). Never fails the send: every error path falls
+                // back to the base checkout.
+                if let (Some(choice), Some(repo_path)) = (workspace_choice, &space_path) {
+                    use crate::workspace_chip as wc;
+                    let set_outcome = |outcome: wc::WorkspaceOutcome, failure: Option<String>, cx: &mut gpui::AsyncApp| {
+                        let chat_id = chat_id.clone();
+                        this.update(cx, |composer, cx| {
+                            composer
+                                .pickers
+                                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, outcome, cx));
+                            if let Some(failure) = failure {
+                                composer.failure = Some(failure.into());
+                                composer.failure_key = Some(chat_id.clone());
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    };
+                    let mut create = choice.first_step() == wc::PreSendStep::Create;
+                    let mut plan_reply: Option<wc::PlanReply> = None;
+                    if choice.first_step() == wc::PreSendStep::Plan {
+                        let planned = attachments::call_with_timeout(
+                            &engine,
+                            cx.background_executor(),
+                            wc::PLAN_CHAT_WORKSPACE,
+                            serde_json::json!({ "message": workspace_message, "cwd": repo_path }),
+                            wc::PLAN_TIMEOUT,
+                        )
+                        .await
+                        .and_then(|value| wc::decode_plan(&value));
+                        if wc::should_create_after_plan(&planned) {
+                            create = true;
+                            plan_reply = planned.ok();
+                            set_outcome(wc::WorkspaceOutcome::Creating, None, cx);
+                        } else {
+                            if let Err(err) = &planned {
+                                tracing::warn!(error = %err, "PlanChatWorkspace failed; using the main checkout");
+                            }
+                            set_outcome(wc::main_after_plan(planned), None, cx);
+                        }
+                    }
+                    if create {
+                        let created = attachments::call_with_timeout(
+                            &engine,
+                            cx.background_executor(),
+                            wc::CREATE_CHAT_WORKTREE,
+                            serde_json::json!({
+                                "chatId": chat_id,
+                                "repoPath": repo_path,
+                                "name": wc::worktree_name(&worktree_name_source),
+                            }),
+                            wc::CREATE_TIMEOUT,
+                        )
+                        .await;
+                        let resolution = wc::resolve_create(created, plan_reply);
+                        if let Some(worktree) = resolution.cwd {
+                            // The engine already stamped the chat's dispatch
+                            // cwd; the Run request agrees with it.
+                            cwd = worktree;
+                        } else if let Some(failure) = &resolution.failure {
+                            tracing::warn!(error = %failure, "CreateChatWorktree failed; dispatching in the base checkout");
+                        }
+                        set_outcome(resolution.outcome, resolution.failure, cx);
+                    }
+                }
+
+        cwd
     }
 
     async fn create_send_chat(send: &PreparedSend, cx: &mut gpui::AsyncApp) -> (String, Option<mast_proto::WorktreeSpec>) {
