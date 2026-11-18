@@ -89,6 +89,8 @@ use split_pairing::*;
 pub use split_pairing::{line_anchor, split_pairs, split_pairs_upto, LinePair};
 use syntax_excerpts::*;
 pub use patch_parser::{file_notices, parse_patch, truncate_file_lines};
+#[cfg(test)]
+use patch_parser::{parse_git_paths, parse_hunk_header};
 use horizontal_geometry::*;
 #[cfg(test)]
 pub(crate) use horizontal_geometry::{CH_ADVANCE_LOOKUPS, SHAPED_LINES, reset_ch_advance_cache};
