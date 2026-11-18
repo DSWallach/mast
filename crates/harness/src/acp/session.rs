@@ -1,6 +1,8 @@
 //! Ownership and event ordering for one ACP session.
 use super::*;
 
+const STARVE_GRACE: Duration = Duration::from_secs(2);
+
 #[cfg(unix)]
 type SignalTarget = i32;
 #[cfg(windows)]
@@ -351,6 +353,153 @@ impl AcpSessionState {
                 }
                 return LoopControl::Stop;
             }
+        }
+        LoopControl::Continue
+    }
+
+    async fn settle_steering(
+        &mut self,
+        res: Result<Value, HarnessError>,
+        incoming: &mut mpsc::Receiver<Incoming>,
+    ) -> LoopControl {
+        let (text, _) = self.steering_call.take().expect("guarded by if");
+        let outcome = match &res {
+            Ok(resp) => resp
+                .get("outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("injected")
+                .to_owned(),
+            Err(e) => {
+                tracing::debug!(
+                    target: "mast_harness::acp",
+                    "_session/steering failed (redelivering): {e}"
+                );
+                // Failed calls redeliver like a lost turn-end race.
+                "promptRequired".to_owned()
+            }
+        };
+        if self.interrupted {
+            // The run is winding down; the steer is abandoned like
+            // any queued steer at interrupt.
+        } else if outcome != "promptRequired" {
+            // Injected into a live turn → a Steered boundary. But if
+            // the turn ended while the call was in flight, the
+            // injection was consumed by THAT turn — its output
+            // already streamed and the turn's Done already closed the
+            // segment. Emitting Steered after that Done re-armed the
+            // consumer (parked session → Working) with no next turn
+            // and no Done ever coming — the stranded-Working /
+            // eternal-timer bug. Post-turn: nothing left to do.
+            if self.turn.is_some() {
+                // The injection proves the turn is LIVE: any settle
+                // deadline armed by an earlier noRunningTurn reply
+                // is no longer valid.
+                self.starve_deadline = None;
+                // Pre-injection updates can still sit in `incoming`
+                // (responses bypass that queue): drain them into the
+                // CURRENT segment first, or text the agent streamed
+                // before the injection landed folds after the split —
+                // the transcript attributes it to the reply-to-steer.
+                let mut consumer_gone = false;
+                while let Ok(inc) = incoming.try_recv() {
+                    match inc {
+                        Incoming::Notification { method, params } => {
+                            let events =
+                                session_update_events(&method, &params, &self.session_id, &mut self.subagents);
+                            for ev in events {
+                                if !send(&self.event_tx, ev).await {
+                                    consumer_gone = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Incoming::Request { id, method, params } => {
+                            for ev in handle_server_request_live(
+                                &self.client,
+                                id,
+                                &method,
+                                &params,
+                                &self.request_input,
+                        &self.session_id,
+                            ) {
+                                if !send(&self.event_tx, ev).await {
+                                    consumer_gone = true;
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if consumer_gone {
+                        break;
+                    }
+                }
+                if consumer_gone {
+                    return LoopControl::Stop;
+                }
+                let (prev, next) = rotate(&mut self.assistant_message_id);
+                if !send(
+                    &self.event_tx,
+                    AgentEvent::Steered {
+                        assistant_message_id: Some(prev),
+                        next_assistant_message_id: Some(next),
+                    },
+                )
+                .await
+                {
+                    return LoopControl::Stop;
+                }
+            }
+        } else if self.turn.is_some() {
+            // Raced the turn end: redeliver at the boundary the
+            // loop is about to hit. `noRunningTurn` is stronger —
+            // the adapter says nothing is running while our prompt
+            // is still outstanding: the starved-turn signature. Arm
+            // the grace deadline; if the prompt's response does not
+            // land first, the recovery arm below settles the dead
+            // turn and promotes this steer.
+            if res
+                .as_ref()
+                .ok()
+                .and_then(|r| r.get("reason"))
+                .and_then(Value::as_str)
+                == Some("noRunningTurn")
+            {
+                tracing::warn!(
+                    target: "mast_harness::acp",
+                    "steering answered noRunningTurn with a prompt \
+                     outstanding; arming starved-turn recovery"
+                );
+                self.starve_deadline =
+                    Some(tokio::time::Instant::now() + STARVE_GRACE);
+            }
+            self.queued_steers.push_back(text);
+        } else {
+            // The turn ended while the call was in flight and its
+            // boundary already passed — the steer becomes the next
+            // turn directly.
+            let (prev, next) = rotate(&mut self.assistant_message_id);
+            if !send(
+                &self.event_tx,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                },
+            )
+            .await
+            {
+                return LoopControl::Stop;
+            }
+            self.begin_prompt(text);
+        }
+        while let Some(next_text) = self.steer_backlog.pop_front() {
+            if self.turn.is_some() && !self.interrupted {
+                let fut = steering_call_future(&self.client, &self.session_id, &next_text);
+                self.steering_call = Some((next_text, fut));
+                break;
+            }
+            // No live turn to inject into: boundary delivery.
+            self.queued_steers.push_back(next_text);
         }
         LoopControl::Continue
     }
@@ -914,7 +1063,6 @@ pub(super) async fn run_session(session: Session) {
     // A short grace covers the true turn-end race (its response lands within
     // milliseconds); past it, the dead prompt is closed out with a Done and
     // the queued steer is promoted to a fresh turn.
-    const STARVE_GRACE: Duration = Duration::from_secs(2);
     let starve_deadline: Option<tokio::time::Instant> = None;
     // Silence is not a turn boundary: completed tools, text, and usage may
     // all precede a slow model request. Keep the prompt future alive until
@@ -988,144 +1136,8 @@ pub(super) async fn run_session(session: Session) {
             res = async { state.steering_call.as_mut().expect("guarded by if").1.as_mut().await },
                 if state.steering_call.is_some() =>
             {
-                let (text, _) = state.steering_call.take().expect("guarded by if");
-                let outcome = match &res {
-                    Ok(resp) => resp
-                        .get("outcome")
-                        .and_then(Value::as_str)
-                        .unwrap_or("injected")
-                        .to_owned(),
-                    Err(e) => {
-                        tracing::debug!(
-                            target: "mast_harness::acp",
-                            "_session/steering failed (redelivering): {e}"
-                        );
-                        // Failed calls redeliver like a lost turn-end race.
-                        "promptRequired".to_owned()
-                    }
-                };
-                if state.interrupted {
-                    // The run is winding down; the steer is abandoned like
-                    // any queued steer at interrupt.
-                } else if outcome != "promptRequired" {
-                    // Injected into a live turn → a Steered boundary. But if
-                    // the turn ended while the call was in flight, the
-                    // injection was consumed by THAT turn — its output
-                    // already streamed and the turn's Done already closed the
-                    // segment. Emitting Steered after that Done re-armed the
-                    // consumer (parked session → Working) with no next turn
-                    // and no Done ever coming — the stranded-Working /
-                    // eternal-timer bug. Post-turn: nothing left to do.
-                    if state.turn.is_some() {
-                        // The injection proves the turn is LIVE: any settle
-                        // deadline armed by an earlier noRunningTurn reply
-                        // is no longer valid.
-                        state.starve_deadline = None;
-                        // Pre-injection updates can still sit in `incoming`
-                        // (responses bypass that queue): drain them into the
-                        // CURRENT segment first, or text the agent streamed
-                        // before the injection landed folds after the split —
-                        // the transcript attributes it to the reply-to-steer.
-                        let mut consumer_gone = false;
-                        while let Ok(inc) = incoming.try_recv() {
-                            match inc {
-                                Incoming::Notification { method, params } => {
-                                    let events =
-                                        session_update_events(&method, &params, &state.session_id, &mut state.subagents);
-                                    for ev in events {
-                                        if !send(&state.event_tx, ev).await {
-                                            consumer_gone = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                Incoming::Request { id, method, params } => {
-                                    for ev in handle_server_request_live(
-                                        &state.client,
-                                        id,
-                                        &method,
-                                        &params,
-                                        &state.request_input,
-                                &state.session_id,
-                                    ) {
-                                        if !send(&state.event_tx, ev).await {
-                                            consumer_gone = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                            if consumer_gone {
-                                break;
-                            }
-                        }
-                        if consumer_gone {
-                            break 'main;
-                        }
-                        let (prev, next) = rotate(&mut state.assistant_message_id);
-                        if !send(
-                            &state.event_tx,
-                            AgentEvent::Steered {
-                                assistant_message_id: Some(prev),
-                                next_assistant_message_id: Some(next),
-                            },
-                        )
-                        .await
-                        {
-                            break 'main;
-                        }
-                    }
-                } else if state.turn.is_some() {
-                    // Raced the turn end: redeliver at the boundary the
-                    // loop is about to hit. `noRunningTurn` is stronger —
-                    // the adapter says nothing is running while our prompt
-                    // is still outstanding: the starved-turn signature. Arm
-                    // the grace deadline; if the prompt's response does not
-                    // land first, the recovery arm below settles the dead
-                    // turn and promotes this steer.
-                    if res
-                        .as_ref()
-                        .ok()
-                        .and_then(|r| r.get("reason"))
-                        .and_then(Value::as_str)
-                        == Some("noRunningTurn")
-                    {
-                        tracing::warn!(
-                            target: "mast_harness::acp",
-                            "steering answered noRunningTurn with a prompt \
-                             outstanding; arming starved-turn recovery"
-                        );
-                        state.starve_deadline =
-                            Some(tokio::time::Instant::now() + STARVE_GRACE);
-                    }
-                    state.queued_steers.push_back(text);
-                } else {
-                    // The turn ended while the call was in flight and its
-                    // boundary already passed — the steer becomes the next
-                    // turn directly.
-                    let (prev, next) = rotate(&mut state.assistant_message_id);
-                    if !send(
-                        &state.event_tx,
-                        AgentEvent::Steered {
-                            assistant_message_id: Some(prev),
-                            next_assistant_message_id: Some(next),
-                        },
-                    )
-                    .await
-                    {
-                        break 'main;
-                    }
-                    state.begin_prompt(text);
-                }
-                while let Some(next_text) = state.steer_backlog.pop_front() {
-                    if state.turn.is_some() && !state.interrupted {
-                        let fut = steering_call_future(&state.client, &state.session_id, &next_text);
-                        state.steering_call = Some((next_text, fut));
-                        break;
-                    }
-                    // No live turn to inject into: boundary delivery.
-                    state.queued_steers.push_back(next_text);
+                if state.settle_steering(res, &mut incoming).await == LoopControl::Stop {
+                    break 'main;
                 }
             },
 
