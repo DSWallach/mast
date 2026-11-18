@@ -1219,6 +1219,16 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 09:00; coordinator 544369c6, overnight run done)
+
+- **Installed: release 110** (85746ce8a), full perf gate (soak vs 109: CPU 4.8 vs 4.8 %, footprint 539 vs 613 MB,
+  git flat). Contents: composer.rs (8,979 → 3,204), overview.rs (7,017 → 2,041) and shell/spaces.rs (5,288 → 717)
+  pure-move splits; orchestrator_wakes crash-recovery test isolated; cleanup pass 3 (clippy 1102 → 1068, all targets).
+- Mikey is still running 105 (restart picks up 106–110).
+- Next: refactor Phase C1 (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf): 1 Shell render reconciliation/actions,
+  2 Composer::send, 3 ACP run_session, 4 Transcript::sync, 5 transcript row/tool rendering. Open for Mikey:
+  "Keeping the Tracker clean" instruction proposal, ui-preview approval rule, older items.
+
 ## In flight (snapshot 2026-11-18 07:40; coordinator 544369c6, overnight run)
 
 - **Installed: release 109** (2053cec30), full perf gate (soak vs 108 equal: CPU 5.1 vs 5.0 %, footprint 620 vs 614 MB,
