@@ -1,317 +1,82 @@
 use super::*;
 
+struct PreparedSend {
+    engine: crate::state::EngineHandle,
+    message_id: String,
+    failed_send: FailedSend,
+    chat_id: String,
+    is_new: bool,
+    plan: crate::pickers::CheckoutPlan,
+    workspace_choice: Option<crate::workspace_chip::WorkspaceChoice>,
+    resolved: crate::pickers::ResolvedRunConfig,
+    existing_cwd: Option<String>,
+    device_id: String,
+    host_device_id: Option<String>,
+    space_id: Option<String>,
+    space_path: Option<String>,
+    ordinary_staged: Vec<StagedAttachment>,
+    staged_appshots: Vec<CapturedAppshot>,
+    staged_skills: Vec<String>,
+    staged: Vec<StagedAttachment>,
+    comments: Vec<crate::comments::ReviewComment>,
+    code_refs: Vec<crate::code_ref::StagedCodeRef>,
+    text: String,
+    created_at: i64,
+    queue: bool,
+    clean_queue_attachment_text: bool,
+    queued_flow: bool,
+    upload_ids: Vec<String>,
+    echo_paths: Vec<String>,
+    echo_text: String,
+    workspace_message: String,
+    worktree_name_source: String,
+    restore_text: String,
+    err_chat_id: String,
+    err_message_id: String,
+    #[cfg(test)]
+    fail_send_before_dispatch: bool,
+}
+
 impl Composer {
     pub(super) fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
-        if self.sending { return; }
-        let message_id = self.retry_send_id.take().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let failed_send = FailedSend {
-            key: self.current_key.clone(), text: text.clone(), message_id: message_id.clone(), queued: queue,
-            attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
-            appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
-            skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
-            code_refs: self.state.read(cx).code_refs(&self.current_key).to_vec(),
-        };
-        self.failed_send = None;
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.failure = Some("Engine not connected".into());
-            self.failure_key = None; // global — meaningful on every chat
-            self.failed_send = Some(failed_send);
-            cx.notify();
-            return;
-        };
-        // Chat id: existing selection, or client-minted for the new-chat canvas
-        // (the chat then appears from the doc host once the doc materializes).
-        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
-            Some(id) => (id, false),
-            None => (uuid::Uuid::new_v4().to_string(), true),
-        };
-        // Where the new session runs (Current checkout / reuse an existing
-        // worktree / fresh worktree off the picked base) — resolved NOW so
-        // the async block needs no picker access.
-        let plan = self.pickers.read(cx).checkout_plan();
-        // New-chat worktree chip (`crate::workspace_chip`): taken (and reset
-        // to Main checkout) only for an eligible new chat — existing chats, the
-        // overview's panel (always an existing chat), non-git / remote
-        // projects and explicit checkout-picker worktrees never see it.
-        let workspace_choice = if is_new && self.pickers.read(cx).workspace_chip_eligible(cx) {
-            Some(self.pickers.update(cx, |p, _| p.take_workspace_choice()))
-        } else {
-            None
-        };
-        // Fully-resolved model/reasoning/options — concrete values (chat config
-        // or defaults), so the engine never has to guess a "default".
-        let resolved = self.pickers.read(cx).resolved(cx);
-        let existing_cwd = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.cwd.clone());
-        // The PROJECT fixes the new chat's device + base folder — sessions are
-        // minted onto the project's device, not necessarily this one. With no
-        // project ("Don't work in a project") the composer's device pick is
-        // the host and the session runs from `~` there.
-        let space = self.state.read(cx).selected_space_row().cloned();
-        let local_device_id = self.state.read(cx).local_device_id.clone();
-        let target_device_id = self.state.read(cx).effective_device_id();
-        let device_id = if is_new {
-            target_device_id
-                .clone()
-                .unwrap_or_else(|| "local".to_string())
-        } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
-                .or_else(|| local_device_id.clone())
-                .unwrap_or_else(|| "local".to_string())
-        };
-        // Uploads/read-backs target the chat's HOST device (forwardable RPCs);
-        // for a new chat that's the target device (None when it's local).
-        let host_device_id = if is_new {
-            target_device_id
-                .clone()
-                .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
-        } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
-        };
-        let space_id = space.as_ref().map(|s| s.id.clone());
-        let space_path = space.as_ref().map(|s| s.path.clone());
-        if queue && !is_new {
-            let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
-                capabilities::MESSAGE_QUEUE_V1
-            } else {
-                capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1
-            };
-            if !engine.engine_info().supports(capability)
-                || !self.state.read(cx).chat_host_supports(&chat_id, capability)
-            {
-                self.failure =
-                    Some("Update the chat's engine to queue messages during a response.".into());
-                cx.notify();
-                return;
-            }
-        }
-        // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
-        // strip empties the instant you hit send; a failure hands the files
-        // back into the chat's stash.
-        let ordinary_staged = self
-            .attachments
-            .remove(&self.current_key)
-            .unwrap_or_default();
-        let staged_appshots = self.appshots.remove(&self.current_key).unwrap_or_default();
-        // Attached-skill chips are per-draft: taken now, handed back on
-        // failure like the attachments.
-        let staged_skills = self.skills.remove(&self.current_key).unwrap_or_default();
-        let mut staged = ordinary_staged.clone();
-        staged.extend(
-            staged_appshots
-                .iter()
-                .map(|appshot| appshot.screenshot.clone()),
-        );
-        // `typed` keeps the user's own words for the failure hand-back below:
-        // restoring the folded prompt would paste the comment block into the
-        // input as literal text.
-        let key = self.current_key.clone();
-        let comments = self.state.update(cx, |state, cx| {
-            let taken = state.take_review_comments(&key);
-            if !taken.is_empty() {
-                cx.notify();
-            }
-            taken
-        });
-        let typed = text.clone();
-        let mentioned_files: HashSet<_> = file_mention_links(&typed).into_iter().filter(|link| !link.is_dir).map(|link| link.path).collect();
-        let code_refs = self.state.update(cx, |state, cx| {
-            let mut seen_files = HashSet::new();
-            let references = state.take_code_refs(&key).into_iter().filter(|reference| {
-                reference.reference.kind != mast_proto::CodeRefKind::File || (mentioned_files.contains(&reference.reference.location.path) && seen_files.insert(reference.reference.location.path.clone()))
-            }).collect::<Vec<_>>();
-            cx.notify();
-            references
-        });
-        // Visible preamble ahead of the user's words (never hidden prompt
-        // injection): the transcript, queue row and Run prompt all carry it.
-        let text = with_skill_preamble(&staged_skills, &text);
-        let text = crate::code_ref::with_code_refs(&text, &code_refs);
-        let text = crate::comments::with_comments(&text, &comments);
-        self.preview = None;
-        self.instruction_reset.remember_send(&message_id, &typed);
-        let created_at = chrono::Utc::now().timestamp_millis();
-        // Existing busy chats always queue; compatibility was checked before
-        // taking the draft, attachments, or review comments.
-        let queue = queue && !is_new;
-        let clean_queue_attachment_text = staged.is_empty()
-            || (engine
-                .engine_info()
-                .supports(capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1)
-                && self.state.read(cx).chat_host_supports(
-                    &chat_id,
-                    capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
-                ));
-
-        // Queued-attachment flow (durable-by-design): stage the bytes on the
-        // LOCAL engine, queue the command immediately with `pending://` refs,
-        // and let the engine push the bytes to a remote host afterwards —
-        // staging must never gate the queue (2026-08-19 incident: a send
-        // died with a zombie peer link because the upload sat in front of
-        // QueueCommand). Requires every engine involved to understand the
-        // ref scheme — the local engine (an IPC daemon may be older than
-        // this UI) and, for remotely-hosted chats, the host; anything older
-        // keeps the legacy blocking upload.
-        let host_is_remote = host_device_id
-            .as_deref()
-            .is_some_and(|id| local_device_id.as_deref() != Some(id));
-        // Queue rows do not carry upstream's attachment-transfer escort, so
-        // they retain the proven host-upload path and store absolute refs.
-        // Appshot XML attributes require escaped final paths. The engine's plain
-        // string replacement of pending refs cannot safely rewrite those, so
-        // rich captures use the existing upload-before-send path.
-        let queued_flow = !queue && staged_appshots.is_empty() && !staged.is_empty() && {
-            let state = self.state.read(cx);
-            let local_ok = local_device_id
-                .as_deref()
-                .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
-            let host_ok = !host_is_remote
-                || host_device_id
-                    .as_deref()
-                    .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
-            local_ok && host_ok
-        };
-        // Upload identities minted NOW: in the queued flow the `pending://`
-        // ref IS the persisted transport until the host rewrites it, so the
-        // id must exist before any bytes move.
-        let upload_ids: Vec<String> = staged
-            .iter()
-            .map(|_| uuid::Uuid::new_v4().to_string())
-            .collect();
-        // The echo carries attachment refs from the first frame, so photos
-        // render while the send is still pending. Queued flow: the refs are
-        // the real `pending://` identities (stable — no post-upload refresh).
-        // Legacy flow: synthetic `pending/…` paths that the post-upload
-        // refresh replaces with the host's absolute paths. Either way the
-        // staged bytes are seeded into the transcript cache under every
-        // device key the transcript consults.
-        let echo_paths: Vec<String> = if queued_flow {
-            staged
-                .iter()
-                .zip(&upload_ids)
-                .map(|(att, id)| format!("pending://{id}/{}", att.name))
-                .collect()
-        } else {
-            staged
-                .iter()
-                .map(|att| format!("pending/{}/{}", att.id, att.name))
-                .collect()
-        };
-        let echo_appshot_paths: HashMap<String, String> = staged
-            .iter()
-            .zip(&echo_paths)
-            .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
-            .collect();
-        let echo_text = attachments::with_attachments(
-            &appshots::with_appshots(&text, &staged_appshots, &echo_appshot_paths),
-            &echo_paths,
-        );
-        // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
-        // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
-        // path the sender can't predict, but whose id8 it minted. The alias
-        // keeps the thumbnail on the already-local bytes through that
-        // rewrite instead of blanking into a reload skeleton.
-        if queued_flow {
-            for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_attachment_alias(
-                    &device_id,
-                    upload_id,
-                    &att.name,
-                    att.image.clone(),
-                );
-                if let Some(local) = local_device_id.as_deref()
-                    && local != device_id
-                {
-                    attachments::seed_attachment_alias(
-                        local,
-                        upload_id,
-                        &att.name,
-                        att.image.clone(),
-                    );
-                }
-            }
-        }
-        for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-            if let Some(local) = local_device_id.as_deref()
-                && local != device_id
-            {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
-            }
-        }
-
-        // Optimistic echo (client-minted id doubles as the persisted message id,
-        // so the doc frame dedups it away).
-        let echo = SessionMessageEntry {
-            id: message_id.clone(),
-            role: mast_doc::MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: echo_text.clone(),
-            }],
-            created_at,
-            device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-        };
-        self.publish_send_echo(is_new, queue, &chat_id, &message_id, echo, cx);
-        if let Some(choice) = workspace_choice {
-            use crate::workspace_chip::{WorkspaceChoice, WorkspaceOutcome};
-            let initial = match choice {
-                WorkspaceChoice::Auto => WorkspaceOutcome::Deciding,
-                WorkspaceChoice::Worktree => WorkspaceOutcome::Creating,
-                WorkspaceChoice::MainCheckout => WorkspaceOutcome::Main {
-                    plan: None,
-                    note: None,
-                    warning: false,
-                },
-            };
-            self.pickers
-                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, initial, cx));
-        }
-        // Jev (the worktree chip's Auto classifier) sees the skill preamble
-        // too: an attached `/open-pr` or `/implement-ticket` is a strong
-        // "this will change code" signal. The worktree NAME still derives
-        // from the user's own words — a slug of "Load and follow these…"
-        // would name every skill-attached worktree the same.
-        let workspace_message = with_skill_preamble(&staged_skills, &typed);
-        let worktree_name_source = if typed.trim().is_empty() {
-            workspace_message.clone()
-        } else {
-            typed.clone()
-        };
-
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.drafts.remove(&self.current_key);
-        self.report_user_activity(cx);
-        self.failure = None;
-        self.sending = true;
-        // A queued row is represented by the queue panel, not the transcript.
-        // Claiming an own-turn anchor for it here would replace the live
-        // turn's runway with an id that has no transcript row yet.
-        if should_publish_optimistic_echo(queue) {
-            cx.emit(ComposerEvent::Sent {
-                chat_id: chat_id.clone(),
-                message_id: message_id.clone(),
-            });
-        }
-        cx.notify();
-
-        let restore_text = typed;
-        let err_chat_id = chat_id.clone();
-        let err_message_id = message_id.clone();
-        #[cfg(test)]
-        let fail_send_before_dispatch = self.fail_send_before_dispatch;
+        let Some(send) = self.prepare_send(text, queue, cx) else { return; };
         self.send_task = Some(cx.spawn(async move |this, cx| {
+            let PreparedSend {
+                engine,
+                message_id,
+                failed_send,
+                chat_id,
+                is_new,
+                plan,
+                workspace_choice,
+                resolved,
+                existing_cwd,
+                device_id,
+                host_device_id,
+                space_id,
+                space_path,
+                ordinary_staged,
+                staged_appshots,
+                staged_skills,
+                staged,
+                comments,
+                code_refs,
+                text,
+                created_at,
+                queue,
+                clean_queue_attachment_text,
+                queued_flow,
+                upload_ids,
+                echo_paths,
+                echo_text,
+                workspace_message,
+                worktree_name_source,
+                restore_text,
+                err_chat_id,
+                err_message_id,
+                #[cfg(test)]
+                fail_send_before_dispatch,
+            } = send;
             let mut dispatch_attempted = false;
             let result: Result<Option<String>, String> = async {
                 // Attachments stage FIRST — before the chat row or anything
@@ -890,6 +655,354 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    fn prepare_send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) -> Option<PreparedSend> {
+        if self.sending { return None; }
+        let message_id = self.retry_send_id.take().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let failed_send = FailedSend {
+            key: self.current_key.clone(), text: text.clone(), message_id: message_id.clone(), queued: queue,
+            attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
+            appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
+            skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
+            code_refs: self.state.read(cx).code_refs(&self.current_key).to_vec(),
+        };
+        self.failed_send = None;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.failure = Some("Engine not connected".into());
+            self.failure_key = None; // global — meaningful on every chat
+            self.failed_send = Some(failed_send);
+            cx.notify();
+            return None;
+        };
+        // Chat id: existing selection, or client-minted for the new-chat canvas
+        // (the chat then appears from the doc host once the doc materializes).
+        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
+            Some(id) => (id, false),
+            None => (uuid::Uuid::new_v4().to_string(), true),
+        };
+        // Where the new session runs (Current checkout / reuse an existing
+        // worktree / fresh worktree off the picked base) — resolved NOW so
+        // the async block needs no picker access.
+        let plan = self.pickers.read(cx).checkout_plan();
+        // New-chat worktree chip (`crate::workspace_chip`): taken (and reset
+        // to Main checkout) only for an eligible new chat — existing chats, the
+        // overview's panel (always an existing chat), non-git / remote
+        // projects and explicit checkout-picker worktrees never see it.
+        let workspace_choice = if is_new && self.pickers.read(cx).workspace_chip_eligible(cx) {
+            Some(self.pickers.update(cx, |p, _| p.take_workspace_choice()))
+        } else {
+            None
+        };
+        // Fully-resolved model/reasoning/options — concrete values (chat config
+        // or defaults), so the engine never has to guess a "default".
+        let resolved = self.pickers.read(cx).resolved(cx);
+        let existing_cwd = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|c| c.cwd.clone());
+        // The PROJECT fixes the new chat's device + base folder — sessions are
+        // minted onto the project's device, not necessarily this one. With no
+        // project ("Don't work in a project") the composer's device pick is
+        // the host and the session runs from `~` there.
+        let space = self.state.read(cx).selected_space_row().cloned();
+        let local_device_id = self.state.read(cx).local_device_id.clone();
+        let target_device_id = self.state.read(cx).effective_device_id();
+        let device_id = if is_new {
+            target_device_id
+                .clone()
+                .unwrap_or_else(|| "local".to_string())
+        } else {
+            self.state
+                .read(cx)
+                .selected_chat_row()
+                .map(|c| c.device_id.clone())
+                .or_else(|| local_device_id.clone())
+                .unwrap_or_else(|| "local".to_string())
+        };
+        // Uploads/read-backs target the chat's HOST device (forwardable RPCs);
+        // for a new chat that's the target device (None when it's local).
+        let host_device_id = if is_new {
+            target_device_id
+                .clone()
+                .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
+        } else {
+            self.state
+                .read(cx)
+                .selected_chat_row()
+                .map(|c| c.device_id.clone())
+        };
+        let space_id = space.as_ref().map(|s| s.id.clone());
+        let space_path = space.as_ref().map(|s| s.path.clone());
+        if queue && !is_new {
+            let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
+                capabilities::MESSAGE_QUEUE_V1
+            } else {
+                capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1
+            };
+            if !engine.engine_info().supports(capability)
+                || !self.state.read(cx).chat_host_supports(&chat_id, capability)
+            {
+                self.failure =
+                    Some("Update the chat's engine to queue messages during a response.".into());
+                cx.notify();
+                return None;
+            }
+        }
+        // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
+        // strip empties the instant you hit send; a failure hands the files
+        // back into the chat's stash.
+        let ordinary_staged = self
+            .attachments
+            .remove(&self.current_key)
+            .unwrap_or_default();
+        let staged_appshots = self.appshots.remove(&self.current_key).unwrap_or_default();
+        // Attached-skill chips are per-draft: taken now, handed back on
+        // failure like the attachments.
+        let staged_skills = self.skills.remove(&self.current_key).unwrap_or_default();
+        let mut staged = ordinary_staged.clone();
+        staged.extend(
+            staged_appshots
+                .iter()
+                .map(|appshot| appshot.screenshot.clone()),
+        );
+        // `typed` keeps the user's own words for the failure hand-back below:
+        // restoring the folded prompt would paste the comment block into the
+        // input as literal text.
+        let key = self.current_key.clone();
+        let comments = self.state.update(cx, |state, cx| {
+            let taken = state.take_review_comments(&key);
+            if !taken.is_empty() {
+                cx.notify();
+            }
+            taken
+        });
+        let typed = text.clone();
+        let mentioned_files: HashSet<_> = file_mention_links(&typed).into_iter().filter(|link| !link.is_dir).map(|link| link.path).collect();
+        let code_refs = self.state.update(cx, |state, cx| {
+            let mut seen_files = HashSet::new();
+            let references = state.take_code_refs(&key).into_iter().filter(|reference| {
+                reference.reference.kind != mast_proto::CodeRefKind::File || (mentioned_files.contains(&reference.reference.location.path) && seen_files.insert(reference.reference.location.path.clone()))
+            }).collect::<Vec<_>>();
+            cx.notify();
+            references
+        });
+        // Visible preamble ahead of the user's words (never hidden prompt
+        // injection): the transcript, queue row and Run prompt all carry it.
+        let text = with_skill_preamble(&staged_skills, &text);
+        let text = crate::code_ref::with_code_refs(&text, &code_refs);
+        let text = crate::comments::with_comments(&text, &comments);
+        self.preview = None;
+        self.instruction_reset.remember_send(&message_id, &typed);
+        let created_at = chrono::Utc::now().timestamp_millis();
+        // Existing busy chats always queue; compatibility was checked before
+        // taking the draft, attachments, or review comments.
+        let queue = queue && !is_new;
+        let clean_queue_attachment_text = staged.is_empty()
+            || (engine
+                .engine_info()
+                .supports(capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1)
+                && self.state.read(cx).chat_host_supports(
+                    &chat_id,
+                    capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
+                ));
+
+        // Queued-attachment flow (durable-by-design): stage the bytes on the
+        // LOCAL engine, queue the command immediately with `pending://` refs,
+        // and let the engine push the bytes to a remote host afterwards —
+        // staging must never gate the queue (2026-08-19 incident: a send
+        // died with a zombie peer link because the upload sat in front of
+        // QueueCommand). Requires every engine involved to understand the
+        // ref scheme — the local engine (an IPC daemon may be older than
+        // this UI) and, for remotely-hosted chats, the host; anything older
+        // keeps the legacy blocking upload.
+        let host_is_remote = host_device_id
+            .as_deref()
+            .is_some_and(|id| local_device_id.as_deref() != Some(id));
+        // Queue rows do not carry upstream's attachment-transfer escort, so
+        // they retain the proven host-upload path and store absolute refs.
+        // Appshot XML attributes require escaped final paths. The engine's plain
+        // string replacement of pending refs cannot safely rewrite those, so
+        // rich captures use the existing upload-before-send path.
+        let queued_flow = !queue && staged_appshots.is_empty() && !staged.is_empty() && {
+            let state = self.state.read(cx);
+            let local_ok = local_device_id
+                .as_deref()
+                .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+            let host_ok = !host_is_remote
+                || host_device_id
+                    .as_deref()
+                    .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+            local_ok && host_ok
+        };
+        // Upload identities minted NOW: in the queued flow the `pending://`
+        // ref IS the persisted transport until the host rewrites it, so the
+        // id must exist before any bytes move.
+        let upload_ids: Vec<String> = staged
+            .iter()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        // The echo carries attachment refs from the first frame, so photos
+        // render while the send is still pending. Queued flow: the refs are
+        // the real `pending://` identities (stable — no post-upload refresh).
+        // Legacy flow: synthetic `pending/…` paths that the post-upload
+        // refresh replaces with the host's absolute paths. Either way the
+        // staged bytes are seeded into the transcript cache under every
+        // device key the transcript consults.
+        let echo_paths: Vec<String> = if queued_flow {
+            staged
+                .iter()
+                .zip(&upload_ids)
+                .map(|(att, id)| format!("pending://{id}/{}", att.name))
+                .collect()
+        } else {
+            staged
+                .iter()
+                .map(|att| format!("pending/{}/{}", att.id, att.name))
+                .collect()
+        };
+        let echo_appshot_paths: HashMap<String, String> = staged
+            .iter()
+            .zip(&echo_paths)
+            .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+            .collect();
+        let echo_text = attachments::with_attachments(
+            &appshots::with_appshots(&text, &staged_appshots, &echo_appshot_paths),
+            &echo_paths,
+        );
+        // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
+        // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
+        // path the sender can't predict, but whose id8 it minted. The alias
+        // keeps the thumbnail on the already-local bytes through that
+        // rewrite instead of blanking into a reload skeleton.
+        if queued_flow {
+            for (upload_id, att) in upload_ids.iter().zip(&staged) {
+                attachments::seed_attachment_alias(
+                    &device_id,
+                    upload_id,
+                    &att.name,
+                    att.image.clone(),
+                );
+                if let Some(local) = local_device_id.as_deref()
+                    && local != device_id
+                {
+                    attachments::seed_attachment_alias(
+                        local,
+                        upload_id,
+                        &att.name,
+                        att.image.clone(),
+                    );
+                }
+            }
+        }
+        for (path, att) in echo_paths.iter().zip(&staged) {
+            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+            if let Some(local) = local_device_id.as_deref()
+                && local != device_id
+            {
+                attachments::seed_attachment(local, path, &att.name, att.image.clone());
+            }
+        }
+
+        // Optimistic echo (client-minted id doubles as the persisted message id,
+        // so the doc frame dedups it away).
+        let echo = SessionMessageEntry {
+            id: message_id.clone(),
+            role: mast_doc::MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: echo_text.clone(),
+            }],
+            created_at,
+            device_id: "local".into(),
+            status: None,
+            continuation_of: None,
+        };
+        self.publish_send_echo(is_new, queue, &chat_id, &message_id, echo, cx);
+        if let Some(choice) = workspace_choice {
+            use crate::workspace_chip::{WorkspaceChoice, WorkspaceOutcome};
+            let initial = match choice {
+                WorkspaceChoice::Auto => WorkspaceOutcome::Deciding,
+                WorkspaceChoice::Worktree => WorkspaceOutcome::Creating,
+                WorkspaceChoice::MainCheckout => WorkspaceOutcome::Main {
+                    plan: None,
+                    note: None,
+                    warning: false,
+                },
+            };
+            self.pickers
+                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, initial, cx));
+        }
+        // Jev (the worktree chip's Auto classifier) sees the skill preamble
+        // too: an attached `/open-pr` or `/implement-ticket` is a strong
+        // "this will change code" signal. The worktree NAME still derives
+        // from the user's own words — a slug of "Load and follow these…"
+        // would name every skill-attached worktree the same.
+        let workspace_message = with_skill_preamble(&staged_skills, &typed);
+        let worktree_name_source = if typed.trim().is_empty() {
+            workspace_message.clone()
+        } else {
+            typed.clone()
+        };
+
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        self.drafts.remove(&self.current_key);
+        self.report_user_activity(cx);
+        self.failure = None;
+        self.sending = true;
+        // A queued row is represented by the queue panel, not the transcript.
+        // Claiming an own-turn anchor for it here would replace the live
+        // turn's runway with an id that has no transcript row yet.
+        if should_publish_optimistic_echo(queue) {
+            cx.emit(ComposerEvent::Sent {
+                chat_id: chat_id.clone(),
+                message_id: message_id.clone(),
+            });
+        }
+        cx.notify();
+
+        let restore_text = typed;
+        let err_chat_id = chat_id.clone();
+        let err_message_id = message_id.clone();
+        #[cfg(test)]
+        let fail_send_before_dispatch = self.fail_send_before_dispatch;
+        Some(PreparedSend {
+            engine,
+            message_id,
+            failed_send,
+            chat_id,
+            is_new,
+            plan,
+            workspace_choice,
+            resolved,
+            existing_cwd,
+            device_id,
+            host_device_id,
+            space_id,
+            space_path,
+            ordinary_staged,
+            staged_appshots,
+            staged_skills,
+            staged,
+            comments,
+            code_refs,
+            text,
+            created_at,
+            queue,
+            clean_queue_attachment_text,
+            queued_flow,
+            upload_ids,
+            echo_paths,
+            echo_text,
+            workspace_message,
+            worktree_name_source,
+            restore_text,
+            err_chat_id,
+            err_message_id,
+            #[cfg(test)]
+            fail_send_before_dispatch,
+        })
     }
 
     fn publish_send_echo(&mut self, is_new: bool, queue: bool, chat_id: &String, message_id: &String, echo: SessionMessageEntry, cx: &mut Context<Self>) {
