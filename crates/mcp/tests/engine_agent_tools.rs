@@ -268,6 +268,17 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         .unwrap();
     assert_eq!(current["workItem"]["id"], item);
 
+
+
+    let linked_id = Box::pin(check_create_linked_item(&core, &tools)).await;
+    Box::pin(check_link_work_item(&core, &tools, &linked_id)).await;
+    let launched_id = Box::pin(check_item_chat_title(&core, &tools, &linked_id)).await;
+    Box::pin(check_chat_reuse(&core, &tools, &linked_id, &launched_id)).await;
+    Box::pin(check_reuse_without_prompt(&tools, &linked_id, &launched_id)).await;
+    Box::pin(check_force_chat(&core, &tools, &linked_id, &launched_id)).await;
+    Box::pin(check_unlinked_item_title(&core, &tools)).await;
+    Box::pin(check_planning_item_title(&core, &tools)).await;
+
     let args = json!({ "project": SPACE, "harness": "claude-code", "title": "Reviewer",
                        "prompt": "review the diff", "idempotency_key": "spawn-reviewer" });
     let first = tools.call("create_chat", args.clone()).await.unwrap();
@@ -299,8 +310,8 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         .iter()
         .filter(|c| c.parent_chat_id.as_deref() == Some(PARENT))
         .collect();
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0].id, child);
+    assert_eq!(children.len(), 5);
+    assert!(children.iter().any(|c| c.id == child));
     let operation = mast_proto::agent_tools::operation_id(PARENT, "spawn-reviewer");
     let command_id = derive_id(&operation, roles::COMMAND);
     let commands = core
@@ -342,6 +353,94 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         assert!(err.contains("unauthenticated"), "{name}: {err}");
     }
     let _: Value = current;
+}
+
+async fn check_create_linked_item(core: &EngineCore, tools: &Tools) -> String {
+    let linked = tools.call("work_outline_create_child", json!({
+        "title": "Implement feature", "linearIssue": "ENG-123", "idempotencyKey": "create-linked"
+    })).await.unwrap();
+    let linked_id = linked["workItemId"].as_str().unwrap().to_owned();
+    let err = tools.call("work_outline_create_child", json!({
+        "title": "Implement feature", "linearIssue": "ENG-999", "idempotencyKey": "create-linked"
+    })).await.unwrap_err();
+    assert!(err.contains("operationConflict"), "{err}");
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
+    let issue = snapshot.linear_issue_reference(&linked_id).unwrap();
+    assert_eq!(issue.external_id, "ENG-123");
+    assert_eq!(issue.provider, mast_proto::linear::LINEAR_PROVIDER);
+    linked_id
+}
+
+async fn check_link_work_item(core: &EngineCore, tools: &Tools, linked_id: &str) {
+    tools.call("work_outline_link", json!({"workItemId": linked_id,
+        "pullRequest": "acme/repo#42", "idempotencyKey": "link-pr"})).await.unwrap();
+    tools.call("work_outline_link", json!({"workItemId": linked_id,
+        "linearIssue": "https://linear.app/acme/issue/ENG-456/description", "idempotencyKey": "link-linear"})).await.unwrap();
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
+    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "acme/repo#42" && r.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER));
+    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "ENG-456" && r.provider == mast_proto::linear::LINEAR_PROVIDER));
+    let err = tools.call("work_outline_link", json!({"workItemId": "foreign-item", "linearIssue": "ENG-3", "idempotencyKey": "link-foreign"})).await.unwrap_err();
+    assert!(err.contains("unauthorized"), "{err}");
+    let err = tools.call("work_outline_create_child", json!({"title": "Invalid", "linearIssue": "not an issue", "idempotencyKey": "invalid-linear"})).await.unwrap_err();
+    assert!(err.contains("linearIssue"), "{err}");
+}
+
+async fn check_item_chat_title(core: &EngineCore, tools: &Tools, linked_id: &str) -> String {
+    let launched = tools.call("create_chat", json!({"workItemId": linked_id,
+        "prompt": "Implement the feature", "idempotencyKey": "launch-linked"})).await.unwrap();
+    let launched_id = launched["chatId"].as_str().unwrap();
+    let launched_chat = core.workspace.chat(launched_id).unwrap().unwrap();
+    assert_eq!(launched_chat.title.as_deref(), Some("ENG-123 Implement feature"));
+    launched_id.to_owned()
+}
+
+async fn check_chat_reuse(core: &EngineCore, tools: &Tools, item_id: &str, chat_id: &str) {
+    let args = json!({"workItemId": item_id, "prompt": "Follow up", "idempotencyKey": "reuse-chat"});
+    let reused = tools.call("create_chat", args.clone()).await.unwrap();
+    assert_eq!(reused["chatId"], chat_id);
+    assert_eq!(reused["reusedExisting"], true);
+    let retry = tools.call("create_chat", args).await.unwrap();
+    assert_eq!(retry["chatId"], chat_id);
+    assert_eq!(retry["replayed"], true);
+    let operation = mast_proto::agent_tools::operation_id(PARENT, "reuse-chat");
+    let command_id = derive_id(&operation, roles::COMMAND);
+    let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
+    let command = commands.iter().find(|command| command.id == command_id).unwrap();
+    assert_eq!(commands.iter().filter(|command| command.id == command_id).count(), 1);
+    match &command.payload {
+        mast_doc::SessionCommandPayload::Run { request, .. } => assert!(request.prompt.contains("Follow up")),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+async fn check_reuse_without_prompt(tools: &Tools, item_id: &str, chat_id: &str) {
+    let result = tools.call("create_chat", json!({"workItemId": item_id, "idempotencyKey": "reuse-without-prompt"})).await.unwrap();
+    assert_eq!(result["chatId"], chat_id);
+    assert_eq!(result["reusedExisting"], true);
+    let err = tools.call("create_chat", json!({"workItemId": item_id, "prompt": "Different", "idempotencyKey": "reuse-without-prompt"})).await.unwrap_err();
+    assert!(err.contains("operationConflict"), "{err}");
+}
+
+async fn check_force_chat(core: &EngineCore, tools: &Tools, item_id: &str, chat_id: &str) {
+    let forced = tools.call("create_chat", json!({"workItemId": item_id,
+        "prompt": "Independent work", "newChat": true, "idempotencyKey": "force-chat"})).await.unwrap();
+    assert_ne!(forced["chatId"], chat_id);
+    let chat = core.workspace.chat(forced["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(chat.title.as_deref(), Some("ENG-123 Implement feature"));
+}
+
+async fn check_unlinked_item_title(core: &EngineCore, tools: &Tools) {
+    let item = tools.call("work_outline_create_child", json!({"title": "Review behavior", "idempotencyKey": "create-unlinked"})).await.unwrap();
+    let chat = tools.call("create_chat", json!({"workItemId": item["workItemId"], "prompt": "Review the change", "idempotencyKey": "launch-unlinked"})).await.unwrap();
+    let stored = core.workspace.chat(chat["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(stored.title.as_deref(), Some("Review behavior"));
+}
+
+async fn check_planning_item_title(core: &EngineCore, tools: &Tools) {
+    let item = tools.call("work_outline_create_child", json!({"title": "Planning", "idempotencyKey": "create-planning"})).await.unwrap();
+    let chat = tools.call("create_chat", json!({"workItemId": item["workItemId"], "prompt": "Plan the change", "idempotencyKey": "launch-planning"})).await.unwrap();
+    let stored = core.workspace.chat(chat["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(stored.title.as_deref(), Some("Feature Planning"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

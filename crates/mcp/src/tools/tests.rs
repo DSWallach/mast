@@ -327,6 +327,7 @@ async fn catalog_is_well_formed() {
                 demands_key,
                 [
                     agent_tool_names::CREATE_CHILD,
+                    agent_tool_names::LINK,
                     agent_tool_names::ANSWER_USER_ACTION_REQUEST,
                     agent_tool_names::PROPOSE_INSTRUCTION,
                     agent_tool_names::PROPOSE_APPROVAL_RULE,

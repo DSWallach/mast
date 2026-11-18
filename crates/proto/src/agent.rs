@@ -868,6 +868,8 @@ pub mod agent_tools {
         pub const READ_SUBTREE: &str = "work_outline_read_subtree";
         /// Create a child under the Chat's item or one of its descendants.
         pub const CREATE_CHILD: &str = "work_outline_create_child";
+        /// Attach an external reference to a work item.
+        pub const LINK: &str = "work_outline_link";
         /// Associate the calling Chat (only) with an item of its Space.
         pub const ASSOCIATE_CURRENT_CHAT: &str = "work_outline_associate_current_chat";
         /// Mark the Chat's item or a descendant active or completed.
@@ -966,10 +968,11 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 18] = [
+        pub const WORK_OUTLINE: [&str; 19] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
+            LINK,
             ASSOCIATE_CURRENT_CHAT,
             SET_STATUS,
             CREATE_USER_ACTION_REQUEST,
@@ -1153,10 +1156,20 @@ pub mod agent_tools {
             required: &[p("title", "string"), KEY_CREATE],
             optional: &[
                 p("description", "string"),
+                p("linearIssue", "Linear issue identifier or URL"),
                 p("parentWorkItemId", "defaults to your chat's item"),
                 p("status", "pending or active"),
             ],
             example: r#"{"title": "Fix the importer", "idempotencyKey": "create-fix-importer"}"#,
+        },
+        ToolUsage {
+            tool: tools::LINK,
+            required: &[p("workItemId", "work item id"), KEY_CREATE],
+            optional: &[
+                p("pullRequest", "GitHub PR URL or owner/repo#number"),
+                p("linearIssue", "Linear issue identifier or URL"),
+            ],
+            example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
         },
         ToolUsage {
             tool: tools::ASSOCIATE_CURRENT_CHAT,
