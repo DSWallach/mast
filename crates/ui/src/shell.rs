@@ -11501,35 +11501,38 @@ impl Shell {
             // Windows caption hit-testing includes the scroll-only hitboxes
             // behind each chip. Stop at the scroller so the titlebar cannot
             // claim tab clicks, while wheel events still reach this scroller.
-            .when(cfg!(target_os = "windows"), |strip| strip.occlude())
-            .on_drag_move::<RightTabDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
-                    let payload = event.drag(cx);
-                    if payload.panel_key != this.panel_key(cx) {
-                        return;
-                    }
-                    let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
-                    this.update_right_tab_drag_over(from, over, cx);
-                },
-            ))
-            .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
+            .when(cfg!(target_os = "windows"), |strip| strip.occlude());
+        // Drag handlers sit on the outer row (built below) so a release in the
+        // free space around the trailing `+` still drops into the last slot;
+        // its left edge is the scroller's, so `rel_x` is unchanged.
+        let drag_move = cx.listener(
+            move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
+                let payload = event.drag(cx);
                 if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
                     return;
                 }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
+                let from = payload.from;
+                let rel_x = f32::from(event.event.position.x)
+                    - f32::from(event.bounds.left())
+                    - f32::from(scroll_for_drag.offset().x);
+                let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
+                this.update_right_tab_drag_over(from, over, cx);
+            },
+        );
+        let drop = cx.listener(move |this, payload: &RightTabDrag, _, cx| {
+            if payload.panel_key != this.panel_key(cx) {
                 this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
-            }));
+                cx.notify();
+                return;
+            }
+            let to = this
+                .right_tab_drag
+                .as_ref()
+                .map(|d| d.over)
+                .unwrap_or(payload.from);
+            this.right_tab_drag = None;
+            this.reorder_right_tabs(payload.from, to, cx);
+        });
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
@@ -11932,6 +11935,8 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(4.0))
+            .on_drag_move::<RightTabDrag>(drag_move)
+            .on_drop::<RightTabDrag>(drop)
             .child(div().flex().min_w_0().h_full().child(region))
             .when(show_plus, |row| row.child(plus))
             .into_any_element()
@@ -16292,6 +16297,35 @@ mod right_tab_mouse_regressions {
             plus.left() - last.right() <= px(8.),
             "+ drifted away from the last tab"
         );
+    }
+
+    #[gpui::test]
+    fn tab_dropped_past_add_button_moves_to_last_slot(cx: &mut TestAppContext) {
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let plus = cx.debug_bounds("right-surface-add").unwrap();
+        // Chips and the `+` block the strip's own hitbox, so a drop lands in
+        // the free space beside them.
+        let target = gpui::point(plus.right() + px(24.), plus.center().y);
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.right_tabs.get(&shell.panel_key(cx)).unwrap().as_slice(),
+                &[RightSurface::Subagent(2), RightSurface::Subagent(1)]
+            );
+        });
     }
 
     #[gpui::test]
