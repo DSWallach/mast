@@ -185,8 +185,6 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .h(crate::typography::ui_rems(24.0))
@@ -378,8 +376,6 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .h(crate::typography::ui_rems(24.0))
@@ -559,9 +555,7 @@ impl Changes {
                     .flex_col()
                     .px(px(Theme::SPACE_LG))
                     .py(px(Theme::SPACE_SM))
-                    .bg(crate::theme::ink(0.05))
-                    .border_1()
-                    .border_color(theme.border)
+                    .when(true, |el| crate::components::review_card(el, theme))
                     .child(
                         div()
                             .flex()
@@ -622,9 +616,7 @@ impl Changes {
                             .flex_col()
                             .px(px(Theme::SPACE_LG))
                             .py(px(Theme::SPACE_SM))
-                            .bg(crate::theme::ink(0.05))
-                            .border_1()
-                            .border_color(theme.border)
+                            .when(true, |el| crate::components::review_card(el, theme))
                             .child(
                                 div()
                                     .flex()
@@ -1173,8 +1165,6 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .id(SharedString::from(format!("review-thread-toggle-{ix}")))

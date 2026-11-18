@@ -35,6 +35,8 @@ pub(crate) fn review_draft_label<T: Styled + FluentBuilder>(element: T, theme: &
 
 pub(crate) fn review_card<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element.bg(theme.surface_raised).rounded(px(theme.ui_style.tokens.panel_radius.unwrap_or(8.0)))
+        .border_1().border_color(theme.border)
+        .when(super::is_horizon(theme), |card| card.bg(theme.bg).border_color(gpui::transparent_black()))
 }
 
 pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
@@ -43,6 +45,22 @@ pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
 
 pub(crate) fn changes_body_text<T: Styled>(element: T) -> T {
     element.text_size(crate::typography::ui_rems(12.0))
+}
+
+#[cfg(test)]
+#[test]
+fn review_card_uses_page_surface_only_in_horizon() {
+    for style in crate::ui_style::UiStyleId::ALL {
+        for dark in [false, true] {
+            let theme = if dark { Theme::dark() } else { Theme::light() }
+                .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+            let mut card = review_card(div(), &theme);
+            let mut expected = div().bg(if *style == crate::ui_style::UiStyleId::Horizon { theme.bg } else { theme.surface_raised });
+            assert_eq!(card.style().background, expected.style().background);
+            let mut with_border = review_card(div(), &theme).border_color(theme.border);
+            assert_eq!(card.style() == with_border.style(), *style != crate::ui_style::UiStyleId::Horizon);
+        }
+    }
 }
 
 pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
