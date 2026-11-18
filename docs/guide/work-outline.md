@@ -24,8 +24,9 @@ the workspace without mounting a second live chat.
 Choose **Sessions** for the previous session list, grouping, sorting, and metadata
 controls. Its presentation is independent of Overview's search and filters;
 both use the Space selector. Overview highlights pinned chats and shows them
-first among their siblings, above sibling work items; Sessions shows them in its Pinned section. Custom sections,
-archived sessions and scheduled-task collections are also available in Sessions.
+first among their siblings, above sibling work items; Sessions shows them in its
+Pinned section. Custom sections, archived sessions and scheduled-task collections
+are also available in Sessions.
 On a narrow window the column floats over the workspace; choosing a destination
 or clicking outside closes it. Expanding the window restores the saved sidebar
 width and collapsed preference.
