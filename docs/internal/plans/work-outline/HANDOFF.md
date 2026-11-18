@@ -1219,6 +1219,18 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 morning; coordinator 544369c6, overnight run)
+
+- **Installed: release 108** (62f242389), full perf gate. Soak vs 107: CPU 4.9 vs 5.1 %, footprint 468 vs 586 MB,
+  git flat. Contents: worker-hygiene (three opt-in per-Space automations, all off by default: own worktree + ticket
+  branch for new workers, complete item on PR merge Off/Ask/Automatic with a 3-min bounded scan, auto-archive
+  finished workers after N days on a daily sweep), style-token-pass (shared controls and tokens across Changes, code
+  refs, Tracker, diagram card; Horizon one-surface; "area" ids are Horizon aliases), flaky-diff-sync (completion
+  signals, explicit mtimes), refactor-state-split (state.rs 4,462 → 677 lines, 10 modules, proven pure move),
+  benches for transcript sync and Changes widths (both measured fine, no code change).
+- Merged for 109: refactor-shell-split (shell.rs 12,770 → 4,156 lines, proven pure move).
+- In progress: refactor B10 (rpc.rs routing-completeness test, then pure moves).
+
 ## In flight (snapshot 2026-11-18 03:45; coordinator 544369c6, overnight run)
 
 - **Installed: release 107** (1929473e1), full perf gate. Soak vs 106: CPU 4.7 vs 4.9 %, footprint 562 vs 665 MB,
