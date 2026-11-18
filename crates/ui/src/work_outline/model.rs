@@ -1161,6 +1161,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn assigned_hidden_chat_is_not_reported_missing() {
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let mut chats = fixture_chats("s1");
+        let mut side = chat(CHAT_GHOST, Some("s1"));
+        side.visible = false;
+        chats.push(side);
+        let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
+        assert!(model.row(&row_key::chat(CHAT_GHOST)).is_none());
+    }
+
+    #[test]
     fn single_space_flattens_three_levels_with_chats_dangling_and_unassociated() {
         let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
         let model = flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &opts());

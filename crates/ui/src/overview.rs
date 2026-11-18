@@ -2595,11 +2595,9 @@ impl Overview {
             .chats
             .iter()
             .filter(|chat| {
-                !chat.is_side_chat()
-                    && chat
-                        .space_id
-                        .as_deref()
-                        .is_none_or(|space_id| state.space_row(space_id).is_some())
+                chat.space_id
+                    .as_deref()
+                    .is_none_or(|space_id| state.space_row(space_id).is_some())
             })
             .map(|chat| {
                 let row = by_id.get(chat.id.as_str());
@@ -2613,7 +2611,9 @@ impl Overview {
                         .and_then(|s| s.last_turn_tool_failures.clone())
                 });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
-                let visible = shown_by_toggles
+                // Keep side chats in the lookup so their durable work-item
+                // assignments do not look dangling, but never show a row.
+                let visible = !chat.is_side_chat() && shown_by_toggles
                     && !hidden_runs.contains(chat.id.as_str())
                     && self
                         .sidebar_scope
