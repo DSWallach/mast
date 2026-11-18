@@ -129,7 +129,7 @@ impl AppState {
     /// closure.  Keeping both here (with a final notify) makes startup
     /// hydration deterministic even when the restored window otherwise has no
     /// input events to drive another paint.
-    fn receive_prepared_opening_transcript_update(
+    pub(super) fn receive_prepared_opening_transcript_update(
         &mut self,
         chat_id: &str,
         update: mast_doc::TranscriptUpdate,

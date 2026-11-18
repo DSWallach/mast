@@ -49,7 +49,7 @@ impl AppState {
         self.apply_devices_at(devices, Utc::now())
     }
 
-    fn apply_devices_at(&mut self, mut devices: Vec<Device>, now: DateTime<Utc>) -> bool {
+    pub(super) fn apply_devices_at(&mut self, mut devices: Vec<Device>, now: DateTime<Utc>) -> bool {
         // A local-only workspace has no remote device identity to distinguish.
         // Keep the engine's legacy sentinel out of the UI while preserving real
         // hostnames and user-assigned device names.
@@ -166,7 +166,7 @@ impl AppState {
     /// First project on the composer's picked device (falling back through
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
-    fn first_space_on_picked_device(&self) -> Option<String> {
+    pub(super) fn first_space_on_picked_device(&self) -> Option<String> {
         let device = self
             .selected_device
             .as_deref()

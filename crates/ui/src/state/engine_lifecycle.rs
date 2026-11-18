@@ -214,7 +214,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.engine.clone() else {
             self.change_request_tasks.clear();
             return;
@@ -276,7 +276,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
         let Some(link) = self.pending_deep_link.clone() else {
             return;
         };

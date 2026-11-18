@@ -154,7 +154,7 @@ impl AppState {
 
     /// Build one lookup for a batch of status derivations, preserving the
     /// first session when a malformed snapshot contains duplicate chat IDs.
-    fn sessions_by_chat(&self) -> HashMap<&str, &Session> {
+    pub(super) fn sessions_by_chat(&self) -> HashMap<&str, &Session> {
         let mut sessions = HashMap::with_capacity(self.sessions.len());
         for session in &self.sessions {
             #[cfg(test)]
@@ -164,7 +164,7 @@ impl AppState {
         sessions
     }
 
-    fn display_status_with_session(&self, chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
+    pub(super) fn display_status_with_session(&self, chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
         if self.send_pending(&chat.id, now) {
             ChatIndicator::Working
         } else {

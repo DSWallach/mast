@@ -41,7 +41,7 @@ impl AppState {
     }
 
     /// Normalize (sort, dedupe) and store the declared set; whether it changed.
-    fn record_work_outline_visible(&mut self, mut space_ids: Vec<String>) -> bool {
+    pub(super) fn record_work_outline_visible(&mut self, mut space_ids: Vec<String>) -> bool {
         space_ids.sort();
         space_ids.dedup();
         if self.work_outline_visible == space_ids {
@@ -153,7 +153,7 @@ impl AppState {
     /// set, drop tasks and snapshots for Spaces no longer wanted (deleted or
     /// hidden), and spawn a watch for each missing one. Re-run from the
     /// Spaces frame, `attach_engine` and `declare_work_outline_visible`.
-    fn reconcile_work_outline_watches(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reconcile_work_outline_watches(&mut self, cx: &mut Context<Self>) {
         self.reconcile_artifact_watches(cx);
         let Some(handle) = self.engine.clone() else {
             self.work_outline_tasks.clear();
