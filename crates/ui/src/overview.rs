@@ -370,7 +370,7 @@ impl OverviewRow {
     }
 
     fn is_stalled(&self) -> bool {
-        self.status == ChatIndicator::Errored || self.tool_failures.is_some()
+        self.status == ChatIndicator::Errored
     }
 }
 
@@ -1557,7 +1557,7 @@ pub struct Overview {
     attention_filter: AttentionFilter,
     /// Pre-attention-filter count of rows needing user interaction.
     needs_interaction_count: usize,
-    /// Pre-attention-filter count of stalled rows (errored or failed tool calls).
+    /// Pre-attention-filter count of errored rows.
     stalled_count: usize,
     /// The chat the List should scroll into view on the next render (opening
     /// the link editor) — consumed by the List body
@@ -2631,7 +2631,7 @@ impl Overview {
                             status == ChatIndicator::AwaitingInput || user_action_required
                         }
                         AttentionFilter::Stalled => {
-                            status == ChatIndicator::Errored || tool_failures.is_some()
+                            status == ChatIndicator::Errored
                         }
                     };
                 let pr_number = row.and_then(|r| r.pr_number).or_else(|| {
@@ -9474,7 +9474,11 @@ mod logic_tests {
             state.chats = vec![
                 row("c-awaiting", "/work/alpha", None).chat,
                 row("c-failed-tools", "/work/alpha", None).chat,
-                row("c-errored", "/work/alpha", None).chat,
+                {
+                    let mut chat = row("c-errored", "/work/alpha", None).chat;
+                    chat.last_message_at = Some(now);
+                    chat
+                },
                 row("c-idle", "/work/alpha", None).chat,
             ];
             state.sessions = vec![
@@ -9543,7 +9547,6 @@ mod logic_tests {
             vcx.debug_bounds("overview-row-stalled-c-failed-tools")
                 .is_some()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         assert!(
             vcx.debug_bounds("overview-row-needs-input-c-idle")
                 .is_none()
@@ -9552,7 +9555,7 @@ mod logic_tests {
 
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.needs_interaction_count, 1);
-            assert_eq!(o.stalled_count, 2);
+            assert_eq!(o.stalled_count, 1);
             assert_eq!(o.list_order.len(), 4);
         });
 
@@ -9568,13 +9571,16 @@ mod logic_tests {
             assert_eq!(o.list_order[0].0, "c-awaiting");
         });
 
-        // Clicking the "stalled" pill switches to the 2 stalled sessions.
+        // Clicking the "stalled" pill shows the errored session only.
         let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
         vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
         draw(vcx);
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.attention_filter, AttentionFilter::Stalled);
-            assert_eq!(o.list_order.len(), 2);
+            assert_eq!(o.list_order.len(), 1);
+            assert_eq!(o.list_order[0].0, "c-errored");
+            assert!(o.outline_chats.iter().find(|c| c.id == "c-errored").unwrap().visible);
+            assert!(!o.outline_chats.iter().find(|c| c.id == "c-failed-tools").unwrap().visible);
         });
 
         // Clicking "stalled" again clears the filter.
@@ -9606,7 +9612,7 @@ mod logic_tests {
         draw(vcx);
         assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_some());
         overview.read_with(vcx, |o, _| {
-            assert_eq!(o.stalled_count, 3);
+            assert_eq!(o.stalled_count, 1);
         });
     }
 
@@ -10058,6 +10064,28 @@ mod logic_tests {
             vcx.debug_bounds("work-item-artifacts-register-input")
                 .is_some()
         );
+    }
+
+    #[gpui::test]
+    fn attention_filter_reaches_outline(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        overview.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
+        draw(vcx);
+        assert!(overview.read_with(vcx, |o, cx| {
+            o.outline.read(cx).model().row(&row_key::item("s1", API)).is_some()
+        }));
+        for filter in [AttentionFilter::NeedsInteraction, AttentionFilter::Stalled] {
+            overview.update(vcx, |o, cx| {
+                o.attention_filter = filter;
+                o.rows_dirty = true;
+                cx.notify();
+            });
+            draw(vcx);
+            assert!(overview.read_with(vcx, |o, cx| {
+                o.outline.read(cx).model().row(&row_key::item("s1", API)).is_none()
+            }));
+        }
     }
 
     /// Acceptance 30: only the visible slice of a large outline renders.

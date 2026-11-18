@@ -1322,6 +1322,40 @@ pub(crate) mod tests {
     const CHAT_PR: &str = "chat-pr";
 
     #[test]
+    fn attention_filter_keeps_archived_ancestors_and_omits_empty_spaces() {
+        let (spaces, mut chats) = archived_synced_pr_spaces();
+        for chat in &mut chats {
+            chat.visible = chat.id == CHAT_PR;
+        }
+        let spaces = [
+            spaces[0].clone(),
+            ready("s2", "Empty", fixture_snapshot("s2")),
+        ];
+        let options = OutlineOptions {
+            attention_only: true,
+            ..opts()
+        };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        assert!(model.row(&row_key::space("s2")).is_none());
+        let chat = model.row(&row_key::chat(CHAT_PR)).unwrap();
+        assert_eq!(
+            model.rows[chat.parent.unwrap()].key,
+            row_key::item("s1", RETIRED)
+        );
+        assert!(model.row(&row_key::chat(CHAT_GHOST)).is_none());
+        let searched = flatten(
+            &spaces,
+            &chats,
+            &HashSet::new(),
+            &OutlineOptions {
+                query: "no matching title".into(),
+                ..options
+            },
+        );
+        assert!(searched.rows.is_empty());
+    }
+
+    #[test]
     fn an_archived_synced_pr_item_with_a_live_chat_is_hidden_and_its_chat_stays_reachable() {
         let (spaces, chats) = archived_synced_pr_spaces();
         let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
