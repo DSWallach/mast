@@ -4825,6 +4825,7 @@ impl Overview {
         };
         popover::btn_primary(theme, "+ New chat")
             .id("overview-new-chat")
+            .debug_selector(|| "overview-new-chat".into())
             .when(true, |el| {
                 crate::components::toolbar_control(el, theme, true)
             })
@@ -8228,6 +8229,46 @@ mod logic_tests {
                     navigation
                 }
             })
+        }
+    }
+
+    #[gpui::test]
+    fn overview_actions_are_in_the_requested_rows(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_repos(cx, dir.path(), &["alpha"]);
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+        let overview = cx.new(|cx| {
+            Overview::new(
+                state,
+                gpui::WeakEntity::new_invalid(),
+                transcript,
+                composer,
+                cx,
+            )
+        });
+        let view = overview.clone();
+        let (_host, vcx) = cx.add_window_view(move |_, _| OverviewLayoutHost {
+            overview: view,
+            workspace: false,
+        });
+        for sidebar in [false, true] {
+            overview.update(vcx, |overview, cx| {
+                overview.in_sidebar = sidebar;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear());
+            let title = vcx.debug_bounds("overview-title").unwrap();
+            let new_chat = vcx.debug_bounds("overview-new-chat").unwrap();
+            let toolbar = vcx.debug_bounds("overview-toolbar").unwrap();
+            let pull_requests = vcx.debug_bounds("overview-pull-requests").unwrap();
+            assert!(new_chat.center().y >= title.origin.y && new_chat.center().y <= title.bottom());
+            assert!(new_chat.origin.x >= title.right());
+            assert!(
+                pull_requests.center().y >= toolbar.origin.y
+                    && pull_requests.center().y <= toolbar.bottom()
+            );
         }
     }
 

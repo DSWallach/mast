@@ -125,6 +125,30 @@ fn chat_fixture_with(
             let designated = mast_proto::PersonalAssistant::for_chat(&state.chats[state.chats.len() - 2], 0);
             state.personal_assistant.apply(mast_proto::PersonalAssistantReply { assistant: Some(designated) });
         }
+        if std::env::var_os("MAST_PREVIEW_ATTENTION_CHIPS").is_some() {
+            let now = chrono::Utc::now();
+            state
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "fixture-tests")
+                .unwrap()
+                .last_message_at = Some(now);
+            for (id, status) in [
+                ("fixture-design", mast_proto::SessionStatus::AwaitingInput),
+                ("fixture-tests", mast_proto::SessionStatus::Errored),
+            ] {
+                state.sessions.push(mast_proto::Session {
+                    chat_id: id.into(),
+                    device_id: "local".into(),
+                    status,
+                    started_at: None,
+                    updated_at: now,
+                    last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: None,
+                });
+            }
+        }
         preview_chat_outline(&mut state);
         state
     });

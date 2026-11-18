@@ -53,6 +53,7 @@ impl Overview {
                         .gap(px(10.0))
                         .child(
                             div()
+                                .debug_selector(|| "overview-title".into())
                                 .text_size(crate::typography::ui_rems(14.0))
                                 .text_color(theme.text)
                                 .child(SharedString::from("Overview")),
@@ -166,6 +167,7 @@ impl Overview {
         let outline_mode = self.view_mode == OverviewMode::Outline;
         let work_item_filter = (!outline_mode).then(|| self.render_work_item_filter(&theme, cx));
         let mut toolbar = div()
+            .debug_selector(|| "overview-toolbar".into())
             .flex()
             .flex_wrap()
             .items_center()
