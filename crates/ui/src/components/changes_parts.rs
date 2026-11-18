@@ -39,10 +39,6 @@ pub(crate) fn hunk_action<T: Styled + FluentBuilder>(element: T, theme: &Theme) 
         .text_color(theme.text)
 }
 
-pub(crate) fn review_primary_action<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    hunk_action(element, theme).bg(theme.accent).border_color(theme.accent).text_color(theme.on_accent)
-}
-
 pub(crate) fn review_draft_label<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element.px(px(Theme::SPACE_SM)).rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
         .bg(theme.warning.opacity(0.12)).text_color(theme.warning)
