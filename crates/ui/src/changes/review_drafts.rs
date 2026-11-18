@@ -172,30 +172,25 @@ impl Changes {
             .map(|suggestion| format!("Draft · agent suggestion · {}", suggestion.severity))
             .unwrap_or_else(|| "Draft · agent suggestion".into());
         let button = |id: String, text: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .cursor_pointer()
-                .text_size(px(11.0))
-                .when(text == "Accept", |el| crate::components::review_primary_action(el, theme))
-                .when(text != "Accept", |el| crate::components::hunk_action(el, theme))
-                .child(text)
+            crate::components::button(SharedString::from(id), text,
+                if text == "Accept" { crate::components::ButtonVariant::Primary } else { crate::components::ButtonVariant::Secondary },
+                crate::components::ButtonSize::Sm, theme)
         };
         div()
             .w_full()
-            .h(px(crate::comments::card_height(&comment.body)))
+            .debug_selector(|| "review-suggestion-card".into())
+            .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
-                    .h(px(24.0))
+                    .h(crate::typography::ui_rems(24.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(Theme::SPACE_SM))
                     .child(
                         div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child(label)),
                     )
@@ -223,7 +218,8 @@ impl Changes {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
+                    .line_height(crate::typography::ui_rems(crate::comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
@@ -368,29 +364,24 @@ impl Changes {
         let remove_id = comment.id.clone();
         let stage_id = comment.id.clone();
         let button = |id: String, label: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .cursor_pointer()
-                .text_size(px(11.0))
-                .when(true, |el| crate::components::hunk_action(el, theme))
-                .child(label)
+            crate::components::button(SharedString::from(id), label, crate::components::ButtonVariant::Secondary,
+                crate::components::ButtonSize::Sm, theme)
         };
         div()
             .w_full()
-            .h(px(crate::comments::card_height(&comment.body)))
+            .debug_selector(|| "review-draft-card".into())
+            .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
-                    .h(px(24.0))
+                    .h(crate::typography::ui_rems(24.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(Theme::SPACE_SM))
                     .child(
                         div().flex_1().flex().items_center().child(div().when(true, |el| crate::components::review_draft_label(el, theme)).child("Draft")),
                     )
@@ -414,7 +405,8 @@ impl Changes {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
+                    .line_height(crate::typography::ui_rems(crate::comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
@@ -562,22 +554,20 @@ impl Changes {
                     .flex()
                     .flex_col()
                     .px(px(Theme::SPACE_LG))
-                    .py(px(6.0))
-                    .bg(crate::theme::ink(0.05))
-                    .border_1()
-                    .border_color(theme.border)
+                    .py(px(Theme::SPACE_SM))
+                    .when(true, |el| crate::components::review_card(el, theme))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(10.0))
+                            .gap(px(Theme::SPACE_SM))
                             .child(
                                 div()
                                     .id(SharedString::from(format!(
                                         "outdated-draft-edit-{edit_id}"
                                     )))
                                     .cursor_pointer()
-                                    .text_size(px(11.0))
+                                    .when(true, crate::components::hunk_header)
                                     .text_color(theme.text_muted)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.edit_outdated_draft(&edit_id, window, cx)
@@ -587,7 +577,7 @@ impl Changes {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(11.0))
+                                    .when(true, crate::components::hunk_header)
                                     .text_color(theme.text_faint)
                                     .child(label),
                             )
@@ -595,7 +585,7 @@ impl Changes {
                                 div()
                                     .id(SharedString::from(format!("outdated-draft-delete-{id}")))
                                     .cursor_pointer()
-                                    .text_size(px(11.0))
+                                    .when(true, crate::components::hunk_header)
                                     .text_color(theme.text_muted)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.remove_comment(&id, cx)
@@ -605,7 +595,7 @@ impl Changes {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .when(true, crate::components::changes_body_text)
                             .text_color(theme.text_dim)
                             .child(SharedString::from(draft.body.clone())),
                     )
@@ -625,19 +615,17 @@ impl Changes {
                             .flex()
                             .flex_col()
                             .px(px(Theme::SPACE_LG))
-                            .py(px(6.0))
-                            .bg(crate::theme::ink(0.05))
-                            .border_1()
-                            .border_color(theme.border)
+                            .py(px(Theme::SPACE_SM))
+                            .when(true, |el| crate::components::review_card(el, theme))
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(10.0))
+                                    .gap(px(Theme::SPACE_SM))
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_size(px(11.0))
+                                            .when(true, crate::components::hunk_header)
                                             .text_color(theme.text_faint)
                                             .child("Outdated · agent suggestion"),
                                     )
@@ -647,7 +635,7 @@ impl Changes {
                                                 "outdated-suggestion-dismiss-{id}"
                                             )))
                                             .cursor_pointer()
-                                            .text_size(px(11.0))
+                                            .when(true, crate::components::hunk_header)
                                             .text_color(theme.text_muted)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.dismiss_suggestion(&id, cx)
@@ -657,7 +645,7 @@ impl Changes {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .when(true, crate::components::changes_body_text)
                                     .text_color(theme.text_dim)
                                     .child(SharedString::from(body.clone())),
                             )
@@ -682,7 +670,7 @@ impl Changes {
                         .flex_col()
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .when(true, crate::components::hunk_header)
                                 .text_color(theme.text_faint)
                                 .child(format!("Thread outside the current diff · {location}")),
                         )
@@ -703,7 +691,7 @@ impl Changes {
                 div()
                     .id("more-outdated-review-items")
                     .cursor_pointer()
-                    .text_size(px(11.0))
+                    .when(true, crate::components::hunk_header)
                     .text_color(theme.text_muted)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.outdated_limit = this.outdated_limit.saturating_add(20);
@@ -1177,14 +1165,12 @@ impl Changes {
             .flex_col()
             .px(px(Theme::SPACE_LG))
             .when(true, |el| crate::components::review_card(el, theme))
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .id(SharedString::from(format!("review-thread-toggle-{ix}")))
                     .h(px(30.0))
                     .cursor_pointer()
-                    .text_size(px(11.0))
+                    .when(true, crate::components::hunk_header)
                     .text_color(if thread.resolved { theme.success } else if thread.outdated { theme.warning } else { theme.accent })
                     .flex().items_center().gap(px(Theme::SPACE_SM))
                     .child(div().flex_1().min_w_0().truncate().child(if collapsed { summary } else { label.to_owned() }))
@@ -1207,13 +1193,13 @@ impl Changes {
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .when(true, crate::components::hunk_header)
                             .text_color(theme.text_faint)
                             .child(SharedString::from(comment.author.clone())),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .when(true, crate::components::changes_body_text)
                             .line_height(px(18.0))
                             .text_color(theme.text_dim)
                             .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
@@ -1391,6 +1377,34 @@ impl ThreadIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReviewCardFixture {
+        changes: gpui::Entity<Changes>,
+        comment: crate::comments::ReviewComment,
+    }
+
+    impl gpui::Render for ReviewCardFixture {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            self.changes.update(cx, |changes, cx| changes.render_local_draft_card(&self.comment, &Theme::dark(), cx))
+        }
+    }
+
+    #[gpui::test]
+    fn draft_card_height_tracks_ui_text_size(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        for rem in [12.0, 16.0, 20.0] {
+            let (_, vcx) = cx.add_window_view(move |window, cx| {
+                window.set_rem_size(px(rem));
+                let state = cx.new(|_| super::super::AppState::new());
+                let changes = cx.new(|cx| Changes::new(state, cx));
+                ReviewCardFixture { changes, comment: crate::comments::ReviewComment::new("a", CommentSide::New, 1, "one\ntwo") }
+            });
+            vcx.run_until_parked();
+            let height = vcx.debug_bounds("review-draft-card").expect("review card").size.height;
+            let expected = crate::comments::card_height("one\ntwo") * rem / 16.0;
+            assert!((f32::from(height) - expected).abs() < 0.1);
+        }
+    }
 
     fn install_diff(changes: &mut Changes) -> String {
         use super::super::*;

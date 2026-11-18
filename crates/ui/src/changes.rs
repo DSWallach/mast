@@ -861,9 +861,20 @@ pub fn body_height_with(
     mode: DiffMode,
     line_h: f32,
 ) -> f32 {
+    body_height_with_card_heights(file, comments, draft, mode, line_h, |comment| comments::card_height(&comment.body))
+}
+
+fn body_height_with_card_heights(
+    file: &FileDiff,
+    comments: &[ReviewComment],
+    draft: Option<(CommentSide, u32)>,
+    mode: DiffMode,
+    line_h: f32,
+    card_height: impl Fn(&ReviewComment) -> f32,
+) -> f32 {
     body_rows(0, file, comments, draft, mode)
         .iter()
-        .map(|row| row.height(comments, line_h))
+        .map(|row| row.height(comments, line_h, &card_height))
         .sum()
 }
 
@@ -1601,7 +1612,7 @@ impl DiffRow {
 
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
-    fn height(self, comments: &[ReviewComment], line_h: f32) -> f32 {
+    fn height(self, comments: &[ReviewComment], line_h: f32, card_height: &impl Fn(&ReviewComment) -> f32) -> f32 {
         match self {
             DiffRow::SubmoduleHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
@@ -1612,7 +1623,7 @@ impl DiffRow {
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
-                .map(|comment| comments::card_height(&comment.body))
+                .map(card_height)
                 .unwrap_or(0.0),
             DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
             DiffRow::ReviewThread { height, .. } => height as f32,
@@ -3445,12 +3456,21 @@ impl Changes {
             cx.notify();
             return;
         }
-        let expanded_height = body_height_with(
+        let ui_scale = crate::typography::effective_rem_px(cx) / 16.0;
+        let expanded_height = body_height_with_card_heights(
             file,
             &self.comments_for(&file.path, cx),
             self.draft_anchor_in(&file.path),
             self.mode,
             diff_line_height(Theme::of(cx)),
+            |comment| {
+                let height = comments::card_height(&comment.body);
+                if self.review_suggestions.contains_key(&comment.id) || self.is_local_draft(&comment.id) {
+                    height * ui_scale
+                } else {
+                    height
+                }
+            },
         );
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
@@ -4766,23 +4786,19 @@ impl Changes {
                 let comment_path = file_diff.path.clone();
                 div().relative().child(hunk_header_row(&hunk_diff.header, symbol, &theme))
                     .when_some(comment_anchor, |row, (side, line)| row.child(
-                        div().id(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")))
-                            .absolute().right(px(210.0)).top(px(2.0)).cursor_pointer()
-                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Comment")
+                        crate::components::button(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")), "Comment", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                            .absolute().right(px(210.0)).top(px(Theme::SPACE_XS / 2.0))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_draft(comment_path.clone(), side, line, window, cx)))))
                     .when(show_reference, |row| row.child(
-                        div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
-                            .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
-                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Add hunk to chat")
+                        crate::components::button(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")), "Add hunk to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                            .absolute().right(px(100.0)).top(px(Theme::SPACE_XS / 2.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
-                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
-                        .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
-                        .text_size(px(10.0)).text_color(theme.text_muted)
-                        .when(true, |el| crate::components::hunk_action(el, &theme))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
-                        .child(label)))
+                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(
+                        crate::components::button(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")), label, crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                        .absolute().right(px(Theme::SPACE_SM)).top(px(Theme::SPACE_XS / 2.0))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))))
                     .into_any_element()
             },
             DiffRow::Line {
@@ -5086,7 +5102,7 @@ impl Changes {
             )),
             _ => None,
         };
-        let left_pad = Theme::SPACE_MD + group.nesting_depth as f32 * 16.0;
+        let left_pad = Theme::SPACE_MD + group.nesting_depth as f32 * Theme::SPACE_LG;
         div()
             .id(("submodule-hdr", group_ix))
             .w_full()
@@ -5095,7 +5111,7 @@ impl Changes {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(Theme::SPACE_SM))
             .pl(px(left_pad))
             .pr(px(Theme::SPACE_MD))
             .bg(theme.ink(0.025))
@@ -5508,7 +5524,7 @@ impl Changes {
                     div()
                         .flex_none()
                         .h(px(crate::surface_chrome::CONTROL_SIZE))
-                        .px(px(6.0))
+                        .px(px(Theme::SPACE_SM))
                         .when(true, |el| crate::components::changes_revision_label(el, &theme))
                         .flex()
                         .items_center()
@@ -5583,14 +5599,14 @@ impl Changes {
             .id("changes-scope-trigger")
             .debug_selector(|| "changes-scope-trigger".into())
             .h(px(crate::surface_chrome::CONTROL_SIZE))
-            .px(px(8.0))
+            .px(px(Theme::SPACE_SM))
             .max_w(px(250.0))
             .min_w_0()
             .flex_shrink(1.0)
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(Theme::SPACE_SM))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
@@ -5620,7 +5636,7 @@ impl Changes {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
                     .line_height(px(14.0))
                     .text_color(theme.text)
                     .child(SharedString::from(scope.label())),
@@ -5639,7 +5655,7 @@ impl Changes {
                 .max_w(px(160.0))
                 .truncate()
                 .h(px(crate::surface_chrome::CONTROL_SIZE))
-                .px(px(8.0))
+                .px(px(Theme::SPACE_SM))
                 .flex_shrink(1.0)
                 .flex()
                 .items_center()
@@ -5662,13 +5678,13 @@ impl Changes {
                 .id("changes-range-title")
                 .debug_selector(|| "changes-range-title".into())
                 .h(px(crate::surface_chrome::CONTROL_SIZE))
-                .px(px(8.0))
+                .px(px(Theme::SPACE_SM))
                 .max_w(px(250.0))
                 .min_w_0()
                 .flex_shrink(1.0)
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(Theme::SPACE_SM))
                 .child(
                     crate::icons::icon(crate::icons::GIT_BRANCH)
                         .size(px(12.0))
@@ -5679,7 +5695,7 @@ impl Changes {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.0))
+                        .when(true, crate::components::changes_body_text)
                         .line_height(px(14.0))
                         .text_color(theme.text)
                         .child(SharedString::from(label)),
@@ -5777,7 +5793,7 @@ impl Changes {
                 // The 2px row gap every other menu carries — rows straight on
                 // the card abutted, adjacent washes read as one slab (user
                 // report).
-                div().flex().flex_col().gap(px(2.0)).children(
+                div().flex().flex_col().gap(px(Theme::SPACE_XS)).children(
                     DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
                         popover::menu_row(
                             theme,
@@ -5907,7 +5923,7 @@ impl Changes {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(Theme::SPACE_SM))
                 // Extra room off the scope dropdown (row gap alone read
                 // cramped — user report).
                 .ml(px(crate::surface_chrome::CONTROL_GAP))
@@ -5951,9 +5967,9 @@ impl Changes {
 
         let list: AnyElement = if rows.is_empty() {
             div()
-                .px(px(8.0))
-                .py(px(6.0))
-                .text_size(px(12.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(Theme::SPACE_SM))
+                .when(true, crate::components::changes_body_text)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(if branches.is_empty() {
                     "No branches"
@@ -5966,7 +5982,7 @@ impl Changes {
                 .id("changes-ref-list")
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
+                .gap(px(Theme::SPACE_XS))
                 .max_h(px(240.0))
                 .overflow_y_scroll()
                 .track_scroll(&list_scroll)
@@ -5991,7 +6007,7 @@ impl Changes {
                             .min_w_0()
                             .truncate()
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(12.0))
+                            .when(true, crate::components::changes_body_text)
                             .child(SharedString::from(label)),
                     )
                 }))
@@ -6268,7 +6284,7 @@ impl Changes {
                 .debug_selector(|| "changes-diff-target-error".into())
                 .flex_none()
                 .px(px(Theme::SPACE_LG))
-                .py(px(4.0))
+                .py(px(Theme::SPACE_XS))
                 .child(
                     crate::error_notice::ErrorNotice::from_text(
                         "changes-diff-target-error",
@@ -6295,7 +6311,7 @@ impl Changes {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(Theme::SPACE_SM))
                 .px(px(Theme::SPACE_LG))
                 .border_b_1()
                 .border_color(crate::theme::hairline(0.06))

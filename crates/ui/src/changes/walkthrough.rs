@@ -427,7 +427,7 @@ impl ReviewDocument {
 
 fn note_body() -> gpui::Div {
     div()
-        .text_size(crate::typography::ui_rems(12.0))
+        .when(true, crate::components::changes_body_text)
         .line_height(crate::typography::ui_rems(16.0))
 }
 
@@ -846,7 +846,7 @@ impl Render for Walkthrough {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .text_size(crate::typography::ui_rems(12.0))
+                .when(true, crate::components::changes_body_text)
                 .when(true, |el| crate::components::walkthrough_guidance(el, &theme, |el| {
                     el.child(format!(
                         "Step {} of {}",
@@ -1073,7 +1073,7 @@ impl Render for Walkthrough {
             .flex_col()
             .gap_2()
             .p_2()
-            .text_size(crate::typography::ui_rems(12.0))
+            .when(true, crate::components::changes_body_text)
             .text_color(theme.text)
             .bg(theme.bg)
             .children(crate::components::walkthrough_empty_decoration(&theme, self.files.is_empty()))
@@ -1085,7 +1085,7 @@ impl Render for Walkthrough {
             ))
             .when(!self.target_selected && self.changes.is_some(), |view| {
                 view.child(
-                    div().flex().flex_col().gap(px(12.0))
+                    div().flex().flex_col().gap(px(Theme::SPACE_MD))
                         .text_color(theme.text_muted)
                         .child("Select the review target in Changes to track progress.")
                         .children(crate::components::walkthrough_empty_decoration(&theme, true)),
@@ -1110,7 +1110,7 @@ impl Render for Walkthrough {
             .when(true, |view| crate::components::walkthrough_hints(view, &theme, |view| {
                     let keymap = crate::settings::current(cx).keymap;
                     view.child(
-                        div().flex().gap(px(6.0)).children(
+                        div().flex().gap(px(Theme::SPACE_SM)).children(
                             [
                                 (crate::settings::ShortcutId::ReviewPreviousStep, "Previous"),
                                 (crate::settings::ShortcutId::ReviewNextStep, "Next"),
@@ -1123,7 +1123,7 @@ impl Render for Walkthrough {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap(px(3.0))
+                                            .gap(px(Theme::SPACE_XS))
                                             .child(crate::work_outline::hints::kbd_chip(
                                                 &theme, &combo,
                                             ))
@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn note_body_uses_secondary_text_size() {
         let mut body = note_body();
-        let mut secondary = div().text_size(crate::typography::ui_rems(12.0));
+        let mut secondary = div().when(true, crate::components::changes_body_text);
         assert_eq!(
             body.style().text.font_size,
             secondary.style().text.font_size

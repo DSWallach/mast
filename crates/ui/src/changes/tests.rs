@@ -789,6 +789,22 @@ fn split_rows_carry_the_comments_of_both_columns() {
 }
 
 #[test]
+fn fold_height_scales_review_cards_without_scaling_other_comments() {
+    let files = parse_patch(PATCH);
+    let mut review = ReviewComment::new("src/main.rs", CommentSide::New, 1, "review");
+    review.id = "review".into();
+    let mut other = ReviewComment::new("src/main.rs", CommentSide::New, 1, "other");
+    other.id = "other".into();
+    let comments = vec![review, other];
+    let baseline = body_height_with(&files[0], &comments, None, DiffMode::Unified, DIFF_LINE_HEIGHT);
+    let scaled = body_height_with_card_heights(&files[0], &comments, None, DiffMode::Unified, DIFF_LINE_HEIGHT, |comment| {
+        let height = comments::card_height(&comment.body);
+        if comment.id == "review" { height * 1.25 } else { height }
+    });
+    assert_eq!(scaled - baseline, comments::card_height("review") * 0.25);
+}
+
+#[test]
 fn a_split_rows_right_column_is_never_a_deletion() {
     // The invariant the `+` placement rests on: only the right column is
     // hoverable, so every note a split row can start must cite the

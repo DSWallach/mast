@@ -1662,21 +1662,13 @@ pub(crate) fn panel_chip(
     text: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
     let selector = id.clone();
-    div()
+    super::badge(theme, label)
         .id(SharedString::from(id))
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .h(px(18.0))
-        .px(px(6.0))
         .flex()
         .items_center()
-        .rounded(px(5.0))
-        .when(super::is_horizon(theme), |el| el.rounded_full())
-        .border_1()
         .border_color(border)
-        .text_size(crate::typography::ui_rems(10.5))
         .text_color(text)
-        .child(SharedString::from(label))
 }
 
 pub(crate) fn worker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpui::Div> {
@@ -1712,6 +1704,7 @@ pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpu
     div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
         .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM)).pr(px(Theme::SPACE_SM))
         .border_b_1().border_color(theme.border).cursor_pointer()
+        .when(super::is_horizon(theme), |row| row.border_color(gpui::transparent_black()))
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
 }
 
@@ -1751,9 +1744,7 @@ pub(crate) fn tracker_pr_line(theme: &Theme, id: String) -> gpui::Stateful<gpui:
 }
 
 pub(crate) fn tracker_action(theme: &Theme, id: String, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
-    running_button(id, label, primary, theme).when(primary, |button| {
-        button.bg(theme.accent).border_color(theme.accent).text_color(theme.on_accent)
-    })
+    super::button(id, label, if primary { super::ButtonVariant::Primary } else { super::ButtonVariant::Secondary }, super::ButtonSize::Sm, theme)
 }
 
 pub(crate) fn tracker_group_heading(theme: &Theme, label: &str, count: usize) -> gpui::Div {
@@ -1791,7 +1782,7 @@ pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .hover(|el| el.text_color(theme.accent))
         .flex()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(Theme::SPACE_XS))
         .child("Tracker ·")
         .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(row, theme, false)
@@ -1825,7 +1816,7 @@ pub(crate) fn worker_action_link(theme: &Theme, icon: &'static str, label: &'sta
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(Theme::SPACE_XS))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
@@ -1860,7 +1851,7 @@ pub(crate) fn worker_diff(theme: &Theme, selector: String, added: u32, removed: 
         .debug_selector(move || selector.clone())
         .flex_none()
         .flex()
-        .gap(px(4.0))
+        .gap(px(Theme::SPACE_XS))
         .text_size(crate::typography::ui_rems(10.5))
         .child(
             div()
@@ -2746,29 +2737,10 @@ pub(crate) fn team_button(
     label: String,
     primary: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let color = if primary {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
     let id: String = id.into();
     let selector = id.clone();
-    let button = div()
-        .id(SharedString::from(id))
+    super::button(SharedString::from(id), label, if primary { super::ButtonVariant::Primary } else { super::ButtonVariant::Secondary }, super::ButtonSize::Sm, theme)
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .when(super::is_horizon(theme), |el| el.rounded_full())
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(color)
-        .cursor_pointer()
-        .hover(|el| el.bg(color.opacity(0.12)))
-        .child(SharedString::from(label));
-    super::segmented_key(button, theme, primary)
 }
 
 pub(crate) fn interrupted_label(label: &'static str, count: usize, theme: &Theme) -> Div {
@@ -3063,6 +3035,53 @@ mod tests {
                 },
             )
             .unwrap()
+        }
+    }
+
+    struct TrackerControls {
+        theme: Theme,
+        clicked: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn tracker_dividers_are_hidden_only_in_horizon() {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let mut row = tracker_row(&theme, "tracker-row".into());
+                let mut with_divider = tracker_row(&theme, "tracker-row".into()).border_color(theme.border);
+                assert_eq!(row.style() == with_divider.style(), *style != crate::ui_style::UiStyleId::Horizon);
+            }
+        }
+    }
+
+    impl Render for TrackerControls {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicked = self.clicked.clone();
+            div().flex().gap(px(Theme::SPACE_SM))
+                .child(panel_chip(&self.theme, "tracker-test-chip".into(), "2 need you".into(), self.theme.border, self.theme.text))
+                .child(tracker_action(&self.theme, "tracker-test-action".into(), "Open chat", false)
+                    .debug_selector(|| "tracker-test-action".into())
+                    .on_click(move |_, _, _| { clicked.store(true, Ordering::SeqCst); }))
+        }
+    }
+
+    #[gpui::test]
+    fn tracker_controls_render_and_accept_clicks_in_each_style(cx: &mut TestAppContext) {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let clicked = Arc::new(AtomicBool::new(false));
+                let recorded = clicked.clone();
+                let (_, cx) = cx.add_window_view(move |_, _| TrackerControls { theme, clicked: recorded });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("tracker-test-chip").is_some());
+                let center = cx.debug_bounds("tracker-test-action").expect("tracker action").center();
+                cx.simulate_click(center, gpui::Modifiers::default());
+                assert!(clicked.load(Ordering::SeqCst));
+            }
         }
     }
 
