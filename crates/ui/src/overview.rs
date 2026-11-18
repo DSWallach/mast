@@ -5975,6 +5975,7 @@ impl Overview {
             spaces: self.outline_spaces(cx),
             chats: (*self.outline_chats).clone(),
             options: OutlineOptions {
+                pinned_chats: Default::default(),
                 hide_completed: self.hide_stale && !self.outline_show_completed,
                 attention_only: self.attention_filter != AttentionFilter::All,
                 show_archived: self.show_archived,
