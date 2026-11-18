@@ -4044,9 +4044,7 @@ impl Pickers {
                 .read(cx)
                 .chat_execution_members(&chat.id)
                 .is_empty();
-            let Some(space) = space.as_ref().filter(|s| s.git_detected || bound) else {
-                return None;
-            };
+            let space = space.as_ref().filter(|s| s.git_detected || bound)?;
             // A selected diff target (the worktree the agent works in) is a
             // worktree even though the chat's own cwd is the workspace root.
             let shown_cwd = self

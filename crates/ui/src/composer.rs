@@ -44,7 +44,9 @@ mod input;
 mod input_layout_geometry;
 mod input_key_bindings;
 pub use input_key_bindings::init;
-pub(crate) use input_key_bindings::{PALETTE_SEARCH_CONTEXT, WORKSPACE_SEARCH_CONTEXT};
+pub(crate) use input_key_bindings::PALETTE_SEARCH_CONTEXT;
+#[cfg(test)]
+use input_key_bindings::WORKSPACE_SEARCH_CONTEXT;
 use input_key_bindings::*;
 pub use input_layout_geometry::*;
 use input_layout_geometry::{input_max_scroll, input_overflow_edges, input_drag_position, input_reveal_height, input_scroll_offset, input_scroll_offset_for_cursor, input_drag_scroll_delta, press_intent, PressIntent};

@@ -76,9 +76,7 @@ impl NeedsGroup {
             Self::Fyi
         } else if priority == Some(UserActionPriority::Blocking) {
             Self::Blocking
-        } else if priority == Some(UserActionPriority::Normal) {
-            Self::ReadyToMerge
-        } else if kind == UserActionKind::Handoff {
+        } else if priority == Some(UserActionPriority::Normal) || kind == UserActionKind::Handoff {
             Self::ReadyToMerge
         } else {
             Self::Blocking

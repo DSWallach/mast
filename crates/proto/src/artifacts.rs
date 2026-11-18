@@ -1172,14 +1172,11 @@ pub fn artifact_links(text: &str) -> Vec<ArtifactLink> {
         format!("]({LEGACY_ARTIFACT_URL_SCHEME}"),
     ];
     let mut from = 0;
-    loop {
-        let Some((rel, needle_len)) = needles
+    while let Some((rel, needle_len)) = needles
             .iter()
             .filter_map(|n| text[from..].find(n.as_str()).map(|r| (r, n.len())))
             .min_by_key(|(r, _)| *r)
-        else {
-            break;
-        };
+    {
         let close = from + rel;
         let target_start = close + needle_len;
         from = target_start;

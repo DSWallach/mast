@@ -2422,7 +2422,7 @@ mod title_registry_tests {
             names.get("sess-bbb").map(String::as_str),
             Some("cleanup-zeron-port")
         );
-        assert!(names.get("sess-ccc").is_none());
+        assert!(!names.contains_key("sess-ccc"));
     }
 
     #[test]
