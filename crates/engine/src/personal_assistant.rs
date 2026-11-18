@@ -66,11 +66,16 @@ impl PersonalAssistantStore {
         lock(&self.state).current.clone()
     }
 
-    pub fn is_assistant(&self, chat: &Chat) -> bool {
-        lock(&self.state)
-            .current
-            .as_ref()
-            .is_some_and(|a| a.covers(chat))
+    /// `chat` is the assistant. `chats` is read only for a scheduled run the
+    /// designation does not match directly (a merged imported task).
+    pub fn is_assistant(&self, chat: &Chat, chats: impl FnOnce() -> Vec<Chat>) -> bool {
+        let Some(assistant) = self.get() else {
+            return false;
+        };
+        assistant.covers(chat, &[])
+            || (assistant.scheduled_task.is_some()
+                && chat.scheduled_task_info.is_some()
+                && assistant.covers(chat, &chats()))
     }
 }
 
@@ -98,19 +103,33 @@ mod tests {
         store.set_store(path.clone());
         store.set(&chat("a", None));
         store.set(&chat("b", Some("t1")));
-        assert!(!store.is_assistant(&chat("a", None)));
-        assert!(store.is_assistant(&chat("b", Some("t1"))));
+        assert!(!store.is_assistant(&chat("a", None), Vec::new));
+        assert!(store.is_assistant(&chat("b", Some("t1")), Vec::new));
         // A later run of the same task is the assistant too.
-        assert!(store.is_assistant(&chat("c", Some("t1"))));
+        assert!(store.is_assistant(&chat("c", Some("t1")), Vec::new));
 
         let reloaded = PersonalAssistantStore::default();
         reloaded.set_store(path.clone());
         assert_eq!(reloaded.get().map(|a| a.chat_id), Some("b".into()));
-        assert!(reloaded.is_assistant(&chat("c", Some("t1"))));
+        assert!(reloaded.is_assistant(&chat("c", Some("t1")), Vec::new));
 
         reloaded.clear();
         let cleared = PersonalAssistantStore::default();
         cleared.set_store(path);
         assert_eq!(cleared.get(), None);
+    }
+
+    #[test]
+    fn a_native_run_of_a_merged_designated_task_is_the_assistant() {
+        let store = PersonalAssistantStore::default();
+        store.set(&chat("imported", Some("legacy")));
+        let mut merged = chat("imported", Some("native"));
+        merged.scheduled_task_info.as_mut().unwrap().legacy_task_id = Some("legacy".into());
+        let native_run = chat("native-run", Some("native"));
+        let chats = vec![merged, native_run.clone()];
+        assert!(store.is_assistant(&native_run, || chats.clone()));
+        assert!(!store.is_assistant(&chat("other", Some("other")), || chats.clone()));
+        // A direct match never reads the chat list.
+        assert!(store.is_assistant(&chat("imported", None), || unreachable!()));
     }
 }

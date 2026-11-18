@@ -692,7 +692,7 @@ fn item_node<'s>(
             chat_count: item
                 .rollup
                 .associated_chat_count
-                .max(item.chat_ids.len() as u32),
+                .max(snapshot.listed_chat_ids(item).count() as u32),
             has_references: !item.external_reference_ids.is_empty(),
             execution_exceptions: snapshot.execution_exception_chats(&item.id).len() as u32,
             template_changed: super::template_review::chip_revisions(snapshot, item),
@@ -1085,6 +1085,28 @@ pub(crate) mod tests {
                 item(LAUNCH).as_str()
             ]
         );
+    }
+
+    #[test]
+    fn an_assigned_older_scheduled_run_stays_hidden_under_its_item() {
+        let mut snapshot = fixture_snapshot("s1");
+        let ui = snapshot.items.iter_mut().find(|i| i.id == UI).unwrap();
+        ui.chat_ids.push("older-run".into());
+        ui.chat_ids.sort();
+        snapshot.hidden_run_chat_ids = vec!["older-run".into()];
+        let spaces = [ready("s1", "Repo", snapshot)];
+        let mut chats = fixture_chats("s1");
+        chats.push(OutlineChat {
+            visible: false,
+            ..chat("older-run", Some("s1"))
+        });
+        let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
+        assert!(
+            model.row(&row_key::chat("older-run")).is_none(),
+            "neither under its item nor in Unassociated Chats"
+        );
+        let ui = model.row(&row_key::item("s1", UI)).unwrap().item().unwrap();
+        assert_eq!(ui.chat_count, 1);
     }
 
     #[test]

@@ -154,9 +154,9 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     let prompt = dir.path().join("SKILL.md");
     std::fs::write(&prompt, "Read the current procedure. Do not invent it.").unwrap();
     let registry = dir.path().join("scheduled-tasks.json");
-    std::fs::write(&registry,serde_json::to_vec(&serde_json::json!({"scheduledTasks":[{"id":"briefing","enabled":true,"cronExpression":"40 4 * * 1-5","cwd":dir.path(),"filePath":prompt,"permissionMode":"auto"}]})).unwrap()).unwrap();
+    std::fs::write(&registry,serde_json::to_vec(&serde_json::json!({"scheduledTasks":[{"id":"briefing","enabled":true,"cronExpression":"40 4 * * 1-5","cwd":dir.path(),"filePath":prompt,"permissionMode":"auto"},{"id":"interval","enabled":true,"cronExpression":"*/30 9-17 * * 1-5","cwd":dir.path(),"filePath":prompt},{"id":"each-minute","enabled":true,"cronExpression":"* * * * *","cwd":dir.path(),"filePath":prompt}]})).unwrap()).unwrap();
     let original = std::fs::read(&registry).unwrap();
-    let preview = core
+    let mut preview = core
         .scheduled_tasks
         .request(ScheduledTasksRequest::ImportPreview {
             registry_path: Some(registry.to_string_lossy().into()),
@@ -165,7 +165,21 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
         })
         .await
         .unwrap();
+    // A task that repeats within the hour catches up only briefly.
+    let interval = preview
+        .candidates
+        .iter()
+        .position(|c| c.source.ends_with("#interval"))
+        .unwrap();
+    assert_eq!(preview.candidates.remove(interval).draft.grace_minutes, 30);
+    let each_minute = preview
+        .candidates
+        .iter()
+        .position(|c| c.source.ends_with("#each-minute"))
+        .unwrap();
+    assert_eq!(preview.candidates.remove(each_minute).draft.grace_minutes, 30);
     assert_eq!(preview.candidates.len(), 1);
+    assert_eq!(preview.candidates[0].draft.grace_minutes, 360);
     assert!(!preview.candidates[0].draft.enabled);
     assert!(!preview.candidates[0].draft.config.auto_approve);
     let import = ScheduledTasksRequest::Import {
@@ -247,6 +261,18 @@ async fn imported_sessions_keep_original_edition_order() {
     let ids = latest_task_chat_ids(&chats);
     assert!(ids.contains("newer"));
     assert!(!ids.contains("older"));
+    let skill = format!("{}/SKILL.md", dir.path().display());
+    let source_file = |id: &str| {
+        core.workspace.chat(id).unwrap().unwrap().scheduled_task_info.unwrap().source_file
+    };
+    assert_eq!(source_file("newer").as_deref(), Some(skill.as_str()));
+    // A run imported before the file was recorded gets it from its transcript, once.
+    let mut info = core.workspace.chat("older").unwrap().unwrap().scheduled_task_info.unwrap();
+    info.source_file = None;
+    core.workspace.set_chat_scheduled_task_info("older", &info).unwrap();
+    assert_eq!(core.external_import.backfill_scheduled_source_files().unwrap(), 1);
+    assert_eq!(source_file("older").as_deref(), Some(skill.as_str()));
+    assert_eq!(core.external_import.backfill_scheduled_source_files().unwrap(), 0);
     core.shutdown().await;
 }
 
@@ -891,11 +917,18 @@ const ITEM_SPACE: &str = "item-space";
 async fn item_core(
     root: &std::path::Path,
 ) -> (EngineCore, mast_rpc::RpcClient, String) {
+    item_core_with(root, mast_harness::mock::InstructionMockHarness::default()).await
+}
+
+async fn item_core_with(
+    root: &std::path::Path,
+    harness: mast_harness::mock::InstructionMockHarness,
+) -> (EngineCore, mast_rpc::RpcClient, String) {
     let data = root.join("data");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::write(data.join("device-id"), ITEM_DEVICE).unwrap();
     let harnesses = mast_engine::HarnessRegistry::new();
-    harnesses.register(Arc::new(mast_harness::mock::InstructionMockHarness::default()));
+    harnesses.register(Arc::new(harness));
     let core =
         EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::Mock, None).unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
@@ -909,9 +942,9 @@ async fn item_core(
         .unwrap();
     for request in [
         serde_json::json!({ "op": "createWorkItem", "spaceId": ITEM_SPACE,
-            "title": "Morning briefings", "operationId": "op-item" }),
+            "title": "Routines", "operationId": "op-item" }),
         serde_json::json!({ "op": "createWorkItemInstruction", "spaceId": ITEM_SPACE,
-            "scope": { "type": "spaceRoot" }, "text": "Write results to the hub.",
+            "scope": { "type": "spaceRoot" }, "text": "Follow the team checklist.",
             "operationId": "op-instruction" }),
     ] {
         client
@@ -1001,8 +1034,20 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (core, _client, _item) = item_core(&root).await;
+    // The source registry row names the prompt file each imported run's tag carries.
+    let prompt = root.join("routine-a.md");
+    let other_account = root.join("other-account/routine-a.md");
+    let registry = root.join("scheduled-tasks.json");
+    std::fs::write(
+        &registry,
+        serde_json::to_vec(&serde_json::json!({"scheduledTasks": [
+            {"id": "routine-a", "cronExpression": "0 8 * * *", "filePath": prompt}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
     let candidate = ScheduledImportCandidate {
-        source: "/claude/acct/scheduled-tasks.json#codespace-stall-watch".into(),
+        source: format!("{}#routine-a", registry.display()),
         source_enabled: true,
         draft: item_draft(&root, None),
         warnings: vec![],
@@ -1011,14 +1056,14 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
         .scheduled_tasks
         .request(ScheduledTasksRequest::Import {
             candidate,
-            operation_id: "import-stall".into(),
+            operation_id: "import-routine".into(),
         })
         .await
         .unwrap()
         .tasks[0]
         .id
         .clone();
-    let legacy_run = |id: &str, task_id: &str, name: &str, at: i64| {
+    let legacy_run = |id: &str, task_id: &str, name: &str, file: &std::path::Path, at: i64| {
         core.workspace
             .create_chat(id, Some(ITEM_SPACE), None, None, None)
             .unwrap();
@@ -1030,47 +1075,160 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
                     task_name: name.into(),
                     run_id: id.into(),
                     session_created_at: Some(at),
+                    source_file: Some(file.to_string_lossy().into()),
                     ..Default::default()
                 },
             )
             .unwrap();
     };
-    legacy_run("stall-a", "native-id-from-registry", "codespace-stall-watch", 1);
-    legacy_run("stall-b", "fafa-legacy-id", "codespace-stall-watch", 2);
-    legacy_run("retired", "old-routine", "daily-priority-briefing", 3);
-    let written = core
-        .scheduled_tasks
-        .reconcile_run_identities(chrono::Utc::now().timestamp_millis())
-        .unwrap();
-    assert_eq!(written, 3);
+    legacy_run("run-a", "legacy-id-a", "routine-a", &prompt, 1);
+    legacy_run("run-b", "legacy-id-b", "routine-a", &prompt, 2);
+    legacy_run("other", "legacy-id-c", "routine-a", &other_account, 4);
+    legacy_run("retired", "old-routine", "retired-routine", &prompt, 3);
+    let now = chrono::Utc::now().timestamp_millis();
+    let written = core.scheduled_tasks.reconcile_run_identities(now).unwrap();
+    assert_eq!(written, 4);
     let info = |id: &str| core.workspace.chat(id).unwrap().unwrap().scheduled_task_info.unwrap();
-    assert_eq!(info("stall-a").task_id, task);
-    assert_eq!(info("stall-b").task_id, task);
-    assert_eq!(info("stall-b").legacy_task_id.as_deref(), Some("fafa-legacy-id"));
+    assert_eq!(info("run-a").task_id, task);
+    assert_eq!(info("run-b").task_id, task);
+    assert_eq!(info("run-b").legacy_task_id.as_deref(), Some("legacy-id-b"));
+    // Same task name, another account's prompt file: never joins this task.
+    assert_eq!(info("other").task_id, "legacy-id-c");
+    assert!(info("other").retired);
     assert!(info("retired").retired);
     let chats = core.workspace.read_chats().unwrap();
     assert_eq!(
         mast_proto::latest_task_chat_ids(&chats),
-        std::collections::HashSet::from(["stall-b"])
+        std::collections::HashSet::from(["run-b"])
     );
     let outline = mast_doc::materialize_work_outline(
         ITEM_SPACE,
         &core.workspace.work_outline_inputs(ITEM_SPACE),
     );
-    assert_eq!(outline.unassociated_chat_ids, vec!["stall-b".to_string()]);
-    // A later pass (forced by a task change) writes nothing new.
-    core.scheduled_tasks
-        .request(ScheduledTasksRequest::RunNow {
-            id: "missing".into(),
-            operation_id: "noop".into(),
-        })
-        .await
-        .ok();
+    assert_eq!(outline.hidden_run_chat_ids, ["other", "retired", "run-a"]);
+    // An old imported run can lose its transcript before backfill finds its file.
+    let transcript = root.join("missing.jsonl");
+    let wrapper = format!(
+        "<scheduled-task name=\"routine-a\" file=\"{}\">\nDo the task\n</scheduled-task>",
+        prompt.display(),
+    );
+    let line = serde_json::json!({
+        "type": "user", "uuid": "first", "timestamp": "2026-11-10T08:00:00Z",
+        "cwd": root, "sessionId": "missing", "message": {"role": "user", "content": wrapper}
+    });
+    std::fs::write(&transcript, format!("{line}\n")).unwrap();
+    core.external_import
+        .import("missing", "missing", &transcript)
+        .unwrap();
+    let mut missing = info("missing");
+    missing.source_file = None;
+    core.workspace
+        .set_chat_scheduled_task_info("missing", &missing)
+        .unwrap();
+    std::fs::remove_file(transcript).unwrap();
+
+    // Within the recheck interval nothing runs; after it, a full pass
+    // rewrites only the run that arrived since.
+    legacy_run("late", "legacy-id-d", "routine-a", &prompt, 5);
+    assert_eq!(core.scheduled_tasks.reconcile_run_identities(now + 1).unwrap(), 0);
+    assert_eq!(info("late").task_id, "legacy-id-d");
+    let recheck = now + 10 * 60_000;
+    assert_eq!(core.scheduled_tasks.reconcile_run_identities(recheck).unwrap(), 1);
+    assert_eq!(info("late").task_id, task);
+    assert_eq!(info("missing"), missing, "the file has not been checked");
+
+    assert_eq!(core.external_import.backfill_scheduled_source_files().unwrap(), 0);
+    let recheck = recheck + 10 * 60_000;
+    assert_eq!(core.scheduled_tasks.reconcile_run_identities(recheck).unwrap(), 1);
+    assert!(info("missing").retired);
+    assert_eq!(info("missing").task_id, missing.task_id);
     assert_eq!(
         core.scheduled_tasks
-            .reconcile_run_identities(chrono::Utc::now().timestamp_millis())
+            .reconcile_run_identities(recheck + 10 * 60_000)
             .unwrap(),
-        0
+        0,
+        "an applied pass writes nothing"
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unsynced_registry_skips_the_identity_pass_and_keeps_it_due() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(mast_engine::EdgeConfig::with_static_token(
+            "http://127.0.0.1:1",
+            "test",
+        )),
+    )
+    .unwrap();
+    assert!(!core.workspace.registry_synced());
+    let device = core.workspace.device_id().to_owned();
+    core.workspace
+        .create_chat("orphan", None, Some(&device), None, None)
+        .unwrap();
+    let orphan = ScheduledChat {
+        task_id: "no-such-task".into(),
+        task_name: "routine-a".into(),
+        run_id: "orphan".into(),
+        ..Default::default()
+    };
+    core.workspace
+        .set_chat_scheduled_task_info("orphan", &orphan)
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    assert_eq!(core.scheduled_tasks.reconcile_run_identities(now).unwrap(), 0);
+    let info = core.workspace.chat("orphan").unwrap().unwrap().scheduled_task_info;
+    assert_eq!(info, Some(orphan), "a stale replica writes nothing");
+    assert_eq!(
+        core.scheduled_tasks.identities_checked_at(),
+        None,
+        "the pass stays due for the first synced tick"
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_its_harness_cannot_start_leaves_no_chat_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let harness = mast_harness::mock::InstructionMockHarness::new(
+        mast_harness::InstructionSupport::no_channel(),
+    );
+    let (core, _client, item) = item_core_with(&root, harness).await;
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "linked".into(),
+            expected_revision: 0,
+            draft: item_draft(&root, Some(item)),
+            operation_id: "save-linked".into(),
+        })
+        .await
+        .unwrap();
+    let snapshot = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::RunNow {
+            id: "linked".into(),
+            operation_id: "run-linked".into(),
+        })
+        .await
+        .unwrap();
+    let chat_id = snapshot.runs[0].chat_id.clone().unwrap();
+    core.scheduled_tasks
+        .tick(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    let runs = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::List)
+        .await
+        .unwrap()
+        .runs;
+    assert_eq!(runs[0].state, ScheduledRunState::Failed);
+    assert!(runs[0].detail.as_deref().is_some_and(|d| d.contains("instructions")));
+    assert!(core.workspace.chat(&chat_id).unwrap().is_none());
     core.shutdown().await;
 }

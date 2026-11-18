@@ -1726,7 +1726,30 @@ fn scheduled_run_lists_and_counts_exclude_superseded_and_retired_chats() {
         assign(&mut doc, &format!("assign-{id}"), id, &item).unwrap();
     }
     let outline = snap(&doc);
-    assert_eq!(outline.item(&item).unwrap().chat_ids, ["latest"]);
-    assert_eq!(outline.item(&item).unwrap().rollup.associated_chat_count, 1);
+    let view = outline.item(&item).unwrap();
+    // Lookups still find every run's item; lists and counts skip the hidden ones.
+    assert_eq!(view.chat_ids, ["latest", "older", "retired"]);
+    assert_eq!(outline.hidden_run_chat_ids, ["older", "retired"]);
+    assert_eq!(outline.listed_chat_ids(view).collect::<Vec<_>>(), ["latest"]);
+    assert_eq!(view.rollup.associated_chat_count, 1);
     assert!(outline.unassociated_chat_ids.is_empty());
+}
+
+#[test]
+fn unassigned_hidden_runs_stay_unassociated_but_are_marked() {
+    let mut doc = doc_with_spaces("dev-a");
+    for (id, at) in [("older", 1), ("latest", 2)] {
+        let mut chat = space_chat(id, Some(SPACE));
+        chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_id: "task".into(),
+            task_name: "Routine".into(),
+            run_id: id.into(),
+            session_created_at: Some(at),
+            ..Default::default()
+        });
+        doc.upsert_chat(&chat).unwrap();
+    }
+    let outline = snap(&doc);
+    assert_eq!(outline.unassociated_chat_ids, ["latest", "older"]);
+    assert!(outline.is_hidden_run("older") && !outline.is_hidden_run("latest"));
 }
