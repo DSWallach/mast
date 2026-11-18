@@ -1704,6 +1704,7 @@ pub(crate) fn tracker_row(theme: &Theme, selector: String) -> gpui::Stateful<gpu
     div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
         .flex().flex_col().gap(px(Theme::SPACE_XS)).py(px(Theme::SPACE_SM)).pr(px(Theme::SPACE_SM))
         .border_b_1().border_color(theme.border).cursor_pointer()
+        .when(super::is_horizon(theme), |row| row.border_color(gpui::transparent_black()))
         .hover(|el| el.bg(theme.element_hover.opacity(0.5)))
 }
 
@@ -3040,6 +3041,19 @@ mod tests {
     struct TrackerControls {
         theme: Theme,
         clicked: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn tracker_dividers_are_hidden_only_in_horizon() {
+        for style in crate::ui_style::UiStyleId::ALL {
+            for dark in [false, true] {
+                let theme = if dark { Theme::dark() } else { Theme::light() }
+                    .with_ui_style(crate::ui_style::UiStyle::resolve(*style, crate::ui_style::UiLayout::Minimal));
+                let mut row = tracker_row(&theme, "tracker-row".into());
+                let mut with_divider = tracker_row(&theme, "tracker-row".into()).border_color(theme.border);
+                assert_eq!(row.style() == with_divider.style(), *style != crate::ui_style::UiStyleId::Horizon);
+            }
+        }
     }
 
     impl Render for TrackerControls {
