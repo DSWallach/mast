@@ -168,16 +168,18 @@ impl PrMergedWakes {
                     items.insert(reference.work_item_id.clone());
                 }
             }
-            for chat in chats.iter().filter(|c| c.space_id.as_deref() == Some(space.id.as_str())) {
+            let assignments: HashMap<&str, &str> = snapshot.assignments.iter()
+                .filter(|a| a.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated)
+                .filter_map(|a| a.work_item_id.as_deref().map(|item| (a.chat_id.as_str(), item))).collect();
+            for chat in chats.iter().filter(|c| c.space_id.as_deref() == Some(space.id.as_str()) && c.parent_chat_id.is_some()) {
+                let Some(item) = assignments.get(chat.id.as_str()) else { continue; };
                 let matches_branch = checkout.is_some_and(|(path, branch)| status.branch.as_deref() == Some(branch) && chat.cwd.as_deref().is_some_and(|cwd| Path::new(cwd) == path)
                     && chat.branch.as_deref() == Some(branch));
                 let links = self.workspace.chat_pr_links(&chat.id).map_err(|e| e.to_string())?;
                 let matches_link = links.iter().any(|link| crate::archivable::owns_pr_link(link)
                     && crate::chat_links::canonicalize_pr_url(&link.url) == url);
-                if let Some(item) = snapshot.assignments.iter().find(|a| a.chat_id == chat.id && a.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated).and_then(|a| a.work_item_id.as_ref()) {
-                    if matches_link { items.insert(item.clone()); }
-                    if matches_branch { branch_items.insert(item.clone()); }
-                }
+                if matches_link { items.insert((*item).to_owned()); }
+                if matches_branch { branch_items.insert((*item).to_owned()); }
             }
             if branch_items.len() == 1 { items.extend(branch_items); }
             let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::System,
@@ -473,7 +475,8 @@ mod tests {
         let branch_item = mutate(mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
             space_id: "branch-space".into(), parent_work_item_id: None, placement: Default::default(), title: "Branch item".into(), description: None, status: None, operation_id: "branch-item".into(),
         })).work_item_id.unwrap();
-        workspace.create_chat("branch-worker", Some("branch-space"), Some("device"), None, Some("/tmp/branch-space".into())).unwrap();
+        workspace.create_chat("branch-parent", Some("branch-space"), Some("device"), None, None).unwrap();
+        workspace.create_chat_with_parent("branch-worker", Some("branch-space"), Some("device"), None, Some("/tmp/branch-space".into()), Some("branch-parent".into())).unwrap();
         workspace.set_chat_branch("branch-worker", "feature/a").unwrap();
         mutate(mast_proto::WorkOutlineMutation::AssignChatToWorkItem(mast_proto::AssignChatToWorkItemParams {
             chat_id: "branch-worker".into(), work_item_id: branch_item.clone(), operation_id: "branch-assign".into(),
