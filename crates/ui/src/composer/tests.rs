@@ -664,12 +664,19 @@ fn queue_command_timeout_restores_draft_to_selected_chat(cx: &mut gpui::TestAppC
     let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
     let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
     let state = cx.new(|_| AppState::new());
-    state.update(cx, |state, _| state.set_test_engine(
-        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)),
-    ));
+    state.update(cx, |state, _| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)));
+        state.local_device_id = Some("local".into());
+        state.devices.push(mast_proto::Device {
+            id: "local".into(), name: "local".into(), platform: "macos".into(),
+            last_seen_at: None, created_at: None, version: Some("0.2.12".into()),
+            cursor_sdk_version: None, capabilities: Vec::new(),
+        });
+    });
     let composer = cx.new(|cx| Composer::new(state.clone(), cx));
     composer.update(cx, |composer, cx| {
         composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+        composer.attachments.insert(String::new(), vec![attachments::stage_png_bytes("image.png".into(), vec![1, 2, 3])]);
         composer.send("draft text".into(), false, cx);
     });
     let mut operations = Vec::new();
@@ -680,11 +687,21 @@ fn queue_command_timeout_restores_draft_to_selected_chat(cx: &mut gpui::TestAppC
         while let Ok(frame) = requests.try_recv() {
             let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
             match frame["method"].as_str() {
+                Some(methods::UPLOAD_CHUNK) => {
+                    replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
+                }
+                Some(methods::UPLOAD_COMMIT) => {
+                    replies.try_send(serde_json::json!({"id": frame["id"], "ok": {"path": "/uploads/image.png"}}).to_string()).unwrap();
+                }
                 Some(methods::MUTATE) => {
                     operations.push(frame["params"]["op"].as_str().unwrap().to_string());
                     replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
                 }
-                Some(methods::QUEUE_COMMAND) => { dispatched = true; }
+                Some(methods::QUEUE_COMMAND) => {
+                    assert_eq!(frame["params"]["transfers"].as_array().unwrap().len(), 1);
+                    assert!(frame["params"]["command"].to_string().contains("pending://"));
+                    dispatched = true;
+                }
                 _ => {}
             }
         }
@@ -721,7 +738,8 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {
         let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound))
-            .with_test_capability(capabilities::MESSAGE_QUEUE_V1);
+            .with_test_capability(capabilities::MESSAGE_QUEUE_V1)
+            .with_test_capability(capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1);
         state.set_test_engine(engine);
         state.selected_chat = Some("c".into());
         state.chats.push(mast_proto::Chat {
@@ -742,6 +760,7 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
     }));
     composer.update(cx, |composer, cx| {
         composer.current_key = "c".into();
+        stage_validation_draft(composer, cx);
         composer.input.update(cx, |input, cx| input.set_text("keep this message", cx));
         composer.send("keep this message".into(), true, cx);
         assert!(state.read(cx).pending_echoes().is_empty());
@@ -754,13 +773,28 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
         while let Ok(frame) = requests.try_recv() {
             let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
             if frame["method"] == methods::QUEUE_MESSAGE {
+                assert_eq!(frame["params"]["attachments"].as_array().unwrap().len(), 2);
+                assert!(frame["params"]["text"].as_str().unwrap().contains("/uploads/image.png"));
                 queue_request = Some(frame["id"].clone());
                 break;
+            }
+            if frame["method"] == methods::UPLOAD_CHUNK {
+                replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
+            }
+            if frame["method"] == methods::UPLOAD_COMMIT {
+                replies.try_send(serde_json::json!({"id": frame["id"], "ok": {"path": "/uploads/image.png"}}).to_string()).unwrap();
             }
         }
         if queue_request.is_some() { break; }
     }
     let id = queue_request.expect("queue request");
+    composer.update(cx, |composer, cx| {
+        stage_validation_draft(composer, cx);
+        composer.skills.insert("c".into(), vec!["fresh-skill".into()]);
+        let shot = &mut composer.appshots.get_mut("c").unwrap()[0];
+        shot.id = "fresh-shot".into();
+        shot.screenshot.id = "fresh-image".into();
+    });
     replies.try_send(serde_json::json!({"id": id, "err": "append failed"}).to_string()).unwrap();
     for _ in 0..100 {
         runtime.block_on(tokio::task::yield_now());
@@ -769,7 +803,12 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
     }
     composer.read_with(cx, |composer, cx| {
         assert!(composer.failure.as_deref().is_some_and(|error| error.contains("append failed")));
-        assert_eq!(composer.input.read(cx).text(), "keep this message");
+        assert_eq!(composer.input.read(cx).text(), "keep this message\n\ndraft text");
+        assert_eq!(composer.staged().len(), 2);
+        assert_eq!(composer.staged_appshots().len(), 2);
+        assert_eq!(composer.staged_skills(), &["review", "fresh-skill"]);
+        assert_eq!(composer.state.read(cx).review_comments("c").len(), 2);
+        assert_eq!(composer.state.read(cx).code_refs("c").len(), 2);
     });
 }
 
