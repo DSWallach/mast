@@ -104,7 +104,7 @@ pub(crate) fn artifact_card(
     };
     let open_button = open.clone();
     div()
-        .py(px(4.0))
+        .py(px(Theme::SPACE_XS))
         .w_full()
         .child(
             crate::components::browser_parts::artifact_card_frame(
@@ -118,7 +118,7 @@ pub(crate) fn artifact_card(
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(Theme::SPACE_SM))
                     .child(crate::components::browser_parts::artifact_card_icon(
                         card.icon, theme,
                     ))
@@ -128,7 +128,7 @@ pub(crate) fn artifact_card(
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
+                            .gap(px(Theme::SPACE_XS))
                             .child(
                                 div()
                                     .truncate()
