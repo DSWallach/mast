@@ -16,7 +16,8 @@ pub struct HealthChat {
     pub archived: bool,
     pub finished: bool,
     pub stale: bool,
-    pub has_open_pr: bool,
+    /// `None` means the cached PR state is not known yet.
+    pub has_open_pr: Option<bool>,
     pub on_default_branch: bool,
     pub has_bound_worktree: bool,
 }
@@ -73,7 +74,7 @@ pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPul
         if ticket && chat.on_default_branch && !chat.has_bound_worktree {
             entries.push(HealthEntry::WorkerOnDefaultBranch { chat_id: chat.id.clone() });
         }
-        if chat.stale && !chat.has_open_pr && !item.is_some_and(|item| item.completed || item.linear_completed == Some(true)) {
+        if chat.stale && chat.has_open_pr == Some(false) && !item.is_some_and(|item| item.completed || item.linear_completed == Some(true)) {
             entries.push(HealthEntry::StaleChat { chat_id: chat.id.clone() });
         }
     }
@@ -89,7 +90,7 @@ mod tests {
         let items = vec![HealthItem { id: "ticket".into(), container: false, completed: false, linear_completed: None, chat_ids: vec!["a".into(), "b".into(), "finished".into()] },
             HealthItem { id: "container".into(), container: true, completed: false, linear_completed: None, chat_ids: vec!["c".into()] }];
         let chat = |id: &str, item: &str| HealthChat { id: id.into(), item_id: Some(item.into()), archived: false, finished: false,
-            stale: false, has_open_pr: false, on_default_branch: false, has_bound_worktree: false };
+            stale: false, has_open_pr: Some(false), on_default_branch: false, has_bound_worktree: false };
         let mut a = chat("a", "ticket"); a.stale = true; a.on_default_branch = true;
         let b = chat("b", "ticket");
         let c = chat("c", "container");
@@ -110,7 +111,7 @@ mod tests {
     fn open_pr_prevents_stale_and_bound_worktree_prevents_default_branch_warning() {
         let item = HealthItem { id: "item".into(), container: false, completed: true, linear_completed: None, chat_ids: vec!["chat".into()] };
         let chat = HealthChat { id: "chat".into(), item_id: Some("item".into()), archived: false, finished: false, stale: true,
-            has_open_pr: true, on_default_branch: true, has_bound_worktree: true };
+            has_open_pr: Some(true), on_default_branch: true, has_bound_worktree: true };
         let pr = HealthPullRequest { url: "merged".into(), item_id: Some("item".into()), linked_to_ticket: true, open: false, merged: true };
         assert!(check_health(&[item], &[chat], &[pr]).is_empty());
     }
@@ -126,5 +127,12 @@ mod tests {
     fn pull_request_matched_to_a_linear_ticket_is_not_unlinked() {
         let pr = HealthPullRequest { url: "open".into(), item_id: None, linked_to_ticket: true, open: true, merged: false };
         assert!(check_health(&[], &[], &[pr]).is_empty());
+    }
+
+    #[test]
+    fn unknown_pr_state_does_not_mark_a_chat_stale() {
+        let chat = HealthChat { id: "chat".into(), item_id: None, archived: false, finished: false, stale: true,
+            has_open_pr: None, on_default_branch: false, has_bound_worktree: false };
+        assert!(check_health(&[], &[chat], &[]).is_empty());
     }
 }

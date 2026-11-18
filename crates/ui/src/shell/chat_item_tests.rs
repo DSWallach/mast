@@ -1335,9 +1335,28 @@ fn tracker_shows_state_specific_actions(cx: &mut TestAppContext) {
     assert!(has(vcx, "tracker-answer-w-1"));
     assert!(has(vcx, "team-pr-w-2-0"));
     assert!(has(vcx, "tracker-review-w-2"));
-    assert!(has(vcx, "tracker-merge-w-2"));
+    assert!(!has(vcx, "tracker-merge-w-2"));
     assert!(has(vcx, "team-worker-changes-w-0"));
     assert!(!has(vcx, "team-worker-changes-w-1"));
+}
+
+#[gpui::test]
+fn tracker_offers_merge_for_approved_passing_pr_without_handoff(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| {
+        let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+            "isWorktree": false, "pr": {"number": 57, "url": "https://github.com/example/project/pull/57", "state": "OPEN",
+                "isDraft": false, "reviewDecision": "APPROVED", "reviewers": [], "checks": "passing",
+                "branch": "feature/w-0", "mergeable": "mergeable", "hasReviewerRequested": false}
+        })).unwrap();
+        shell.chat_header_links.insert("w-0".into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-review-w-0"));
+    assert!(has(vcx, "tracker-merge-w-0"));
 }
 
 #[gpui::test]

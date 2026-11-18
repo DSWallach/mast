@@ -1009,9 +1009,10 @@ impl Shell {
         let (_, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
         let identity = model.filter(|model| !model.is_empty()).unwrap_or(harness);
         let group = worker.tracker_group();
+        let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
             && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
-        let status = if group == TrackerGroup::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
+        let status = if stage == LifecycleStage::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
         let status_color = crate::status_style::status_style(status, theme.appearance).color;
         let stalled = self.tracker.stalled.get(&id).cloned();
         let title = tracker_headline(worker.ticket.as_ref().filter(|_| self.tracker.linear_project_linked), worker.work_item_title.as_deref().unwrap_or("Unassigned work"));
@@ -1051,7 +1052,6 @@ impl Shell {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
             }
         }
-        let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
         let track = tracker_stage_track(&id, std::array::from_fn(|index| index <= stage.index()), theme);
         let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
             .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
@@ -1135,7 +1135,7 @@ impl Shell {
             actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-answer-{id}"), "Answer", true)
                 .debug_selector({ let id = id.clone(); move || format!("tracker-answer-{id}") })
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_chat(answer_id.clone(), cx); })));
-        } else if group == TrackerGroup::ReadyToMerge && open_pr.is_some() {
+        } else if matches!(stage, LifecycleStage::PrReview | LifecycleStage::ReadyToMerge) && open_pr.is_some() {
             let pr = open_pr.unwrap();
             let review_id = id.clone();
             let review_branch = worker.branch.clone();
@@ -1151,10 +1151,12 @@ impl Shell {
                     this.tracker.review_generation = this.tracker.review_generation.wrapping_add(1);
                     this.tracker.review_task = None;
                     this.open_tracker_review(review_id.clone(), review_branch.clone(), review_url.clone(), review_head.clone(), cx);
-                })))
-                .child(crate::components::shell_parts::tracker_action(theme, format!("tracker-merge-{id}"), "Merge…", false)
+                })));
+            if stage == LifecycleStage::ReadyToMerge {
+                actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-merge-{id}"), "Merge…", false)
                     .debug_selector({ let id = id.clone(); move || format!("tracker-merge-{id}") })
                     .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_web_reference(&merge_url, window.modifiers().secondary(), window, cx); })));
+            }
         } else {
             let changes_id = id.clone();
             let changes_branch = worker.branch.clone();

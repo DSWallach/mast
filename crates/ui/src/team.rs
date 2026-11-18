@@ -182,6 +182,7 @@ pub(crate) fn ticket_lifecycle(
             .is_some_and(|at| now.signed_duration_since(at) > chrono::Duration::days(3)),
     }).collect();
     let prs: Vec<_> = workers.iter().flat_map(|worker| &worker.prs).map(|pr| PullRequestFacts {
+        state_known: !pr.state.is_empty(),
         open: pr.state.eq_ignore_ascii_case("open"),
         merged: pr.state.eq_ignore_ascii_case("merged"),
         approved: pr.review == Some("approved") && !pr.draft,

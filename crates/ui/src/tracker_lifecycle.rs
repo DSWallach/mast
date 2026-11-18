@@ -26,6 +26,7 @@ impl LifecycleStage {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PullRequestFacts {
+    pub state_known: bool,
     pub open: bool,
     pub merged: bool,
     pub approved: bool,
@@ -79,6 +80,7 @@ pub(crate) fn derive_ticket_lifecycle(
         has_linear_ticket: linear_completed.is_some(),
         linear_completed: linear_completed.unwrap_or(false),
         pull_request: PullRequestFacts {
+            state_known: pull_requests.iter().all(|pr| pr.state_known),
             open,
             merged,
             approved: ready,
@@ -88,7 +90,8 @@ pub(crate) fn derive_ticket_lifecycle(
             checks_passing: ready,
         },
         needs_answer: chats.iter().any(|chat| chat.needs_answer) || changes_requested,
-        idle_over_three_days: !chats.is_empty() && chats.iter().all(|chat| chat.idle_over_three_days),
+        idle_over_three_days: !chats.is_empty() && chats.iter().all(|chat| chat.idle_over_three_days)
+            && pull_requests.iter().all(|pr| pr.state_known),
     };
     derive_lifecycle(facts)
 }
@@ -216,5 +219,13 @@ mod tests {
         assert_eq!(derive_ticket_lifecycle(&chats, &[], None, None).stage, LifecycleStage::CodeReview);
         assert_eq!(derive_ticket_lifecycle(&[], &[], Some(true), None).stage, LifecycleStage::Done);
         assert_eq!(derive_ticket_lifecycle(&[], &[], Some(false), None).stage, LifecycleStage::NotStarted);
+    }
+
+    #[test]
+    fn unknown_pull_request_state_does_not_hide_a_ticket_as_stale() {
+        let chat = ChatFacts { idle_over_three_days: true, ..Default::default() };
+        let pr = PullRequestFacts::default();
+        assert!(!derive_ticket_lifecycle(&[chat], &[pr], Some(false), None).stale);
+        assert!(derive_ticket_lifecycle(&[chat], &[], Some(false), None).stale);
     }
 }
