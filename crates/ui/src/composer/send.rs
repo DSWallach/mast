@@ -139,16 +139,6 @@ impl Composer {
     }
 
     async fn dispatch_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool) -> Result<Option<String>, String> {
-        let engine = &send.engine;
-        let message_id = &send.message_id;
-        let chat_id = &send.chat_id;
-        let resolved = &send.resolved;
-        let host_device_id = &send.host_device_id;
-        let staged_appshots = &send.staged_appshots;
-        let staged = &send.staged;
-        let text = &send.text;
-        let queue = send.queue;
-        let clean_queue_attachment_text = send.clean_queue_attachment_text;
         #[cfg(test)]
         let fail_send_before_dispatch = send.fail_send_before_dispatch;
         let (content, attachment_paths, transfers) = Self::stage_send_attachments(send, this, cx).await?;
@@ -161,6 +151,20 @@ impl Composer {
                 if fail_send_before_dispatch {
                     return Err("Injected pre-dispatch failure".into());
                 }
+        Self::queue_send(send, this, cx, dispatch_attempted, cwd, run_worktree, content, attachment_paths, transfers).await
+    }
+
+    async fn queue_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool, cwd: String, run_worktree: Option<mast_proto::WorktreeSpec>, content: String, attachment_paths: Vec<String>, transfers: Vec<serde_json::Value>) -> Result<Option<String>, String> {
+        let engine = &send.engine;
+        let message_id = &send.message_id;
+        let chat_id = &send.chat_id;
+        let resolved = &send.resolved;
+        let host_device_id = &send.host_device_id;
+        let staged_appshots = &send.staged_appshots;
+        let staged = &send.staged;
+        let text = &send.text;
+        let queue = send.queue;
+        let clean_queue_attachment_text = send.clean_queue_attachment_text;
                 if queue {
                     // A queue row is editable UI state, so its text must stay
                     // free of the internal attachment-path trailer. The host
