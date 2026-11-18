@@ -158,4 +158,3 @@ pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
         _ => line.new_no.map(|no| (CommentSide::New, no)),
     }
 }
-

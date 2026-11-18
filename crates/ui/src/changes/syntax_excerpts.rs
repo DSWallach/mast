@@ -177,4 +177,3 @@ pub(super) fn file_diff_text_request(
         diff_checksum: diff.checksum.clone(),
     }
 }
-

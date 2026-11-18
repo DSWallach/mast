@@ -236,4 +236,3 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
         .max()
         .unwrap_or(0);
 }
-
