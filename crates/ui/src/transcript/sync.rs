@@ -5,6 +5,12 @@ struct SyncSource {
     replay: TranscriptReplayState,
 }
 
+struct SyncRows {
+    new_rows: Vec<Row>,
+    entries_empty: bool,
+    tail_streaming: bool,
+}
+
 impl Transcript {
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
@@ -14,42 +20,7 @@ impl Transcript {
         };
         let attached = self.attach_transcript(selected, replay);
 
-        let mut new_rows: Vec<Row> = Vec::new();
-        // Borrow the transcript only while deriving rows. Cloning the entity
-        // handle lets rows_for mutate our caches without copying every text
-        // and tool payload on each app-state notification.
-        let (entries_empty, tail_streaming) = {
-            let state = self.state.clone();
-            let state = state.read(cx);
-            let entries = match &self.doc_override {
-                Some(doc_id) => state.sub_transcript(doc_id),
-                None => state.transcript.as_slice(),
-            };
-            let prepared = self
-                .chat_id
-                .as_ref()
-                .and_then(|id| state.prepared_transcripts.get(id));
-            for entry in entries {
-                if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
-                    #[cfg(test)]
-                    SYNC_ROW_COUNTS.with(|counts| { let (visited, cloned) = counts.get(); counts.set((visited + rows.len(), cloned + rows.len())); });
-                    new_rows.extend(rows.iter().cloned());
-                } else {
-                    new_rows.extend(self.rows_for(entry, false));
-                }
-            }
-            if self.doc_override.is_none() {
-                for echo in state.pending_echoes() {
-                    new_rows.extend(self.rows_for(echo, true));
-                }
-            }
-            (
-                entries.is_empty(),
-                entries
-                    .last()
-                    .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
-            )
-        };
+        let SyncRows { new_rows, entries_empty, tail_streaming } = self.build_sync_rows(cx);
 
         let baseline = self
             .chat_id
@@ -579,6 +550,46 @@ impl Transcript {
         }
 
         attached
+    }
+    fn build_sync_rows(&mut self, cx: &mut Context<Self>) -> SyncRows {
+        let mut new_rows: Vec<Row> = Vec::new();
+        // Borrow the transcript only while deriving rows. Cloning the entity
+        // handle lets rows_for mutate our caches without copying every text
+        // and tool payload on each app-state notification.
+        let (entries_empty, tail_streaming) = {
+            let state = self.state.clone();
+            let state = state.read(cx);
+            let entries = match &self.doc_override {
+                Some(doc_id) => state.sub_transcript(doc_id),
+                None => state.transcript.as_slice(),
+            };
+            let prepared = self
+                .chat_id
+                .as_ref()
+                .and_then(|id| state.prepared_transcripts.get(id));
+            for entry in entries {
+                if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
+                    #[cfg(test)]
+                    SYNC_ROW_COUNTS.with(|counts| { let (visited, cloned) = counts.get(); counts.set((visited + rows.len(), cloned + rows.len())); });
+                    new_rows.extend(rows.iter().cloned());
+                } else {
+                    new_rows.extend(self.rows_for(entry, false));
+                }
+            }
+            if self.doc_override.is_none() {
+                for echo in state.pending_echoes() {
+                    new_rows.extend(self.rows_for(echo, true));
+                }
+            }
+            (
+                entries.is_empty(),
+                entries
+                    .last()
+                    .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
+            )
+        };
+
+        SyncRows { new_rows, entries_empty, tail_streaming }
     }
 
 }
