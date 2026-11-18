@@ -137,6 +137,13 @@ fn runnable(path: &Path) -> bool {
 }
 
 fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    newest_candidate_with(candidates, binary_version)
+}
+
+fn newest_candidate_with(
+    candidates: Vec<PathBuf>,
+    version_of: impl Fn(&Path) -> Option<semver::Version>,
+) -> Option<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     let candidates: Vec<_> = candidates
         .into_iter()
@@ -144,9 +151,9 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         .collect();
     let mut best = candidates.first()?.clone();
     if candidates.len() > 1 {
-        let mut version = binary_version(&best);
+        let mut version = version_of(&best);
         for path in candidates.iter().skip(1) {
-            let next = binary_version(path);
+            let next = version_of(path);
             if next.as_ref().is_some_and(|next| {
                 version
                     .as_ref()
@@ -163,6 +170,16 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 /// Probe once per executable identity. Failures are cached too, including timeout.
 /// Keep the lock during the short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
+    binary_version_with(path, std::time::Duration::from_secs(2), |start, timeout| {
+        start.elapsed() >= timeout
+    })
+}
+
+fn binary_version_with(
+    path: &Path,
+    timeout: std::time::Duration,
+    mut expired: impl FnMut(std::time::Instant, std::time::Duration) -> bool,
+) -> Option<semver::Version> {
     use std::{
         collections::HashMap,
         sync::{Mutex, OnceLock},
@@ -208,7 +225,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         let success = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
-                Ok(None) if start.elapsed() < Duration::from_secs(2) => {
+                Ok(None) if !expired(start, timeout) => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
                 _ => {
@@ -227,7 +244,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         }
         let mut bytes = Vec::new();
         for reader in readers {
-            while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
+            while !reader.is_finished() && !expired(start, timeout) {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !reader.is_finished() {
@@ -256,7 +273,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                         .stdout(crate::process::Stdio::piped())
                         .stderr(crate::process::Stdio::piped())
                         .kill_on_drop(true);
-                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+                    let output = tokio::time::timeout(timeout, command.output())
                         .await
                         .ok()?
                         .ok()?;
@@ -613,8 +630,18 @@ mod tests {
             std::fs::write(path, format!("#!/bin/sh\necho codex-cli {version} >&2\n")).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(binary_version(&first).unwrap().to_string(), "1.0.0+aaa");
-        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+        let probe = |path: &Path| {
+            binary_version_with(
+                path,
+                std::time::Duration::from_secs(30),
+                |start, timeout| start.elapsed() >= timeout,
+            )
+        };
+        assert_eq!(probe(&first).unwrap().to_string(), "1.0.0+aaa");
+        assert_eq!(
+            newest_candidate_with(vec![first.clone(), second], probe),
+            Some(first)
+        );
     }
 
     #[cfg(unix)]
@@ -622,15 +649,54 @@ mod tests {
     fn version_probe_bounds_hangs_and_rejects_nonzero() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        for (name, body) in [("failed", "echo 9.0.0; exit 1"), ("hung", "sleep 30")] {
-            let path = dir.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let started = std::time::Instant::now();
-            assert_eq!(binary_version(&path), None);
-            assert!(started.elapsed() < std::time::Duration::from_secs(3));
-            assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
-        }
+        let failed = dir.path().join("failed");
+        std::fs::write(&failed, "#!/bin/sh\necho 9.0.0; exit 1\n").unwrap();
+        std::fs::set_permissions(&failed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            binary_version_with(
+                &failed,
+                std::time::Duration::from_secs(30),
+                |start, timeout| start.elapsed() >= timeout
+            ),
+            None
+        );
+        let hung = dir.path().join("hung");
+        let ready = dir.path().join("ready");
+        std::fs::write(
+            &hung,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'; exec sleep 60\n",
+                ready.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guard = std::time::Instant::now();
+        let mut armed = false;
+        assert_eq!(
+            binary_version_with(&hung, std::time::Duration::from_secs(2), |_, timeout| {
+                assert_eq!(timeout, std::time::Duration::from_secs(2));
+                assert!(
+                    guard.elapsed() < std::time::Duration::from_secs(30),
+                    "child did not start"
+                );
+                armed = ready.exists();
+                armed
+            }),
+            None
+        );
+        assert!(armed);
+        let pid: i32 = std::fs::read_to_string(ready)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "timed-out child must be reaped"
+        );
+        assert_eq!(newest_candidate(vec![hung.clone()]), Some(hung));
     }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {
