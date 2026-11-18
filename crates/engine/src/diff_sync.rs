@@ -180,6 +180,7 @@ struct CheckoutEntry {
     handled_kicks: AtomicU64,
     /// Set once the fs watchers are attached (or setup was abandoned).
     watch_attached: AtomicBool,
+    attach_finished_for_test: AtomicBool,
     /// Most recent chat activity, updated even while setup is queued.
     watch_priority: Arc<AtomicI64>,
     /// Debug-only measurement of the post-attachment kick.
@@ -312,6 +313,7 @@ struct DiffSyncInner {
     identities: Mutex<HashMap<String, CheckoutIdentity>>,
     /// How long an entry may sit chat-less before reconcile removes it.
     orphan_grace: Duration,
+    completion_tx: watch::Sender<u64>,
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     statuses_tx: watch::Sender<Vec<mast_proto::CheckoutGitStatus>>,
     /// (chat id, checkout root) → turn-start tree (see [`TurnSnapshot`]): the
@@ -386,6 +388,7 @@ impl CheckoutDiffSync {
                 reconcile_gate: tokio::sync::Mutex::new(()),
                 identities: Mutex::new(HashMap::new()),
                 orphan_grace,
+                completion_tx: watch::channel(0).0,
                 diffs_tx,
                 statuses_tx: watch::channel(Vec::new()).0,
                 turn_trees: Mutex::new(HashMap::new()),
@@ -472,10 +475,16 @@ impl CheckoutDiffSync {
     /// guessing from wall-clock quiet.
     pub fn is_settled(&self) -> bool {
         lock(&self.inner.entries).values().all(|entry| {
-            entry.watch_attached.load(Ordering::SeqCst)
+            entry.attach_finished_for_test.load(Ordering::SeqCst)
                 && entry.handled_kicks.load(Ordering::SeqCst)
                     >= entry.kick_tx.sent.load(Ordering::SeqCst)
         })
+    }
+
+    /// Subscribe before starting work, then recheck the desired state after each change.
+    #[doc(hidden)]
+    pub fn watch_completion_for_test(&self) -> watch::Receiver<u64> {
+        self.inner.completion_tx.subscribe()
     }
 
     /// Whether setup has finished for this cwd, including fallback to repair.
@@ -1395,6 +1404,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_tx: kick_tx.clone(),
         handled_kicks: AtomicU64::new(0),
         watch_attached: AtomicBool::new(false),
+        attach_finished_for_test: AtomicBool::new(false),
         watch_priority: priority.clone(),
         attach_timing: Mutex::new(None),
         watchers: Mutex::new(Vec::new()),
@@ -1450,6 +1460,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
     // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
     // checkout).
     let weak = Arc::downgrade(&entry);
+    let completion_tx = inner.completion_tx.clone();
     let enqueued = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
         .then(std::time::Instant::now);
     let checkout = enqueued.map(|_| entry.identity.root.clone());
@@ -1471,18 +1482,22 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         // the kick before its measurement is recorded.
         let mut timing = enqueued.map(|_| lock(&entry.attach_timing));
         let attach_time = enqueued.map(|_| std::time::Instant::now());
-        if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
+        let kicked = if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
             // First sync, probed after attach: nothing to close.
             kick_tx.send();
+            true
         } else if !entry.probed_after_attach.load(Ordering::SeqCst) {
             entry.repair_kick.store(true, Ordering::Relaxed);
             kick_tx.send();
+            true
         } else {
-            return;
-        }
-        if let (Some(timing), Some(start)) = (timing.as_mut(), attach_time) {
+            false
+        };
+        if kicked && let (Some(timing), Some(start)) = (timing.as_mut(), attach_time) {
             **timing = Some((start, kick_tx.sent.load(Ordering::SeqCst)));
         }
+        entry.attach_finished_for_test.store(true, Ordering::SeqCst);
+        completion_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
         }).await;
     });
 }
@@ -1630,6 +1645,7 @@ async fn entry_task(
             _ = sync_entry(&inner, &entry) => {}
         }
         entry.handled_kicks.fetch_max(seen, Ordering::SeqCst);
+        inner.completion_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
         if tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG) {
             let mut timing = lock(&entry.attach_timing);
             if timing.as_ref().is_some_and(|(_, kick)| seen >= *kick)

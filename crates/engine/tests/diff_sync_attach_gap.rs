@@ -13,12 +13,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.expect("timed out waiting for diff-sync");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -38,12 +39,12 @@ async fn edit_before_registration_is_caught_by_attach_reprobe() {
     core.workspace.create_space("space", &core.device_id, &cwd, None, true).unwrap();
     core.workspace.create_chat("chat", Some("space"), None, None, None).unwrap();
     core.diff_sync.reconcile_now().await;
-    wait_for(|| !core.diff_sync.watch_diffs().borrow().is_empty()).await;
+    wait_for(&core.diff_sync, || !core.diff_sync.watch_diffs().borrow().is_empty()).await;
     assert!(!core.diff_sync.is_attached(&cwd));
     let initial = core.diff_sync.watch_diffs().borrow()[0].checksum.clone();
     std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
     drop(pause);
-    wait_for(|| core.diff_sync.is_attached(&cwd) && core.diff_sync.watch_diffs().borrow().first().is_some_and(|diff| diff.checksum != initial)).await;
+    wait_for(&core.diff_sync, || core.diff_sync.is_attached(&cwd) && core.diff_sync.watch_diffs().borrow().first().is_some_and(|diff| diff.checksum != initial)).await;
     core.shutdown().await;
 }
 

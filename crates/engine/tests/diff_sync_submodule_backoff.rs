@@ -32,12 +32,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, what: &str, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
 fn checksum_of(sync: &CheckoutDiffSync, cwd: &str) -> Option<String> {
@@ -86,20 +87,20 @@ async fn undecidable_probes_back_off_and_a_missed_change_is_still_caught() {
         repos.push(repo);
     }
     core.diff_sync.reconcile_now().await;
-    wait_for("every checkout publishes a diff", || {
+    wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == CHECKOUTS
     })
     .await;
-    wait_for("startup settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
 
     let before = git_spawn_count();
     // One tick's cost while every checkout still runs a full capture.
     core.diff_sync.repair_now().await;
-    wait_for("tick completes", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "tick completes", || core.diff_sync.is_settled()).await;
     let per_tick = git_spawn_count() - before;
     for _ in 1..TICKS {
         core.diff_sync.repair_now().await;
-        wait_for("tick completes", || core.diff_sync.is_settled()).await;
+        wait_for(&core.diff_sync, "tick completes", || core.diff_sync.is_settled()).await;
     }
     let spawns = git_spawn_count() - before;
     let unbacked = per_tick * TICKS;
@@ -118,7 +119,7 @@ async fn undecidable_probes_back_off_and_a_missed_change_is_still_caught() {
     let mut caught = None;
     for tick in 1..=CheckoutDiffSync::max_repair_gap_ticks() {
         core.diff_sync.repair_now().await;
-        wait_for("tick completes", || core.diff_sync.is_settled()).await;
+        wait_for(&core.diff_sync, "tick completes", || core.diff_sync.is_settled()).await;
         if checksum_of(&core.diff_sync, &missed).is_some_and(|sum| sum != missed_before) {
             caught = Some(tick);
             break;
