@@ -1791,7 +1791,7 @@ pub(crate) fn item_team_rollup(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .hover(|el| el.text_color(theme.accent))
         .flex()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(Theme::SPACE_XS))
         .child("Tracker ·")
         .when(super::is_horizon(theme), |el| el.rounded_full());
     super::segmented_key(row, theme, false)
@@ -1825,7 +1825,7 @@ pub(crate) fn worker_action_link(theme: &Theme, icon: &'static str, label: &'sta
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(Theme::SPACE_XS))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
@@ -1860,7 +1860,7 @@ pub(crate) fn worker_diff(theme: &Theme, selector: String, added: u32, removed: 
         .debug_selector(move || selector.clone())
         .flex_none()
         .flex()
-        .gap(px(4.0))
+        .gap(px(Theme::SPACE_XS))
         .text_size(crate::typography::ui_rems(10.5))
         .child(
             div()
