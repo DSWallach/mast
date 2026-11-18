@@ -1,5 +1,190 @@
 use super::*;
 
+/// (Re-)apply the whole app keymap: clears every binding, restores the composer
+/// map, then binds the customizable shortcuts from `keymap` (feature-inventory
+/// §1.4). Invalid persisted combos fall back to that shortcut's default.
+pub fn apply_keymap(
+    cx: &mut App,
+    keymap: &KeymapConfig,
+    composer_send_behavior: ComposerSendBehavior,
+) {
+    fn valid_or_default(combo: &str, fallback: &str) -> String {
+        let candidate = platform_combo(combo);
+        if Keystroke::parse(&candidate).is_ok() {
+            candidate
+        } else {
+            tracing::warn!(%combo, "unparseable shortcut combo; using default");
+            platform_combo(fallback)
+        }
+    }
+    crate::appshots::set_shortcut(&keymap.capture_appshot);
+    cx.clear_key_bindings();
+    // `clear_key_bindings` also removes the contextual editing actions that
+    // gpui-base installed at startup. Reinitialize the component layer before
+    // rebuilding Mast's bindings so the file editor keymap remains active.
+    gpui_base::init(cx);
+    crate::composer::init(cx, composer_send_behavior);
+    // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
+    // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
+    // key equivalents and must survive keymap re-application.
+    crate::app_menus::bind_keys(cx);
+    crate::changes::walkthrough::bind_keys(cx, keymap);
+    // gpui-base binds Replace to Cmd+Shift+F in every Input. Remove that
+    // binding before installing the user-configured search and replace keys.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-shift-f", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
+    for (id, action) in [
+        (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
+        (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
+        (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
+        (ShortcutId::ReplaceFile, Box::new(gpui_base::input::Replace) as Box<dyn Action>),
+    ] {
+        let combo = keymap.get(id);
+        if combo.is_empty() { continue; }
+        let context = if id == ShortcutId::AddCodeToChat { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
+        let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
+        if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
+            cx.bind_keys([binding]);
+        }
+    }
+    cx.bind_keys([
+        KeyBinding::new(
+            &valid_or_default(&keymap.save_file, "mod-s"),
+            SaveFile,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_sidebar, "mod-b"),
+            ToggleSidebar,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_changes, "mod-r"),
+            ToggleChanges,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_files, "mod-e"),
+            ToggleFiles,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_terminal, "mod-j"),
+            ToggleTerminal,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.open_my_prs, "mod-p"),
+            OpenMyPrs,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.new_session, "mod-n"),
+            NewSession,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.next_session,
+                crate::settings::ShortcutId::NextSession.default_combo(),
+            ),
+            NextSession,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.prev_session,
+                crate::settings::ShortcutId::PrevSession.default_combo(),
+            ),
+            PrevSession,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.archive_session, "mod-shift-a"),
+            ArchiveSession,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
+            AddSpacePalette,
+            None,
+        ),
+        // Fixed: ⌘K summons the command palette.
+        // Pressing it again dismisses.
+        KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        // Fixed: ⌘⇧O (Ctrl+Shift+O elsewhere) opens the multi-chat overview.
+        // Not (yet) a customizable `ShortcutId` — same tier as ⌘K above.
+        KeyBinding::new(&platform_combo("mod-shift-o"), OpenOverview, None),
+        // Contextual overview navigation: Find targets the Overview search
+        // (List and Outline) and ⌘⇧G opens the repository/worktree map.
+        KeyBinding::new(
+            &platform_combo(FOCUS_OVERVIEW_SEARCH_COMBO),
+            FocusOverviewSearch,
+            None,
+        ),
+        KeyBinding::new(
+            &platform_combo(OPEN_PR_REVIEW_CHATS_COMBO),
+            OpenPrReviewChats,
+            None,
+        ),
+        KeyBinding::new(&platform_combo(OPEN_ITEM_TAB_COMBO), OpenItemTab, None),
+        KeyBinding::new(
+            &platform_combo(running_ui::TOGGLE_RUNNING_CHATS_COMBO),
+            ToggleRunningChats,
+            None,
+        ),
+        KeyBinding::new(
+            &platform_combo(TOGGLE_ITEM_CARD_COMBO),
+            ToggleItemCard,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.open_model_picker, "mod-/"),
+            OpenModelPicker,
+            None,
+        ),
+    ]);
+    if !keymap.open_team_tab.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.open_team_tab, ShortcutId::OpenTeamTab.default_combo()),
+            OpenTeamTab,
+            None,
+        )]);
+    }
+    if !keymap.open_team_tab_from_panel.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.open_team_tab_from_panel, ShortcutId::OpenTeamTabFromPanel.default_combo()),
+            OpenTeamTabFromPanel,
+            Some("TeamPanel && !Composer && !MessageComposer && !PaletteSearch"),
+        )]);
+    }
+    crate::browser::bind_keys(cx, keymap);
+    // ⌘F / ⌘G / ⇧⌘G inside an Artifact tab (after the global ⌘F above).
+    crate::artifacts::tab::bind_keys(cx);
+    // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
+    // combo in a hand-edited file) binds nothing rather than falling back —
+    // the user cleared it on purpose.
+    cx.bind_keys((0..JUMP_SLOTS).filter_map(|slot| {
+        let id = ShortcutId::JumpSession(slot);
+        let combo = keymap.get(id);
+        if combo.is_empty() {
+            return None;
+        }
+        Some(KeyBinding::new(
+            &valid_or_default(combo, id.default_combo()),
+            JumpSession(slot),
+            None,
+        ))
+    }));
+    // Work Outline commands (empty combos stay unbound).
+    cx.bind_keys(work_outline_ui::work_outline_bindings(keymap));
+    // Outline navigation keys, context `WorkOutline` minus text inputs.
+    work_outline_ui::bind_work_outline_navigation(cx, keymap);
+}
+
 impl Shell {
     pub(super) fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
         if !self.right_pane_open(cx) {
