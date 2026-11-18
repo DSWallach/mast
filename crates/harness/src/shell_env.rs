@@ -354,7 +354,7 @@ exit 1
                             guard.elapsed() < Duration::from_secs(30),
                             "shell did not start"
                         );
-                        ready.exists()
+                        std::fs::read_to_string(&ready).is_ok_and(|pid| pid.trim().parse::<i32>().is_ok())
                     })
                 } else {
                     run_and_capture(&shell, flags, script, Duration::from_secs(30))

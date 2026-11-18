@@ -198,7 +198,7 @@ fn binary_version_with(
         return version.clone();
     }
     #[cfg(not(windows))]
-    let probe = || -> Option<semver::Version> {
+    let mut probe = || -> Option<semver::Version> {
         use std::io::Read;
         use std::process::{Command, Stdio};
         let mut command = Command::new(path);
@@ -680,7 +680,7 @@ mod tests {
                     guard.elapsed() < std::time::Duration::from_secs(30),
                     "child did not start"
                 );
-                armed = ready.exists();
+                armed = std::fs::read_to_string(&ready).is_ok_and(|pid| pid.trim().parse::<i32>().is_ok());
                 armed
             }),
             None
