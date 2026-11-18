@@ -370,6 +370,8 @@ impl OverviewRow {
     }
 
     fn is_stalled(&self) -> bool {
+        // Tool failures can be handled within a successful turn and do not
+        // establish that the session itself has stopped on an error.
         self.status == ChatIndicator::Errored
     }
 }
@@ -5656,7 +5658,7 @@ impl Overview {
             } else {
                 format!("{} tool calls failed", failures.count)
             };
-            let selector = format!("overview-row-stalled-{chat_id}");
+            let selector = format!("overview-row-tool-failures-{chat_id}");
             let mut pill = div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
@@ -9544,15 +9546,16 @@ mod logic_tests {
                 .is_some()
         );
         assert!(
-            vcx.debug_bounds("overview-row-stalled-c-failed-tools")
+            vcx.debug_bounds("overview-row-tool-failures-c-failed-tools")
                 .is_some()
         );
         assert!(
             vcx.debug_bounds("overview-row-needs-input-c-idle")
                 .is_none()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
+        assert!(vcx.debug_bounds("overview-row-tool-failures-c-idle").is_none());
 
+        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.needs_interaction_count, 1);
             assert_eq!(o.stalled_count, 1);
@@ -9583,6 +9586,12 @@ mod logic_tests {
             assert!(!o.outline_chats.iter().find(|c| c.id == "c-failed-tools").unwrap().visible);
         });
 
+        overview.update(vcx, |o, cx| {
+            let ids = o.sidebar_filter_ids(cx).unwrap();
+            assert!(ids.contains("c-errored"));
+            assert!(!ids.contains("c-failed-tools"));
+        });
+
         // Clicking "stalled" again clears the filter.
         let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
         vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
@@ -9610,7 +9619,7 @@ mod logic_tests {
             cx.notify();
         });
         draw(vcx);
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_some());
+        assert!(vcx.debug_bounds("overview-row-tool-failures-c-idle").is_some());
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.stalled_count, 1);
         });
@@ -10069,22 +10078,37 @@ mod logic_tests {
     #[gpui::test]
     fn attention_filter_reaches_outline(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        let (overview, _state, vcx) = outline_overview(cx, dir.path());
+        let (overview, state, vcx) = outline_overview(cx, dir.path());
+        let now = Utc::now();
+        state.update(vcx, |state, cx| {
+            state.sessions.push(mast_proto::Session {
+                chat_id: CHAT_AUTH.into(), device_id: "d".into(),
+                status: mast_proto::SessionStatus::AwaitingInput,
+                started_at: Some(now), updated_at: now, last_completed_turn: None,
+                awaiting_input: None, last_turn_tool_failures: None,
+            });
+            cx.notify();
+        });
         overview.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
-        draw(vcx);
-        assert!(overview.read_with(vcx, |o, cx| {
-            o.outline.read(cx).model().row(&row_key::item("s1", API)).is_some()
-        }));
         for filter in [AttentionFilter::NeedsInteraction, AttentionFilter::Stalled] {
+            if filter == AttentionFilter::Stalled {
+                state.update(vcx, |state, cx| {
+                    state.sessions[0].status = mast_proto::SessionStatus::Errored;
+                    cx.notify();
+                });
+            }
             overview.update(vcx, |o, cx| {
                 o.attention_filter = filter;
                 o.rows_dirty = true;
                 cx.notify();
             });
             draw(vcx);
-            assert!(overview.read_with(vcx, |o, cx| {
-                o.outline.read(cx).model().row(&row_key::item("s1", API)).is_none()
-            }));
+            overview.read_with(vcx, |o, cx| {
+                let model = o.outline.read(cx).model();
+                assert!(model.row(&row_key::item("s1", API_AUTH)).is_some());
+                assert!(model.row(&row_key::chat(CHAT_AUTH)).is_some());
+                assert!(model.row(&row_key::item("s1", HOUSEKEEPING)).is_none());
+            });
         }
     }
 
