@@ -19,3 +19,14 @@ pub(crate) fn task_time() -> Div {
 pub(crate) fn task_history() -> Div {
     div().text_size(crate::typography::ui_rems(10.0)).rounded(px(4.0))
 }
+
+pub(crate) fn cleanup_panel(theme: &crate::theme::Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .p(px(12.0))
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(8.0))
+}

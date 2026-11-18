@@ -9823,6 +9823,13 @@ impl Shell {
                 .is_some();
             let can_hand_off = self.can_hand_off(&chat_id, cx);
             let admin_space = self.admin_space_of(&chat_id, cx).is_some();
+            let assistant_eligible = admin_space
+                && self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == chat_id && !chat.is_background_task_run());
             let is_admin = self.chat_is_admin(&chat_id, cx);
             let assistant_id = chat_id.clone();
             let is_assistant = self.state.read(cx).is_personal_assistant(&chat_id);
@@ -9995,7 +10002,7 @@ impl Shell {
                             )
                         })
                     })
-                    .when(admin_space || is_assistant, |menu| {
+                    .when(assistant_eligible || is_assistant, |menu| {
                         menu.child(
                             popover::menu_row(
                                 &theme,

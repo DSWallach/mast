@@ -15,11 +15,19 @@ Choose an **Agent** from the same enabled, installed agents offered in your
 sessions, then choose its **Model**, **Thinking level**, and **Context window**.
 Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
-Choose a **Work item** within the selected Space to attach each run to that item
-and deliver its inherited instructions. Changing the Space clears the work item.
-The field appears only when the execution device supports task-to-item
-attachment; update an older execution device to use it. A run whose agent cannot
-receive the item's instructions fails before it creates a session.
+Choose an **Output** mode.
+
+- **Background** is the default for new tasks. Choose a **Work item** in the
+  selected Space. Open the transcript from **Run history** in Scheduled tasks
+  or from the work item's hidden runs. Background runs stay out of the sidebar
+  and Overview, and cannot act as the personal assistant.
+- **Interactive** shows the latest run in the sidebar and Overview. You can
+  optionally attach runs to a work item. Existing tasks start in this mode.
+
+Attached runs receive the work item's inherited instructions. Changing the Space
+clears the work item. A run whose agent cannot receive the item's instructions
+fails before it creates a session. Older execution devices offer Interactive
+output. Update the execution device to use Background.
 Each run captures its configuration, so editing a task changes future editions.
 You can change the model or switch agents, including Claude Code to Codex, after
 a task has run. Past editions retain their original agent and model.
@@ -52,18 +60,30 @@ edition without changing the recurring next-run time. **Pause** stops future
 dispatches; it does not stop an agent already running. Stop that agent from its
 session. **Delete** removes the schedule while retaining its run history.
 
+For Background tasks, **After a successful run** defaults to **Archive**.
+Mast archives the chat after the run completes and any open Required Action,
+input request or queued turn clears. Pinned chats and the personal assistant
+stay open. Choose **Keep** to leave successful runs unarchived. The control
+requires an updated execution device.
+
+A Background run that fails, stops early or waits for input leaves its chat
+unarchived. Look for the task's Required Action on its work item. It links to
+the run chat when one exists and updates as new runs need attention. A successful
+run resolves the action.
+
 ## Read editions
 
-The sidebar, Overview, and Work Outline show only the latest unarchived run per
-task on each device. An older run attached to a work item stays attached to it
-and is hidden from the item's chat list and count.
-In Overview list mode, each task has a row with its name, schedule, next run,
+The sidebar and Overview show the latest unarchived run per task on each device
+when it is Interactive. Background and older runs stay attached to their work
+item and appear through its hidden-run control.
+In Overview list mode, each visible task has a row with its name, schedule, next run,
 and last outcome. Click the row to open the latest run or
 choose **History** to see past runs. Reading or replying to an older edition
 does not promote it. The task manager lists
 configured schedules. Choose **Edit** to see a task's settings, with its own
 **Run history** at the bottom of that page. A scheduled session's **Run history**
-button opens the same task page. Choose an edition there to open its transcript.
+button opens the same task page. History shows recorded run outcomes and marks
+archived chats. Choose an edition there to open its transcript.
 An older session also offers **Latest run**. A new run does not interrupt the
 edition you are reading.
 
@@ -76,6 +96,24 @@ A personal assistant chosen on an imported run follows its task after the join.
 Deleted tasks and source tasks never imported into Mast appear under **Retired
 tasks** in Scheduled tasks. Their runs stay readable in history and are hidden
 from the sidebar, Overview, and Work Outline.
+
+## Clean up old runs
+
+On **Scheduled tasks**, select the run device and choose **Clean up old runs**.
+The preview shows how many chats will be archived for each task. Choose
+**Archive runs** to confirm. If eligibility changes while you review the
+preview, Mast shows the updated counts for you to confirm again.
+
+Cleanup archives superseded runs and Desktop runs from schedules that have
+moved to Mast or been retired. Runs with an open Required Action, running or
+queued work, or pending input stay available, as do pinned chats and personal
+assistant runs. Archived runs remain in **Run history** and can be restored
+from the archive.
+
+The background import sweep archives newly discovered Desktop runs from
+handed-off or retired schedules as it imports them. When Mast cannot verify
+retirement from the source registries, it leaves that run's import visible.
+Hosts that predate this feature do not offer the cleanup action.
 
 ## Import Claude schedules
 

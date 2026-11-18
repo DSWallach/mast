@@ -92,20 +92,17 @@ pub(crate) fn launch_scheduled_chat(
         )),
         None => None,
     };
-    workspace.create_chat(
+    workspace.create_scheduled_chat(
         chat_id,
         draft.space_id.as_deref(),
-        Some(workspace.device_id()),
-        Some(draft.config.clone()),
-        Some(draft.cwd.clone()),
-    )?;
-    workspace.set_chat_scheduled_task_info(
-        chat_id,
-        &mast_proto::ScheduledChat {
+        draft.config.clone(),
+        draft.cwd.clone(),
+        mast_proto::ScheduledChat {
             task_id: run.task_id.clone(),
             task_name: draft.name.clone(),
             session_created_at: Some(run.created_at),
             run_id: run.id.clone(),
+            output: draft.output,
             ..Default::default()
         },
     )?;

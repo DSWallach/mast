@@ -2920,6 +2920,11 @@ impl RpcService for EngineRpc {
                         "only chats in a Space can be the personal assistant".into(),
                     ));
                 }
+                if chat.is_background_task_run() {
+                    return Err(RpcError::Failed(
+                        "background task runs cannot be the personal assistant".into(),
+                    ));
+                }
                 RpcReply::value(&mast_proto::PersonalAssistantReply {
                     assistant: Some(self.agent_tools.tokens().personal_assistant().set(&chat)),
                 })
@@ -5460,9 +5465,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&snapshot)
             }
             methods::SCHEDULED_TASKS => {
+                let output_provided = params.pointer("/draft/output").is_some();
+                let after_success_provided = params.pointer("/draft/afterSuccess").is_some();
                 let request: mast_proto::ScheduledTasksRequest = parse_params(params)?;
                 let service = self.scheduled_tasks.as_ref().ok_or_else(|| RpcError::Failed("Scheduled tasks unavailable".into()))?;
-                let result = service.request(request).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let result = service
+                    .request_from_client(request, output_provided, after_success_provided)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&result)
             }
             methods::LIST_PROJECT_ACTIONS => {
