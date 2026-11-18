@@ -158,24 +158,17 @@ impl StartChatDialog {
                 .is_some_and(|pr| pr.action == PrReviewAction::CodeReview)
     }
 
-    /// The Claude Code subagent this review will run as: the Space's agent,
-    /// when the picked agent is Claude Code.
+    /// The named agent this review will run as: the Space's agent, when the
+    /// picked harness runs agent definitions. The launcher's pickers carry it
+    /// (see [`Pickers::set_launch_agent`]).
     pub(super) fn review_agent(&self, cx: &App) -> Option<String> {
-        let agent = self.review_defaults.as_ref()?.agent.clone()?;
-        (self.pickers.read(cx).resolved(cx).harness == Some(mast_proto::HarnessId::ClaudeCode))
-            .then_some(agent)
+        mast_proto::agent_option(&self.pickers.read(cx).resolved(cx).model_options)
+            .map(str::to_owned)
     }
 
-    /// The config Start sends: the picker's, plus the review agent.
+    /// The config Start sends: the picker's, review agent included.
     fn launch_config(&self, cx: &App) -> Option<mast_proto::ChatConfig> {
-        let mut config = self.pickers.read(cx).resolved(cx).chat_config()?;
-        if let Some(agent) = self.review_agent(cx) {
-            config
-                .model_options
-                .entry(mast_proto::AGENT_OPTION)
-                .or_insert(agent.into());
-        }
-        Some(config)
+        self.pickers.read(cx).resolved(cx).chat_config()
     }
 
     pub(super) fn can_start(&self, cx: &App) -> bool {
@@ -503,19 +496,12 @@ impl Shell {
                 .map(|defaults| defaults.normalized())
                 .unwrap_or_default()
         });
-        let review_model_seeded = match review_defaults
-            .as_ref()
-            .and_then(|defaults| defaults.model_for(false))
-        {
-            Some(model) => {
-                let model = model.to_owned();
-                pickers.update(cx, |pickers, cx| {
-                    pickers.seed_launch_model(mast_proto::HarnessId::ClaudeCode, model, cx)
-                });
-                true
-            }
-            None => false,
-        };
+        let review_model_seeded = review_defaults.as_ref().is_some_and(|defaults| {
+            pickers.update(cx, |pickers, cx| {
+                pickers.set_launch_agent(defaults.agent.clone(), cx);
+                seed_review_pick(pickers, defaults, false, cx)
+            })
+        });
         let dialog = StartChatDialog {
             space_id,
             item_id,
@@ -572,15 +558,13 @@ impl Shell {
         }
         dialog.merge_gate = !dialog.merge_gate;
         dialog.failure = None;
-        let model = dialog
-            .review_defaults
-            .as_ref()
-            .and_then(|defaults| defaults.model_for(dialog.merge_gate))
-            .map(str::to_owned);
-        if let Some(model) = model {
+        let merge_gate = dialog.merge_gate;
+        if let Some(defaults) = dialog.review_defaults.clone()
+            && defaults.model_for(merge_gate).is_some()
+        {
             dialog.review_model_seeded = true;
             dialog.pickers.clone().update(cx, |pickers, cx| {
-                pickers.seed_launch_model(mast_proto::HarnessId::ClaudeCode, model, cx)
+                seed_review_pick(pickers, &defaults, merge_gate, cx)
             });
         }
         cx.notify();
@@ -1640,8 +1624,25 @@ pub(super) fn start_chat_card(
         .into_any_element()
 }
 
+/// Point a review launcher at the Space's review harness and its model for
+/// this kind of review. Whether anything was seeded: a seeded pick is the
+/// Space's, so a start does not make it the composer's sticky pick.
+fn seed_review_pick(
+    pickers: &mut Pickers,
+    defaults: &mast_proto::PrReviewLaunchDefaults,
+    merge_gate: bool,
+    cx: &mut Context<Pickers>,
+) -> bool {
+    let model = defaults.model_for(merge_gate).map(str::to_owned);
+    if defaults.harness.is_none() && model.is_none() {
+        return false;
+    }
+    pickers.seed_launch_model(defaults.harness_or_default(), model, cx);
+    true
+}
+
 /// Code reviews on a host that runs review agents: the merge-gate toggle and
-/// the subagent the review runs as.
+/// the named agent the review runs as.
 fn review_launch_rows(
     dialog: &StartChatDialog,
     theme: &Theme,
@@ -1672,7 +1673,7 @@ fn review_launch_rows(
     let agent = dialog.review_agent(cx).map(|agent| {
         note(
             "start-chat-review-agent",
-            format!("Runs as the Claude Code subagent `{agent}`."),
+            format!("Runs as the agent `{agent}`."),
             theme.text_faint,
         )
         .mt(px(2.0))
