@@ -1229,6 +1229,26 @@ fn tracker_shows_cached_linear_issues_and_local_items_together(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn tracker_discards_project_cache_after_account_credentials_change(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project", "externalId":"project"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        shell.set_tracker_project_for_test("default", "project", vec![mast_proto::linear::LinearIssueSummary {
+            id:"i".into(), identifier:"EX-1".into(), title:"Issue".into(), ..Default::default()
+        }]);
+        shell.team_facts(CHAT_API, cx);
+        assert!(shell.tracker_has_item_for_test("linear:EX-1"));
+        shell.state.update(cx, |state, _| state.linear.invalidate_account("default"));
+        shell.team_facts(CHAT_API, cx);
+        assert!(!shell.tracker_has_item_for_test("linear:EX-1"));
+    });
+}
+
+#[gpui::test]
 fn tracker_remains_selected_when_expanded(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 2);

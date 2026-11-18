@@ -25,7 +25,7 @@ enum TrackerFilter {
 
 #[derive(Default)]
 pub(super) struct TrackerState {
-    key: Option<(String, Option<u64>, u64, u64)>,
+    key: Option<(String, Option<u64>, u64, u64, u64)>,
     facts: TeamFacts,
     all_workers: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
@@ -36,9 +36,9 @@ pub(super) struct TrackerState {
     grouped_rows: std::collections::HashMap<(TrackerFilter, LifecycleStage), Vec<usize>>,
     stale_rows: std::collections::HashMap<TrackerFilter, Vec<usize>>,
     lifecycle_rows: std::collections::HashMap<String, LifecycleRow>,
-    linear_projects: std::collections::HashMap<(String, String), Vec<mast_proto::linear::LinearIssueSummary>>,
-    linear_loading: std::collections::HashSet<(String, String)>,
-    linear_errors: std::collections::HashMap<(String, String), crate::linear::client::LinearUiError>,
+    linear_projects: std::collections::HashMap<(String, String, u64), Vec<mast_proto::linear::LinearIssueSummary>>,
+    linear_loading: std::collections::HashSet<(String, String, u64)>,
+    linear_errors: std::collections::HashMap<(String, String, u64), crate::linear::client::LinearUiError>,
     linear_project_linked: bool,
     source_label: String,
     source_notice: Option<String>,
@@ -319,11 +319,16 @@ mod tracker_tests {
 impl Shell {
     #[cfg(test)]
     pub(super) fn set_tracker_project_for_test(&mut self, account: &str, project: &str, issues: Vec<mast_proto::linear::LinearIssueSummary>) {
-        self.tracker.linear_projects.insert((account.into(), project.into()), issues);
+        self.tracker.linear_projects.insert((account.into(), project.into(), 0), issues);
         self.tracker.key = None;
     }
 
-    fn tracker_linear_project(&self, chat_id: &str, cx: &App) -> Option<(String, String, String)> {
+    #[cfg(test)]
+    pub(super) fn tracker_has_item_for_test(&self, id: &str) -> bool {
+        self.tracker.not_started.iter().chain(&self.tracker.completed_items).any(|item| item.id == id)
+    }
+
+    fn tracker_linear_project(&self, chat_id: &str, cx: &App) -> Option<(String, String, String, u64)> {
         let state = self.state.read(cx);
         let space = state.chats.iter().find(|chat| chat.id == chat_id)?.space_id.as_deref()?;
         let outline = state.work_outline(space);
@@ -332,12 +337,14 @@ impl Shell {
         let item = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
         let project = snapshot.linear_project_reference(item)?;
         if project.external_id.is_empty() { return None; }
-        Some((space.to_owned(), crate::linear::store::account_scope(snapshot).to_owned(), project.external_id.clone()))
+        let account = crate::linear::store::account_scope(snapshot).to_owned();
+        let revision = state.linear.revision(&account);
+        Some((space.to_owned(), account, project.external_id.clone(), revision))
     }
 
     pub(super) fn load_tracker_project(&mut self, chat_id: &str, force: bool, cx: &mut Context<Self>) {
-        let Some((space, account, project)) = self.tracker_linear_project(chat_id, cx) else { return; };
-        let key = (account.clone(), project.clone());
+        let Some((space, account, project, revision)) = self.tracker_linear_project(chat_id, cx) else { return; };
+        let key = (account.clone(), project.clone(), revision);
         if !self.tracker.linear_loading.insert(key.clone()) { return; }
         self.tracker.key = None;
         let actions = self.state.read(cx).work_outline_actions();
@@ -547,7 +554,7 @@ impl Shell {
             state: mast_proto::linear::LinearState { state_type: if index == 3 { mast_proto::linear::LinearStateType::Completed } else { mast_proto::linear::LinearStateType::Started }, ..Default::default() },
             ..Default::default()
         }).collect();
-        self.tracker.linear_projects.insert(("default".into(), "fixture-project".into()), issues);
+        self.tracker.linear_projects.insert(("default".into(), "fixture-project".into(), 0), issues);
         for index in 0..8 {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
             let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
@@ -591,8 +598,9 @@ impl Shell {
         let snapshot = state.chats.iter().find(|chat| chat.id == chat_id)
             .and_then(|chat| chat.space_id.as_deref())
             .and_then(|id| state.work_outline(id).snapshot().cloned());
+        let account_revision = snapshot.as_deref().map(|snapshot| state.linear.revision(crate::linear::store::account_scope(snapshot))).unwrap_or_default();
         let key = (chat_id.to_owned(), snapshot.as_ref().map(|s| s.revision),
-            state.board_status_revision, self.board_links_revision);
+            state.board_status_revision, self.board_links_revision, account_revision);
         if self.tracker.key.as_ref() == Some(&key) {
             return self.tracker.facts.clone();
         }
@@ -674,7 +682,7 @@ impl Shell {
         let project = snapshot.as_deref().filter(|snapshot| crate::linear::space_enabled(Some(snapshot))).and_then(|snapshot| {
             let root = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
             let project = snapshot.linear_project_reference(root)?;
-            Some(((crate::linear::store::account_scope(snapshot).to_owned(), project.external_id.clone()), project.cached_title.clone()))
+            Some(((crate::linear::store::account_scope(snapshot).to_owned(), project.external_id.clone(), account_revision), project.cached_title.clone()))
         });
         let mut empty: Vec<_> = items.iter().filter(|(_, unassigned)| *unassigned).map(|(item, _)| item.clone()).collect();
         let mut completion = std::collections::HashMap::new();
@@ -841,7 +849,7 @@ impl Shell {
         let active = self.resolved_right_active(cx) == RightSurface::Team;
         let waiting = team.waiting() > 0;
         Some(
-            crate::components::shell_parts::panel_tab(&theme, "right-surface-team-tab", "Tracker", format!("Tracker {}", team.live().count()), active)
+            crate::components::shell_parts::panel_tab(&theme, "right-surface-team-tab", "Tracker", format!("Tracker {}", self.tracker.counts.iter().sum::<usize>()), active)
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.set_right_active(RightSurface::Team, cx);
