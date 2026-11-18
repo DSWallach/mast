@@ -1,5 +1,92 @@
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Traffic-light-aware titlebar layout (feature-inventory §1.1)
+// ---------------------------------------------------------------------------
+
+/// Where the top-left window-control cluster starts, in px from the window's
+/// left edge (zeron window-controls.tsx: `left: fullscreen ? 12 : 88`). The
+/// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
+/// fullscreen hides them and the cluster reclaims the inset.
+pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
+    if fullscreen { 12.0 } else { 88.0 }
+}
+
+/// Width of the spacer ahead of the control cluster for a strip that already
+/// carries `container_pad` px of its own left padding. macOS only — on
+/// Linux/Windows there are no traffic lights and the cluster hugs the edge.
+pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
+    if !is_macos {
+        return 0.0;
+    }
+    (titlebar_cluster_start(fullscreen) - container_pad).max(0.0)
+}
+
+/// Within-group rhythm for Back/Forward.
+pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
+/// Structural separation between titlebar groups: sidebar, navigation,
+/// transcript identity, and trailing actions.
+pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
+/// Breathing room between the navigation cluster and transcript identity.
+pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
+/// A 28px action centered in the 38px titlebar with its 2px downward optical
+/// shift lands 6px from the top; use the same inset at the trailing edge.
+pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
+/// Width of the persistent top-left button cluster itself: a 24px sidebar
+/// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
+pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
+/// Extra width consumed when the collapsed-sidebar New Session action joins
+/// the left controls as its own group.
+pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = TITLEBAR_GROUP_GAP + 24.0;
+/// The `+` and running-chats lamp slots that follow the cluster buttons. Both
+/// are always reserved (the `+` slot stays empty off the chat route) so the
+/// lamp never moves and no title sits under either.
+pub const TITLEBAR_TRAILING_SLOTS_WIDTH: f32 = TITLEBAR_ACTION_SLOT_WIDTH * 2.0;
+/// Horizontal inset owned by the titlebar control row itself. Keep this value
+/// paired with [`Self::titlebar_spacer`]: using a different number for the
+/// spacer shifts every control while leaving the declared cluster geometry
+/// unchanged.
+pub(super) const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
+
+/// Width of a row of `count` Linux caption buttons, drawn at the cluster's
+/// own 24px-button / 2px-gap rhythm.
+pub fn caption_buttons_width(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    count as f32 * 24.0 + (count as f32 - 1.0) * 2.0
+}
+
+/// Where the cluster's first button starts, from the window's left edge.
+/// `linux_left_captions` is the number of caption buttons zeron draws at the
+/// top-left on Linux (GNOME `close:…` layouts) — the app cluster follows them
+/// at the shared 2px rhythm.
+pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captions: usize) -> f32 {
+    if is_macos {
+        titlebar_cluster_start(fullscreen)
+    } else if linux_left_captions > 0 {
+        10.0 + caption_buttons_width(linux_left_captions) + 2.0
+    } else {
+        10.0
+    }
+}
+
+/// Left clearance a full-bleed header (collapsed sidebar) needs so its content
+/// starts past the overlay cluster, given the header's own `container_pad`.
+pub fn cluster_clearance(
+    is_macos: bool,
+    fullscreen: bool,
+    linux_left_captions: usize,
+    container_pad: f32,
+) -> f32 {
+    (cluster_buttons_start(is_macos, fullscreen, linux_left_captions)
+        + CLUSTER_BUTTONS_WIDTH
+        + TITLEBAR_TRAILING_SLOTS_WIDTH
+        + 8.0
+        - container_pad)
+        .max(0.0)
+}
+
 impl Shell {
     /// The animated spacer clearing the macOS traffic lights ahead of a
     /// titlebar control cluster. Fullscreen toggles tween the cluster start
