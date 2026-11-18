@@ -37,7 +37,7 @@ pub(crate) enum WorkerState {
 }
 
 /// Display order for the Tracker's worker groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TrackerGroup {
     NeedsYou,
     ReadyToMerge,
@@ -383,7 +383,8 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
             if pr.state.eq_ignore_ascii_case("open") { 0 } else if pr.state.eq_ignore_ascii_case("merged") { 1 } else { 2 }
         }).and_then(|pr| pr.branch.clone()) {
             worker.branch = Some(branch);
-        } else if worker.branch.as_deref().is_some_and(|branch| branch == "main" || branch == "master") {
+        } else if !input.links.get(&chat.id).is_some_and(|status| status.is_worktree)
+            && worker.branch.as_deref().is_some_and(|branch| branch == "main" || branch == "master") {
             worker.branch = None;
         }
         workers.push(worker);

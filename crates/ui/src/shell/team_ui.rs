@@ -14,7 +14,7 @@ use crate::team::{
     team,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
     #[default]
     All,
@@ -30,12 +30,14 @@ enum TrackerFilter {
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64)>,
     facts: TeamFacts,
+    all_workers: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
     completed_items: Vec<crate::board::BoardItem>,
     other_chats: Vec<WorkerFacts>,
     additional_chats: std::collections::HashMap<String, Vec<WorkerFacts>>,
     expanded_chats: std::collections::HashSet<String>,
-    stale_chats: std::collections::HashSet<String>,
+    grouped_rows: std::collections::HashMap<(TrackerFilter, crate::team::TrackerGroup), Vec<usize>>,
+    stale_rows: std::collections::HashMap<TrackerFilter, Vec<usize>>,
     other_expanded: bool,
     stale_expanded: bool,
     counts: [usize; 6],
@@ -404,6 +406,7 @@ impl Shell {
                 now,
             })
         };
+        let all_workers = facts.clone();
         let mut other_chats = Vec::new();
         let mut additional_chats = std::collections::HashMap::new();
         if let Some(snapshot) = &snapshot {
@@ -429,11 +432,22 @@ impl Shell {
                     rows.push(worker);
                 }
             }
+            rows.sort_by_key(|worker| (worker.tracker_group(), std::cmp::Reverse(worker.last_active), worker.chat_id.clone()));
             facts.workers = rows;
         }
-        let stale_chats = facts.live().filter(|worker| worker.state == crate::team::WorkerState::Idle
+        let stale_chats: std::collections::HashSet<String> = facts.live().filter(|worker| worker.state == crate::team::WorkerState::Idle
             && worker.last_active.is_some_and(|at| chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(3)))
             .map(|worker| worker.chat_id.clone()).collect();
+        let mut grouped_rows = std::collections::HashMap::<_, Vec<usize>>::new();
+        let mut stale_rows = std::collections::HashMap::<_, Vec<usize>>::new();
+        for (index, worker) in facts.workers.iter().enumerate().filter(|(_, worker)| !worker.archived) {
+            for filter in [TrackerFilter::All, TrackerFilter::Working, TrackerFilter::NeedsYou, TrackerFilter::Ready, TrackerFilter::OpenPrs, TrackerFilter::MergedPrs, TrackerFilter::Done] {
+                if tracker_matches(worker, filter) {
+                    if stale_chats.contains(&worker.chat_id) { stale_rows.entry(filter).or_default().push(index); }
+                    else { grouped_rows.entry((filter, worker.tracker_group())).or_default().push(index); }
+                }
+            }
+        }
         let state = self.state.read(cx);
         let mut metadata = std::collections::HashMap::new();
         for chat in &state.chats {
@@ -513,11 +527,13 @@ impl Shell {
         self.tracker.review_task = None;
         self.tracker.key = Some(key);
         self.tracker.facts = facts.clone();
+        self.tracker.all_workers = all_workers;
         self.tracker.not_started = not_started;
         self.tracker.completed_items = completed_items;
         self.tracker.other_chats = other_chats;
         self.tracker.additional_chats = additional_chats;
-        self.tracker.stale_chats = stale_chats;
+        self.tracker.grouped_rows = grouped_rows;
+        self.tracker.stale_rows = stale_rows;
         self.tracker.counts = tracker_counts(&facts.live().collect::<Vec<_>>(), tickets_done);
         self.tracker.metadata = metadata;
         self.tracker.requests = requests;
@@ -567,7 +583,7 @@ impl Shell {
         }
         let chat_id = self.active_chat.clone();
         let facts = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty()) {
+        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty()) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -587,7 +603,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty()) {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty()) {
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -627,6 +643,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
+        let all_workers = self.tracker.all_workers.clone();
         let focus = self.team_panel_focus(cx);
         let mut col = crate::components::linear_parts::team_column(&theme, false);
         if self
@@ -640,12 +657,11 @@ impl Shell {
                 crate::components::shell_parts::team_notice(&theme, "team-coordinator-archived", "Coordinator archived — hand off or unarchive"),
             );
         }
-        if team.is_empty() && self.tracker.not_started.is_empty() && self.tracker.completed_items.is_empty() {
+        if team.is_empty() && self.tracker.other_chats.is_empty() && self.tracker.not_started.is_empty() && self.tracker.completed_items.is_empty() {
             col = col.child(
                 crate::components::shell_parts::team_notice(&theme, "team-empty", "This chat has no workers."),
             );
         } else {
-            let workers: Vec<_> = team.live().collect();
             let reports = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::latest_reports).unwrap_or_default();
             let unseen = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::unseen_by_worker).unwrap_or_default();
             let [working, needs_you, ready, open_prs, merged_prs, done] = self.tracker.counts;
@@ -675,12 +691,12 @@ impl Shell {
             }
             rollup = rollup.child(settings);
             col = col.child(rollup);
-            col = col.child(self.render_team_archive_block(&chat_id, &team, &theme, cx));
+            col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             use crate::team::TrackerGroup;
             for (group, label) in [(TrackerGroup::NeedsYou, "Needs you"), (TrackerGroup::ReadyToMerge, "Ready to merge"),
                 (TrackerGroup::Errored, "Errored"), (TrackerGroup::Working, "Working"), (TrackerGroup::Idle, "Idle"),
                 (TrackerGroup::NotStarted, "Not started"), (TrackerGroup::Done, "Done")] {
-                let matching: Vec<_> = workers.iter().copied().filter(|w| w.tracker_group() == group && !self.tracker.stale_chats.contains(&w.chat_id) && tracker_matches(w, self.tracker.filter)).collect();
+                let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
                 let show_not_started = group == TrackerGroup::NotStarted && self.tracker.filter == TrackerFilter::All && !self.tracker.not_started.is_empty();
                 let show_completed = group == TrackerGroup::Done && matches!(self.tracker.filter, TrackerFilter::All | TrackerFilter::Done)
                     && !self.tracker.completed_items.is_empty();
@@ -688,7 +704,7 @@ impl Shell {
                 let group_count = matching.len() + if show_not_started { self.tracker.not_started.len() } else { 0 }
                     + if show_completed { self.tracker.completed_items.len() } else { 0 };
                 col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, label, group_count));
-                for worker in matching { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
+                for &index in matching { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
                 if show_not_started {
                     for item in &self.tracker.not_started {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
@@ -710,18 +726,18 @@ impl Shell {
                     }
                 }
             }
-            let stale: Vec<_> = workers.iter().copied().filter(|worker| self.tracker.stale_chats.contains(&worker.chat_id) && tracker_matches(worker, self.tracker.filter)).collect();
+            let stale = self.tracker.stale_rows.get(&self.tracker.filter).map(Vec::as_slice).unwrap_or_default();
             if !stale.is_empty() {
                 col = col.child(div().id("tracker-stale-toggle").cursor_pointer().child(format!("{} Stale ({})", if self.tracker.stale_expanded { "▾" } else { "▸" }, stale.len()))
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.stale_expanded = !this.tracker.stale_expanded; cx.notify(); })));
-                if self.tracker.stale_expanded { for worker in stale { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
+                if self.tracker.stale_expanded { for &index in stale { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
             }
             if !self.tracker.other_chats.is_empty() && self.tracker.filter == TrackerFilter::All {
                 col = col.child(div().id("tracker-other-toggle").cursor_pointer().child(format!("{} Other chats ({})", if self.tracker.other_expanded { "▾" } else { "▸" }, self.tracker.other_chats.len()))
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.other_expanded = !this.tracker.other_expanded; cx.notify(); })));
                 if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
             }
-            col = col.children(self.render_team_archived(&chat_id, &team, &theme, cx));
+            col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
         }
         self.panel_root("team-tab", focus, col, cx)
     }
@@ -779,7 +795,7 @@ impl Shell {
             identity_line = identity_line.child(div().id(SharedString::from(format!("team-branch-{id}")))
                 .debug_selector({ let id = id.clone(); move || format!("team-branch-{id}") })
                 .flex().items_center().gap(px(Theme::SPACE_XS)).min_w_0().text_color(theme.text_faint)
-                .child(crate::icons::icon(crate::icons::GIT_BRANCH).size(px(11.0)))
+                .child(crate::icons::icon(crate::icons::GIT_BRANCH).size(px(11.0)).text_color(theme.text_faint))
                 .child(crate::components::shell_parts::tracker_mono(theme, branch.clone(), theme.text_faint)));
         }
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("team-worker-{id}"))
@@ -1397,8 +1413,8 @@ impl Shell {
     /// the dialog opened is skipped).
     fn archive_finished_workers(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.wakes.archive_confirm.remove(chat_id);
-        let ids: Vec<String> = self
-            .team_facts(chat_id, cx)
+        self.team_facts(chat_id, cx);
+        let ids: Vec<String> = self.tracker.all_workers
             .finished()
             .iter()
             .map(|w| w.chat_id.clone())
