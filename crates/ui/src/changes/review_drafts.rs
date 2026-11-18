@@ -223,7 +223,7 @@ impl Changes {
             )
             .child(
                 div()
-                    .when(true, crate::components::review_body)
+                    .text_size(px(12.0))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
@@ -414,7 +414,7 @@ impl Changes {
             )
             .child(
                 div()
-                    .when(true, crate::components::review_body)
+                    .text_size(px(12.0))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
