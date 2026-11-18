@@ -312,12 +312,21 @@ pub fn traits_summary(
 
 /// Keep only the picks `model` still offers. Remembered picks outlive the
 /// model they were made on, and harnesses apply some options blindly (Claude
-/// appends `[1m]` to any model id when `contextWindow` is "1m").
+/// appends `[1m]` to any model id when `contextWindow` is "1m"). The
+/// [`mast_proto::AGENT_OPTION`] pick is kept unless the model offers its own
+/// `agent` option: a review's subagent is not a model trait.
 pub fn offered_options(
     model: &Model,
     mut selections: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
+    let model_offers_agent = model
+        .options
+        .iter()
+        .any(|option| option.id == mast_proto::AGENT_OPTION);
     selections.retain(|id, choice| {
+        if id == mast_proto::AGENT_OPTION && !model_offers_agent {
+            return true;
+        }
         model.options.iter().any(|option| {
             option.id == *id
                 && choice
@@ -836,6 +845,24 @@ impl Pickers {
             this.catalog_rev += 1;
         }
         this
+    }
+
+    /// Start a launcher on `harness` + `model` (a Space's review launch
+    /// default) without touching the remembered picks; the user can still
+    /// change both.
+    pub(crate) fn seed_launch_model(
+        &mut self,
+        harness: HarnessId,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config.harness != Some(harness) {
+            self.config.reasoning = None;
+        }
+        self.config.harness = Some(harness);
+        self.config.model = Some(model);
+        self.ensure_models(harness, false, cx);
+        cx.notify();
     }
 
     pub(crate) fn seed_hand_off(&mut self, config: Option<&ChatConfig>, cx: &mut Context<Self>) {
@@ -8053,6 +8080,22 @@ mod tests {
         let mut want = serde_json::Map::new();
         want.insert("context".into(), serde_json::Value::String("1m".into()));
         assert_eq!(offered_options(&model, remembered), want);
+        // A review's subagent is not a model option: a model switch keeps it,
+        // unless the model has its own `agent` option to validate it against.
+        let mut with_agent = want.clone();
+        with_agent.insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
+        assert_eq!(offered_options(&model, with_agent.clone()), with_agent);
+        let mut agents = model.clone();
+        agents.options.push(ModelOption {
+            id: mast_proto::AGENT_OPTION.into(),
+            label: "Agent".into(),
+            choices: vec![ModelOptionChoice {
+                id: "build".into(),
+                label: "Build".into(),
+            }],
+            default_choice: String::new(),
+        });
+        assert_eq!(offered_options(&agents, with_agent), want);
         // Reasoning shows without a model too.
         assert_eq!(
             traits_summary(

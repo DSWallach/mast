@@ -93,6 +93,15 @@ pub(super) struct StartChatDialog {
     effective: Vec<EffectiveInstructionEntry>,
     pub(super) instructions_changed: bool,
     pub(super) instructions_open: bool,
+    /// Code reviews on a host that runs review agents: the Space's review
+    /// launch defaults (empty when the Space sets none or is unknown).
+    /// `None` hides the merge-gate toggle and applies no agent.
+    pub(super) review_defaults: Option<mast_proto::PrReviewLaunchDefaults>,
+    /// A merge-gate review (code reviews only).
+    pub(super) merge_gate: bool,
+    /// The model came from the Space's review defaults, so a start does not
+    /// make it the composer's sticky pick.
+    review_model_seeded: bool,
     /// Why Start cannot work at all (the owner lacks the capability).
     pub(super) launch_blocker: Option<String>,
     op: OperationSlot,
@@ -137,6 +146,36 @@ impl StartChatDialog {
             cwd: self.skill_root.clone(),
             device_id: (!self.device_id.is_empty()).then(|| self.device_id.clone()),
         }
+    }
+
+    /// Whether this dialog starts a code review (a PR review or a branch
+    /// review, never fix-CI).
+    fn is_code_review(&self) -> bool {
+        self.branch_review.is_some()
+            || self
+                .pr
+                .as_ref()
+                .is_some_and(|pr| pr.action == PrReviewAction::CodeReview)
+    }
+
+    /// The Claude Code subagent this review will run as: the Space's agent,
+    /// when the picked agent is Claude Code.
+    pub(super) fn review_agent(&self, cx: &App) -> Option<String> {
+        let agent = self.review_defaults.as_ref()?.agent.clone()?;
+        (self.pickers.read(cx).resolved(cx).harness == Some(mast_proto::HarnessId::ClaudeCode))
+            .then_some(agent)
+    }
+
+    /// The config Start sends: the picker's, plus the review agent.
+    fn launch_config(&self, cx: &App) -> Option<mast_proto::ChatConfig> {
+        let mut config = self.pickers.read(cx).resolved(cx).chat_config()?;
+        if let Some(agent) = self.review_agent(cx) {
+            config
+                .model_options
+                .entry(mast_proto::AGENT_OPTION)
+                .or_insert(agent.into());
+        }
+        Some(config)
     }
 
     pub(super) fn can_start(&self, cx: &App) -> bool {
@@ -444,6 +483,36 @@ impl Shell {
             .with_single_line()
         });
         let input_events = cx.subscribe(&input, |_, _, _, _| {});
+        let code_review = branch_review.is_some()
+            || pr.as_ref().is_some_and(|pr| pr.action == PrReviewAction::CodeReview);
+        let review_defaults = (code_review
+            && !device_id.is_empty()
+            && self
+                .state
+                .read(cx)
+                .device_supports(&device_id, mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1))
+        .then(|| {
+            self.state
+                .read(cx)
+                .work_outline(&space_id)
+                .snapshot()
+                .and_then(|snapshot| snapshot.space_settings.pr_review_launch.clone())
+                .map(|defaults| defaults.normalized())
+                .unwrap_or_default()
+        });
+        let review_model_seeded = match review_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.model_for(false))
+        {
+            Some(model) => {
+                let model = model.to_owned();
+                pickers.update(cx, |pickers, cx| {
+                    pickers.seed_launch_model(mast_proto::HarnessId::ClaudeCode, model, cx)
+                });
+                true
+            }
+            None => false,
+        };
         let dialog = StartChatDialog {
             space_id,
             item_id,
@@ -470,6 +539,9 @@ impl Shell {
             effective: Vec::new(),
             instructions_changed: false,
             instructions_open: false,
+            review_defaults,
+            merge_gate: false,
+            review_model_seeded,
             launch_blocker: None,
             op: OperationSlot::default(),
             starting: false,
@@ -486,18 +558,49 @@ impl Shell {
         Ok(())
     }
 
+    /// Flip the merge-gate toggle; the Space's model for the new kind of
+    /// review, when it sets one, replaces the model pick.
+    pub(super) fn toggle_start_chat_merge_gate(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.start_chat_dialog() else {
+            return;
+        };
+        if dialog.review_defaults.is_none() || !dialog.is_code_review() || dialog.starting {
+            return;
+        }
+        dialog.merge_gate = !dialog.merge_gate;
+        dialog.failure = None;
+        let model = dialog
+            .review_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.model_for(dialog.merge_gate))
+            .map(str::to_owned);
+        if let Some(model) = model {
+            dialog.review_model_seeded = true;
+            dialog.pickers.clone().update(cx, |pickers, cx| {
+                pickers.seed_launch_model(mast_proto::HarnessId::ClaudeCode, model, cx)
+            });
+        }
+        cx.notify();
+    }
+
     fn submit_start_branch_review(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.start_chat_dialog() else { return; };
         if !dialog.can_start(cx) { return; }
         let Some(branch) = dialog.branch_review.clone() else { return; };
         let space_id = dialog.space_id.clone();
         let item_id = (!dialog.item_id.is_empty()).then(|| dialog.item_id.clone());
-        let config = dialog.pickers.read(cx).resolved(cx).chat_config();
+        let config = dialog.launch_config(cx);
         let account_id = config.as_ref().and_then(|config| crate::managed_accounts::launch_account_id(config.harness, dialog.account_choice.as_ref()));
         let pickers = dialog.pickers.clone();
+        let adopt_picks = !dialog.review_model_seeded;
+        let merge_gate = dialog.merge_gate;
         dialog.starting = true;
         dialog.failure = None;
-        let params = self.branch_review_ops.params(space_id, item_id, branch.target.clone(), config, account_id, None);
+        let mut params = self.branch_review_ops.params(space_id, item_id, branch.target.clone(), config, account_id, None);
+        if merge_gate {
+            params.merge_gate = true;
+            params = self.branch_review_ops.assign(params);
+        }
         let engine = self.state.read(cx).engine().cloned();
         #[cfg(test)]
         let script = self.branch_review_script.clone();
@@ -522,9 +625,11 @@ impl Shell {
                 match result {
                     Ok(reply) => {
                         this.branch_review_chats.insert(format!("{}\0{}", reply.space_id, branch.target.state_key()), reply.chat_id.clone());
-                        let picks = pickers.read(cx).new_chat_defaults().clone();
-                        let composer_pickers = this.composer.read(cx).pickers().clone();
-                        composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));
+                        if adopt_picks {
+                            let picks = pickers.read(cx).new_chat_defaults().clone();
+                            let composer_pickers = this.composer.read(cx).pickers().clone();
+                            composer_pickers.update(cx, |composer, cx| composer.adopt_new_chat_picks(&picks, cx));
+                        }
                         this.work_outline_modal = None;
                         this.work_outline_modal_focus_pending = false;
                         this.work_outline_prior_focus = None;
@@ -551,12 +656,15 @@ impl Shell {
         if dialog.starting {
             return;
         }
-        let config = dialog.pickers.read(cx).resolved(cx).chat_config();
+        let config = dialog.launch_config(cx);
         let pickers = dialog.pickers.clone();
+        let adopt_picks = !dialog.review_model_seeded;
+        let merge_gate = dialog.merge_gate;
         dialog.starting = true;
         dialog.failure = None;
         let key = (pr.reference.url(), pr.action);
-        let task = self.launch_pr_review(pr.reference, pr.action, pr.item, config, cx);
+        let task =
+            self.launch_pr_review(pr.reference, pr.action, pr.item, config, merge_gate, cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -574,12 +682,15 @@ impl Shell {
                 match result {
                     Ok(_) => {
                         // A chat started with these picks: they become the
-                        // composer's last-used new-chat selection.
-                        let picks = pickers.read(cx).new_chat_defaults().clone();
-                        let composer_pickers = this.composer.read(cx).pickers().clone();
-                        composer_pickers.update(cx, |composer_pickers, cx| {
-                            composer_pickers.adopt_new_chat_picks(&picks, cx)
-                        });
+                        // composer's last-used new-chat selection, unless
+                        // the Space's review defaults chose the model.
+                        if adopt_picks {
+                            let picks = pickers.read(cx).new_chat_defaults().clone();
+                            let composer_pickers = this.composer.read(cx).pickers().clone();
+                            composer_pickers.update(cx, |composer_pickers, cx| {
+                                composer_pickers.adopt_new_chat_picks(&picks, cx)
+                            });
+                        }
                         this.work_outline_modal = None;
                         this.work_outline_modal_focus_pending = false;
                         this.work_outline_prior_focus = None;
@@ -1408,6 +1519,7 @@ pub(super) fn start_chat_card(
             )
         });
 
+    let review_rows = review_launch_rows(dialog, theme, cx);
     let failure = dialog.failure.clone().map(|failure| {
         div()
             .debug_selector(|| "start-chat-failure".into())
@@ -1526,6 +1638,52 @@ pub(super) fn start_chat_card(
         .into_any_element()
 }
 
+/// Code reviews on a host that runs review agents: the merge-gate toggle and
+/// the subagent the review runs as.
+fn review_launch_rows(
+    dialog: &StartChatDialog,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Option<gpui::Div> {
+    if dialog.review_defaults.is_none() || !dialog.is_code_review() {
+        return None;
+    }
+    let on = dialog.merge_gate;
+    let toggle = div()
+        .mt(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            crate::components::toggle_switch(theme, on)
+                .id("start-chat-merge-gate")
+                .debug_selector(|| "start-chat-merge-gate".into())
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_start_chat_merge_gate(cx))),
+        )
+        .child(note(
+            "start-chat-merge-gate-label",
+            "Merge gate review",
+            theme.text,
+        ));
+    let agent = dialog.review_agent(cx).map(|agent| {
+        note(
+            "start-chat-review-agent",
+            format!("Runs as the Claude Code subagent `{agent}`."),
+            theme.text_faint,
+        )
+        .mt(px(2.0))
+    });
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .child(toggle)
+            .when_some(agent, |el, agent| el.child(agent)),
+    )
+}
+
 /// The PR-mode Start Chat card: what will run (the review prompt, the PR
 /// link, where the host checks the branch out) is shown as a summary; the
 /// agent picker is the work-item dialog's own.
@@ -1556,6 +1714,7 @@ fn branch_start_chat_card(
         .child(note("start-chat-branch-range", range, theme.text_muted))
         .child(section_label("Agent", theme))
         .child(dialog.pickers.clone())
+        .when_some(review_launch_rows(dialog, theme, cx), |el, rows| el.child(rows))
         .when_some(start_chat_account_chip(dialog, shell, theme, cx), |el, chip| el.child(chip))
         .when_some(failure, |el, failure| el.child(failure))
         .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
@@ -1653,6 +1812,7 @@ fn pr_start_chat_card(
                 .child(note("start-chat-pr-link", url, theme.text).mt(px(2.0)))
                 .child(section_label("Agent", theme))
                 .child(agents)
+                .when_some(review_rows, |el, rows| el.child(rows))
                 .child(section_label("Runs in", theme))
                 .child(
                     note(

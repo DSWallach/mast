@@ -60,6 +60,10 @@ pub enum HarnessError {
     Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The run request carries a value the adapter refuses to pass to the
+    /// agent process. Raised before spawning.
+    #[error("invalid run request: {0}")]
+    InvalidRequest(String),
     /// The run carries Work Outline instructions this adapter cannot deliver
     /// (`instruction_support()` is not `Supported`, or the envelope does not
     /// fit). Raised before spawning; never run without the instructions.

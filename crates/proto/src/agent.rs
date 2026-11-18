@@ -650,9 +650,57 @@ pub enum AgentEvent {
     },
 }
 
+/// `model_options` key naming a harness-side agent profile the run starts
+/// as (Claude Code `--agent <name>`, an OpenCode agent). It is not a model
+/// option, so pickers keep it across model changes; a harness change clears
+/// it with the rest of the options.
+pub const AGENT_OPTION: &str = "agent";
+
+/// Longest agent name a launch accepts.
+pub const AGENT_NAME_MAX_LEN: usize = 64;
+
+/// The agent named in `options` (trimmed), when one is set.
+pub fn agent_option(options: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    options
+        .get(AGENT_OPTION)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// Whether `name` is safe to pass as a single CLI argument: ASCII letters,
+/// digits, `_ . : -`, not starting with `-`, at most [`AGENT_NAME_MAX_LEN`].
+pub fn is_valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= AGENT_NAME_MAX_LEN
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_option_is_trimmed_and_validated() {
+        let mut options = serde_json::Map::new();
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!("  "));
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!(7));
+        assert_eq!(agent_option(&options), None);
+        options.insert(AGENT_OPTION.into(), serde_json::json!(" pr-review "));
+        assert_eq!(agent_option(&options), Some("pr-review"));
+        for ok in ["pr-review", "team:review_v2.1", "a"] {
+            assert!(is_valid_agent_name(ok), "{ok}");
+        }
+        let long = "a".repeat(AGENT_NAME_MAX_LEN + 1);
+        for bad in ["", "-p", "two words", "a/b", "x;y", "naïve", long.as_str()] {
+            assert!(!is_valid_agent_name(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn builtin_claude_default_is_opus_5_5() {

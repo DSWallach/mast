@@ -63,29 +63,29 @@ impl BranchReviewOperations {
         account_id: Option<String>,
         target_device_id: Option<String>,
     ) -> StartBranchReviewParams {
-        let key = serde_json::json!([
+        self.assign(StartBranchReviewParams {
             space_id,
             work_item_id,
             target,
             config,
             account_id,
-            target_device_id
-        ])
-        .to_string();
-        let operation_id = self
+            merge_gate: false,
+            operation_id: String::new(),
+            target_device_id,
+        })
+    }
+
+    /// Give `params` the operation id of its request: every field but the
+    /// operation id is the request's identity.
+    pub(crate) fn assign(&mut self, mut params: StartBranchReviewParams) -> StartBranchReviewParams {
+        params.operation_id = String::new();
+        let key = serde_json::to_string(&params).unwrap_or_default();
+        params.operation_id = self
             .ids
             .entry(key)
             .or_insert_with(|| format!("branch-review-{}", uuid::Uuid::new_v4()))
             .clone();
-        StartBranchReviewParams {
-            space_id,
-            work_item_id,
-            target,
-            config,
-            account_id,
-            operation_id,
-            target_device_id,
-        }
+        params
     }
 }
 
@@ -182,5 +182,17 @@ mod tests {
             None,
         );
         assert_ne!(first.operation_id, other.operation_id);
+        let gate = operations.assign(StartBranchReviewParams {
+            merge_gate: true,
+            ..first.clone()
+        });
+        assert_ne!(gate.operation_id, first.operation_id);
+        assert_eq!(
+            operations.assign(StartBranchReviewParams {
+                merge_gate: true,
+                ..first.clone()
+            }),
+            gate
+        );
     }
 }

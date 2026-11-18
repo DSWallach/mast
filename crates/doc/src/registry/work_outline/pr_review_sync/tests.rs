@@ -452,3 +452,97 @@ fn approval_rules_are_space_scoped_and_only_users_can_change_them() {
     });
     assert!(apply_as(&mut doc, WorkOutlineActorKind::User, cross_space).is_err());
 }
+
+fn set_launch(
+    doc: &mut RegistryDoc,
+    kind: WorkOutlineActorKind,
+    defaults: PrReviewLaunchDefaults,
+    op: &str,
+) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+    apply_as(
+        doc,
+        kind,
+        WorkOutlineMutation::SetPrReviewLaunchDefaults(SetPrReviewLaunchDefaultsParams {
+            space_id: SPACE.into(),
+            defaults,
+            operation_id: op.into(),
+        }),
+    )
+}
+
+#[test]
+fn launch_defaults_are_normalized_validated_and_cleared() {
+    let mut doc = doc();
+    assert_eq!(snapshot(&doc, SPACE).space_settings.pr_review_launch, None);
+    // Clearing an absent setting writes nothing.
+    set_launch(&mut doc, WorkOutlineActorKind::User, PrReviewLaunchDefaults::default(), "noop").unwrap();
+    assert!(doc.overlay_row(KIND_WORK_OUTLINE_SPACE_SETTINGS, SPACE).is_none());
+
+    let defaults = PrReviewLaunchDefaults {
+        agent: Some(" pr-review ".into()),
+        draft_model: Some("claude-haiku-4-5".into()),
+        gate_model: Some("  ".into()),
+    };
+    set_launch(&mut doc, WorkOutlineActorKind::User, defaults, "set").unwrap();
+    let want = PrReviewLaunchDefaults {
+        agent: Some("pr-review".into()),
+        draft_model: Some("claude-haiku-4-5".into()),
+        gate_model: None,
+    };
+    assert_eq!(snapshot(&doc, SPACE).space_settings.pr_review_launch, Some(want.clone()));
+    assert_eq!(snapshot(&doc, OTHER).space_settings.pr_review_launch, None);
+
+    for (bad, op) in [
+        (PrReviewLaunchDefaults { agent: Some("rm -rf".into()), ..Default::default() }, "bad-agent"),
+        (PrReviewLaunchDefaults { agent: Some("--help".into()), ..Default::default() }, "flag-agent"),
+        (PrReviewLaunchDefaults { agent: Some("a".repeat(65)), ..Default::default() }, "long-agent"),
+        (PrReviewLaunchDefaults { gate_model: Some("m".repeat(201)), ..Default::default() }, "long-model"),
+    ] {
+        let error = set_launch(&mut doc, WorkOutlineActorKind::User, bad, op).unwrap_err();
+        assert_eq!(error.code, WorkOutlineErrorCode::Invalid, "{op}");
+    }
+    assert_eq!(snapshot(&doc, SPACE).space_settings.pr_review_launch, Some(want));
+
+    set_launch(&mut doc, WorkOutlineActorKind::User, PrReviewLaunchDefaults::default(), "clear").unwrap();
+    assert_eq!(snapshot(&doc, SPACE).space_settings.pr_review_launch, None);
+}
+
+#[test]
+fn launch_defaults_survive_a_prompt_rewrite_and_agents_cannot_set_them() {
+    let mut doc = doc();
+    let defaults = PrReviewLaunchDefaults {
+        agent: Some("pr-review".into()),
+        draft_model: None,
+        gate_model: Some("claude-opus-5-5".into()),
+    };
+    set_launch(&mut doc, WorkOutlineActorKind::User, defaults.clone(), "set").unwrap();
+    // A client that only knows the prompts rewrites them; the defaults are a
+    // separate field and stay.
+    doc.set_pr_review_prompts(
+        &SetPrReviewPromptsParams {
+            space_id: SPACE.into(),
+            prompts: PrReviewPrompts::neutral(),
+            operation_id: "prompts".into(),
+        },
+        NOW + 1,
+    )
+    .unwrap();
+    let settings = snapshot(&doc, SPACE).space_settings;
+    assert_eq!(settings.pr_review_launch, Some(defaults));
+    assert_eq!(settings.pr_review_prompts, Some(PrReviewPrompts::neutral()));
+
+    let mut agent = actor(WorkOutlineActorKind::Agent);
+    agent.chat_id = Some("chat-x".into());
+    let error = doc
+        .apply_work_outline_mutation(
+            &WorkOutlineMutation::SetPrReviewLaunchDefaults(SetPrReviewLaunchDefaultsParams {
+                space_id: SPACE.into(),
+                defaults: PrReviewLaunchDefaults::default(),
+                operation_id: "agent".into(),
+            }),
+            &agent,
+            NOW,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, WorkOutlineErrorCode::Unauthorized);
+}

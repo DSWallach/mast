@@ -40,11 +40,12 @@ impl Shell {
         action: PrReviewAction,
         item: Option<(String, String)>,
         config: Option<mast_proto::ChatConfig>,
+        merge_gate: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<StartPrReviewReply, PrReviewError>> {
         let mut params = self
             .pr_review_ops
-            .params_in_item(&reference, action, config, item);
+            .params_in_item(&reference, action, config, item, merge_gate);
         // The user confirmed this start with an agent pick: not the live
         // review Chat of the same PR, which would ignore it.
         params.fresh = true;

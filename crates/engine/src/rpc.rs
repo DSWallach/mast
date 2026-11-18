@@ -1878,6 +1878,17 @@ impl EngineRpc {
             Some(known) if !known.supports(mast_proto::capabilities::PR_REVIEW_LAUNCH_V1) => {
                 return Err(offline("update Mast on that device".into()));
             }
+            Some(known)
+                if crate::pr_review_launch::needs_review_agent_host(
+                    p.config.as_ref(),
+                    p.merge_gate && p.action == mast_proto::PrReviewAction::CodeReview,
+                ) && !known.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1) =>
+            {
+                return Err(offline(
+                    "update Mast on that device to run review agents and merge-gate reviews"
+                        .into(),
+                ));
+            }
             Some(_) => {}
         }
         let mut forwarded = p.clone();
@@ -4258,6 +4269,19 @@ impl RpcService for EngineRpc {
                 if space.device_id != self.doc_host.device_id() {
                     if p.target_device_id.is_some() {
                         return Err(RpcError::Failed("Space lives on another device".into()));
+                    }
+                    if crate::pr_review_launch::needs_review_agent_host(p.config.as_ref(), p.merge_gate)
+                        && !self.workspace.read_devices().ok().is_some_and(|devices| {
+                            devices.iter().any(|device| {
+                                device.id == space.device_id
+                                    && device.supports(mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1)
+                            })
+                        })
+                    {
+                        return Err(RpcError::Failed(format!(
+                            "Update Mast on {} to run review agents and merge-gate reviews.",
+                            self.device_label(&space.device_id)
+                        )));
                     }
                     p.target_device_id = Some(space.device_id.clone());
                     let params = serde_json::to_value(&p).map_err(|e| RpcError::Failed(e.to_string()))?;

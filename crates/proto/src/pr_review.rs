@@ -47,6 +47,10 @@ pub struct StartBranchReviewParams {
     pub config: Option<ChatConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// A merge-gate review: with no `config`, the host picks the Space's
+    /// gate model instead of its draft model.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub merge_gate: bool,
     pub operation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device_id: Option<String>,
@@ -103,6 +107,10 @@ pub struct StartPrReviewParams {
     /// it). Absent/false reuses that Chat.
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh: bool,
+    /// A merge-gate code review: with no `config`, the host picks the
+    /// Space's gate model instead of its draft model. Ignored for fix-CI.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub merge_gate: bool,
     pub operation_id: String,
     /// Routing hint set by the forwarding engine. Callers leave it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +432,7 @@ mod tests {
             work_item_id: None,
             config: None,
             fresh: false,
+            merge_gate: false,
             operation_id: "op".into(),
             target_device_id: None,
         };
@@ -436,8 +445,40 @@ mod tests {
         );
         let fresh = StartPrReviewParams {
             fresh: true,
-            ..params
+            ..params.clone()
         };
         assert_eq!(serde_json::to_value(&fresh).unwrap()["fresh"], true);
+        let gate = StartPrReviewParams {
+            merge_gate: true,
+            ..params
+        };
+        assert_eq!(serde_json::to_value(&gate).unwrap()["mergeGate"], true);
+        let old: StartPrReviewParams = serde_json::from_value(serde_json::json!({
+            "repoOwner": "o", "repoName": "r", "number": 7,
+            "action": "codeReview", "operationId": "op"
+        }))
+        .unwrap();
+        assert!(!old.merge_gate, "an older client's start is a draft review");
+    }
+
+    #[test]
+    fn launch_defaults_are_additive_and_normalized() {
+        use crate::work_outline::{PrReviewLaunchDefaults, WorkOutlineSpaceSettings};
+        let settings: WorkOutlineSpaceSettings =
+            serde_json::from_value(serde_json::json!({"linearEnabled": true})).unwrap();
+        assert_eq!(settings.pr_review_launch, None);
+        let defaults = PrReviewLaunchDefaults {
+            agent: Some(" pr-review ".into()),
+            draft_model: Some("".into()),
+            gate_model: Some("claude-opus-5-5".into()),
+        }
+        .normalized();
+        assert_eq!(
+            serde_json::to_value(&defaults).unwrap(),
+            serde_json::json!({"agent": "pr-review", "gateModel": "claude-opus-5-5"})
+        );
+        assert_eq!(defaults.model_for(true), Some("claude-opus-5-5"));
+        assert_eq!(defaults.model_for(false), None);
+        assert!(PrReviewLaunchDefaults::default().is_empty());
     }
 }

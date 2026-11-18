@@ -931,6 +931,9 @@ impl RegistryDoc {
             WorkOutlineMutation::SetPrReviewPrompts(p) => {
                 self.set_pr_review_prompts(p, now_ms).map(|_| empty)
             }
+            WorkOutlineMutation::SetPrReviewLaunchDefaults(p) => {
+                self.set_pr_review_launch_defaults(p, now_ms).map(|_| empty)
+            }
             WorkOutlineMutation::SetApprovalRule(p) => {
                 self.set_approval_rule(p, now_ms).map(|_| empty)
             }

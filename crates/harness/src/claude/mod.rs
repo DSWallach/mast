@@ -327,6 +327,14 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
+        // A named subagent profile (`.claude/agents/<name>.md`) runs as the
+        // session's main agent. [`check_agent_option`] refuses a bad name
+        // before spawning; this never passes one through.
+        if let Some(agent) = mast_proto::agent_option(&request.model_options)
+            .filter(|agent| mast_proto::is_valid_agent_name(agent))
+        {
+            cmd.args(["--agent", agent]);
+        }
         // `read-only` is enforced by the CLI itself: file-mutating tools and
         // Bash (which cannot be restricted to read-only use) are denied, and
         // auto-approve never selects bypass mode for it. `workspace-write` is
@@ -702,6 +710,20 @@ impl Harness for ClaudeHarness {
     }
 }
 
+/// Refuse a run whose `agent` option is not a plain agent name, rather than
+/// run without the agent the user picked.
+fn check_agent_option(request: &RunRequest) -> Result<(), HarnessError> {
+    match mast_proto::agent_option(&request.model_options) {
+        Some(agent) if !mast_proto::is_valid_agent_name(agent) => {
+            Err(HarnessError::InvalidRequest(format!(
+                "Claude Code agent name {agent:?} must be 1-{} letters, digits, '_', '.', ':' or '-'",
+                mast_proto::AGENT_NAME_MAX_LEN
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 impl ClaudeHarness {
     async fn run_with_mode(
         &self,
@@ -711,6 +733,7 @@ impl ClaudeHarness {
         agent_tools: Option<&crate::AgentToolsInjection>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
+        check_agent_option(&request)?;
         let mut extra_args = self.instruction_args(&request)?;
         let (tool_args, mcp_config_file) = self.agent_tools_args(agent_tools)?;
         extra_args.extend(tool_args);
@@ -1454,6 +1477,37 @@ mod tests {
             model_arg(&argv(&harness, &request)),
             Some("claude-sonnet-5")
         );
+    }
+
+    #[test]
+    fn the_agent_option_runs_as_a_named_subagent() {
+        let harness = ClaudeHarness::new();
+        let plain = argv(&harness, &plain_request());
+        assert!(!plain.iter().any(|a| a == "--agent"), "{plain:?}");
+        assert!(check_agent_option(&plain_request()).is_ok());
+
+        let mut request = plain_request();
+        request.model = Some("claude-haiku-4-5".into());
+        request
+            .model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!(" pr-review "));
+        assert!(check_agent_option(&request).is_ok());
+        let args = argv(&harness, &request);
+        let at = args.iter().position(|a| a == "--agent").expect("--agent");
+        assert_eq!(args[at + 1], "pr-review");
+        assert_eq!(model_arg(&args), Some("claude-haiku-4-5"));
+
+        for bad in ["--dangerously-skip-permissions", "a b", "x;rm"] {
+            request
+                .model_options
+                .insert(mast_proto::AGENT_OPTION.into(), json!(bad));
+            assert!(
+                matches!(check_agent_option(&request), Err(HarnessError::InvalidRequest(_))),
+                "{bad}"
+            );
+            let args = argv(&harness, &request);
+            assert!(!args.iter().any(|a| a == "--agent" || a == bad), "{args:?}");
+        }
     }
 
     fn tools_injection() -> crate::AgentToolsInjection {
