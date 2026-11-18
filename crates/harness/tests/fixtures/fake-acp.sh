@@ -153,6 +153,8 @@ case "$promptline" in
   fid=$(rid "$followline")
   has "$followline" '"method":"session/prompt"' || exit 1
   emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"$first_prompt_id\",\"stopReason\":\"cancelled\"}}"
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"stale-observed"}}'
+  while [ ! -f stale-observed ]; do sleep 0.01; done
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}'
   emit "{\"id\":$fid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;

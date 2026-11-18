@@ -1022,11 +1022,12 @@ async fn stale_prompt_complete_never_settles_a_newer_turn() {
 
 #[tokio::test]
 async fn prior_prompt_completion_does_not_settle_the_following_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("stale-observed");
     let (controls, steer, _) = controls();
-    let mut stream = harness()
-        .run(request("scenario:prompt-complete-prior-turn"), controls)
-        .await
-        .unwrap();
+    let mut req = request("scenario:prompt-complete-prior-turn");
+    req.cwd = directory.path().display().to_string();
+    let mut stream = harness().run(req, controls).await.unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async move {
         let mut events = Vec::new();
         let mut steer = Some(steer);
@@ -1042,6 +1043,9 @@ async fn prior_prompt_completion_does_not_settle_the_following_turn() {
                     })
                     .await
                     .unwrap();
+            }
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "stale-observed") {
+                std::fs::write(&marker, "").unwrap();
             }
             events.push(event);
         }
