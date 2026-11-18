@@ -1119,3 +1119,161 @@ fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
     assert_eq!(tween.current(), 0.0);
     assert!(!tween.animating());
 }
+
+#[gpui::test]
+fn render_updates_geometry_only_when_ready(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+    });
+    let (shell, cx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        let mut shell = Shell::new(state, EngineBootConfig {
+            data_dir: dir.path().into(), ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(), edge_token: None,
+            org_id: None, workos_client_id: None,
+            default_harness: mast_proto::HarnessId::Mock,
+        }, cx);
+        shell.viewport_height = -1.0;
+        shell.debug_gate = Some(GatePhase::Loading);
+        shell
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    shell.read_with(cx, |shell, _| assert_eq!(shell.viewport_height, -1.0));
+    shell.update(cx, |shell, cx| {
+        shell.debug_gate = Some(GatePhase::Ready);
+        cx.notify();
+    });
+    let expected = cx.update(|window, cx| {
+        let height = f32::from(window.viewport_size().height);
+        window.draw(cx).clear();
+        height
+    });
+    shell.read_with(cx, |shell, _| assert_eq!(shell.viewport_height, expected));
+}
+
+#[gpui::test]
+fn render_closes_browsers_when_workspace_profile_changes(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+    });
+    let shell = cx.add_window(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        Shell::new(
+            state,
+            EngineBootConfig {
+                data_dir: dir.path().into(),
+                ipc_port: 0,
+                edge_url: "http://127.0.0.1:1".into(),
+                edge_token: None,
+                org_id: None,
+                workos_client_id: None,
+                default_harness: mast_proto::HarnessId::Mock,
+            },
+            cx,
+        )
+    });
+    shell
+        .update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("first".into());
+            });
+            let _ = shell.render(window, cx);
+            let profile = shell.browser_profile.clone();
+            shell.active_chat = "chat".into();
+            shell.add_browser_surface(None, window, cx);
+            assert_eq!(shell.browsers.len(), 1);
+            let _ = shell.render(window, cx);
+            assert_eq!(shell.browsers.len(), 1);
+            shell
+                .state
+                .update(cx, |state, _| state.local_device_id = Some("second".into()));
+            let _ = shell.render(window, cx);
+            assert_ne!(shell.browser_profile, profile);
+            assert!(shell.browsers.is_empty());
+            assert!(shell.browser_subs.is_empty());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn render_restores_focus_and_clears_hints_on_deactivation(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+    });
+    let (shell, cx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        let mut shell = Shell::new(state, EngineBootConfig {
+            data_dir: dir.path().into(), ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(), edge_token: None,
+            org_id: None, workos_client_id: None,
+            default_harness: mast_proto::HarnessId::Mock,
+        }, cx);
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell
+    });
+    cx.update(|window, cx| { window.activate_window(); window.draw(cx).clear(); });
+    shell.update(cx, |shell, cx| { shell.jump_hints = true; cx.notify(); });
+    cx.deactivate_window();
+    shell.read_with(cx, |shell, _| assert!(!shell.jump_hints));
+    cx.update(|window, cx| { window.activate_window(); window.blur(); window.draw(cx).clear(); });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear();
+        shell.read(cx).shortcut_focus.contains_focused(window, cx)
+    }).then_some(()).expect("focus returns inside the shell");
+}
+
+#[gpui::test]
+fn render_shortcuts_respect_overlay_and_settings(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        cx.bind_keys([
+            KeyBinding::new(&platform_combo("mod-shift-o"), OpenOverview, None),
+            KeyBinding::new(&platform_combo("mod-shift-b"), ToggleChanges, None),
+        ]);
+    });
+    let (shell, cx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        let mut shell = Shell::new(state, EngineBootConfig {
+            data_dir: dir.path().into(), ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(), edge_token: None,
+            org_id: None, workos_client_id: None,
+            default_harness: mast_proto::HarnessId::Mock,
+        }, cx);
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.route = Route::Settings(SettingsSection::Devices);
+        shell
+    });
+    cx.update(|window, cx| { window.activate_window(); window.draw(cx).clear(); });
+    cx.run_until_parked();
+    cx.simulate_keystrokes(&platform_combo("mod-shift-b"));
+    shell.read_with(cx, |shell, cx| {
+        assert!(matches!(shell.route, Route::Settings(_)));
+        assert!(!shell.right_pane_open(cx));
+    });
+    shell.update(cx, |shell, cx| { shell.running.open = true; cx.notify(); });
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_keystrokes(&platform_combo("mod-shift-o"));
+    shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Settings(_))));
+    shell.update(cx, |shell, cx| { shell.running.open = false; cx.notify(); });
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_keystrokes(&platform_combo("mod-shift-o"));
+    shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Overview)));
+}
