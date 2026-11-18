@@ -31,6 +31,50 @@ pub(crate) struct LifecycleFacts {
     pub idle_over_three_days: bool,
 }
 
+/// Facts that belong to one non-archived chat on a ticket.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChatFacts {
+    pub branch_review: bool,
+    pub ready_request: bool,
+    pub needs_answer: bool,
+    pub idle_over_three_days: bool,
+}
+
+/// Derive one row from all chats and PRs without mixing review and check
+/// results from different PRs. A ticket is stale only when every chat is idle.
+pub(crate) fn derive_ticket_lifecycle(
+    chats: &[ChatFacts],
+    pull_requests: &[PullRequestFacts],
+    item_completed: bool,
+    linear_completed: bool,
+) -> LifecycleRow {
+    let merged = pull_requests.iter().any(|pr| pr.merged);
+    let open = pull_requests.iter().any(|pr| pr.open);
+    let ready = pull_requests.iter().any(|pr| {
+        pr.open && pr.approved && !pr.changes_requested && pr.checks_passing
+    });
+    let changes_requested = pull_requests.iter().any(|pr| pr.open && pr.changes_requested);
+    let facts = LifecycleFacts {
+        has_chat: !chats.is_empty(),
+        branch_review: chats.iter().any(|chat| chat.branch_review),
+        ready_request: chats.iter().any(|chat| chat.ready_request),
+        item_completed,
+        linear_completed,
+        pull_request: PullRequestFacts {
+            open,
+            merged,
+            approved: ready,
+            // A ready PR is the furthest-along fact, while changes requested
+            // on another PR still needs the user's attention.
+            changes_requested: !ready && changes_requested,
+            checks_passing: ready,
+        },
+        needs_answer: chats.iter().any(|chat| chat.needs_answer) || changes_requested,
+        idle_over_three_days: !chats.is_empty() && chats.iter().all(|chat| chat.idle_over_three_days),
+    };
+    derive_lifecycle(facts)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LifecycleRow {
     pub stage: LifecycleStage,
@@ -123,5 +167,29 @@ mod tests {
         facts.item_completed = false;
         facts.has_chat = false;
         assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::NotStarted);
+    }
+
+    #[test]
+    fn combines_chats_and_prs_without_combining_independent_checks() {
+        let chats = [ChatFacts { ready_request: true, idle_over_three_days: true, ..Default::default() },
+            ChatFacts { needs_answer: true, ..Default::default() }];
+        let mut prs = [PullRequestFacts { open: true, approved: true, ..Default::default() },
+            PullRequestFacts { open: true, checks_passing: true, ..Default::default() }];
+        let row = derive_ticket_lifecycle(&chats, &prs, false, false);
+        assert_eq!(row.stage, LifecycleStage::PrReview);
+        assert!(row.needs_you);
+        assert!(!row.stale);
+        prs[0].checks_passing = true;
+        assert_eq!(derive_ticket_lifecycle(&chats, &prs, false, false).stage, LifecycleStage::ReadyToMerge);
+        prs[1].merged = true;
+        assert_eq!(derive_ticket_lifecycle(&chats, &prs, false, false).stage, LifecycleStage::Done);
+    }
+
+    #[test]
+    fn branch_review_and_reopened_items_follow_current_facts() {
+        let chats = [ChatFacts { branch_review: true, ..Default::default() }];
+        assert_eq!(derive_ticket_lifecycle(&chats, &[], false, false).stage, LifecycleStage::CodeReview);
+        assert_eq!(derive_ticket_lifecycle(&[], &[], true, false).stage, LifecycleStage::Done);
+        assert_eq!(derive_ticket_lifecycle(&[], &[], false, false).stage, LifecycleStage::NotStarted);
     }
 }
