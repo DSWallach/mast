@@ -1981,6 +1981,8 @@ impl AppState {
             })
             .map(|c| (self.display_status_for(c, now), c))
             .collect();
+        #[cfg(test)]
+        crate::shell::perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
         sort_active(&mut rows);
         rows
     }
@@ -2004,7 +2006,11 @@ impl AppState {
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
-        self.sessions.iter().find(|s| s.chat_id == chat_id)
+        self.sessions.iter().find(|s| {
+            #[cfg(test)]
+            crate::shell::perf_counts::SESSION_SCANS.with(|c| c.set(c.get() + 1));
+            s.chat_id == chat_id
+        })
     }
 
     /// Staleness-checked status dot for a chat row. A send in flight reads as
@@ -2052,6 +2058,8 @@ impl AppState {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.chats.len().hash(&mut h);
         for chat in &self.chats {
+            #[cfg(test)]
+            crate::shell::perf_counts::FINGERPRINT_CHATS.with(|c| c.set(c.get() + 1));
             chat.id.hash(&mut h);
             chat.device_id.hash(&mut h);
             chat.title.hash(&mut h);

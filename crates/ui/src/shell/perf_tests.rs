@@ -793,6 +793,10 @@ struct SidebarCounts {
     sidebar_pane: u64,
     chat_rows: u64,
     spinner_views: u64,
+    chat_scans: u64,
+    session_scans: u64,
+    sorts: u64,
+    fingerprint_chats: u64,
 }
 
 fn sidebar_counts(sidebar: &Entity<SidebarPane>, cx: &mut gpui::VisualTestContext) -> SidebarCounts {
@@ -801,6 +805,10 @@ fn sidebar_counts(sidebar: &Entity<SidebarPane>, cx: &mut gpui::VisualTestContex
         sidebar_pane: sidebar.read_with(cx, |pane, _| pane.renders as u64),
         chat_rows: perf_counts::CHAT_ROW_BUILDS.with(|c| c.get()),
         spinner_views: crate::loaders::MINI_SPINNER_RENDERS.with(|c| c.get()),
+        chat_scans: perf_counts::CHAT_ROW_SCANS.with(|c| c.get()),
+        session_scans: perf_counts::SESSION_SCANS.with(|c| c.get()),
+        sorts: perf_counts::SIDEBAR_SORTS.with(|c| c.get()),
+        fingerprint_chats: perf_counts::FINGERPRINT_CHATS.with(|c| c.get()),
     }
 }
 
@@ -810,6 +818,10 @@ fn sidebar_delta(a: SidebarCounts, b: SidebarCounts) -> SidebarCounts {
         sidebar_pane: b.sidebar_pane - a.sidebar_pane,
         chat_rows: b.chat_rows - a.chat_rows,
         spinner_views: b.spinner_views - a.spinner_views,
+        chat_scans: b.chat_scans - a.chat_scans,
+        session_scans: b.session_scans - a.session_scans,
+        sorts: b.sorts - a.sorts,
+        fingerprint_chats: b.fingerprint_chats - a.fingerprint_chats,
     }
 }
 
@@ -817,7 +829,7 @@ const BUDGET_CHATS: usize = 360;
 const BUDGET_WORKING: usize = 5;
 const BUDGET_FRAMES: u64 = 30;
 
-/// 360 chats in an open sidebar, 5 working. Returns the shell, its sidebar pane
+/// 360 chats across 50 checkouts in an open sidebar, 5 working. Returns the shell, its sidebar pane
 /// and the window context after the first frames have settled.
 fn sidebar_budget_fixture(
     cx: &mut TestAppContext,
@@ -834,15 +846,27 @@ fn sidebar_budget_fixture(
     });
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {
-        state.chats = (0..BUDGET_CHATS).map(chat_row).collect();
-        state.sessions = (BUDGET_CHATS - BUDGET_WORKING..BUDGET_CHATS)
+        state.spaces = (0..50).map(|index| mast_proto::Space {
+            id: format!("space{index}"), device_id: "local".into(),
+            path: format!("/work/repo{index}"), name: None, git_detected: true,
+            git_checked_at: None, checkout_id: Some(format!("checkout{index}")),
+            created_at: Utc::now(),
+        }).collect();
+        state.chats = (0..BUDGET_CHATS).map(|index| {
+            let mut chat = chat_row(index);
+            chat.space_id = Some(format!("space{}", index % 50));
+            chat.checkout_id = Some(format!("checkout{}", index % 50));
+            chat.cwd = Some(format!("/work/repo{}", index % 50));
+            chat
+        }).collect();
+        state.sessions = (0..BUDGET_CHATS)
             .map(|index| mast_proto::Session {
                 last_completed_turn: None,
                 awaiting_input: None,
                 last_turn_tool_failures: None, todo_progress: None,
                 chat_id: format!("c{index}"),
                 device_id: "local".into(),
-                status: mast_proto::SessionStatus::Working,
+                status: if index >= BUDGET_CHATS - BUDGET_WORKING { mast_proto::SessionStatus::Working } else { mast_proto::SessionStatus::Idle },
                 started_at: None,
                 updated_at: Utc::now(),
             })
@@ -896,9 +920,11 @@ fn sidebar_spinner_frames_rerender_only_spinners(cx: &mut TestAppContext) {
     }
     perf_counts::CHAT_ROW_BY_ID.with(|m| m.borrow_mut().clear());
     let before = sidebar_counts(&sidebar, vcx);
+    let started = std::time::Instant::now();
     for _ in 0..BUDGET_FRAMES {
         animation_frame(vcx);
     }
+    eprintln!("BUDGET spinner ms/frame: {:.3}", started.elapsed().as_secs_f64() * 1000.0 / BUDGET_FRAMES as f64);
     eprintln!("BUDGET notifies: {:?}", totals(&watched));
     let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
     eprintln!("BUDGET spinner frames ({BUDGET_FRAMES}): {spent:?}");
@@ -916,6 +942,27 @@ fn sidebar_spinner_frames_rerender_only_spinners(cx: &mut TestAppContext) {
         spent.spinner_views <= 2 * BUDGET_FRAMES * BUDGET_WORKING as u64,
         "more spinner renders than animated rows × frames (own tick + row re-render): {spent:?}"
     );
+}
+
+#[gpui::test]
+fn sidebar_hover_frame_cost(cx: &mut TestAppContext) {
+    let (_shell, sidebar, _state, vcx) = sidebar_budget_fixture(cx);
+    vcx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+    for _ in 0..4 { animation_frame(vcx); }
+    let centers: Vec<_> = ["chat-c359", "chat-c358", "chat-c357", "chat-c356", "chat-c355", "chat-c354"]
+        .into_iter()
+        .filter_map(|id| vcx.debug_bounds(id).map(|bounds| bounds.center()))
+        .take(2).collect();
+    assert_eq!(centers.len(), 2, "fixture must expose two chat rows");
+    let before = sidebar_counts(&sidebar, vcx);
+    let started = std::time::Instant::now();
+    for index in 0..BUDGET_FRAMES {
+        vcx.simulate_mouse_move(centers[index as usize % 2], None, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
+    let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
+    eprintln!("BUDGET hover ms/frame: {:.3}; {spent:?}", started.elapsed().as_secs_f64() * 1000.0 / BUDGET_FRAMES as f64);
 }
 
 /// One streamed token into the selected chat: only its transcript changes.

@@ -1572,6 +1572,10 @@ pub(crate) mod perf_counts {
     thread_local! {
         pub(crate) static SHELL_RENDERS: Cell<u64> = const { Cell::new(0) };
         pub(crate) static CHAT_ROW_BUILDS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_SCANS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static SESSION_SCANS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static SIDEBAR_SORTS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static FINGERPRINT_CHATS: Cell<u64> = const { Cell::new(0) };
         pub(crate) static CHAT_ROW_BY_ID: std::cell::RefCell<std::collections::HashMap<String, u64>> = std::cell::RefCell::new(Default::default());
     }
 }
@@ -7487,7 +7491,11 @@ impl Shell {
         let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
         let identity = {
             let state = self.state.read(cx);
-            let chat = state.chats.iter().find(|chat| chat.id == id);
+            let chat = state.chats.iter().find(|chat| {
+                #[cfg(test)]
+                perf_counts::CHAT_ROW_SCANS.with(|c| c.set(c.get() + 1));
+                chat.id == id
+            });
             let config = chat.and_then(|chat| chat.config.as_ref());
             theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
         };
@@ -7539,7 +7547,11 @@ impl Shell {
             .read(cx)
             .chats
             .iter()
-            .find(|chat| chat.id == id)
+            .find(|chat| {
+                #[cfg(test)]
+                perf_counts::CHAT_ROW_SCANS.with(|c| c.set(c.get() + 1));
+                chat.id == id
+            })
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });

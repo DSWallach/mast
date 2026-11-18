@@ -2587,6 +2587,8 @@ impl Shell {
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
+        #[cfg(test)]
+        perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
@@ -2741,6 +2743,8 @@ impl Shell {
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
+            #[cfg(test)]
+            perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
@@ -2759,6 +2763,8 @@ impl Shell {
             .enumerate()
             .map(|(ix, id)| (id.as_str(), ix))
             .collect();
+        #[cfg(test)]
+        perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
         rows.sort_by_key(|row| {
             rank.get(row.chat.id.as_str())
                 .copied()
