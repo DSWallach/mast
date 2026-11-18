@@ -88,7 +88,7 @@ impl Transcript {
             .font_family(theme.font_sans_fixed.clone())
             .when(collapses, |el| {
                 el.child(reveal_tool_row(
-                    header,
+                    header.into_any_element(),
                     TOOL_GROUP_HEADER_HEIGHT,
                     header_reveal,
                 ))
@@ -400,7 +400,7 @@ impl Transcript {
         theme: &Theme,
         frame: &ToolGroupFrame<'_>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let viewport_height = frame.viewport_height;
         let effective_auto_open = frame.effective_auto_open;
         let disclosure_progress = frame.disclosure_progress;
@@ -450,7 +450,6 @@ impl Transcript {
                     .truncate()
                     .child(tool_group_title(summary.clone(), shimmer_phase, theme)),
             )
-            .into_any_element()
     }
 
     fn render_tool_chips(
