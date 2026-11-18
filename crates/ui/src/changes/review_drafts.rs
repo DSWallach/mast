@@ -178,7 +178,7 @@ impl Changes {
         };
         div()
             .w_full()
-            .h(px(crate::comments::card_height(&comment.body)))
+            .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -188,7 +188,7 @@ impl Changes {
             .border_color(theme.border)
             .child(
                 div()
-                    .h(px(24.0))
+                    .h(crate::typography::ui_rems(24.0))
                     .flex()
                     .items_center()
                     .gap(px(Theme::SPACE_SM))
@@ -219,7 +219,8 @@ impl Changes {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
+                    .line_height(crate::typography::ui_rems(crate::comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )
@@ -369,7 +370,7 @@ impl Changes {
         };
         div()
             .w_full()
-            .h(px(crate::comments::card_height(&comment.body)))
+            .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -379,7 +380,7 @@ impl Changes {
             .border_color(theme.border)
             .child(
                 div()
-                    .h(px(24.0))
+                    .h(crate::typography::ui_rems(24.0))
                     .flex()
                     .items_center()
                     .gap(px(Theme::SPACE_SM))
@@ -406,7 +407,8 @@ impl Changes {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .when(true, crate::components::changes_body_text)
+                    .line_height(crate::typography::ui_rems(crate::comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
                     .child(crate::components::code_block::inline_code(&comment.body, theme, theme.text_dim)),
             )

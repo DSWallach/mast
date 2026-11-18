@@ -861,9 +861,20 @@ pub fn body_height_with(
     mode: DiffMode,
     line_h: f32,
 ) -> f32 {
+    body_height_with_card_heights(file, comments, draft, mode, line_h, |comment| comments::card_height(&comment.body))
+}
+
+fn body_height_with_card_heights(
+    file: &FileDiff,
+    comments: &[ReviewComment],
+    draft: Option<(CommentSide, u32)>,
+    mode: DiffMode,
+    line_h: f32,
+    card_height: impl Fn(&ReviewComment) -> f32,
+) -> f32 {
     body_rows(0, file, comments, draft, mode)
         .iter()
-        .map(|row| row.height(comments, line_h))
+        .map(|row| row.height(comments, line_h, &card_height))
         .sum()
 }
 
@@ -1601,7 +1612,7 @@ impl DiffRow {
 
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
-    fn height(self, comments: &[ReviewComment], line_h: f32) -> f32 {
+    fn height(self, comments: &[ReviewComment], line_h: f32, card_height: &impl Fn(&ReviewComment) -> f32) -> f32 {
         match self {
             DiffRow::SubmoduleHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
@@ -1612,7 +1623,7 @@ impl DiffRow {
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
-                .map(|comment| comments::card_height(&comment.body))
+                .map(card_height)
                 .unwrap_or(0.0),
             DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
             DiffRow::ReviewThread { height, .. } => height as f32,
@@ -3445,12 +3456,21 @@ impl Changes {
             cx.notify();
             return;
         }
-        let expanded_height = body_height_with(
+        let ui_scale = crate::typography::effective_rem_px(cx) / 16.0;
+        let expanded_height = body_height_with_card_heights(
             file,
             &self.comments_for(&file.path, cx),
             self.draft_anchor_in(&file.path),
             self.mode,
             diff_line_height(Theme::of(cx)),
+            |comment| {
+                let height = comments::card_height(&comment.body);
+                if self.review_suggestions.contains_key(&comment.id) || self.is_local_draft(&comment.id) {
+                    height * ui_scale
+                } else {
+                    height
+                }
+            },
         );
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
