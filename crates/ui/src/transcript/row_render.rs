@@ -1,5 +1,13 @@
 use super::*;
 
+struct RowFrame {
+    theme: Theme,
+    identity: gpui::Hsla,
+    workspace_root: Option<SharedString>,
+    top_gap: f32,
+    bottom_pad: f32,
+}
+
 impl Transcript {
     pub(super) fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(test)]
@@ -54,7 +62,87 @@ impl Transcript {
             .then(|| self.render_working_trailer(cx))
             .flatten();
 
-        let inner: AnyElement = match &row.kind {
+        let frame = RowFrame { theme, identity, workspace_root, top_gap, bottom_pad };
+        let Some(inner) = self.render_row_content(&row, ix, &frame, window, cx) else {
+            return gpui::Empty.into_any_element();
+        };
+        let theme = &frame.theme;
+        let identity = frame.identity;
+        let top_gap = frame.top_gap;
+        let bottom_pad = frame.bottom_pad;
+
+        let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
+        let is_markdown = |candidate: &Row| matches!(candidate.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+        let adjacent = |candidate: &Row| is_markdown(candidate) && candidate.entry_id == row.entry_id;
+        let continues = is_markdown(&row) && ix.checked_sub(1).and_then(|i| self.rows.get(i)).is_some_and(adjacent);
+        let continued_by_next = is_markdown(&row) && self.rows.get(ix + 1).is_some_and(adjacent);
+        let inner = if matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
+            let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
+            let first_block = matches!(&row.kind, RowKind::Markdown { block_ix, .. } | RowKind::LiveMarkdown { block_ix, .. } if *block_ix == 0);
+            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, continues, continued_by_next, top_gap, model, inner)
+        } else { inner };
+
+        let strip = self.render_row_metadata(&row, theme, cx);
+        let entry_id = row.entry_id.clone();
+        let row_id = row.id.clone();
+        let a11y_active = window.is_a11y_active();
+        let row_kind = &row.kind;
+        div()
+            .id(row.id.clone())
+            .map(|el| with_accessible_text(el, row_kind, a11y_active))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    let next = Some((row_id.clone(), entry_id.clone()));
+                    if this.hovered_entry != next {
+                        let entry_changed = this
+                            .hovered_entry
+                            .as_ref()
+                            .is_none_or(|(_, entry)| entry != &entry_id);
+                        this.hovered_entry = next;
+                        if entry_changed {
+                            cx.notify();
+                        }
+                    }
+                } else if this
+                    .hovered_entry
+                    .as_ref()
+                    .is_some_and(|(row, _)| row == &row_id)
+                {
+                    // Only the row that OWNS the current reveal may clear it —
+                    // a stale leave from an earlier row must not blank the
+                    // strip the newly entered row just lit.
+                    this.hovered_entry = None;
+                    cx.notify();
+                }
+            }))
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(crate::components::agent_message_row_gap(&theme, continues, top_gap)))
+            .pb(px(bottom_pad))
+            // Keep side gutters as the configurable column shrinks to fit.
+            .px(px(48.0))
+            .child(
+                crate::components::conversation_column(&theme, self.content_width)
+                    .child(inner)
+                    .children(strip)
+                    .children(trailer),
+            )
+            .into_any_element()
+    }
+
+    fn render_row_content(
+        &mut self,
+        row: &Row,
+        ix: usize,
+        frame: &RowFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = &frame.theme;
+        let identity = frame.identity;
+        let workspace_root = &frame.workspace_root;
+        Some(match &row.kind {
             RowKind::User {
                 source,
                 text,
@@ -148,7 +236,7 @@ impl Transcript {
             RowKind::Markdown { tree, block_ix } => {
                 let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
+                    return None;
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
@@ -183,7 +271,7 @@ impl Transcript {
             RowKind::LiveMarkdown { tree, block_ix } => {
                 let theme = crate::components::agent_message_theme(&theme, identity);
                 let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
+                    return None;
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 // Per-appended-chunk fade veil (opacity only — layout commits
@@ -345,19 +433,15 @@ impl Transcript {
                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(TranscriptEvent::RetryErroredTurn { chat_id: chat_id.clone(), error_entry_id: error_entry_id.clone() })))
                     )).into_any_element()
             },
-        };
+        })
+    }
 
-        let is_first_entry_row = ix == 0 || self.rows.get(ix - 1).is_some_and(|previous| previous.entry_id != row.entry_id);
-        let is_markdown = |candidate: &Row| matches!(candidate.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
-        let adjacent = |candidate: &Row| is_markdown(candidate) && candidate.entry_id == row.entry_id;
-        let continues = is_markdown(&row) && ix.checked_sub(1).and_then(|i| self.rows.get(i)).is_some_and(adjacent);
-        let continued_by_next = is_markdown(&row) && self.rows.get(ix + 1).is_some_and(adjacent);
-        let inner = if matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }) {
-            let model = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).and_then(|config| config.model.clone());
-            let first_block = matches!(&row.kind, RowKind::Markdown { block_ix, .. } | RowKind::LiveMarkdown { block_ix, .. } if *block_ix == 0);
-            crate::components::agent_message_bubble(&theme, identity, is_first_entry_row, first_block, continues, continued_by_next, top_gap, model, inner)
-        } else { inner };
-
+    fn render_row_metadata(
+        &mut self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only
         // flip visibility/content, so none of them shifts the virtualizer.
@@ -371,7 +455,7 @@ impl Transcript {
         let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
-        let strip = row.timestamp.map(|ms| {
+        row.timestamp.map(|ms| {
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
@@ -409,53 +493,8 @@ impl Transcript {
                         metadata,
                     ))
                 })
-        });
-        let entry_id = row.entry_id.clone();
-        let row_id = row.id.clone();
-        let a11y_active = window.is_a11y_active();
-        let row_kind = &row.kind;
-        div()
-            .id(row.id.clone())
-            .map(|el| with_accessible_text(el, row_kind, a11y_active))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    let next = Some((row_id.clone(), entry_id.clone()));
-                    if this.hovered_entry != next {
-                        let entry_changed = this
-                            .hovered_entry
-                            .as_ref()
-                            .is_none_or(|(_, entry)| entry != &entry_id);
-                        this.hovered_entry = next;
-                        if entry_changed {
-                            cx.notify();
-                        }
-                    }
-                } else if this
-                    .hovered_entry
-                    .as_ref()
-                    .is_some_and(|(row, _)| row == &row_id)
-                {
-                    // Only the row that OWNS the current reveal may clear it —
-                    // a stale leave from an earlier row must not blank the
-                    // strip the newly entered row just lit.
-                    this.hovered_entry = None;
-                    cx.notify();
-                }
-            }))
-            .w_full()
-            .flex()
-            .justify_center()
-            .pt(px(crate::components::agent_message_row_gap(&theme, continues, top_gap)))
-            .pb(px(bottom_pad))
-            // Keep side gutters as the configurable column shrinks to fit.
-            .px(px(48.0))
-            .child(
-                crate::components::conversation_column(&theme, self.content_width)
-                    .child(inner)
-                    .children(strip)
-                    .children(trailer),
-            )
-            .into_any_element()
+                .into_any_element()
+        })
     }
 
 }
