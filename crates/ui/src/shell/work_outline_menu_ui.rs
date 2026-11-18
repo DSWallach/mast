@@ -152,20 +152,22 @@ impl Shell {
         if chat.space_id.is_none() {
             return entries;
         }
-        let is_assistant = self.state.read(cx).is_personal_assistant(chat_id);
-        entries.push(
-            MenuEntry::new(
-                "personal-assistant",
-                if is_assistant {
-                    crate::personal_assistant::CLEAR_LABEL
-                } else {
-                    crate::personal_assistant::SET_LABEL
-                },
-                icons::BOT,
-                MenuAction::TogglePersonalAssistant(chat_id.to_owned()),
-            )
-            .separated(),
-        );
+        if !chat.is_background_task_run() {
+            let is_assistant = self.state.read(cx).is_personal_assistant(chat_id);
+            entries.push(
+                MenuEntry::new(
+                    "personal-assistant",
+                    if is_assistant {
+                        crate::personal_assistant::CLEAR_LABEL
+                    } else {
+                        crate::personal_assistant::SET_LABEL
+                    },
+                    icons::BOT,
+                    MenuAction::TogglePersonalAssistant(chat_id.to_owned()),
+                )
+                .separated(),
+            );
+        }
         let is_admin = self.chat_is_admin(chat_id, cx);
         entries.push(MenuEntry::new(
             "grant-admin",

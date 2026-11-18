@@ -239,6 +239,12 @@ pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
 }
 
+enum ChatOrigin {
+    Parent(String),
+    Scheduled(mast_proto::ScheduledChat),
+    ArchivedExternal(mast_proto::ScheduledChat),
+}
+
 impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
@@ -1822,8 +1828,78 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            parent_chat_id.map(ChatOrigin::Parent),
+        )
+    }
+
+    /// Publish scheduled provenance with the chat so a background run is
+    /// hidden even before its work-item assignment arrives.
+    pub(crate) fn create_scheduled_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        config: ChatConfig,
+        cwd: String,
+        task: mast_proto::ScheduledChat,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::Scheduled(task)),
+        )
+    }
+
+    pub(crate) fn create_archived_external_chat(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: ChatConfig,
+        cwd: String,
+        task: mast_proto::ScheduledChat,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            Some(space_id),
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::ArchivedExternal(task)),
+        )
+    }
+
+    fn create_chat_with_origin(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        origin: Option<ChatOrigin>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
-            return Ok(()); // idempotent: optimistic client retries never duplicate
+            // Older launchers could stop after creating the chat but before
+            // recording its provenance. Complete that step on recovery.
+            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+                self.mutate(|doc| {
+                    if doc
+                        .chat(chat_id)?
+                        .is_some_and(|chat| chat.scheduled_task_info.is_none())
+                    {
+                        doc.set_chat_scheduled_task_info(chat_id, task)?;
+                    }
+                    Ok::<(), mast_doc::DocError>(())
+                })?;
+            }
+            return Ok(());
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -1841,12 +1917,18 @@ impl WorkspaceHost {
                 ));
             }
         };
+        let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
+        let (parent_chat_id, scheduled_task_info) = match origin {
+            Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
+            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
+            _ => (None, None),
+        };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
-                archived: false,
+                archived,
                 cwd: Some(cwd.unwrap_or_else(|| {
                     space
                         .as_ref()
@@ -1868,11 +1950,13 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 actual_model: None,
-                scheduled_task: None,
-                scheduled_task_info: None,
+                scheduled_task: scheduled_task_info
+                    .as_ref()
+                    .map(|task| task.task_name.clone()),
+                scheduled_task_info,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                parent_chat_id,
                 side_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
@@ -2141,6 +2225,103 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
+        self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
+    }
+
+    /// Recheck registry protections together with the archive write. Returns
+    /// false when a transient protection should defer the scheduled follow-up.
+    pub(crate) fn archive_scheduled_run_if<Ready>(
+        &self,
+        chat_id: &str,
+        expected: impl Fn(&Chat) -> bool,
+        load_readiness_check: impl FnOnce() -> Result<Ready, EngineError>,
+    ) -> Result<bool, EngineError>
+    where
+        Ready: FnOnce() -> Result<bool, EngineError>,
+    {
+        enum Status {
+            Done,
+            Blocked,
+            Candidate,
+        }
+        let status = |doc: &RegistryDoc| -> Result<Status, EngineError> {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(Status::Done);
+            };
+            if chat.device_id != self.device_id()
+                || chat.archived
+                || doc.scheduled_success_archived(chat_id)
+                || !expected(&chat)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == chat_id)
+                })
+            {
+                return Ok(Status::Done);
+            }
+            if doc.has_open_action_for_chat(chat_id) {
+                return Ok(Status::Blocked);
+            }
+            Ok(Status::Candidate)
+        };
+        match self.read(&status)? {
+            Status::Done => return Ok(true),
+            Status::Blocked => return Ok(false),
+            Status::Candidate => {}
+        }
+        // Load potentially cold session state after the cheap registry
+        // checks, outside the registry lock. Recheck under lock before write.
+        let ready = load_readiness_check()?;
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| match status(doc)? {
+            Status::Done => Ok(true),
+            Status::Blocked => Ok(false),
+            Status::Candidate => {
+                if !ready()? {
+                    return Ok(false);
+                }
+                doc.archive_scheduled_success(chat_id)?;
+                Ok(true)
+            }
+        })
+    }
+
+    pub(crate) fn open_user_action_chats(&self) -> std::collections::HashSet<String> {
+        self.read(RegistryDoc::open_user_action_chats)
+    }
+
+    fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
+        doc.kinds_generation(&[
+            mast_doc::registry::KIND_CHATS,
+            mast_doc::registry::KIND_SIDEBAR_PINS,
+            mast_doc::registry::work_outline::KIND_USER_ACTION_REQUESTS,
+        ])
+    }
+
+    pub(crate) fn scheduled_run_cleanup_marker(&self) -> u64 {
+        self.read(Self::scheduled_run_cleanup_generation)
+    }
+
+    /// Commit the confirmed set together, provided its registry inputs have
+    /// not changed since selection. In particular, a pin or a Required Action
+    /// arriving during selection must win over the archive.
+    pub(crate) fn archive_scheduled_runs<'a>(
+        &self,
+        marker: u64,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| {
+            if Self::scheduled_run_cleanup_generation(doc) != marker {
+                return Ok(false);
+            }
+            for id in ids {
+                doc.set_chat_archived(id, true)?;
+            }
+            Ok(true)
+        })
     }
 
     /// Stamp stable run provenance and the compatible legacy task name together.
@@ -2414,6 +2595,12 @@ impl WorkspaceHost {
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
     pub fn flush(&self) {
         self.inner.save_snapshot();
+    }
+
+    /// Persist scheduled follow-up registry writes before acknowledging their
+    /// queue entries in the scheduler database.
+    pub(crate) fn persist_scheduled_followups(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides
@@ -3519,6 +3706,52 @@ mod tests {
         host.create_chat("c1", None, Some("test-device"), None, None)
             .unwrap();
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn scheduled_chat_creation_recovers_missing_metadata_once() {
+        let (dir, host) = linkable_test_host();
+        let original = host.chat("c1").unwrap().unwrap();
+        assert!(original.scheduled_task_info.is_none());
+        let config = mast_proto::ChatConfig {
+            harness: mast_proto::HarnessId::Mock,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            approval_rules: false,
+        };
+        let task = mast_proto::ScheduledChat {
+            task_id: "daily".into(),
+            task_name: "Daily".into(),
+            run_id: "occurrence".into(),
+            output: mast_proto::ScheduledTaskOutput::Background,
+            ..Default::default()
+        };
+        let create = |task| {
+            host.create_scheduled_chat(
+                "c1",
+                None,
+                config.clone(),
+                dir.path().to_string_lossy().into_owned(),
+                task,
+            )
+            .unwrap();
+        };
+
+        create(task.clone());
+        let recovered = host.chat("c1").unwrap().unwrap();
+        assert_eq!(recovered.created_at, original.created_at);
+        assert_eq!(recovered.scheduled_task.as_deref(), Some("Daily"));
+        assert_eq!(recovered.scheduled_task_info.as_ref(), Some(&task));
+        let row = host.registry_row(mast_doc::KIND_CHATS, "c1").unwrap();
+
+        create(mast_proto::ScheduledChat {
+            task_name: "Changed task name".into(),
+            ..task
+        });
+        assert_eq!(host.registry_row(mast_doc::KIND_CHATS, "c1"), Some(row));
     }
 
     #[tokio::test]

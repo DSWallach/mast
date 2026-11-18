@@ -51,6 +51,10 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⇧F10` | Row menu |
 | `?` | Shortcut reference |
 
+In Work Outline confirmation dialogs, Enter activates the default action when
+the dialog itself has focus, except for destructive confirmations. For an
+archive with descendants, select what to do with them before Enter can confirm.
+
 ## In a plan
 
 | Key | Does |

@@ -681,6 +681,24 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    /// A scheduled turn can finish before shutdown and before the scheduler
+    /// observes its live status. Check the recovered journal on the next boot.
+    pub(crate) fn last_journaled_turn_outcome(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<DoneStatus>, EngineError> {
+        Ok(self
+            .inner
+            .journal
+            .find_rev(chat_id, |_, event| {
+                Some(match event {
+                    AgentEvent::Done { status, .. } => Some(status),
+                    _ => None,
+                })
+            })?
+            .flatten())
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }
@@ -3708,6 +3726,29 @@ async fn drive_run(
         // self-continued turn starts a whole new agent round trip (seconds
         // at minimum, minutes in the incident). Inside the gate everything
         // non-boundary stays inert, exactly as before.
+        if idle_since.is_some()
+            && matches!(&event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+        {
+            // Closing a parked child ends its process. Keep a completed
+            // journal terminal, but still settle a watchdog park or a later
+            // journal event so restart recovery sees a closed journal.
+            let journal = inner.journal.clone();
+            let journal_chat = chat_id.clone();
+            let completed = tokio::task::spawn_blocking(move || {
+                journal
+                    .find_rev(&journal_chat, |_, event| {
+                        Some(matches!(event, AgentEvent::Done {
+                            status: DoneStatus::Completed, ..
+                        }))
+                    })
+                    .is_ok_and(|result| result == Some(true))
+            })
+            .await
+            .unwrap_or(false);
+            if completed {
+                break SessionStatus::Idle;
+            }
+        }
         let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {

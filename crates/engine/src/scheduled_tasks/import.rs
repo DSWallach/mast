@@ -18,27 +18,67 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     Ok(bytes)
 }
 fn registries() -> Vec<PathBuf> {
+    discover_registries().0
+}
+
+fn discover_registries() -> (Vec<PathBuf>, bool) {
+    fn directories(path: &Path, complete: &mut bool) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => match entry.path().metadata() {
+                            Ok(metadata) if metadata.is_dir() => paths.push(entry.path()),
+                            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                                *complete = false;
+                            }
+                            _ => {}
+                        },
+                        Err(_) => *complete = false,
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => *complete = false,
+        }
+        paths
+    }
+
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return vec![];
+        return (Vec::new(), false);
     };
     let root = home.join("Library/Application Support/Claude");
-    let mut out = Vec::new();
+    let mut paths = Vec::new();
+    let mut complete = true;
     for kind in ["claude-code-sessions", "local-agent-mode-sessions"] {
-        if let Ok(accounts) = std::fs::read_dir(root.join(kind)) {
-            for account in accounts.flatten() {
-                if let Ok(orgs) = std::fs::read_dir(account.path()) {
-                    for org in orgs.flatten() {
-                        let p = org.path().join("scheduled-tasks.json");
-                        if p.is_file() {
-                            out.push(p)
-                        }
-                    }
+        for account in directories(&root.join(kind), &mut complete) {
+            for org in directories(&account, &mut complete) {
+                let path = org.join("scheduled-tasks.json");
+                match path.metadata() {
+                    Ok(metadata) if metadata.is_file() => paths.push(path),
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => complete = false,
+                    _ => {}
                 }
             }
         }
     }
-    out.sort();
-    out
+    paths.sort();
+    (paths, complete)
+}
+
+/// The `filePath` of the registry row an import source (`…json#id`) names,
+/// read from that registry now. `None` when the registry or row is gone.
+pub(crate) fn registry_file(import_source: &str) -> Option<String> {
+    let (path, id) = import_source.rsplit_once('#')?;
+    let bytes = read(Path::new(path), 2 * 1024 * 1024).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value["scheduledTasks"]
+        .as_array()?
+        .iter()
+        .find(|row| row["id"].as_str() == Some(id))?["filePath"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Match transcript provenance to a registry definition only when unambiguous.
@@ -49,20 +89,7 @@ pub(crate) fn imported_identity(
     session: &str,
     scope: &str,
 ) -> String {
-    let mut sources = Vec::new();
-    for path in registries() {
-        let Ok(bytes) = read(&path, 2 * 1024 * 1024) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
-        for row in value["scheduledTasks"].as_array().into_iter().flatten() {
-            if row["id"].as_str() == Some(name) && row["filePath"].as_str() == Some(file) {
-                sources.push(format!("{}#{name}", path.display()));
-            }
-        }
-    }
+    let (mut sources, _) = desktop_sources(file, name);
     let source = if sources.len() == 1 {
         sources.remove(0)
     } else if sources.len() > 1 {
@@ -71,6 +98,29 @@ pub(crate) fn imported_identity(
         format!("legacy:{device}:{file}")
     };
     task_id(scope, device, &source)
+}
+
+/// Exact source matches and whether the search was conclusive. Missing or
+/// unreadable registries cannot prove a definition has been retired.
+pub(super) fn desktop_sources(file: &str, name: &str) -> (Vec<String>, bool) {
+    let mut sources = Vec::new();
+    let (paths, complete) = discover_registries();
+    let mut all_read = complete && !paths.is_empty();
+    for path in paths {
+        let rows = read(&path, 2 * 1024 * 1024)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let Some(rows) = rows.as_ref().and_then(|value| value["scheduledTasks"].as_array()) else {
+            all_read = false;
+            continue;
+        };
+        for row in rows {
+            if row["id"].as_str() == Some(name) && row["filePath"].as_str() == Some(file) {
+                sources.push(format!("{}#{name}", path.display()));
+            }
+        }
+    }
+    (sources, all_read)
 }
 
 pub(crate) fn task_id(scope: &str, device: &str, source: &str) -> String {
@@ -130,6 +180,9 @@ pub fn preview(
                 continue;
             };
             evaluator::validate(&schedule).map_err(fail)?;
+            // A task that repeats within the hour only catches up its latest miss briefly.
+            let sub_hourly = matches!(&schedule, TaskSchedule::Cron { expression, .. }
+                if expression.split_whitespace().next().is_some_and(|m| m == "*" || m.contains(['/', ',', '-'])));
             let prompt = String::from_utf8(read(Path::new(file), 128 * 1024)?).map_err(fail)?;
             if prompt
                 .lines()
@@ -171,7 +224,9 @@ pub fn preview(
                     enabled: false,
                     cutover_confirmed: false,
                     work_item_id: None,
-                    grace_minutes: if id.contains("stall-watch") { 30 } else { 360 },
+                    output: Default::default(),
+                    after_success: Default::default(),
+                    grace_minutes: if sub_hourly { 30 } else { 360 },
                 },
                 warnings,
             });

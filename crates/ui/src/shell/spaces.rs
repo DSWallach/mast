@@ -5999,6 +5999,7 @@ impl Shell {
             // whether or not a personal assistant is assigned.
             let open_row = state
                 .selected_chat_row()
+                .filter(|open| !open.is_background_task_run())
                 .filter(|open| assistant_id != Some(open.id.as_str()))
                 .map(|open| {
                     self.sidebar_chat_data(state.display_status_for(open, now), open.clone(), state)
@@ -6006,7 +6007,7 @@ impl Shell {
             let assistant_data = assistant_chat.map(|chat| {
                 let selected = state
                     .selected_chat_row()
-                    .is_some_and(|selected| state.personal_assistant.covers(selected));
+                    .is_some_and(|selected| state.personal_assistant.covers(selected, &state.chats));
                 (
                     self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
                     selected,
@@ -6226,13 +6227,14 @@ impl Shell {
         let filter = self.settings.space_filter.clone();
         let mut rows: Vec<mast_proto::Chat> = {
             let state = self.state.read(cx);
+            let covers = state.personal_assistant.coverage(&state.chats);
             state
                 .chats
                 .iter()
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
-                .filter(|c| !state.personal_assistant.covers(c))
+                .filter(|c| !c.is_background_task_run() && !covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

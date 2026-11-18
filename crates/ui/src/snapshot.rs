@@ -125,6 +125,30 @@ fn chat_fixture_with(
             let designated = mast_proto::PersonalAssistant::for_chat(&state.chats[state.chats.len() - 2], 0);
             state.personal_assistant.apply(mast_proto::PersonalAssistantReply { assistant: Some(designated) });
         }
+        if std::env::var_os("MAST_PREVIEW_ATTENTION_CHIPS").is_some() {
+            let now = chrono::Utc::now();
+            state
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "fixture-tests")
+                .unwrap()
+                .last_message_at = Some(now);
+            for (id, status) in [
+                ("fixture-design", mast_proto::SessionStatus::AwaitingInput),
+                ("fixture-tests", mast_proto::SessionStatus::Errored),
+            ] {
+                state.sessions.push(mast_proto::Session {
+                    chat_id: id.into(),
+                    device_id: "local".into(),
+                    status,
+                    started_at: None,
+                    updated_at: now,
+                    last_completed_turn: None,
+                    awaiting_input: None,
+                    last_turn_tool_failures: None,
+                });
+            }
+        }
         preview_chat_outline(&mut state);
         state
     });
@@ -256,7 +280,7 @@ pub fn question_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell:
             );
             state.receive_transcript_frame(mast_doc::TranscriptFrame::Reset { reset: serde_json::from_value(serde_json::json!([
                 {"id":"user","role":"user","parts":[{"id":"text","kind":"text","text":"Review the sidebar spacing."}],"createdAt":1788900000000_i64,"deviceId":"local"},
-                {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"The caption gap and the control gap disagree. I can fix it either way."},{"id":"ask","kind":"input","requestId":"req-1","questions":[{"id":"q1","header":"Spacing","question":"Which gap should the sidebar captions use?","options":["The control gap token","A new caption token","Leave it as is"],"allowCustom":true}]}],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
+                {"id":"assistant","role":"assistant","parts":[{"id":"text","kind":"text","text":"The caption gap and the control gap disagree. I can fix it either way."},{"id":"ask","kind":"input","requestId":"req-1","questions":[{"id":"q1","header":"Approve command","question":"Allow this command? cargo test -p mast-ui --lib -- --test-threads=1","options":["Yes","No"],"allowCustom":true}]}],"createdAt":1788900001000_i64,"deviceId":"local","status":"streaming"}
             ])).unwrap() }, cx).unwrap();
         },
         cx,
