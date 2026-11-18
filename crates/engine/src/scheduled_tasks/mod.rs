@@ -5,6 +5,7 @@ pub mod evaluator;
 mod identity;
 pub(crate) mod import;
 mod lifecycle;
+pub(crate) mod results;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
@@ -545,6 +546,21 @@ impl ScheduledTasks {
                         tracing::warn!(chat = %chat, error = %e, "scheduled run interrupt failed")
                     }
                 }
+            }
+            // A completed Background run must have published its results; a
+            // skipped publication fails the run, so it is neither archived
+            // nor left looking successful.
+            if r.state == ScheduledRunState::Completed
+                && let Some(mut results) = r.results.take()
+            {
+                match results::published_revision(&self.0.workspace, &r, &results) {
+                    Ok(revision) => results.revision = Some(revision),
+                    Err(reason) => {
+                        r.state = ScheduledRunState::Failed;
+                        r.detail = Some(reason);
+                    }
+                }
+                r.results = Some(results);
             }
             if !r.state.active() {
                 r.finished_at = Some(now);

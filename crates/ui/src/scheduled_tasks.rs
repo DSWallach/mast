@@ -2404,6 +2404,7 @@ mod tests {
                                 snapshot: draft.clone(),
                                 awaiting_request_id: None,
                                 awaiting_since: None,
+                                results: None,
                             }];
                             p.error = None;
                             p

@@ -77,7 +77,7 @@ pub(crate) fn launch_scheduled_chat(
     let draft = &run.snapshot;
     let request = prompt_request(
         &WorkItemPrompt {
-            text: draft.prompt.clone(),
+            text: crate::scheduled_tasks::results::prompt_with_contract(run),
             attachments: vec![],
         },
         Some(&draft.config),

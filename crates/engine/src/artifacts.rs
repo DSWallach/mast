@@ -2727,6 +2727,8 @@ impl ArtifactsService {
             None => None,
         };
         let source = self.agent_path(caller, &args.path)?;
+        let operation_id = publish_operation_id(&caller.chat_id, key);
+        self.guard_results_publish(caller, &args, &operation_id)?;
         let reply = self.record(PublishRequest {
             space_id: caller.space_id.clone(),
             work_item_id: caller.work_item_id.clone(),
@@ -2737,7 +2739,7 @@ impl ArtifactsService {
             role: args.role,
             note: args.note.unwrap_or_default(),
             pin_as_plan: args.pin_as_plan,
-            operation_id: Some(publish_operation_id(&caller.chat_id, key)),
+            operation_id: Some(operation_id),
             by: caller.actor(),
         })?;
         if !args.addressed_comments.is_empty() {
@@ -2780,6 +2782,71 @@ impl ArtifactsService {
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
         }))
+    }
+
+    /// A Background scheduled run owns one revision of its task's results
+    /// artifact: the fixed title and role, never the item's plan, and only
+    /// one publish per run (a retry with the same idempotency key replays).
+    fn guard_results_publish(
+        &self,
+        caller: &AgentCaller,
+        args: &PublishArgs,
+        operation_id: &str,
+    ) -> Outcome<()> {
+        let Some(item) = caller.work_item_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(info) = self
+            .workspace()
+            .chat(&caller.chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.scheduled_task_info)
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)
+        else {
+            return Ok(());
+        };
+        let expected = mast_proto::ScheduledRunResults::new(
+            &caller.space_id,
+            item,
+            &info.task_id,
+            &info.task_name,
+        );
+        let role = args.role.as_deref().map(str::trim).unwrap_or_default();
+        let titled = mast_proto::artifacts::normalize_title(&args.title)
+            == mast_proto::artifacts::normalize_title(&expected.title);
+        let roled = role.eq_ignore_ascii_case(&expected.role);
+        if role.starts_with(mast_proto::RESULTS_ROLE_PREFIX) && !roled {
+            return Err(ArtifactError::invalid(
+                "this role belongs to another task's results; use the role from your results contract",
+            ));
+        }
+        if !titled && !roled {
+            return Ok(());
+        }
+        if !(titled && roled) {
+            return Err(ArtifactError::invalid(format!(
+                "the results artifact is title \"{}\" with role \"{}\"; use both exactly",
+                expected.title, expected.role
+            )));
+        }
+        if args.pin_as_plan {
+            return Err(ArtifactError::invalid(
+                "a results artifact is not the item's plan; publish it without pinAsPlan",
+            ));
+        }
+        if let Some(existing) = self.workspace().artifact(&expected.artifact_id)
+            && let Some(prior) = existing.revisions.iter().find(|revision| {
+                revision.by.chat_id.as_deref() == Some(caller.chat_id.as_str())
+                    && revision.op.as_deref() != Some(operation_id)
+            })
+        {
+            return Err(ArtifactError::invalid(format!(
+                "this run already published its results as revision {}; a run publishes once",
+                prior.id
+            )));
+        }
+        Ok(())
     }
 
     /// `artifact_get_plan`: the pinned plan of the Chat's work item (else of

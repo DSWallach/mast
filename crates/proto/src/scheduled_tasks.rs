@@ -160,6 +160,66 @@ pub struct ScheduledRun {
     pub awaiting_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_since: Option<i64>,
+    /// The results artifact this Background run promised to publish. Absent
+    /// for Interactive runs and for runs launched before the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<ScheduledRunResults>,
+}
+
+/// Role prefix of a task's results artifact. The suffix is a hash of the
+/// task id, so the role stays within the artifact role limit.
+pub const RESULTS_ROLE_PREFIX: &str = "scheduled-results:";
+
+/// Identity of a Background task's results artifact on its work item.
+/// There is one per task and item; every run adds one revision to it.
+/// Consumers find it by `role` (stable across task renames), never by title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRunResults {
+    pub artifact_id: String,
+    pub title: String,
+    pub role: String,
+    /// The revision this run published, set once the run is verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+}
+
+impl ScheduledRunResults {
+    pub fn role_for(task_id: &str) -> String {
+        format!(
+            "{RESULTS_ROLE_PREFIX}{}",
+            crate::work_outline::derive_id(task_id, "results")
+        )
+    }
+
+    pub fn title_for(task_name: &str) -> String {
+        crate::artifacts::clean_title(&format!("Results: {}", task_name.trim()))
+    }
+
+    pub fn new(space_id: &str, work_item_id: &str, task_id: &str, task_name: &str) -> Self {
+        let title = Self::title_for(task_name);
+        let role = Self::role_for(task_id);
+        Self {
+            artifact_id: crate::artifacts::artifact_id(
+                space_id,
+                Some(work_item_id),
+                None,
+                &title,
+                Some(&role),
+            ),
+            title,
+            role,
+            revision: None,
+        }
+    }
+
+    /// Prefix of the Required Action dedupe keys this task's runs raise.
+    pub fn dedupe_prefix(task_id: &str) -> String {
+        format!(
+            "scheduled-need:{}:",
+            crate::work_outline::derive_id(task_id, "results")
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,5 +532,21 @@ mod tests {
         let decoded: crate::Chat = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.id, "old");
         assert!(decoded.scheduled_task_info.is_none());
+    }
+
+    #[test]
+    fn a_run_row_without_results_reads_and_writes_unchanged() {
+        let results = ScheduledRunResults::new("space", "item", "task", "Slack");
+        assert!(results.role.len() <= crate::artifacts::artifact_limits::MAX_ROLE_CHARS);
+        let long = "x".repeat(128);
+        assert!(
+            ScheduledRunResults::role_for(&long).len()
+                <= crate::artifacts::artifact_limits::MAX_ROLE_CHARS
+        );
+        let mut value = serde_json::to_value(ScheduledRunResults::new("s", "i", "t", "n")).unwrap();
+        assert!(value.get("revision").is_none());
+        value["revision"] = 3.into();
+        let decoded: ScheduledRunResults = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.revision, Some(3));
     }
 }
