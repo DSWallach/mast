@@ -1932,36 +1932,42 @@ mod tests {
             ("dark", crate::theme::Appearance::Dark),
             ("light", crate::theme::Appearance::Light),
         ] {
-            crate::snapshot::render_to_png(
-                &format!("scheduled-task-editor-{name}"),
-                gpui::size(px(850.0), px(1500.0)),
-                crate::ui_style::UiStyleId::Default,
-                appearance,
-                |_, cx| {
-                    let _ = crate::typography::register_fonts(cx);
-                    let state = cx.new(|_| AppState::new());
-                    let page = cx.new(|cx| {
-                        let mut p = ScheduledTasksPage::new(state.clone(), cx);
-                        p.target = Some("host".into());
-                        state.update(cx, |s, _| {
-                            // Show the editor against a host that predates Work item support.
-                            s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos"})).unwrap());
-                            s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
+            for (host, supports_work_item) in [("current", true), ("older", false)] {
+                let capabilities = if supports_work_item {
+                    vec![mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]
+                } else {
+                    vec![]
+                };
+                crate::snapshot::render_to_png(
+                    &format!("scheduled-task-editor-{host}-{name}"),
+                    gpui::size(px(850.0), px(1500.0)),
+                    crate::ui_style::UiStyleId::Default,
+                    appearance,
+                    |_, cx| {
+                        let _ = crate::typography::register_fonts(cx);
+                        let state = cx.new(|_| AppState::new());
+                        let page = cx.new(|cx| {
+                            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+                            p.target = Some("host".into());
+                            state.update(cx, |s, _| {
+                                s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos","capabilities":capabilities})).unwrap());
+                                s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
+                            });
+                            p.edit(None, cx);
+                            p.editor.as_mut().unwrap().id = "morning".into();
+                            p.editor.as_mut().unwrap().revision = 2;
+                            let e = p.editor.as_ref().unwrap();
+                            e.name.update(cx, |i,cx|i.set_text("Daily summary",cx));
+                            e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-summary",cx));
+                            e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
+                            p.editor.as_mut().unwrap().draft.work_item_id = supports_work_item.then(|| "routines".into());
+                            p.error = None;
+                            p
                         });
-                        p.edit(None, cx);
-                        p.editor.as_mut().unwrap().id = "morning".into();
-                        p.editor.as_mut().unwrap().revision = 2;
-                        let e = p.editor.as_ref().unwrap();
-                        e.name.update(cx, |i,cx|i.set_text("Daily summary",cx));
-                        e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-summary",cx));
-                        e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
-                        p.editor.as_mut().unwrap().draft.work_item_id = Some("routines".into());
-                        p.error = None;
-                        p
-                    });
-                    cx.new(|_| Fixture(page))
-                },
-            )?;
+                        cx.new(|_| Fixture(page))
+                    },
+                )?;
+            }
             crate::snapshot::render_to_png(
                 &format!("scheduled-task-list-retired-{name}"),
                 gpui::size(px(850.0), px(700.0)),

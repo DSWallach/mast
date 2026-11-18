@@ -831,13 +831,19 @@ impl ExternalSessionImporter {
             if chat.device_id != self.device_id || marker.is_file() {
                 continue;
             }
-            let first = match self.transcript_path_for(&chat.id)? {
-                Some(path) => match File::open(path) {
-                    Ok(file) => first_raw_user_message_from_file(file),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(err) => return Err(err.into()),
-                },
-                None => None,
+            let first = match self.transcript_path_for(&chat.id).and_then(|path| {
+                let Some(path) = path else { return Ok(None) };
+                match File::open(path) {
+                    Ok(file) => Ok(first_raw_user_message_from_file(file)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(err) => Err(err.into()),
+                }
+            }) {
+                Ok(first) => first,
+                Err(error) => {
+                    tracing::warn!(chat_id = %chat.id, %error, "scheduled source backfill skipped a run");
+                    continue;
+                }
             };
             if let Some((_, file)) = first.as_deref().and_then(scheduled_tag) {
                 let info = mast_proto::ScheduledChat {

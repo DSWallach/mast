@@ -1106,6 +1106,27 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
         &core.workspace.work_outline_inputs(ITEM_SPACE),
     );
     assert_eq!(outline.hidden_run_chat_ids, ["other", "retired", "run-a"]);
+    // An old imported run can lose its transcript before backfill finds its file.
+    let transcript = root.join("missing.jsonl");
+    let wrapper = format!(
+        "<scheduled-task name=\"routine-a\" file=\"{}\">\nDo the task\n</scheduled-task>",
+        prompt.display(),
+    );
+    let line = serde_json::json!({
+        "type": "user", "uuid": "first", "timestamp": "2026-11-10T08:00:00Z",
+        "cwd": root, "sessionId": "missing", "message": {"role": "user", "content": wrapper}
+    });
+    std::fs::write(&transcript, format!("{line}\n")).unwrap();
+    core.external_import
+        .import("missing", "missing", &transcript)
+        .unwrap();
+    let mut missing = info("missing");
+    missing.source_file = None;
+    core.workspace
+        .set_chat_scheduled_task_info("missing", &missing)
+        .unwrap();
+    std::fs::remove_file(transcript).unwrap();
+
     // Within the recheck interval nothing runs; after it, a full pass
     // rewrites only the run that arrived since.
     legacy_run("late", "legacy-id-d", "routine-a", &prompt, 5);
@@ -1114,6 +1135,13 @@ async fn imported_runs_join_their_native_task_and_retired_runs_hide() {
     let recheck = now + 10 * 60_000;
     assert_eq!(core.scheduled_tasks.reconcile_run_identities(recheck).unwrap(), 1);
     assert_eq!(info("late").task_id, task);
+    assert_eq!(info("missing"), missing, "the file has not been checked");
+
+    assert_eq!(core.external_import.backfill_scheduled_source_files().unwrap(), 0);
+    let recheck = recheck + 10 * 60_000;
+    assert_eq!(core.scheduled_tasks.reconcile_run_identities(recheck).unwrap(), 1);
+    assert!(info("missing").retired);
+    assert_eq!(info("missing").task_id, missing.task_id);
     assert_eq!(
         core.scheduled_tasks
             .reconcile_run_identities(recheck + 10 * 60_000)
