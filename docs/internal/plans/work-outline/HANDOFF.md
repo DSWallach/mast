@@ -1219,6 +1219,15 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 11:00; coordinator 544369c6)
+
+- **Installed: release 111** (2c02e2c3c), full perf gate (soak vs 110: CPU 4.7 vs 4.7 %, footprint 458 vs 526 MB).
+  tracker-polish from Mikey's real-data audit: stage pips success/current/muted (Not started shows none); merged
+  PRs' Ready-for-review requests move to cleanup ("Resolve stale request"); local items titled with a ticket id
+  merge into that Linear row or get a "Link ENG-n" cleanup entry; probable duplicate hints; "N chats" label size.
+- Mikey restarted onto 110 at ~09:15; post-restart sample healthy (main ~8 % busy, footprint 1.7 GB).
+- Next: refactor Phase C1 slices (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf).
+
 ## In flight (snapshot 2026-11-18 09:00; coordinator 544369c6, overnight run done)
 
 - **Installed: release 110** (85746ce8a), full perf gate (soak vs 109: CPU 4.8 vs 4.8 %, footprint 539 vs 613 MB,
