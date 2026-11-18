@@ -32,7 +32,11 @@ pub fn overview_caption(theme: &Theme) -> Div {
         .text_color(theme.text_muted)
 }
 
-pub fn overview_attention_filter(id: &'static str, color: gpui::Hsla, active: bool) -> Stateful<Div> {
+pub fn overview_attention_filter(
+    id: &'static str,
+    color: gpui::Hsla,
+    active: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.into())

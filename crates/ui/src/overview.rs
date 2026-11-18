@@ -3382,7 +3382,11 @@ impl Overview {
             let badge_id = SharedString::from(debug_id.clone());
             row = row.child(
                 link_source_hover(
-                    crate::components::outline_metadata_tag(theme.text_muted, theme.element_hover, 6.0)
+                    crate::components::outline_metadata_tag(
+                        theme.text_muted,
+                        theme.element_hover,
+                        6.0,
+                    )
                         .id(badge_id)
                         .debug_selector(move || debug_id.clone())
                         .flex_none()

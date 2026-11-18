@@ -78,7 +78,9 @@ impl Overview {
                             format!("{} need interaction", self.needs_interaction_count)
                         };
                         el.child(
-                            crate::components::overview_attention_filter("overview-filter-needs-interaction", color, active)
+                            crate::components::overview_attention_filter(
+                                "overview-filter-needs-interaction", color, active,
+                            )
                                 .child(SharedString::from(label))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.attention_filter = if this.attention_filter
@@ -105,7 +107,9 @@ impl Overview {
                         .color;
                         let label = format!("{} stalled", self.stalled_count);
                         el.child(
-                            crate::components::overview_attention_filter("overview-filter-stalled", color, active)
+                            crate::components::overview_attention_filter(
+                                "overview-filter-stalled", color, active,
+                            )
                                 .child(SharedString::from(label))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.attention_filter =

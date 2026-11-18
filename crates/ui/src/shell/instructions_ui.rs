@@ -1496,7 +1496,13 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
         });
         let data_dir = dir.to_path_buf();
         cx.add_window_view(move |_, cx| {

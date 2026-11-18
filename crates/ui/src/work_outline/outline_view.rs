@@ -3931,7 +3931,11 @@ fn chat_body(
             format!("{} tool calls failed", failures.count)
         };
         let selector = format!("outline-chat-stalled-{key}");
-        let mut pill = crate::components::outline_metadata_tag(error_color, error_color.opacity(0.15), 5.0)
+        let mut pill = crate::components::outline_metadata_tag(
+            error_color,
+            error_color.opacity(0.15),
+            5.0,
+        )
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
             .flex_none()

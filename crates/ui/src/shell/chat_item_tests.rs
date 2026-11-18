@@ -1572,7 +1572,9 @@ fn toggling_a_wake_switch_updates_the_cached_settings_at_once(cx: &mut TestAppCo
     shell.update(vcx, |shell, cx| shell.toggle_wake(CHAT_API, WakeToggle::AutoContinue, cx));
     shell.read_with(vcx, |shell, _| {
         let settings = shell.wakes.statuses[CHAT_API].settings;
-        assert!(!settings.turn_finished && !settings.enabled && settings.errors && settings.auto_continue);
+        assert!(
+            !settings.turn_finished && !settings.enabled && settings.errors && settings.auto_continue
+        );
     });
 }
 
