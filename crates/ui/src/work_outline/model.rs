@@ -1044,11 +1044,18 @@ pub(crate) mod tests {
     #[test]
     fn pinned_child_sorts_first_only_within_its_parent() {
         let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
-        let mut chats = vec![chat("parent", Some("s1")), chat("older", Some("s1")), chat("newer", Some("s1"))];
+        let mut chats = vec![
+            chat("parent", Some("s1")),
+            chat("older", Some("s1")),
+            chat("newer", Some("s1")),
+        ];
         chats[1].parent_chat_id = Some("parent".into());
         chats[2].parent_chat_id = Some("parent".into());
         chats[2].activity = 10;
-        let options = OutlineOptions { pinned_chats: ["older".to_string()].into_iter().collect(), ..opts() };
+        let options = OutlineOptions {
+            pinned_chats: ["older".to_string()].into_iter().collect(),
+            ..opts()
+        };
         let model = flatten(&spaces, &chats, &HashSet::new(), &options);
         let parent = model.position(&row_key::chat("parent")).unwrap();
         let older = model.position(&row_key::chat("older")).unwrap();
@@ -1061,9 +1068,15 @@ pub(crate) mod tests {
     fn pinned_chat_from_hidden_archived_item_sorts_first_when_unassociated() {
         let (spaces, mut chats) = archived_synced_pr_spaces();
         chats.iter_mut().find(|c| c.id == CHAT_LOOSE_A).unwrap().activity = 100;
-        let options = OutlineOptions { pinned_chats: [CHAT_PR.to_string()].into_iter().collect(), ..opts() };
+        let options = OutlineOptions {
+            pinned_chats: [CHAT_PR.to_string()].into_iter().collect(),
+            ..opts()
+        };
         let model = flatten(&spaces, &chats, &HashSet::new(), &options);
-        assert!(model.position(&row_key::chat(CHAT_PR)).unwrap() < model.position(&row_key::chat(CHAT_LOOSE_A)).unwrap());
+        assert!(
+            model.position(&row_key::chat(CHAT_PR)).unwrap()
+                < model.position(&row_key::chat(CHAT_LOOSE_A)).unwrap()
+        );
     }
 
     #[test]

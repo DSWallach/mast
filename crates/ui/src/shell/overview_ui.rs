@@ -459,26 +459,50 @@ pub(super) mod tests {
         let (_dir, shell, vcx) = setup(cx);
         shell.update(vcx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
-                state.chats.push(serde_json::from_value(serde_json::json!({
-                    "id": "newer", "deviceId": "local", "title": "Newer chat",
-                    "createdAt": "2026-11-02T00:00:00Z", "archived": false
-                })).unwrap());
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "newer", "deviceId": "local", "title": "Newer chat",
+                        "createdAt": "2026-11-02T00:00:00Z", "archived": false
+                    }))
+                    .unwrap(),
+                );
                 cx.notify();
             });
         });
         redraw_assistant(vcx);
-        let outline = shell.read_with(vcx, |shell, cx| shell.overview_page.as_ref().unwrap().read(cx).outline_entity());
-        let positions = |vcx: &mut VisualTestContext| outline.read_with(vcx, |outline, _| {
-            (outline.model().position(&crate::work_outline::model::row_key::chat("chat")).unwrap(),
-             outline.model().position(&crate::work_outline::model::row_key::chat("newer")).unwrap())
+        let outline = shell.read_with(vcx, |shell, cx| {
+            shell
+                .overview_page
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .outline_entity()
         });
+        let positions = |vcx: &mut VisualTestContext| {
+            outline.read_with(vcx, |outline, _| {
+                (
+                    outline
+                        .model()
+                        .position(&crate::work_outline::model::row_key::chat("chat"))
+                        .unwrap(),
+                    outline
+                        .model()
+                        .position(&crate::work_outline::model::row_key::chat("newer"))
+                        .unwrap(),
+                )
+            })
+        };
         let (older, newer) = positions(vcx);
         assert!(newer < older);
-        shell.update(vcx, |shell, cx| shell.set_chat_pinned("chat".into(), true, cx));
+        shell.update(vcx, |shell, cx| {
+            shell.set_chat_pinned("chat".into(), true, cx)
+        });
         redraw_assistant(vcx);
         let (older, newer) = positions(vcx);
         assert!(older < newer);
-        shell.update(vcx, |shell, cx| shell.set_chat_pinned("chat".into(), false, cx));
+        shell.update(vcx, |shell, cx| {
+            shell.set_chat_pinned("chat".into(), false, cx)
+        });
         redraw_assistant(vcx);
         let (older, newer) = positions(vcx);
         assert!(newer < older);
