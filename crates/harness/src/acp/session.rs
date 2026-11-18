@@ -57,6 +57,26 @@ impl AcpSessionState {
         }
     }
 
+    fn escalate_interrupt(
+        &mut self,
+        turn: &mut Option<BoxFuture<'static, Result<Value, HarnessError>>>,
+        escalation_signal: &mut Signal,
+        kill_grace: Duration,
+    ) {
+        // Once escalation starts, a late response no longer owns this turn.
+        *turn = None;
+        if let Some(target) = &self.escalation_target {
+            send_signal(target, *escalation_signal);
+        }
+        self.escalation_deadline = match *escalation_signal {
+            Signal::Term => {
+                *escalation_signal = Signal::Kill;
+                Some(tokio::time::Instant::now() + kill_grace)
+            }
+            Signal::Kill => None,
+        };
+    }
+
     async fn expire_prompt_stall(
         &mut self,
         event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -1218,19 +1238,7 @@ pub(super) async fn run_session(session: Session) {
             // or signal a pid after the child has been reaped.
             _ = tokio::time::sleep_until(state.escalation_deadline.unwrap_or_else(tokio::time::Instant::now)),
                 if state.escalation_deadline.is_some() => {
-                // Once signal escalation starts, a late prompt response no longer
-                // owns this turn (including any usage attached to that response).
-                turn = None;
-                if let Some(target) = &state.escalation_target {
-                    send_signal(target, escalation_signal);
-                }
-                state.escalation_deadline = match escalation_signal {
-                    Signal::Term => {
-                        escalation_signal = Signal::Kill;
-                        Some(tokio::time::Instant::now() + kill_grace)
-                    }
-                    Signal::Kill => None,
-                };
+                state.escalate_interrupt(&mut turn, &mut escalation_signal, kill_grace);
             },
 
             _ = event_tx.closed() => break 'main,
