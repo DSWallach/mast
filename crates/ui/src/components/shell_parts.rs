@@ -1742,7 +1742,7 @@ pub(crate) fn tracker_checklist(theme: &Theme, progress: mast_proto::TodoProgres
         bar = bar.child(div().w(px(5.0)).h(px(5.0)).rounded_full()
             .bg(if completed { theme.accent } else { theme.border }));
     }
-    bar.child(tracker_mono(theme, label, theme.text_faint))
+    bar.child(tracker_metadata(theme, label))
 }
 
 pub(crate) fn tracker_pr_line(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {
@@ -1966,7 +1966,6 @@ pub(crate) fn archive_confirmation_note(theme: &Theme) -> gpui::Div {
 pub(crate) fn archive_suggestion(theme: &Theme, count: usize) -> gpui::Div {
     div()
         .debug_selector(|| "team-archive-suggest".into())
-        .flex_1()
         .min_w_0()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)

@@ -37,7 +37,7 @@ pub(crate) enum WorkerState {
 }
 
 /// Display order for the Tracker's worker groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TrackerGroup {
     NeedsYou,
     ReadyToMerge,
@@ -168,9 +168,9 @@ pub(crate) struct WorkerFacts {
 impl WorkerFacts {
     pub(crate) fn tracker_group(&self) -> TrackerGroup {
         match (self.state, self.ready.is_some()) {
+            (WorkerState::Done, _) => TrackerGroup::Done,
             (WorkerState::Waiting, _) => TrackerGroup::NeedsYou,
             (_, true) => TrackerGroup::ReadyToMerge,
-            (WorkerState::Done, _) => TrackerGroup::Done,
             (WorkerState::Errored, _) => TrackerGroup::Errored,
             (WorkerState::Working, _) => TrackerGroup::Working,
             (WorkerState::Idle, _) => TrackerGroup::Idle,
@@ -178,10 +178,13 @@ impl WorkerFacts {
     }
 
     pub(crate) fn tracker_stages(&self) -> TrackerStages {
+        if self.state == WorkerState::Done || self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")) {
+            return TrackerStages { chat_started: true, changes: true, pr_open: true, checks: true, review: true, merged: true };
+        }
         TrackerStages {
             chat_started: true,
             changes: self.diff.is_some_and(|(added, removed)| added > 0 || removed > 0),
-            pr_open: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("open")),
+            pr_open: !self.prs.is_empty(),
             checks: self.prs.iter().any(|pr| pr.checks.is_some()),
             review: self.prs.iter().any(|pr| pr.review.is_some()),
             merged: self.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
@@ -285,7 +288,12 @@ pub(crate) fn activity_line(preview: &str) -> Option<String> {
 /// [`activity_line`] with an explicit length.
 pub(crate) fn activity_line_max(preview: &str, max: usize) -> Option<String> {
     let line = preview.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: String = pulldown_cmark::Parser::new(line).filter_map(|event| match event {
+        pulldown_cmark::Event::Text(text) | pulldown_cmark::Event::Code(text) => Some(text.into_string()),
+        pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => Some(" ".to_owned()),
+        _ => None,
+    }).collect();
+    let line = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = line.chars().take(max).collect();
     if line.chars().count() > max {
         out.push('\u{2026}');
@@ -311,12 +319,23 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
     let mut items = HashMap::new();
     let mut requests: HashMap<&str, Vec<&mast_proto::UserActionRequestView>> = HashMap::new();
     let mut tickets: HashMap<&str, Option<HeaderTicket>> = HashMap::new();
+    let mut item_prs: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut cached_prs = HashMap::new();
+    for status in input.links.values() {
+        if let Some(pr) = &status.pr && let Some(url) = &pr.url { cached_prs.insert(url.as_str(), pr); }
+        for link in &status.pr_links {
+            if let Some(detail) = &link.detail { cached_prs.insert(link.url.as_str(), detail); }
+        }
+    }
     if let Some(snapshot) = input.snapshot {
         let dangling: HashSet<_> = snapshot.assignments.iter()
             .filter(|a| a.state == mast_proto::WorkItemChatAssignmentState::DanglingChat)
             .map(|a| a.chat_id.as_str()).collect();
         let mut direct = HashMap::new();
         for reference in &snapshot.external_references {
+            if reference.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER && reference.reference_type == mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE {
+                item_prs.entry(reference.work_item_id.as_str()).or_default().push(reference.url.as_str());
+            }
             if reference.provider == mast_proto::linear::LINEAR_PROVIDER && reference.reference_type == mast_proto::linear::LINEAR_ISSUE_REFERENCE {
                 direct.entry(reference.work_item_id.as_str()).and_modify(|prior: &mut &mast_proto::WorkItemExternalReferenceView| {
                     if (reference.created_at, &reference.id) < (prior.created_at, &prior.id) { *prior = reference; }
@@ -352,7 +371,23 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
         let item = item_id.and_then(|id| items.get(id).copied());
         let worker_requests = requests.get(chat.id.as_str()).map(Vec::as_slice).unwrap_or_default();
         let inherited_ticket = item_id.and_then(|id| tickets.get(id)).cloned().flatten();
-        workers.push(worker_with_index(chat, item, input, worker_requests, inherited_ticket));
+        let mut worker = worker_with_index(chat, item, input, worker_requests, inherited_ticket);
+        if let Some(urls) = item_id.and_then(|id| item_prs.get(id)) {
+            for &url in urls {
+                if worker.prs.iter().any(|pr| pr.url.eq_ignore_ascii_case(url)) { continue; }
+                let number = crate::chat_work_context::parse_pr_url(url).map_or(0, |pr| pr.number);
+                worker.prs.push(WorkerPr::of(number, url.to_owned(), cached_prs.get(url).copied()));
+            }
+        }
+        if let Some(branch) = worker.prs.iter().filter(|pr| pr.branch.is_some()).min_by_key(|pr| {
+            if pr.state.eq_ignore_ascii_case("open") { 0 } else if pr.state.eq_ignore_ascii_case("merged") { 1 } else { 2 }
+        }).and_then(|pr| pr.branch.clone()) {
+            worker.branch = Some(branch);
+        } else if !input.links.get(&chat.id).is_some_and(|status| status.is_worktree)
+            && worker.branch.as_deref().is_some_and(|branch| branch == "main" || branch == "master") {
+            worker.branch = None;
+        }
+        workers.push(worker);
     }
     workers.sort_by(|a, b| {
         (a.rank(), std::cmp::Reverse(a.last_active), &a.chat_id).cmp(&(
@@ -401,10 +436,10 @@ pub(crate) fn worker_with_index(
         .copied()
         .unwrap_or(ChatIndicator::Idle);
     let item_done = item.is_some_and(|i| matches!(i.effective_status, WorkItemEffectiveStatus::Completed));
-    let state = if !chat.archived && (asks || indicator == ChatIndicator::AwaitingInput) {
-        WorkerState::Waiting
-    } else if item_done || chat.archived {
+    let state = if item_done || chat.archived {
         WorkerState::Done
+    } else if asks || indicator == ChatIndicator::AwaitingInput {
+        WorkerState::Waiting
     } else {
         match indicator {
             ChatIndicator::Working => WorkerState::Working,
@@ -423,7 +458,7 @@ pub(crate) fn worker_with_index(
                 s.pr_links
                     .iter()
                     .map(|l| {
-                        let number = l.detail.as_ref().map_or(0, |d| d.number);
+                        let number = l.detail.as_ref().map(|d| d.number).or_else(|| crate::chat_work_context::parse_pr_url(&l.url).map(|pr| pr.number)).unwrap_or(0);
                         WorkerPr::of(number, l.url.clone(), l.detail.as_ref())
                     })
                     .collect()
@@ -433,7 +468,8 @@ pub(crate) fn worker_with_index(
     if prs.is_empty()
         && let Some(url) = chat.linked_pr_url.clone()
     {
-        prs.push(WorkerPr::of(0, url, None));
+        let number = crate::chat_work_context::parse_pr_url(&url).map_or(0, |pr| pr.number);
+        prs.push(WorkerPr::of(number, url, None));
     }
     let ticket = status
         .and_then(|s| s.ticket.as_ref())
@@ -544,10 +580,31 @@ mod tests {
     #[test]
     fn activity_is_the_first_line_collapsed_and_clipped() {
         assert_eq!(activity_line("  \n Running   cargo test\nmore").as_deref(), Some("Running cargo test"));
+        assert_eq!(activity_line("[project#42](https://github.com/example/project/pull/42) remains **open**").as_deref(), Some("project#42 remains open"));
         assert_eq!(activity_line("   "), None);
         let long = activity_line(&"x".repeat(300)).unwrap();
         assert_eq!(long.chars().count(), ACTIVITY_MAX_CHARS + 1);
         assert!(long.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn item_pull_request_reference_advances_tracker_stage() {
+        let chats: Vec<Chat> = ["coordinator", "worker"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "fixture", "spaceId": "fixture", "archived": false, "createdAt": "2026-01-01T00:00:00Z"
+        })).unwrap()).collect();
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "fixture", "items": [
+                {"id":"root", "spaceId":"fixture", "title":"Root", "chatIds":["coordinator"], "childIds":["item"]},
+                {"id":"item", "spaceId":"fixture", "title":"Item", "parentWorkItemId":"root", "chatIds":["worker"]}
+            ], "externalReferences": [{"id":"pr", "spaceId":"fixture", "workItemId":"item", "provider":"github",
+                "referenceType":"pullRequest", "externalId":"example/project#42", "url":"https://github.com/example/project/pull/42"}]
+        })).unwrap();
+        let indicators = HashMap::new();
+        let links = HashMap::new();
+        let facts = team(&TeamInput { chat_id: "coordinator", chats: &chats, indicators: &indicators,
+            snapshot: Some(&snapshot), links: &links, now: Utc::now() });
+        assert_eq!(facts.workers[0].prs[0].number, 42);
+        assert!(facts.workers[0].tracker_stages().pr_open);
     }
 
     #[test]
@@ -571,7 +628,7 @@ mod tests {
             (Working, false), (Idle, false), (Done, false), (Done, true)]);
         let groups: Vec<_> = facts.workers.iter().map(WorkerFacts::tracker_group).collect();
         assert_eq!(groups, [TrackerGroup::NeedsYou, TrackerGroup::ReadyToMerge,
-            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done, TrackerGroup::ReadyToMerge]);
+            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done, TrackerGroup::Done]);
         assert!(TrackerGroup::Idle < TrackerGroup::NotStarted);
         assert!(TrackerGroup::NotStarted < TrackerGroup::Done);
     }
@@ -592,6 +649,6 @@ mod tests {
         });
         worker.prs[0].state = "MERGED".into();
         assert!(worker.tracker_stages().merged);
-        assert!(!worker.tracker_stages().pr_open);
+        assert!(worker.tracker_stages().pr_open);
     }
 }
