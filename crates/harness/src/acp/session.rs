@@ -22,6 +22,195 @@ impl AcpSessionState {
     }
 }
 
+struct EstablishedSession {
+    session_id: String,
+    steer_ext: bool,
+    init_commands: Vec<SlashCommand>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn establish_session(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    request: &RunRequest,
+    harness: HarnessId,
+    agent_name: &'static str,
+    auth_method: Option<&'static str>,
+    effort_in_model_id: bool,
+    effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
+) -> Result<EstablishedSession, HarnessError> {
+    let init = client
+        .request("initialize", initialize_params(harness))
+        .await?;
+    let steer_ext = steering_supported(&init);
+    let init_commands = scan_available_commands(&init);
+
+    let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+    let (session_id, mut session_response) = if let Some(resume) = &request.resume {
+        let mut load = session_params.clone();
+        load["sessionId"] = Value::String(resume.clone());
+        match request_draining(client, incoming, "session/load", load).await {
+            Ok(resp) => (resume.clone(), resp),
+            Err(e) if auth_method.is_some() && is_auth_required(&e) => {
+                return Err(HarnessError::Protocol(format!(
+                    "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
+                )));
+            }
+            // A missing/foreign session falls back to a fresh one.
+            Err(e) => {
+                tracing::debug!(
+                    target: "mast_harness::acp",
+                    "session/load failed (starting fresh): {e}"
+                );
+                let _ = send(event_tx, AgentEvent::Error {
+                    code: None, resets_at: None, message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
+                }).await;
+                let new = new_session(
+                    client,
+                    incoming,
+                    session_params.clone(),
+                    agent_name,
+                    auth_method.is_some(),
+                )
+                .await?;
+                (
+                    new.get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    new,
+                )
+            }
+        }
+    } else {
+        let new = new_session(
+            client,
+            incoming,
+            session_params,
+            agent_name,
+            auth_method.is_some(),
+        )
+        .await?;
+        (
+            new.get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            new,
+        )
+    };
+    if session_id.is_empty() {
+        return Err(HarnessError::Protocol(
+            "session/new returned no sessionId".into(),
+        ));
+    }
+    if harness == HarnessId::Devin
+        && let Some(model) = request.model.as_deref()
+    {
+        devin_models::wait_for_model(
+            client,
+            incoming,
+            &session_id,
+            &mut session_response,
+            model,
+        )
+        .await?;
+    }
+    // ACP has had two model-selection surfaces. Newer config-option agents
+    // use category=model below; Grok Build currently advertises only the
+    // first-class `models` state and requires `session/set_model`. Other
+    // ACP clients follow the same split. Unlike the best-effort auxiliary options,
+    // an explicit model switch is strict: prompting with a different
+    // model than the picker shows is worse than surfacing the RPC error.
+    let requested_model: Option<String> = match request.model.as_deref() {
+        Some(model) if effort_in_model_id => Some(effort_variant_id(
+            &session_response,
+            model,
+            request.reasoning,
+        )),
+        model => model.map(str::to_owned),
+    };
+    if harness == HarnessId::Antigravity {
+        validate_config_model_selection(
+            &session_response,
+            requested_model.as_deref(),
+            &request.model_options,
+        )?;
+    }
+    if let Some(model) =
+        first_class_model_change(&session_response, requested_model.as_deref())?
+    {
+        request_draining(
+            client,
+            incoming,
+            "session/set_model",
+            json!({
+                "sessionId": session_id,
+                "modelId": model,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            HarnessError::Protocol(format!("agent rejected model switch to {model}: {error}"))
+        })?;
+    }
+    // Apply the run's model + effort + model options through the
+    // session's advertised config options. Best-effort for effort and
+    // traits: a rejected auxiliary set is logged and the agent default
+    // runs.
+    let efforts = effort_values(request.reasoning, request.model.as_deref());
+    let session_commands = scan_available_commands(&session_response);
+    let init_commands = if session_commands.is_empty() {
+        init_commands
+    } else {
+        session_commands
+    };
+    let options_snapshot = session_response;
+    for (config_id, payload) in config_option_sets(
+        &options_snapshot,
+        requested_model.as_deref(),
+        &efforts,
+        &request.model_options,
+    ) {
+        let mut params = serde_json::Map::new();
+        params.insert("sessionId".into(), session_id.clone().into());
+        params.insert("configId".into(), config_id.clone().into());
+        if let Some(payload) = payload.as_object() {
+            for (k, v) in payload {
+                params.insert(k.clone(), v.clone());
+            }
+        }
+        if let Err(e) = request_draining(
+            client,
+            incoming,
+            "session/set_config_option",
+            Value::Object(params),
+        )
+        .await
+        {
+            if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
+                && requested_model.is_some()
+                && is_model_config_option(&options_snapshot, &config_id)
+            {
+                return Err(HarnessError::Protocol(format!(
+                    "agent rejected requested model {}: {e}",
+                    requested_model.as_deref().unwrap_or_default()
+                )));
+            }
+            tracing::debug!(
+                target: "mast_harness::acp",
+                "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
+            );
+        }
+    }
+    Ok(EstablishedSession {
+        session_id,
+        steer_ext,
+        init_commands,
+    })
+}
+
 /// The per-run event loop: one task multiplexing agent messages, the pending
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 pub(super) async fn run_session(session: Session) {
@@ -57,178 +246,18 @@ pub(super) async fn run_session(session: Session) {
     let request_input = std::sync::Arc::new(request_input);
 
     // ---- handshake + session (interruptible) ------------------------------
-    let setup = async {
-        let init = client
-            .request("initialize", initialize_params(harness))
-            .await?;
-        let steer_ext = steering_supported(&init);
-        let init_commands = scan_available_commands(&init);
-
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
-        let (session_id, mut session_response) = if let Some(resume) = &request.resume {
-            let mut load = session_params.clone();
-            load["sessionId"] = Value::String(resume.clone());
-            match request_draining(&client, &mut incoming, "session/load", load).await {
-                Ok(resp) => (resume.clone(), resp),
-                Err(e) if auth_method.is_some() && is_auth_required(&e) => {
-                    return Err(HarnessError::Protocol(format!(
-                        "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
-                    )));
-                }
-                // A missing/foreign session falls back to a fresh one.
-                Err(e) => {
-                    tracing::debug!(
-                        target: "mast_harness::acp",
-                        "session/load failed (starting fresh): {e}"
-                    );
-                    let _ = send(&event_tx, AgentEvent::Error {
-                        code: None, resets_at: None, message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
-                    }).await;
-                    let new = new_session(
-                        &client,
-                        &mut incoming,
-                        session_params.clone(),
-                        agent_name,
-                        auth_method.is_some(),
-                    )
-                    .await?;
-                    (
-                        new.get("sessionId")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        new,
-                    )
-                }
-            }
-        } else {
-            let new = new_session(
-                &client,
-                &mut incoming,
-                session_params,
-                agent_name,
-                auth_method.is_some(),
-            )
-            .await?;
-            (
-                new.get("sessionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                new,
-            )
-        };
-        if session_id.is_empty() {
-            return Err(HarnessError::Protocol(
-                "session/new returned no sessionId".into(),
-            ));
-        }
-        if harness == HarnessId::Devin
-            && let Some(model) = request.model.as_deref()
-        {
-            devin_models::wait_for_model(
-                &client,
-                &mut incoming,
-                &session_id,
-                &mut session_response,
-                model,
-            )
-            .await?;
-        }
-        // ACP has had two model-selection surfaces. Newer config-option agents
-        // use category=model below; Grok Build currently advertises only the
-        // first-class `models` state and requires `session/set_model`. Other
-        // ACP clients follow the same split. Unlike the best-effort auxiliary options,
-        // an explicit model switch is strict: prompting with a different
-        // model than the picker shows is worse than surfacing the RPC error.
-        let requested_model: Option<String> = match request.model.as_deref() {
-            Some(model) if effort_in_model_id => Some(effort_variant_id(
-                &session_response,
-                model,
-                request.reasoning,
-            )),
-            model => model.map(str::to_owned),
-        };
-        if harness == HarnessId::Antigravity {
-            validate_config_model_selection(
-                &session_response,
-                requested_model.as_deref(),
-                &request.model_options,
-            )?;
-        }
-        if let Some(model) =
-            first_class_model_change(&session_response, requested_model.as_deref())?
-        {
-            request_draining(
-                &client,
-                &mut incoming,
-                "session/set_model",
-                json!({
-                    "sessionId": session_id,
-                    "modelId": model,
-                }),
-            )
-            .await
-            .map_err(|error| {
-                HarnessError::Protocol(format!("agent rejected model switch to {model}: {error}"))
-            })?;
-        }
-        // Apply the run's model + effort + model options through the
-        // session's advertised config options. Best-effort for effort and
-        // traits: a rejected auxiliary set is logged and the agent default
-        // runs.
-        let efforts = effort_values(request.reasoning, request.model.as_deref());
-        let session_commands = scan_available_commands(&session_response);
-        let init_commands = if session_commands.is_empty() {
-            init_commands
-        } else {
-            session_commands
-        };
-        let options_snapshot = session_response;
-        for (config_id, payload) in config_option_sets(
-            &options_snapshot,
-            requested_model.as_deref(),
-            &efforts,
-            &request.model_options,
-        ) {
-            let mut params = serde_json::Map::new();
-            params.insert("sessionId".into(), session_id.clone().into());
-            params.insert("configId".into(), config_id.clone().into());
-            if let Some(payload) = payload.as_object() {
-                for (k, v) in payload {
-                    params.insert(k.clone(), v.clone());
-                }
-            }
-            if let Err(e) = request_draining(
-                &client,
-                &mut incoming,
-                "session/set_config_option",
-                Value::Object(params),
-            )
-            .await
-            {
-                if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
-                    && requested_model.is_some()
-                    && is_model_config_option(&options_snapshot, &config_id)
-                {
-                    return Err(HarnessError::Protocol(format!(
-                        "agent rejected requested model {}: {e}",
-                        requested_model.as_deref().unwrap_or_default()
-                    )));
-                }
-                tracing::debug!(
-                    target: "mast_harness::acp",
-                    "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
-                );
-            }
-        }
-        Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
-            session_id,
-            steer_ext,
-            init_commands,
-        ))
-    };
-    let (session_id, steer_ext, init_commands) = tokio::select! {
+    let setup = establish_session(
+        &client,
+        &mut incoming,
+        &event_tx,
+        &request,
+        harness,
+        agent_name,
+        auth_method,
+        effort_in_model_id,
+        effort_values,
+    );
+    let EstablishedSession { session_id, steer_ext, init_commands } = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
