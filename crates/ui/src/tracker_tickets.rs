@@ -13,6 +13,21 @@ pub(crate) fn title_issue_identifier(title: &str) -> Option<&str> {
     Some(&title[..end])
 }
 
+pub(crate) fn normalized_title(title: &str) -> String {
+    let title = title.trim();
+    let first = title.split_whitespace().next().unwrap_or_default();
+    let bytes = first.as_bytes();
+    let milestone = bytes.first() == Some(&b'T') && bytes.len() > 1 && bytes[1..].iter().all(u8::is_ascii_digit);
+    let title = if milestone || title_issue_identifier(title).is_some() { &title[first.len()..] } else { title };
+    title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+pub(crate) fn titles_match(local: &str, issue: &str) -> bool {
+    let local = normalized_title(local);
+    let issue = normalized_title(issue);
+    !local.is_empty() && !issue.is_empty() && (local.starts_with(&issue) || issue.starts_with(&local))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalTicket {
     pub item_id: String,
@@ -117,6 +132,13 @@ mod tests {
         for title in ["eng-3409 Arrival", "E-1 Title", "ABCDEFGHIJK-1 Title", "ENG-1suffix", " ENG-1 Title", "ENG- Title"] {
             assert_eq!(title_issue_identifier(title), None);
         }
+    }
+
+    #[test]
+    fn title_matching_strips_ticket_and_milestone_prefixes() {
+        assert!(titles_match("T4 Kit page layout, customer-safe dates", "ENG-3401 Kit page layout, customer-safe dates and shipping"));
+        assert!(!titles_match("T4 Other work", "ENG-3401 Kit page"));
+        assert!(!titles_match("T4", "ENG-1"));
     }
 
     #[test]
