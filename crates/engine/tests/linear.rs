@@ -633,6 +633,33 @@ async fn tracker_project_page_reports_when_the_bounded_result_has_more() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tracker_project_page_cache_is_isolated_by_account() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-1", "Account A", None, "started")], None)}})));
+    let params = json!({"spaceId": SPACE, "projectId": "shared"});
+    let first = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params.clone()).await.unwrap();
+    assert_eq!(first["issues"][0]["title"], "Account A");
+
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT,
+        json!({"label": "Personal", "apiKey": OTHER_KEY})).await.unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": account["id"], "operationId": "cache-select-personal"})).await.unwrap();
+    assert!(rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.is_err());
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-2", "Account B", None, "started")], None)}})));
+    let second = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params).await.unwrap();
+    assert_eq!(second["issues"][0]["title"], "Account B");
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": null, "operationId": "cache-select-default"})).await.unwrap();
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.unwrap();
+    assert_eq!(cached["issues"][0]["title"], "Account A");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
     let rig = rig().await;
     for _ in 0..2 {
