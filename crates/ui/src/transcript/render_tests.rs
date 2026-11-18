@@ -145,3 +145,44 @@ fn closed_tool_group_stays_empty_until_opened_and_retains_height_while_closing(
         });
     });
 }
+
+#[gpui::test]
+fn tool_group_displays_the_most_recently_selected_fetched_detail(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        cx.set_reduce_motion(true);
+        crate::settings::init(Default::default(), dir.path(), cx);
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, cx| {
+            let id: SharedString = "group".into();
+            let diff: SharedString = "diff".into();
+            let output: SharedString = "output".into();
+            let detail = |lines| Arc::new(ToolDetail::Output {
+                lines: vec!["line".into(); lines], truncated_by: 0,
+            });
+            this.blob_details.insert(diff.clone(), BlobFetch::Ready(detail(1)));
+            this.blob_details.insert(output.clone(), BlobFetch::Ready(detail(8)));
+            let tools = Arc::new(vec![ToolItem {
+                part_id: "call".into(), call: ToolCall::Exec { command: "pwd".into() },
+                is_error: false, resolved: true, detail: None, invocation: None,
+                output_ref: Some(output.clone()), output_bytes: None, diff_ref: Some(diff.clone()),
+                subagent_ref: None, subagent_status: None, subagent_tail: None, is_thought: false,
+            }]);
+            this.tool_details.insert("group#d0".into(), FoldState { open: Some(true), ..Default::default() });
+            let summary = "Tools".into();
+            this.spawn_blob_fetch(diff.clone(), cx);
+            let _ = this.render_tool_group(&id, &tools, &summary, true, &Theme::dark(), cx);
+            let short = this.tool_group_reveals[&id].rendered_height;
+            this.spawn_blob_fetch(output, cx);
+            let _ = this.render_tool_group(&id, &tools, &summary, true, &Theme::dark(), cx);
+            let long = this.tool_group_reveals[&id].rendered_height;
+            assert!(long > short);
+            this.spawn_blob_fetch(diff, cx);
+            let _ = this.render_tool_group(&id, &tools, &summary, true, &Theme::dark(), cx);
+            assert_eq!(this.tool_group_reveals[&id].rendered_height, short);
+        });
+    });
+}
