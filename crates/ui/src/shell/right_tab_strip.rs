@@ -1,5 +1,69 @@
 use super::*;
 
+/// The dragged surface-tab payload (strip reorder).
+pub(super) struct RightTabDrag {
+    pub(super) panel_key: String,
+    pub(super) from: usize,
+    pub(super) title: SharedString,
+    pub(super) workspace_path: Option<WorkspacePathDrag>,
+}
+
+/// Live drag-over state for the surface-tab strip — the terminal drawer's
+/// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
+/// slide-animation restarts as the hovered slot changes.
+pub(super) struct RightTabDragState {
+    pub(super) from: usize,
+    pub(super) over: usize,
+    pub(super) epoch: usize,
+    pub(super) prev_over: usize,
+}
+
+/// Ghost chip following the pointer while a surface tab drags.
+pub(super) struct SurfaceTabGhost {
+    pub(super) title: SharedString,
+}
+
+impl Render for SurfaceTabGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .h(px(24.0))
+            .w(px(112.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(theme.border_strong)
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text)
+            .opacity(0.85)
+            .child(div().truncate().child(self.title.clone()))
+    }
+}
+
+pub(super) struct SurfaceTabTooltip {
+    pub(super) text: SharedString,
+}
+
+impl Render for SurfaceTabTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let card = div()
+            .max_w(px(380.0))
+            .px(px(9.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(crate::popover::surface_bg(theme))
+            .text_size(px(10.5))
+            .text_color(theme.text_muted)
+            .child(self.text.clone());
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+    }
+}
 impl Shell {
     pub(super) fn close_right_plus(&mut self, cx: &mut Context<Self>) {
         if self.right_plus.begin_close() {
