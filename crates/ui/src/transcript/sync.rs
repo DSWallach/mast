@@ -1,163 +1,18 @@
 use super::*;
 
+struct SyncSource {
+    selected: Option<String>,
+    replay: TranscriptReplayState,
+}
+
 impl Transcript {
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
         let _measurement = SyncMeasurement::start();
-                if self.retain_on_deselect
-            && self.doc_override.is_none()
-            && self.state.read(cx).selected_chat.is_none()
-            && self.chat_id.is_some()
-        {
-            // A quick return can reuse this entity before the exit finishes.
-            // Its next snapshot is still a replay, not newly arriving tools.
-            self.veil_attach_pending = true;
+        let Some(SyncSource { selected, replay }) = self.sync_source(cx) else {
             return;
-        }
-        let (selected, replay) = {
-            let s = self.state.read(cx);
-            match &self.doc_override {
-                // Pinned to a subagent doc: `selected` equals `chat_id` by
-                // construction, so the attach/reset branch below never fires,
-                // and echoes stay empty (nothing is ever sent from here).
-                Some(doc_id) => (Some(doc_id.clone()), TranscriptReplayState::Populated),
-                None => {
-                    let replay = if !s.transcript_replayed {
-                        TranscriptReplayState::Pending
-                    } else if s.transcript.is_empty() {
-                        TranscriptReplayState::Empty
-                    } else {
-                        TranscriptReplayState::Populated
-                    };
-                    (s.selected_chat.clone(), replay)
-                }
-            }
         };
-
-        let source = (
-            selected.clone(),
-            replay,
-            self.state.read(cx).transcript_revision,
-        );
-        let (identity, code_ref_context) = {
-            let state = self.state.read(cx);
-            let chat = selected.as_deref().and_then(|id| state.chats.iter().find(|chat| chat.id == id));
-            let config = chat.and_then(|chat| chat.config.as_ref());
-            let identity = (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())));
-            let context = chat.and_then(|chat| crate::files::client::FilesRequestContext::for_chat_row(state, chat));
-            (identity, context)
-        };
-        if self.code_ref_context != code_ref_context {
-            self.code_ref_context = code_ref_context;
-            self.code_ref_resolutions.clear();
-            self.code_ref_hover = None;
-            self.code_ref_focus.clear();
-            self.code_ref_focus_pending = None;
-            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
-            cx.notify();
-        }
-        if self.last_identity.as_ref() != Some(&identity) {
-            self.last_identity = Some(identity);
-            self.render_cache.borrow_mut().clear();
-            self.list.remeasure_items(0..self.rows.len());
-            cx.notify();
-        }
-        if self.last_source.as_ref() == Some(&source) {
-            return;
-        }
-        self.last_source = Some(source);
-
-        let attached = selected != self.chat_id;
-        // Arm the replay baseline before classifying tool arrivals. Selection
-        // and replay may arrive in one sync; a retained same-chat entity can
-        // also see a fresh pending subscription without changing chat_id.
-        if attached || replay == TranscriptReplayState::Pending {
-            self.veil_baseline.clear();
-            self.veil_attach_pending = true;
-        }
-        if attached {
-            // Read the incoming snapshot before inserting the outgoing one:
-            // a full bounded cache may evict its oldest entry, which can be
-            // exactly the chat the user is reopening.
-            let saved_viewport = selected
-                .as_ref()
-                .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
-            self.remember_current_viewport();
-            let keep_own_turn = self
-                .own_turn
-                .as_ref()
-                .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
-            if !keep_own_turn {
-                self.own_turn = None;
-                self.own_turn_kick = false;
-                self.own_turn_last_tick = None;
-            }
-            self.chat_id = selected;
-            self.code_ref_resolutions.clear();
-            self.code_ref_hover = None;
-            self.code_ref_focus.clear();
-            self.code_ref_focus_pending = None;
-            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
-            self.rows.clear();
-            self.rows_generation = self.rows_generation.wrapping_add(1);
-            self.row_cache.clear();
-            self.live_parsers.clear();
-            self.tree_cache.clear();
-            self.folds.clear();
-            self.tool_group_reveals.clear();
-            self.last_replay_baseline = None;
-            self.historical_markdown.clear();
-            self.user_folds.clear();
-            self.user_heights.clear();
-            self.user_hold_token = self.user_hold_token.wrapping_add(1);
-            self.user_hold_task = None;
-            self.user_collapse_scroll = None;
-            self.veils.clear();
-            self.render_cache.borrow_mut().clear();
-            self.highlights.entries.clear();
-            self.copied_message = None;
-            self.copied_message_clear = None;
-            self.list.reset(0);
-            self.pending_viewport = None;
-            self.viewport_generation = self.viewport_generation.wrapping_add(1);
-            self.viewport_finalize_pending = false;
-            if self.own_turn.is_some() {
-                // A kept own-turn hold (send-created chat) owns the viewport.
-                self.pinned = false;
-                self.last_scroll_distance = 0.0;
-                self.show_jump_button = false;
-            } else if let Some(SavedViewport::Anchored {
-                anchor,
-                distance_from_bottom,
-                own_turn,
-            }) = saved_viewport
-            {
-                // Keep a possible runway pending until replay confirms that
-                // its optimistic prompt still exists. Installing it on this
-                // empty attach frame can leave a failed send's stale anchor
-                // intercepting scroll-to-bottom forever.
-                self.pinned = false;
-                self.last_scroll_distance = distance_from_bottom;
-                self.show_jump_button = distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
-                self.pending_viewport = Some(SavedViewport::Anchored {
-                    anchor,
-                    distance_from_bottom,
-                    own_turn,
-                });
-            } else {
-                // New chats and chats that were following their tail retain
-                // the existing open-at-bottom behavior.
-                self.pinned = true;
-                self.last_scroll_distance = 0.0;
-                self.show_jump_button = false;
-            }
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
-            self.scroll_anim = None;
-            self.stop_selection_scroll();
-        }
+        let attached = self.attach_transcript(selected, replay);
 
         let mut new_rows: Vec<Row> = Vec::new();
         // Borrow the transcript only while deriving rows. Cloning the entity
@@ -561,6 +416,169 @@ impl Transcript {
             }
         }
         cx.notify();
+    }
+
+    fn sync_source(&mut self, cx: &mut Context<Self>) -> Option<SyncSource> {
+        if self.retain_on_deselect
+            && self.doc_override.is_none()
+            && self.state.read(cx).selected_chat.is_none()
+            && self.chat_id.is_some()
+        {
+            // A quick return can reuse this entity before the exit finishes.
+            // Its next snapshot is still a replay, not newly arriving tools.
+            self.veil_attach_pending = true;
+            return None;
+        }
+        let (selected, replay) = {
+            let s = self.state.read(cx);
+            match &self.doc_override {
+                // Pinned to a subagent doc: `selected` equals `chat_id` by
+                // construction, so the attach/reset branch below never fires,
+                // and echoes stay empty (nothing is ever sent from here).
+                Some(doc_id) => (Some(doc_id.clone()), TranscriptReplayState::Populated),
+                None => {
+                    let replay = if !s.transcript_replayed {
+                        TranscriptReplayState::Pending
+                    } else if s.transcript.is_empty() {
+                        TranscriptReplayState::Empty
+                    } else {
+                        TranscriptReplayState::Populated
+                    };
+                    (s.selected_chat.clone(), replay)
+                }
+            }
+        };
+
+        let source = (
+            selected.clone(),
+            replay,
+            self.state.read(cx).transcript_revision,
+        );
+        let (identity, code_ref_context) = {
+            let state = self.state.read(cx);
+            let chat = selected.as_deref().and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+            let config = chat.and_then(|chat| chat.config.as_ref());
+            let identity = (config.map(|config| config.harness), config.and_then(|config| config.model.clone()).or_else(|| chat.and_then(|chat| chat.actual_model.clone())));
+            let context = chat.and_then(|chat| crate::files::client::FilesRequestContext::for_chat_row(state, chat));
+            (identity, context)
+        };
+        if self.code_ref_context != code_ref_context {
+            self.code_ref_context = code_ref_context;
+            self.code_ref_resolutions.clear();
+            self.code_ref_hover = None;
+            self.code_ref_focus.clear();
+            self.code_ref_focus_pending = None;
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
+            cx.notify();
+        }
+        if self.last_identity.as_ref() != Some(&identity) {
+            self.last_identity = Some(identity);
+            self.render_cache.borrow_mut().clear();
+            self.list.remeasure_items(0..self.rows.len());
+            cx.notify();
+        }
+        if self.last_source.as_ref() == Some(&source) {
+            return None;
+        }
+        self.last_source = Some(source);
+
+        Some(SyncSource { selected, replay })
+    }
+
+    fn attach_transcript(&mut self, selected: Option<String>, replay: TranscriptReplayState) -> bool {
+        let attached = selected != self.chat_id;
+        // Arm the replay baseline before classifying tool arrivals. Selection
+        // and replay may arrive in one sync; a retained same-chat entity can
+        // also see a fresh pending subscription without changing chat_id.
+        if attached || replay == TranscriptReplayState::Pending {
+            self.veil_baseline.clear();
+            self.veil_attach_pending = true;
+        }
+        if attached {
+            // Read the incoming snapshot before inserting the outgoing one:
+            // a full bounded cache may evict its oldest entry, which can be
+            // exactly the chat the user is reopening.
+            let saved_viewport = selected
+                .as_ref()
+                .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
+            self.remember_current_viewport();
+            let keep_own_turn = self
+                .own_turn
+                .as_ref()
+                .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
+            if !keep_own_turn {
+                self.own_turn = None;
+                self.own_turn_kick = false;
+                self.own_turn_last_tick = None;
+            }
+            self.chat_id = selected;
+            self.code_ref_resolutions.clear();
+            self.code_ref_hover = None;
+            self.code_ref_focus.clear();
+            self.code_ref_focus_pending = None;
+            self.code_ref_generation = self.code_ref_generation.wrapping_add(1);
+            self.rows.clear();
+            self.rows_generation = self.rows_generation.wrapping_add(1);
+            self.row_cache.clear();
+            self.live_parsers.clear();
+            self.tree_cache.clear();
+            self.folds.clear();
+            self.tool_group_reveals.clear();
+            self.last_replay_baseline = None;
+            self.historical_markdown.clear();
+            self.user_folds.clear();
+            self.user_heights.clear();
+            self.user_hold_token = self.user_hold_token.wrapping_add(1);
+            self.user_hold_task = None;
+            self.user_collapse_scroll = None;
+            self.veils.clear();
+            self.render_cache.borrow_mut().clear();
+            self.highlights.entries.clear();
+            self.copied_message = None;
+            self.copied_message_clear = None;
+            self.list.reset(0);
+            self.pending_viewport = None;
+            self.viewport_generation = self.viewport_generation.wrapping_add(1);
+            self.viewport_finalize_pending = false;
+            if self.own_turn.is_some() {
+                // A kept own-turn hold (send-created chat) owns the viewport.
+                self.pinned = false;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            } else if let Some(SavedViewport::Anchored {
+                anchor,
+                distance_from_bottom,
+                own_turn,
+            }) = saved_viewport
+            {
+                // Keep a possible runway pending until replay confirms that
+                // its optimistic prompt still exists. Installing it on this
+                // empty attach frame can leave a failed send's stale anchor
+                // intercepting scroll-to-bottom forever.
+                self.pinned = false;
+                self.last_scroll_distance = distance_from_bottom;
+                self.show_jump_button = distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
+                self.pending_viewport = Some(SavedViewport::Anchored {
+                    anchor,
+                    distance_from_bottom,
+                    own_turn,
+                });
+            } else {
+                // New chats and chats that were following their tail retain
+                // the existing open-at-bottom behavior.
+                self.pinned = true;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            }
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_settled_at = None;
+            self.spring_kick = false;
+            self.scroll_anim = None;
+            self.stop_selection_scroll();
+        }
+
+        attached
     }
 
 }
