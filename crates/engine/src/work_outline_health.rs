@@ -57,6 +57,22 @@ pub fn subtree_items<'a>(snapshot: &'a mast_proto::WorkOutlineSnapshot, root: &s
     items
 }
 
+/// Convert the scoped outline into health inputs. Linear completion is an
+/// optional cached observation keyed by item id; absence stays unknown.
+pub fn health_items(
+    snapshot: &mast_proto::WorkOutlineSnapshot,
+    root: &str,
+    linear_completion: &std::collections::HashMap<String, bool>,
+) -> Vec<HealthItem> {
+    subtree_items(snapshot, root).into_iter().map(|item| HealthItem {
+        id: item.id.clone(),
+        container: !item.child_ids.is_empty(),
+        completed: item.effective_status == mast_proto::WorkItemEffectiveStatus::Completed,
+        linear_completed: linear_completion.get(&item.id).copied(),
+        chat_ids: item.chat_ids.clone(),
+    }).collect()
+}
+
 /// Builds the list from a single snapshot, without IO or mutations. Inputs
 /// must already be restricted to the caller's permitted subtree.
 pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPullRequest]) -> Vec<HealthEntry> {
@@ -76,11 +92,32 @@ pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPul
             }
         }
     }
+    // Several chats may report the same PR. Combine their observations before
+    // deciding whether it is unlinked, so a linked observation wins over an
+    // otherwise identical unlinked one regardless of input order.
+    let mut observations = HashMap::<&str, (bool, bool, bool, Vec<&str>)>::new();
+    let mut pr_order = Vec::new();
     for pr in prs {
-        match pr.item_id.as_deref().and_then(|id| items_by_id.get(id)) {
-            Some(item) if pr.merged && (!item.completed || item.linear_completed == Some(false)) => entries.push(HealthEntry::MergedPrOnOpenItem { item_id: item.id.clone(), url: pr.url.clone() }),
-            None if !pr.linked_to_ticket && (pr.open || pr.merged) => entries.push(HealthEntry::UnlinkedPr { url: pr.url.clone() }),
-            _ => {}
+        if !observations.contains_key(pr.url.as_str()) { pr_order.push(pr.url.as_str()); }
+        let entry = observations.entry(pr.url.as_str()).or_default();
+        entry.0 |= pr.linked_to_ticket;
+        entry.1 |= pr.open;
+        entry.2 |= pr.merged;
+        if let Some(item_id) = pr.item_id.as_deref().filter(|id| items_by_id.contains_key(id)) {
+            entry.0 |= items_by_id.get(item_id).is_some_and(|item| !item.container);
+            entry.3.push(item_id);
+        }
+    }
+    for url in pr_order {
+        let (linked, open, merged, item_ids) = &observations[url];
+        let mut seen = HashSet::new();
+        for item in item_ids.iter().filter(|id| seen.insert(**id)).filter_map(|id| items_by_id.get(*id)) {
+            if *merged && (!item.completed || item.linear_completed == Some(false)) {
+                entries.push(HealthEntry::MergedPrOnOpenItem { item_id: item.id.clone(), url: url.to_owned() });
+            }
+        }
+        if !*linked && (*open || *merged) {
+            entries.push(HealthEntry::UnlinkedPr { url: url.to_owned() });
         }
     }
     for chat in chats.iter().filter(|chat| !chat.archived && !chat.finished) {
@@ -114,6 +151,10 @@ mod tests {
         let ids: Vec<_> = subtree_items(&snapshot, "root").into_iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, ["root", "child"]);
         assert!(subtree_items(&snapshot, "missing").is_empty());
+        let facts = health_items(&snapshot, "root", &[("child".to_owned(), true)].into_iter().collect());
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].linear_completed, None);
+        assert_eq!(facts[1].linear_completed, Some(true));
     }
 
     #[test]
@@ -158,6 +199,21 @@ mod tests {
     fn pull_request_matched_to_a_linear_ticket_is_not_unlinked() {
         let pr = HealthPullRequest { url: "open".into(), item_id: None, linked_to_ticket: true, open: true, merged: false };
         assert!(check_health(&[], &[], &[pr]).is_empty());
+    }
+
+    #[test]
+    fn multiple_chats_reporting_one_pr_do_not_duplicate_or_mislabel_it() {
+        let unlinked = HealthPullRequest { url: "pr".into(), item_id: None, linked_to_ticket: false, open: true, merged: false };
+        let linked = HealthPullRequest { linked_to_ticket: true, ..unlinked.clone() };
+        assert!(check_health(&[], &[], &[unlinked.clone(), linked.clone()]).is_empty());
+        assert!(check_health(&[], &[], &[linked, unlinked.clone()]).is_empty());
+        assert_eq!(check_health(&[], &[], &[unlinked.clone(), unlinked]).len(), 1);
+        let item = HealthItem { id: "item".into(), container: false, completed: false, linear_completed: None, chat_ids: vec![] };
+        let merged = HealthPullRequest { url: "pr".into(), item_id: Some("item".into()), linked_to_ticket: true, open: false, merged: true };
+        assert_eq!(check_health(&[item], &[], &[merged.clone(), merged]).len(), 1);
+        let container = HealthItem { id: "container".into(), container: true, completed: false, linear_completed: None, chat_ids: vec![] };
+        let on_container = HealthPullRequest { url: "pr".into(), item_id: Some("container".into()), linked_to_ticket: false, open: true, merged: false };
+        assert!(matches!(&check_health(&[container], &[], &[on_container])[..], [HealthEntry::UnlinkedPr { .. }]));
     }
 
     #[test]
