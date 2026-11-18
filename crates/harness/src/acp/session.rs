@@ -530,6 +530,61 @@ impl AcpSessionState {
         LoopControl::Continue
     }
 
+    async fn recover_starved_prompt(&mut self) -> LoopControl {
+        self.starve_deadline = None;
+        tracing::warn!(
+            target: "mast_harness::acp",
+            "prompt response missing past turn-end evidence; settling \
+             the dead turn (and promoting any queued steer)"
+        );
+        // Drop the dead future: a response that somehow arrives later
+        // resolves a closed channel harmlessly.
+        self.turn = None;
+        let (prev, _next) = rotate(&mut self.assistant_message_id);
+        if !send(
+            &self.event_tx,
+            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+        )
+        .await
+        {
+            return LoopControl::Stop;
+        }
+        self.done_current = true;
+        if !send(
+            &self.event_tx,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some(self.session_id.clone()),
+            },
+        )
+        .await
+        {
+            return LoopControl::Stop;
+        }
+        if let Some(text) = self.queued_steers.pop_front() {
+            let (prev, next) = rotate(&mut self.assistant_message_id);
+            if !send(
+                &self.event_tx,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                },
+            )
+            .await
+            {
+                return LoopControl::Stop;
+            }
+            self.begin_prompt(text);
+        } else if !self.steering_open {
+            // Mirror the normal turn-settled exit: mailbox closed
+            // and nothing left to run — the session is over.
+            return LoopControl::Stop;
+        }
+        LoopControl::Continue
+    }
+
     fn observe_child_exit(
         &mut self,
         status: std::io::Result<std::process::ExitStatus>,
@@ -1187,55 +1242,7 @@ pub(super) async fn run_session(session: Session) {
             _ = tokio::time::sleep_until(
                 state.starve_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if state.starve_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
-                state.starve_deadline = None;
-                tracing::warn!(
-                    target: "mast_harness::acp",
-                    "prompt response missing past turn-end evidence; settling \
-                     the dead turn (and promoting any queued steer)"
-                );
-                // Drop the dead future: a response that somehow arrives later
-                // resolves a closed channel harmlessly.
-                state.turn = None;
-                let (prev, _next) = rotate(&mut state.assistant_message_id);
-                if !send(
-                    &state.event_tx,
-                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
-                )
-                .await
-                {
-                    break 'main;
-                }
-                state.done_current = true;
-                if !send(
-                    &state.event_tx,
-                    AgentEvent::Done {
-                        status: DoneStatus::Completed,
-                        result: None,
-                        error: None,
-                        session_id: Some(state.session_id.clone()),
-                    },
-                )
-                .await
-                {
-                    break 'main;
-                }
-                if let Some(text) = state.queued_steers.pop_front() {
-                    let (prev, next) = rotate(&mut state.assistant_message_id);
-                    if !send(
-                        &state.event_tx,
-                        AgentEvent::Steered {
-                            assistant_message_id: Some(prev),
-                            next_assistant_message_id: Some(next),
-                        },
-                    )
-                    .await
-                    {
-                        break 'main;
-                    }
-                    state.begin_prompt(text);
-                } else if !state.steering_open {
-                    // Mirror the normal turn-settled exit: mailbox closed
-                    // and nothing left to run — the session is over.
+                if state.recover_starved_prompt().await == LoopControl::Stop {
                     break 'main;
                 }
             },
