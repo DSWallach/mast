@@ -5241,3 +5241,6 @@ mod tests;
 
 #[cfg(test)]
 mod context_usage_tests;
+
+#[cfg(test)]
+mod routing_completeness_tests;
