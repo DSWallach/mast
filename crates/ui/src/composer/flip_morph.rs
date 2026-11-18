@@ -46,7 +46,7 @@ impl FlipMorph {
     }
 
     /// Raw timeline position 0..1 over this morph's motion spec.
-    fn raw(&self, now_ms: f32) -> f32 {
+    pub(super) fn raw(&self, now_ms: f32) -> f32 {
         let total = self.spec.total().as_secs_f32() * 1000.0;
         ((now_ms - self.start_ms) / total).clamp(0.0, 1.0)
     }
