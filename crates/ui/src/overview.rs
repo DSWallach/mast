@@ -9251,6 +9251,16 @@ mod logic_tests {
     }
 
     #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    struct ScheduledTaskOverviewFixture(Entity<Overview>);
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    impl Render for ScheduledTaskOverviewFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+        }
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
     #[test]
     #[ignore = "requires macOS Metal and access to macOS services"]
     fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
@@ -9271,7 +9281,7 @@ mod logic_tests {
                         });
                         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
                         let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
-                        cx.new(|cx| {
+                        let overview = cx.new(|cx| {
                             let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
                             overview.view_mode = OverviewMode::List;
                             let task = serde_json::from_value(serde_json::json!({
@@ -9286,7 +9296,8 @@ mod logic_tests {
                                 device_id:"host".into(), tasks:vec![task], ..Default::default()
                             })));
                             overview
-                        })
+                        });
+                        cx.new(|_| ScheduledTaskOverviewFixture(overview))
                     },
                 )?;
             }
@@ -9332,7 +9343,7 @@ mod logic_tests {
                     });
                     let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
                     let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
-                    cx.new(|cx| {
+                    let overview = cx.new(|cx| {
                         let mut overview = Overview::new(
                             state, gpui::WeakEntity::new_invalid(), transcript, composer, cx,
                         );
@@ -9354,7 +9365,8 @@ mod logic_tests {
                         overview.set_outline_loads(fixture_loads(Some(snapshot)), cx);
                         overview.set_mode(OverviewMode::Outline, cx);
                         overview
-                    })
+                    });
+                    cx.new(|_| ScheduledTaskOverviewFixture(overview))
                 },
             )?;
         }
