@@ -1,5 +1,23 @@
 use super::*;
 
+/// Flex gap between sidebar list items.
+pub(super) const SIDEBAR_LIST_GAP: f32 = 2.0;
+/// Fixed vertical slot occupied by one active sidebar card.
+#[cfg(test)]
+pub(super) const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
+pub(super) const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
+pub(super) const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
+pub(super) const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
+pub(super) const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
+
+/// Active and archived sessions share harness/title geometry.
+pub(super) const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+pub(super) const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
+
+/// Ramp height of the sidebar's scroll-edge fade (the gpui
+/// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
+pub(super) const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
+
 /// Sidebar-only drag payload. Regular sessions never acquire a manual order.
 #[derive(Clone, PartialEq)]
 pub(super) struct SidebarSessionDrag {

@@ -108,6 +108,8 @@ mod menu_bar_ui;
 mod running_ui;
 mod sidebar_pins;
 mod sidebar_resort;
+use sidebar_resort::{SIDEBAR_LIST_GAP, SIDEBAR_DRAG_SCROLL_BAND, SIDEBAR_DRAG_SCROLL_MAX, SIDEBAR_DRAG_SCROLL_FRAME_MS, SIDEBAR_LIST_PAD_TOP, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, SIDEBAR_GLASS_FADE_BAND};
+#[cfg(test)] use sidebar_resort::SIDEBAR_SESSION_SLOT;
 use sidebar_resort::{SidebarSessionDrag, SidebarSessionDrop, SidebarSessionTransfer, SidebarSessionGap, SidebarSessionSlide, SidebarSessionReturn, PinnedSessionDragState, SidebarKeyedRow, SidebarSessionRows};
 use sidebar_resort::sidebar_key_order_changed;
 pub use sidebar_resort::{resort_offsets, RESORT};
@@ -338,24 +340,6 @@ fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface
 fn workspace_file_title(path: &str) -> SharedString {
     path.rsplit('/').next().unwrap_or(path).to_string().into()
 }
-
-/// Flex gap between sidebar list items.
-const SIDEBAR_LIST_GAP: f32 = 2.0;
-/// Fixed vertical slot occupied by one active sidebar card.
-#[cfg(test)]
-const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
-const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
-const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
-const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
-const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
-
-/// Active and archived sessions share harness/title geometry.
-const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
-const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-
-/// Ramp height of the sidebar's scroll-edge fade (the gpui
-/// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
-const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve
