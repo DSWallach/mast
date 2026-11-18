@@ -2909,6 +2909,10 @@ impl Shell {
             {
                 changes.update(cx, |changes, cx| changes.ensure_content(cx));
             }
+            if panels.changes_open && self.resolved_right_active(cx) == RightSurface::Team {
+                let chat_id = self.active_chat.clone();
+                self.load_tracker_project(&chat_id, false, cx);
+            }
         }
         self.prewarm_workspace_search(cx);
         match state.read(cx).connection {
@@ -3284,7 +3288,11 @@ impl Shell {
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
             RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
+            RightSurface::Team => {
+                let chat_id = self.active_chat.clone();
+                self.load_tracker_project(&chat_id, false, cx);
+            }
+            RightSurface::Picker | RightSurface::Item | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();

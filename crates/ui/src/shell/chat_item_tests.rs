@@ -1201,6 +1201,34 @@ fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_shows_cached_linear_issues_and_local_items_together(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
+            snapshot.space_settings.linear_enabled = true;
+            for (id, item, kind, external_id) in [("project-ref", API, "project", "project"), ("issue-ref", "fixture-item-0", "issue", "EX-1")] {
+                snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                    "id": id, "spaceId":"s1", "workItemId":item, "provider":"linear", "referenceType":kind, "externalId":external_id
+                })).unwrap());
+            }
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
+        });
+        shell.set_tracker_project_for_test("default", "project", vec![
+            mast_proto::linear::LinearIssueSummary { id:"i1".into(), identifier:"EX-1".into(), title:"Linked issue".into(), ..Default::default() },
+            mast_proto::linear::LinearIssueSummary { id:"i2".into(), identifier:"EX-2".into(), title:"Unstarted issue".into(), ..Default::default() },
+        ]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
+    assert!(has(vcx, "tracker-item-linear:EX-2"));
+}
+
+#[gpui::test]
 fn tracker_remains_selected_when_expanded(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 2);
