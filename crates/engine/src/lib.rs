@@ -72,6 +72,7 @@ mod transcript_history;
 pub mod typesafe;
 pub mod uploads;
 pub mod work_outline;
+pub mod work_outline_health;
 pub mod work_outline_launch;
 pub mod work_outline_pr_links;
 pub mod workflow_pack;
