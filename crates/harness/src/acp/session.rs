@@ -34,9 +34,188 @@ struct AcpSessionState {
     done_current: bool,
     open_tools: std::collections::HashSet<String>,
     last_update_at: tokio::time::Instant,
+    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    subagents: SubagentObserver,
+    request_input: std::sync::Arc<RequestInputFn>,
+    assistant_message_id: String,
+    starve_deadline: Option<tokio::time::Instant>,
+    done_after_interrupt: bool,
+    steering_open: bool,
 }
 
 impl AcpSessionState {
+    async fn settle_prompt(
+        &mut self,
+        res: Result<Value, HarnessError>,
+        incoming: &mut mpsc::Receiver<Incoming>,
+        auth_method: Option<&str>,
+        agent_name: &str,
+    ) -> LoopControl {
+        self.turn = None;
+        if res.is_err() && self.client.is_closed() {
+            return LoopControl::Stop;
+        }
+        self.starve_deadline = None;
+        self.prompt_stall_deadline = None;
+        if let Some(id) = self.current_prompt_id.take() {
+            self.completed_prompts.push_back(id);
+            while self.completed_prompts.len() > 32 {
+                self.completed_prompts.pop_front();
+            }
+        }
+        // Settle an in-flight `_session/steering` call BEFORE closing
+        // the turn: its response rides the same stdout as the prompt
+        // response, so by now it is (nearly always) already parsed —
+        // the select just hadn't polled it yet. Deciding it here keeps
+        // the ordering deterministic: an injection that landed in this
+        // turn emits its Steered boundary now, ahead of the drained
+        // tail and the Done (a Steered AFTER Done re-armed the
+        // consumer with no next turn — the stranded-Working bug); a
+        // rejected/unsettled call redelivers as the next turn. The
+        // timeout guards the flooded-incoming edge (reader blocked on
+        // a full channel never parses the response): past it the call
+        // is abandoned and the steer redelivered.
+        if let Some((text, mut fut)) = self.steering_call.take() {
+            let outcome = match tokio::time::timeout(
+                Duration::from_millis(1000),
+                &mut fut,
+            )
+            .await
+            {
+                Ok(Ok(resp)) => resp
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .unwrap_or("injected")
+                    .to_owned(),
+                Ok(Err(_)) | Err(_) => "promptRequired".to_owned(),
+            };
+            if self.interrupted {
+                // Winding down; abandoned like any queued steer.
+            } else if outcome != "promptRequired" {
+                let (prev, next) = rotate(&mut self.assistant_message_id);
+                if !send(
+                    &self.event_tx,
+                    AgentEvent::Steered {
+                        assistant_message_id: Some(prev),
+                        next_assistant_message_id: Some(next),
+                    },
+                )
+                .await
+                {
+                    return LoopControl::Stop;
+                }
+            } else {
+                self.queued_steers.push_back(text);
+            }
+            // Followers waiting on the settled call have no live turn
+            // to inject into anymore: boundary delivery.
+            while let Some(next_text) = self.steer_backlog.pop_front() {
+                self.queued_steers.push_back(next_text);
+            }
+        }
+        // Updates streamed before the prompt response are already
+        // queued in stdout order — fold them into the turn before
+        // closing it (responses bypass the incoming queue).
+        let mut consumer_gone = false;
+        while let Ok(inc) = incoming.try_recv() {
+            match inc {
+                Incoming::Notification { method, params } => {
+                    let events =
+                        session_update_events(&method, &params, &self.session_id, &mut self.subagents);
+                    for ev in events {
+                        if !send(&self.event_tx, ev).await {
+                            consumer_gone = true;
+                            break;
+                        }
+                    }
+                }
+                Incoming::Request { id, method, params } => {
+                    for ev in handle_server_request_live(
+                        &self.client,
+                        id,
+                        &method,
+                        &params,
+                        &self.request_input,
+                        &self.session_id,
+                    ) {
+                        if !send(&self.event_tx, ev).await {
+                            consumer_gone = true;
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if consumer_gone {
+                break;
+            }
+        }
+        if consumer_gone {
+            return LoopControl::Stop;
+        }
+        let (prev, _next) = rotate(&mut self.assistant_message_id);
+        if !send(
+            &self.event_tx,
+            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+        )
+        .await
+        {
+            return LoopControl::Stop;
+        }
+        // Per-turn token usage, when the adapter settles the prompt
+        // with it (claude-agent-acp and codex-acp both do).
+        if let Some(usage) = usage_from_response(&res)
+            && !send(&self.event_tx, usage).await
+        {
+            return LoopControl::Stop;
+        }
+        let (status, mut error) = stop_outcome(&res, self.interrupted);
+        if !self.interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+            error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+        }
+        self.done_current = true;
+        if self.interrupted {
+            self.done_after_interrupt = true;
+        }
+        if !send(
+            &self.event_tx,
+            AgentEvent::Done {
+                status,
+                result: None,
+                error,
+                session_id: Some(self.session_id.clone()),
+            },
+        )
+        .await
+        {
+            return LoopControl::Stop;
+        }
+        if self.interrupted || res.is_err() {
+            return LoopControl::Stop;
+        }
+        // Persistent session: a queued steer becomes the next turn;
+        // otherwise stay alive for the mailbox — the caller owns
+        // teardown (mirrors the codex harness).
+        if let Some(text) = self.queued_steers.pop_front() {
+            let (prev, next) = rotate(&mut self.assistant_message_id);
+            if !send(
+                &self.event_tx,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                },
+            )
+            .await
+            {
+                return LoopControl::Stop;
+            }
+            self.begin_prompt(text);
+        } else if !self.steering_open {
+            return LoopControl::Stop;
+        }
+        LoopControl::Continue
+    }
+
     fn observe_child_exit(
         &mut self,
         status: std::io::Result<std::process::ExitStatus>,
@@ -109,9 +288,6 @@ impl AcpSessionState {
     async fn finish_session(
         &mut self,
         child: &mut Child,
-        event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
-        subagents: &mut SubagentObserver,
-        done_after_interrupt: bool,
         agent_name: &str,
         stderr_tail: &crate::StderrTail,
         kill_grace: Duration,
@@ -123,17 +299,17 @@ impl AcpSessionState {
         } else {
             DoneStatus::Errored
         };
-        for event in subagents.finish_open(subagent_status) {
-            if !send(event_tx, event).await {
+        for event in self.subagents.finish_open(subagent_status) {
+            if !send(&self.event_tx, event).await {
                 break;
             }
         }
 
         // Terminal bookkeeping: never end the stream without a Done unless the
         // consumer already hung up.
-        if !event_tx.is_closed() {
-            if self.interrupted && !done_after_interrupt {
-                let _ = event_tx
+        if !self.event_tx.is_closed() {
+            if self.interrupted && !self.done_after_interrupt {
+                let _ = self.event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Interrupted,
                         result: None,
@@ -152,7 +328,7 @@ impl AcpSessionState {
                 };
                 child.request_group_shutdown();
                 stderr_tail.wait_closed().await;
-                let _ = event_tx
+                let _ = self.event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
@@ -168,12 +344,11 @@ impl AcpSessionState {
 
     async fn expire_prompt_stall(
         &mut self,
-        event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
         agent_name: &str,
         stall_hint: &str,
     ) {
         let _ = send(
-            event_tx,
+            &self.event_tx,
             AgentEvent::Error {
                 code: None, resets_at: None, message: format!(
                     "{agent_name} did not respond to the prompt at all \
@@ -186,7 +361,7 @@ impl AcpSessionState {
         .await;
         self.done_current = true;
         let _ = send(
-            event_tx,
+            &self.event_tx,
             AgentEvent::Done {
                 status: DoneStatus::Errored,
                 result: None,
@@ -501,7 +676,7 @@ pub(super) async fn run_session(session: Session) {
         }
     };
 
-    let mut assistant_message_id = new_message_id();
+    let assistant_message_id = new_message_id();
     if !send(
         &event_tx,
         AgentEvent::SessionStarted {
@@ -536,7 +711,7 @@ pub(super) async fn run_session(session: Session) {
     // Subagent correlation + transcript tails: Devin carries nested updates
     // on ACP itself; everything else gets the Grok tracker (inert without
     // Grok's subagent lifecycle extension).
-    let mut subagents = if harness == HarnessId::Devin {
+    let subagents = if harness == HarnessId::Devin {
         SubagentObserver::Devin(DevinTracker::default())
     } else {
         SubagentObserver::Grok(SubagentTracker::new(
@@ -584,9 +759,9 @@ pub(super) async fn run_session(session: Session) {
     // steering response).
     let steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
     let steer_backlog: VecDeque<String> = VecDeque::new();
-    let mut steering_open = true;
+    let steering_open = true;
     let done_current = false;
-    let mut done_after_interrupt = false;
+    let done_after_interrupt = false;
     let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
     // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
@@ -601,7 +776,7 @@ pub(super) async fn run_session(session: Session) {
     // milliseconds); past it, the dead prompt is closed out with a Done and
     // the queued steer is promoted to a fresh turn.
     const STARVE_GRACE: Duration = Duration::from_secs(2);
-    let mut starve_deadline: Option<tokio::time::Instant> = None;
+    let starve_deadline: Option<tokio::time::Instant> = None;
     // Silence is not a turn boundary: completed tools, text, and usage may
     // all precede a slow model request. Keep the prompt future alive until
     // its response (or an authoritative completion extension) arrives.
@@ -637,6 +812,13 @@ pub(super) async fn run_session(session: Session) {
         done_current,
         open_tools,
         last_update_at,
+        event_tx,
+        subagents,
+        request_input,
+        assistant_message_id,
+        starve_deadline,
+        done_after_interrupt,
+        steering_open,
         child_exit: None,
         exit_drain_deadline: None,
         escalation_deadline: None,
@@ -653,166 +835,7 @@ pub(super) async fn run_session(session: Session) {
                 if state.exit_drain_deadline.is_some() => break 'main,
 
             res = async { state.turn.as_mut().expect("guarded by if").await }, if state.turn.is_some() => {
-                state.turn = None;
-                if res.is_err() && state.client.is_closed() {
-                    break 'main;
-                }
-                starve_deadline = None;
-                state.prompt_stall_deadline = None;
-                if let Some(id) = state.current_prompt_id.take() {
-                    state.completed_prompts.push_back(id);
-                    while state.completed_prompts.len() > 32 {
-                        state.completed_prompts.pop_front();
-                    }
-                }
-                // Settle an in-flight `_session/steering` call BEFORE closing
-                // the turn: its response rides the same stdout as the prompt
-                // response, so by now it is (nearly always) already parsed —
-                // the select just hadn't polled it yet. Deciding it here keeps
-                // the ordering deterministic: an injection that landed in this
-                // turn emits its Steered boundary now, ahead of the drained
-                // tail and the Done (a Steered AFTER Done re-armed the
-                // consumer with no next turn — the stranded-Working bug); a
-                // rejected/unsettled call redelivers as the next turn. The
-                // timeout guards the flooded-incoming edge (reader blocked on
-                // a full channel never parses the response): past it the call
-                // is abandoned and the steer redelivered.
-                if let Some((text, mut fut)) = state.steering_call.take() {
-                    let outcome = match tokio::time::timeout(
-                        Duration::from_millis(1000),
-                        &mut fut,
-                    )
-                    .await
-                    {
-                        Ok(Ok(resp)) => resp
-                            .get("outcome")
-                            .and_then(Value::as_str)
-                            .unwrap_or("injected")
-                            .to_owned(),
-                        Ok(Err(_)) | Err(_) => "promptRequired".to_owned(),
-                    };
-                    if state.interrupted {
-                        // Winding down; abandoned like any queued steer.
-                    } else if outcome != "promptRequired" {
-                        let (prev, next) = rotate(&mut assistant_message_id);
-                        if !send(
-                            &event_tx,
-                            AgentEvent::Steered {
-                                assistant_message_id: Some(prev),
-                                next_assistant_message_id: Some(next),
-                            },
-                        )
-                        .await
-                        {
-                            break 'main;
-                        }
-                    } else {
-                        state.queued_steers.push_back(text);
-                    }
-                    // Followers waiting on the settled call have no live turn
-                    // to inject into anymore: boundary delivery.
-                    while let Some(next_text) = state.steer_backlog.pop_front() {
-                        state.queued_steers.push_back(next_text);
-                    }
-                }
-                // Updates streamed before the prompt response are already
-                // queued in stdout order — fold them into the turn before
-                // closing it (responses bypass the incoming queue).
-                let mut consumer_gone = false;
-                while let Ok(inc) = incoming.try_recv() {
-                    match inc {
-                        Incoming::Notification { method, params } => {
-                            let events =
-                                session_update_events(&method, &params, &state.session_id, &mut subagents);
-                            for ev in events {
-                                if !send(&event_tx, ev).await {
-                                    consumer_gone = true;
-                                    break;
-                                }
-                            }
-                        }
-                        Incoming::Request { id, method, params } => {
-                            for ev in handle_server_request_live(
-                                &state.client,
-                                id,
-                                &method,
-                                &params,
-                                &request_input,
-                                &state.session_id,
-                            ) {
-                                if !send(&event_tx, ev).await {
-                                    consumer_gone = true;
-                                    break;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    if consumer_gone {
-                        break;
-                    }
-                }
-                if consumer_gone {
-                    break 'main;
-                }
-                let (prev, _next) = rotate(&mut assistant_message_id);
-                if !send(
-                    &event_tx,
-                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
-                )
-                .await
-                {
-                    break 'main;
-                }
-                // Per-turn token usage, when the adapter settles the prompt
-                // with it (claude-agent-acp and codex-acp both do).
-                if let Some(usage) = usage_from_response(&res)
-                    && !send(&event_tx, usage).await
-                {
-                    break 'main;
-                }
-                let (status, mut error) = stop_outcome(&res, state.interrupted);
-                if !state.interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
-                    error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
-                }
-                state.done_current = true;
-                if state.interrupted {
-                    done_after_interrupt = true;
-                }
-                if !send(
-                    &event_tx,
-                    AgentEvent::Done {
-                        status,
-                        result: None,
-                        error,
-                        session_id: Some(state.session_id.clone()),
-                    },
-                )
-                .await
-                {
-                    break 'main;
-                }
-                if state.interrupted || res.is_err() {
-                    break 'main;
-                }
-                // Persistent session: a queued steer becomes the next turn;
-                // otherwise stay alive for the mailbox — the caller owns
-                // teardown (mirrors the codex harness).
-                if let Some(text) = state.queued_steers.pop_front() {
-                    let (prev, next) = rotate(&mut assistant_message_id);
-                    if !send(
-                        &event_tx,
-                        AgentEvent::Steered {
-                            assistant_message_id: Some(prev),
-                            next_assistant_message_id: Some(next),
-                        },
-                    )
-                    .await
-                    {
-                        break 'main;
-                    }
-                    state.begin_prompt(text);
-                } else if !steering_open {
+                if state.settle_prompt(res, &mut incoming, auth_method, agent_name).await == LoopControl::Stop {
                     break 'main;
                 }
             },
@@ -888,10 +911,10 @@ pub(super) async fn run_session(session: Session) {
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events =
-                        session_update_events(&method, &params, &state.session_id, &mut subagents);
+                        session_update_events(&method, &params, &state.session_id, &mut state.subagents);
                     for ev in events {
                         track_open_tools(&ev, &mut state.open_tools);
-                        if !send(&event_tx, ev).await {
+                        if !send(&state.event_tx, ev).await {
                             break 'main;
                         }
                     }
@@ -903,10 +926,10 @@ pub(super) async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        &request_input,
+                        &state.request_input,
                         &state.session_id,
                     ) {
-                        if !send(&event_tx, ev).await {
+                        if !send(&state.event_tx, ev).await {
                             break 'main;
                         }
                     }
@@ -924,22 +947,22 @@ pub(super) async fn run_session(session: Session) {
                         && let Ok(res @ Ok(_)) =
                             tokio::time::timeout(Duration::from_millis(50), &mut fut).await
                     {
-                        let (prev, _next) = rotate(&mut assistant_message_id);
+                        let (prev, _next) = rotate(&mut state.assistant_message_id);
                         let _ = send(
-                            &event_tx,
+                            &state.event_tx,
                             AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
                         )
                         .await;
                         if let Some(usage) = usage_from_response(&res) {
-                            let _ = send(&event_tx, usage).await;
+                            let _ = send(&state.event_tx, usage).await;
                         }
                         let (status, error) = stop_outcome(&res, state.interrupted);
                         state.done_current = true;
                         if state.interrupted {
-                            done_after_interrupt = true;
+                            state.done_after_interrupt = true;
                         }
                         let _ = send(
-                            &event_tx,
+                            &state.event_tx,
                             AgentEvent::Done {
                                 status,
                                 result: None,
@@ -988,7 +1011,7 @@ pub(super) async fn run_session(session: Session) {
                         // The injection proves the turn is LIVE: any settle
                         // deadline armed by an earlier noRunningTurn reply
                         // is no longer valid.
-                        starve_deadline = None;
+                        state.starve_deadline = None;
                         // Pre-injection updates can still sit in `incoming`
                         // (responses bypass that queue): drain them into the
                         // CURRENT segment first, or text the agent streamed
@@ -999,9 +1022,9 @@ pub(super) async fn run_session(session: Session) {
                             match inc {
                                 Incoming::Notification { method, params } => {
                                     let events =
-                                        session_update_events(&method, &params, &state.session_id, &mut subagents);
+                                        session_update_events(&method, &params, &state.session_id, &mut state.subagents);
                                     for ev in events {
-                                        if !send(&event_tx, ev).await {
+                                        if !send(&state.event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
                                         }
@@ -1013,10 +1036,10 @@ pub(super) async fn run_session(session: Session) {
                                         id,
                                         &method,
                                         &params,
-                                        &request_input,
+                                        &state.request_input,
                                 &state.session_id,
                                     ) {
-                                        if !send(&event_tx, ev).await {
+                                        if !send(&state.event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
                                         }
@@ -1031,9 +1054,9 @@ pub(super) async fn run_session(session: Session) {
                         if consumer_gone {
                             break 'main;
                         }
-                        let (prev, next) = rotate(&mut assistant_message_id);
+                        let (prev, next) = rotate(&mut state.assistant_message_id);
                         if !send(
-                            &event_tx,
+                            &state.event_tx,
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
@@ -1064,7 +1087,7 @@ pub(super) async fn run_session(session: Session) {
                             "steering answered noRunningTurn with a prompt \
                              outstanding; arming starved-turn recovery"
                         );
-                        starve_deadline =
+                        state.starve_deadline =
                             Some(tokio::time::Instant::now() + STARVE_GRACE);
                     }
                     state.queued_steers.push_back(text);
@@ -1072,9 +1095,9 @@ pub(super) async fn run_session(session: Session) {
                     // The turn ended while the call was in flight and its
                     // boundary already passed — the steer becomes the next
                     // turn directly.
-                    let (prev, next) = rotate(&mut assistant_message_id);
+                    let (prev, next) = rotate(&mut state.assistant_message_id);
                     if !send(
-                        &event_tx,
+                        &state.event_tx,
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
@@ -1108,9 +1131,9 @@ pub(super) async fn run_session(session: Session) {
                 if state.turn.is_none()
                     && let Some(text) = state.queued_steers.pop_front()
                 {
-                    let (prev, next) = rotate(&mut assistant_message_id);
+                    let (prev, next) = rotate(&mut state.assistant_message_id);
                     if !send(
-                        &event_tx,
+                        &state.event_tx,
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
@@ -1121,7 +1144,7 @@ pub(super) async fn run_session(session: Session) {
                         break 'main;
                     }
                     state.begin_prompt(text);
-                } else if state.turn.is_none() && !steering_open {
+                } else if state.turn.is_none() && !state.steering_open {
                     // Mailbox closed while the flush waited: nothing left.
                     break 'main;
                 }
@@ -1132,9 +1155,9 @@ pub(super) async fn run_session(session: Session) {
             // response, recover the stranded prompt. Silence, tool results,
             // and usage updates must never arm this recovery.
             _ = tokio::time::sleep_until(
-                starve_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if starve_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
-                starve_deadline = None;
+                state.starve_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if state.starve_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
+                state.starve_deadline = None;
                 tracing::warn!(
                     target: "mast_harness::acp",
                     "prompt response missing past turn-end evidence; settling \
@@ -1143,9 +1166,9 @@ pub(super) async fn run_session(session: Session) {
                 // Drop the dead future: a response that somehow arrives later
                 // resolves a closed channel harmlessly.
                 state.turn = None;
-                let (prev, _next) = rotate(&mut assistant_message_id);
+                let (prev, _next) = rotate(&mut state.assistant_message_id);
                 if !send(
-                    &event_tx,
+                    &state.event_tx,
                     AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
                 )
                 .await
@@ -1154,7 +1177,7 @@ pub(super) async fn run_session(session: Session) {
                 }
                 state.done_current = true;
                 if !send(
-                    &event_tx,
+                    &state.event_tx,
                     AgentEvent::Done {
                         status: DoneStatus::Completed,
                         result: None,
@@ -1167,9 +1190,9 @@ pub(super) async fn run_session(session: Session) {
                     break 'main;
                 }
                 if let Some(text) = state.queued_steers.pop_front() {
-                    let (prev, next) = rotate(&mut assistant_message_id);
+                    let (prev, next) = rotate(&mut state.assistant_message_id);
                     if !send(
-                        &event_tx,
+                        &state.event_tx,
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
@@ -1180,14 +1203,14 @@ pub(super) async fn run_session(session: Session) {
                         break 'main;
                     }
                     state.begin_prompt(text);
-                } else if !steering_open {
+                } else if !state.steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
                     // and nothing left to run — the session is over.
                     break 'main;
                 }
             },
 
-            steer = steering.recv(), if steering_open && !state.interrupted => match steer {
+            steer = steering.recv(), if state.steering_open && !state.interrupted => match steer {
                 Some(msg) => {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
@@ -1217,9 +1240,9 @@ pub(super) async fn run_session(session: Session) {
                             Some(tokio::time::Instant::now() + CANCEL_FLUSH);
                     } else if state.turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
-                        let (prev, next) = rotate(&mut assistant_message_id);
+                        let (prev, next) = rotate(&mut state.assistant_message_id);
                         if !send(
-                            &event_tx,
+                            &state.event_tx,
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
@@ -1247,7 +1270,7 @@ pub(super) async fn run_session(session: Session) {
                     }
                 }
                 None => {
-                    steering_open = false;
+                    state.steering_open = false;
                     if state.turn.is_none() && state.queued_steers.is_empty() {
                         break 'main;
                     }
@@ -1273,7 +1296,7 @@ pub(super) async fn run_session(session: Session) {
                 state.prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if state.prompt_stall_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
                 state.expire_prompt_stall(
-                    &event_tx, agent_name, stall_hint,
+                    agent_name, stall_hint,
                 ).await;
                 break 'main;
             },
@@ -1285,12 +1308,11 @@ pub(super) async fn run_session(session: Session) {
                 state.escalate_interrupt(&mut escalation_signal, kill_grace);
             },
 
-            _ = event_tx.closed() => break 'main,
+            _ = state.event_tx.closed() => break 'main,
         }
     }
 
     state.finish_session(
-        &mut child, &event_tx, &mut subagents, done_after_interrupt,
-        agent_name, &stderr_tail, kill_grace,
+        &mut child, agent_name, &stderr_tail, kill_grace,
     ).await;
 }
