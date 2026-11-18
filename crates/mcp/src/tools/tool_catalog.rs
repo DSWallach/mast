@@ -224,11 +224,26 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "title": { "type": "string" },
                     "description": { "type": "string" },
+                    "linearIssue": { "type": "string", "description": "Linear issue identifier or URL." },
                     "parentWorkItemId": { "type": "string", "description": "Your chat's item, a descendant, or any item inside your project. Defaults to the project worker destination if configured, otherwise your chat's item." },
                     "status": { "type": "string", "enum": ["pending", "active"], "default": "pending" },
                     "idempotencyKey": idempotency_key_schema()
                 },
                 "required": ["title", "idempotencyKey"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::LINK,
+            description: "Attach a Linear issue or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workItemId": { "type": "string" },
+                    "linearIssue": { "type": "string" },
+                    "pullRequest": { "type": "string" },
+                    "idempotencyKey": idempotency_key_schema()
+                },
+                "required": ["workItemId", "idempotencyKey"]
             }),
         },
         ToolDef {

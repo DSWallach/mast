@@ -431,6 +431,26 @@ impl WorkItemLaunchService {
             p.config.clone(),
             p.parent_chat_id.as_deref(),
         )?;
+        // Name the chat before its first turn can schedule automatic titling.
+        // Preserve an existing title on retries or after a user rename.
+        if self
+            .workspace
+            .chat(&chat_id)
+            .map_err(engine_error)?
+            .is_some_and(|chat| {
+                chat.title
+                    .as_deref()
+                    .is_none_or(|title| title.trim().is_empty())
+            })
+        {
+            let title = match snapshot.linear_issue_reference(&item.id) {
+                Some(reference) => format!("{} {}", reference.external_id, item.title),
+                None => item.title.clone(),
+            };
+            self.workspace
+                .rename_chat(&chat_id, &title)
+                .map_err(engine_error)?;
+        }
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
             self.sessions

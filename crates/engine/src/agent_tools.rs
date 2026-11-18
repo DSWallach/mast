@@ -42,7 +42,7 @@ use mast_proto::agent_tools::{self, AgentOrigin, AgentToolCallParams, AgentToolE
 use mast_proto::work_outline::{derive_id, roles};
 use mast_proto::{
     AssignChatToWorkItemParams, ChatDiffTargetSource, CreateUserActionRequestParams,
-    CreateWorkItemParams, InstructionProposalOrigin, InstructionProposalTarget, ProposalAction,
+    CreateWorkItemExternalReferenceParams, CreateWorkItemParams, InstructionProposalOrigin, InstructionProposalTarget, ProposalAction,
     ProposeWorkItemInstructionParams, ResolveUserActionRequestParams, RunRequest, SandboxLevel,
     UpdateWorkItemParams, UserActionRequestOrigin, WorkItemChanges, WorkItemStatus,
     WorkOutlineError, WorkOutlineMutateReply, WorkOutlineMutation, WorkOutlinePlacement,
@@ -58,6 +58,64 @@ use crate::doc_host::DocHost;
 use crate::sessions::SessionsEngine;
 use crate::work_outline::WorkOutlineService;
 use crate::workspace_host::WorkspaceHost;
+
+struct ExternalReference {
+    provider: &'static str,
+    reference_type: &'static str,
+    external_id: String,
+    url: String,
+}
+
+fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let identifier = if let Some(rest) = input.strip_prefix("https://linear.app/") {
+        let parts: Vec<_> = rest.split('/').collect();
+        if parts.len() < 3 || parts[1] != "issue" {
+            return Err(AgentToolError::invalid("invalid Linear issue URL"));
+        }
+        parts[2].split(['?', '#']).next().unwrap_or("")
+    } else {
+        input
+    };
+    let valid = identifier.split_once('-').is_some_and(|(team, number)| {
+        !team.is_empty()
+            && team.chars().all(|c| c.is_ascii_alphanumeric())
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit())
+            && number.parse::<u64>().is_ok_and(|n| n > 0)
+    });
+    if !valid {
+        return Err(AgentToolError::invalid(
+            "linearIssue must be an identifier such as ENG-123 or a Linear issue URL",
+        ));
+    }
+    let external_id = identifier.to_ascii_uppercase();
+    let url = if input.starts_with("https://linear.app/") {
+        input.to_owned()
+    } else {
+        format!("https://linear.app/issue/{external_id}")
+    };
+    Ok(ExternalReference {
+        provider: mast_proto::linear::LINEAR_PROVIDER,
+        reference_type: mast_proto::linear::LINEAR_ISSUE_REFERENCE,
+        external_id,
+        url,
+    })
+}
+
+fn parse_pull_request(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let pr = crate::work_outline_pr_links::pull_request_from_url(input)
+        .or_else(|| mast_proto::pr_review_sync::PullRequestRef::parse_external_id(input))
+        .ok_or_else(|| {
+            AgentToolError::invalid("pullRequest must be a GitHub PR URL or owner/repo#number")
+        })?;
+    Ok(ExternalReference {
+        provider: mast_proto::pr_review_sync::GITHUB_PROVIDER,
+        reference_type: mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE,
+        external_id: pr.external_id(),
+        url: pr.url,
+    })
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -455,6 +513,16 @@ struct CreateChildArgs {
     status: Option<String>,
     #[serde(default)]
     placement: Option<WorkOutlinePlacement>,
+    #[serde(default)]
+    linear_issue: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkArgs {
+    work_item_id: String,
+    linear_issue: Option<String>,
+    pull_request: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1038,6 +1106,7 @@ impl AgentToolsService {
             tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
+            tools::LINK => self.link(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
             tools::SET_STATUS => self.set_status(context, arguments),
             tools::CREATE_USER_ACTION_REQUEST => {
@@ -1423,6 +1492,11 @@ impl AgentToolsService {
     ) -> Result<Value, AgentToolError> {
         let args: CreateChildArgs = parse_args(arguments)?;
         let operation_id = context.operation_id(arguments)?;
+        let reference = args
+            .linear_issue
+            .as_deref()
+            .map(parse_linear_issue)
+            .transpose()?;
         let status = match args.status.as_deref().map(str::trim) {
             None | Some("") | Some("pending") => None,
             Some("active") => Some(WorkItemStatus::Active),
@@ -1455,15 +1529,71 @@ impl AgentToolsService {
             title: args.title,
             description: non_empty(args.description),
             status,
-            operation_id,
+            operation_id: operation_id.clone(),
         });
         let reply = self.apply(context, &mutation)?;
+        if let (Some(reference), Some(item_id)) = (reference, reply.work_item_id.as_deref()) {
+            self.apply_reference(
+                context,
+                item_id,
+                reference,
+                derive_id(&operation_id, "create-child-reference"),
+            )?;
+        }
         Ok(json!({
             "workItemId": reply.work_item_id,
             "parentWorkItemId": parent,
             "resolvedToWorkerDestination": to_destination,
             "createdByChatId": context.grant.chat_id,
         }))
+    }
+
+    fn apply_reference(
+        &self,
+        context: &CallContext,
+        item_id: &str,
+        reference: ExternalReference,
+        operation_id: String,
+    ) -> Result<Value, AgentToolError> {
+        let reply = self.apply(
+            context,
+            &WorkOutlineMutation::CreateWorkItemExternalReference(
+                CreateWorkItemExternalReferenceParams {
+                    work_item_id: item_id.to_owned(),
+                    provider: reference.provider.into(),
+                    reference_type: reference.reference_type.into(),
+                    external_id: reference.external_id,
+                    url: reference.url,
+                    cached_title: None,
+                    operation_id,
+                },
+            ),
+        )?;
+        Ok(json!({"workItemId": item_id, "referenceId": reply.reference_id}))
+    }
+
+    fn link(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let args: LinkArgs = parse_args(arguments)?;
+        let operation_id = context.operation_id(arguments)?;
+        let item_id = self.resolve_work_item_id(context, &args.work_item_id)?;
+        let root = context.require_item("linking a work item")?;
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !snapshot.is_within(&root, &item_id) && item_id != root {
+            return Err(WorkOutlineError::unauthorized(
+                "Agents may only link their own work item and its descendants",
+            )
+            .into());
+        }
+        let reference = match (args.linear_issue.as_deref(), args.pull_request.as_deref()) {
+            (Some(issue), None) => parse_linear_issue(issue)?,
+            (None, Some(pr)) => parse_pull_request(pr)?,
+            _ => {
+                return Err(AgentToolError::invalid(
+                    "provide exactly one of linearIssue or pullRequest",
+                ));
+            }
+        };
+        self.apply_reference(context, &item_id, reference, operation_id)
     }
 
     fn associate_current_chat(

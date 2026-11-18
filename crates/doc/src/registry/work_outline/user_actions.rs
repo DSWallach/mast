@@ -1847,6 +1847,9 @@ impl RegistryDoc {
                 })?;
                 in_project_scope(parent)
             }
+            WorkOutlineMutation::CreateWorkItemExternalReference(p) => {
+                in_project_scope(&p.work_item_id)
+            }
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {
                     return Err(unauthorized("Agents may only associate their own Chat"));
