@@ -85,6 +85,38 @@ fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
     format!("{}/{}", progress.done, progress.total)
 }
 
+fn tracker_select_rows(facts: &mut TeamFacts, snapshot: Option<&mast_proto::WorkOutlineSnapshot>, chat_id: &str) -> (Vec<WorkerFacts>, std::collections::HashMap<String, Vec<WorkerFacts>>) {
+    let mut other_chats = Vec::new();
+    let mut additional_chats = std::collections::HashMap::new();
+    if let Some(snapshot) = snapshot {
+        let root = crate::chat_work_context::assigned_item(snapshot, chat_id);
+        let mut assignments = std::collections::HashMap::new();
+        for item in &snapshot.items {
+            for id in &item.chat_ids { assignments.insert(id.as_str(), item); }
+        }
+        facts.workers.sort_by_key(|worker| {
+            let rank = match worker.state { crate::team::WorkerState::Waiting => 0, crate::team::WorkerState::Working => 1, _ => 2 };
+            (worker.archived, rank, std::cmp::Reverse(worker.last_active))
+        });
+        let mut selected = std::collections::HashMap::<String, usize>::new();
+        let mut rows: Vec<WorkerFacts> = Vec::new();
+        for worker in facts.workers.drain(..) {
+            let Some(item) = assignments.get(worker.chat_id.as_str()) else { rows.push(worker); continue; };
+            if Some(item.id.as_str()) == root || !item.child_ids.is_empty() { other_chats.push(worker); continue; }
+            if let Some(&index) = selected.get(&item.id) {
+                for pr in &worker.prs { if !rows[index].prs.iter().any(|existing| existing.url == pr.url) { rows[index].prs.push(pr.clone()); } }
+                additional_chats.entry(rows[index].chat_id.clone()).or_insert_with(Vec::new).push(worker);
+            } else {
+                selected.insert(item.id.clone(), rows.len());
+                rows.push(worker);
+            }
+        }
+        rows.sort_by_key(|worker| (worker.tracker_group(), std::cmp::Reverse(worker.last_active), worker.chat_id.clone()));
+        facts.workers = rows;
+    }
+    (other_chats, additional_chats)
+}
+
 fn tracker_primary_pr(prs: &[WorkerPr]) -> Option<&WorkerPr> {
     prs.iter().min_by_key(|pr| if pr.state.eq_ignore_ascii_case("open") { 0 } else if pr.state.eq_ignore_ascii_case("merged") { 1 } else if pr.state.eq_ignore_ascii_case("closed") { 2 } else { 3 })
 }
@@ -155,6 +187,24 @@ mod tracker_tests {
         assert!(tracker_matches(&worker, TrackerFilter::Done));
         let stages = worker.tracker_stages();
         assert!(stages.chat_started && stages.changes && stages.pr_open && stages.checks && stages.review && stages.merged);
+    }
+
+    #[test]
+    fn tracker_selects_one_chat_per_leaf_and_excludes_containers() {
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "fixture", "items": [
+                {"id":"root", "spaceId":"fixture", "title":"Root", "chatIds":["coordinator", "planning"], "childIds":["container"]},
+                {"id":"container", "spaceId":"fixture", "title":"Container", "chatIds":["container-chat"], "childIds":["item"]},
+                {"id":"item", "spaceId":"fixture", "title":"Item", "chatIds":["idle", "waiting"]}
+            ]
+        })).unwrap();
+        let mut facts = TeamFacts { workers: vec![worker("idle", WorkerState::Idle), worker("waiting", WorkerState::Waiting),
+            worker("planning", WorkerState::Idle), worker("container-chat", WorkerState::Working)] };
+        let (other, additional) = tracker_select_rows(&mut facts, Some(&snapshot), "coordinator");
+        assert_eq!(facts.workers.len(), 1);
+        assert_eq!(facts.workers[0].chat_id, "waiting");
+        assert_eq!(additional["waiting"][0].chat_id, "idle");
+        assert_eq!(other.len(), 2);
     }
 
     #[test]
@@ -407,34 +457,7 @@ impl Shell {
             })
         };
         let all_workers = facts.clone();
-        let mut other_chats = Vec::new();
-        let mut additional_chats = std::collections::HashMap::new();
-        if let Some(snapshot) = &snapshot {
-            let root = crate::chat_work_context::assigned_item(snapshot, chat_id);
-            let mut assignments = std::collections::HashMap::new();
-            for item in &snapshot.items {
-                for id in &item.chat_ids { assignments.insert(id.as_str(), item); }
-            }
-            facts.workers.sort_by_key(|worker| {
-                let rank = match worker.state { crate::team::WorkerState::Waiting => 0, crate::team::WorkerState::Working => 1, _ => 2 };
-                (worker.archived, rank, std::cmp::Reverse(worker.last_active))
-            });
-            let mut selected = std::collections::HashMap::<String, usize>::new();
-            let mut rows: Vec<WorkerFacts> = Vec::new();
-            for worker in facts.workers.drain(..) {
-                let Some(item) = assignments.get(worker.chat_id.as_str()) else { rows.push(worker); continue; };
-                if Some(item.id.as_str()) == root || !item.child_ids.is_empty() { other_chats.push(worker); continue; }
-                if let Some(&index) = selected.get(&item.id) {
-                    for pr in &worker.prs { if !rows[index].prs.iter().any(|existing| existing.url == pr.url) { rows[index].prs.push(pr.clone()); } }
-                    additional_chats.entry(rows[index].chat_id.clone()).or_insert_with(Vec::new).push(worker);
-                } else {
-                    selected.insert(item.id.clone(), rows.len());
-                    rows.push(worker);
-                }
-            }
-            rows.sort_by_key(|worker| (worker.tracker_group(), std::cmp::Reverse(worker.last_active), worker.chat_id.clone()));
-            facts.workers = rows;
-        }
+        let (other_chats, additional_chats) = tracker_select_rows(&mut facts, snapshot.as_deref(), chat_id);
         let stale_chats: std::collections::HashSet<String> = facts.live().filter(|worker| worker.state == crate::team::WorkerState::Idle
             && worker.last_active.is_some_and(|at| chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(3)))
             .map(|worker| worker.chat_id.clone()).collect();
