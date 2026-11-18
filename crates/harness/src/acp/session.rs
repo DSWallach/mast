@@ -77,6 +77,69 @@ impl AcpSessionState {
         };
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_session(
+        &mut self,
+        child: &mut Child,
+        event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+        subagents: &mut SubagentObserver,
+        done_after_interrupt: bool,
+        done_current: bool,
+        session_id: &str,
+        agent_name: &str,
+        stderr_tail: &crate::StderrTail,
+        kill_grace: Duration,
+    ) {
+        // A vanished Devin process cannot send subagent_completed. Settle every
+        // open nested transcript before the parent's terminal Done.
+        let subagent_status = if self.interrupted {
+            DoneStatus::Interrupted
+        } else {
+            DoneStatus::Errored
+        };
+        for event in subagents.finish_open(subagent_status) {
+            if !send(event_tx, event).await {
+                break;
+            }
+        }
+
+        // Terminal bookkeeping: never end the stream without a Done unless the
+        // consumer already hung up.
+        if !event_tx.is_closed() {
+            if self.interrupted && !done_after_interrupt {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.to_owned()),
+                    }))
+                    .await;
+            } else if !self.interrupted && !done_current {
+                // A child killed mid-turn must not read as a silent success.
+                let status = match self.child_exit {
+                    Some(status) => status,
+                    None => tokio::time::timeout(Duration::from_millis(200), child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                };
+                child.request_group_shutdown();
+                stderr_tail.wait_closed().await;
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(crate::crash_message(agent_name, status, stderr_tail)),
+                        session_id: Some(session_id.to_owned()),
+                    }))
+                    .await;
+            }
+        }
+
+        child.shutdown(kill_grace).await;
+    }
+
     async fn expire_prompt_stall(
         &mut self,
         event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -1245,52 +1308,8 @@ pub(super) async fn run_session(session: Session) {
         }
     }
 
-    // A vanished Devin process cannot send subagent_completed. Settle every
-    // open nested transcript before the parent's terminal Done.
-    let subagent_status = if state.interrupted {
-        DoneStatus::Interrupted
-    } else {
-        DoneStatus::Errored
-    };
-    for event in subagents.finish_open(subagent_status) {
-        if !send(&event_tx, event).await {
-            break;
-        }
-    }
-
-    // Terminal bookkeeping: never end the stream without a Done unless the
-    // consumer already hung up.
-    if !event_tx.is_closed() {
-        if state.interrupted && !done_after_interrupt {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Interrupted,
-                    result: None,
-                    error: None,
-                    session_id: Some(session_id.clone()),
-                }))
-                .await;
-        } else if !state.interrupted && !done_current {
-            // A child killed mid-turn must not read as a silent success.
-            let status = match state.child_exit {
-                Some(status) => status,
-                None => tokio::time::timeout(Duration::from_millis(200), child.wait())
-                    .await
-                    .ok()
-                    .and_then(Result::ok),
-            };
-            child.request_group_shutdown();
-            stderr_tail.wait_closed().await;
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(crate::crash_message(agent_name, status, &stderr_tail)),
-                    session_id: Some(session_id.clone()),
-                }))
-                .await;
-        }
-    }
-
-    child.shutdown(kill_grace).await;
+    state.finish_session(
+        &mut child, &event_tx, &mut subagents, done_after_interrupt, done_current,
+        &session_id, agent_name, &stderr_tail, kill_grace,
+    ).await;
 }
