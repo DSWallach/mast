@@ -120,17 +120,24 @@ impl RegistryDoc {
     ) -> Outcome<()> {
         check_operation_id(&p.operation_id)?;
         self.require_space(&p.space_id)?;
-        if p.archive_workers_after_days == Some(0) {
+        use mast_proto::work_outline::WorkerAutomationField;
+        if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) && p.archive_workers_after_days == Some(0) {
             return Err(invalid("The archive delay must be at least one day"));
         }
-        let fields = BTreeMap::from([
+        let mut fields = BTreeMap::from([
             ("spaceId".to_owned(), json!(p.space_id)),
-            ("workerWorktrees".to_owned(), json!(p.worker_worktrees)),
-            ("mergedPrCompletion".to_owned(), json!(p.merged_pr_completion)),
-            ("archiveWorkersAfterDays".to_owned(), json!(p.archive_workers_after_days)),
             ("updatedAt".to_owned(), json!(now_ms)),
             ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
         ]);
+        if p.field.is_none_or(|field| field == WorkerAutomationField::Worktrees) {
+            fields.insert("workerWorktrees".into(), json!(p.worker_worktrees));
+        }
+        if p.field.is_none_or(|field| field == WorkerAutomationField::MergedPrCompletion) {
+            fields.insert("mergedPrCompletion".into(), json!(p.merged_pr_completion));
+        }
+        if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) {
+            fields.insert("archiveWorkersAfterDays".into(), json!(p.archive_workers_after_days));
+        }
         let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
             RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
             RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),

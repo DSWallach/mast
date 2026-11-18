@@ -1243,6 +1243,9 @@ pub struct WorkItemChanges {
     /// Ignored for other statuses; agents may never set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_open_requests: bool,
+    /// Resolve only the specified merged-PR completion request while completing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_request_id: Option<String>,
     /// PR review sync: replace the item's `externalSyncState` record. Only
     /// the system actor (the engine's sync) may set it; a user or agent
     /// change carrying it is `unauthorized`.
@@ -1506,6 +1509,9 @@ pub struct SetResolveMergedHandoffsParams {
 #[serde(rename_all = "camelCase")]
 pub struct SetWorkerAutomationParams {
     pub space_id: String,
+    /// When present, update only this field, leaving other settings intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<WorkerAutomationField>,
     #[serde(default)]
     pub worker_worktrees: bool,
     #[serde(default)]
@@ -1513,6 +1519,14 @@ pub struct SetWorkerAutomationParams {
     #[serde(default)]
     pub archive_workers_after_days: Option<u32>,
     pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkerAutomationField {
+    Worktrees,
+    MergedPrCompletion,
+    ArchiveWorkers,
 }
 
 /// `createWorkItemFromLinear` (Linear integration): create a work item for a

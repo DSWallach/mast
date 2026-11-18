@@ -35,7 +35,7 @@ use mast_proto::work_outline_user_actions::{
     CreateUserActionRequestParams, InstructionProposalReview, InstructionProposalStatus,
     InstructionProposalTarget, ProposalAction, ProposalReviewState, ProposalTargetScope,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionAnswer, UserActionOriginKind, UserActionRequestState,
+    ResolveUserActionRequestParams, UserActionAnswer, UserActionKind, UserActionOriginKind, UserActionRequestState,
     UserActionRequestView, UserActionResolution, WorkItemInstructionProposalView,
     user_action_limits,
 };
@@ -578,6 +578,33 @@ impl RegistryDoc {
             None,
             None,
         ))
+    }
+
+    pub(super) fn plan_merged_pr_completion(
+        &self,
+        work_item_id: &str,
+        request_id: &str,
+        actor: &WorkOutlineActor,
+        now_ms: i64,
+    ) -> Outcome<Vec<Planned>> {
+        if actor.kind != WorkOutlineActorKind::User {
+            return Err(WorkOutlineError::unauthorized("Only the user can approve this completion"));
+        }
+        let requests: Vec<UserActionRequestView> = self.requests_of_item(work_item_id)
+            .into_iter().map(|r| r.view).filter(UserActionRequestView::is_open).collect();
+        let Some(request) = requests.iter().find(|r| r.id == request_id) else {
+            return Err(invalid("The completion request is no longer open"));
+        };
+        let Some(key) = request.dedupe_key.as_deref().filter(|key| key.starts_with("merged-pr-completion:")) else {
+            return Err(invalid("This is not a merged PR completion request"));
+        };
+        if request.origin_kind != UserActionOriginKind::System || request.kind != Some(UserActionKind::Approve) {
+            return Err(invalid("This is not a merged PR completion request"));
+        }
+        if requests.iter().any(|r| r.dedupe_key.as_deref() != Some(key)) {
+            return Err(WorkOutlineError::open_user_action_requests(requests.iter().filter(|r| r.is_unresolved()).count().max(1)));
+        }
+        Ok(Self::plan_resolutions(&requests, actor, now_ms, Some(COMPLETION_RESOLUTION_NOTE), None, None, None, None))
     }
 
     // ── request mutations ──────────────────────────────────────────────────

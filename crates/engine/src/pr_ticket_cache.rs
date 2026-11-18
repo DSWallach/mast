@@ -343,6 +343,12 @@ pub struct PrTicketCache {
 }
 
 impl PrTicketCache {
+    /// Read a cached PR state without scheduling a refresh or a git probe.
+    pub(crate) fn cached_pr_state(&self, url: &str) -> Option<String> {
+        lock(&self.inner.pr_cache).get(&PrKey::Url(url.to_owned()))
+            .filter(|entry| entry.fresh_pr())
+            .and_then(|entry| entry.data.as_ref().map(|status| status.state.clone()))
+    }
     /// Read a fresh durable-link result without scheduling any work. The outer
     /// option is absent when the result is unknown; the inner option is absent
     /// when a lookup completed and found no PR.
@@ -783,7 +789,11 @@ impl PrTicketCache {
                     PrKey::Branch { .. } | PrKey::CheckoutBranch { .. } => status.url.as_deref(),
                 };
                 if let Some(url) = url {
-                    wakes.observe(url, status).await;
+                    let checkout = match &key {
+                        PrKey::Branch { cwd, branch } | PrKey::CheckoutBranch { cwd, branch } => Some((cwd.as_path(), branch.as_str())),
+                        PrKey::Url(_) => None,
+                    };
+                    wakes.observe_with_checkout(url, status, checkout).await;
                 }
             }
             pr_results.push((key, data));

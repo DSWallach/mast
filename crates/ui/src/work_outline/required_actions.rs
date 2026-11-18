@@ -110,6 +110,7 @@ pub(crate) struct RequiredActionRow {
     /// Raised by the engine itself (PR review sync): no Chat, origin
     /// "GitHub", Resolve only.
     pub system: bool,
+    pub merged_pr_completion: bool,
     /// A system request's PR (its work item's `github` / `pullRequest`
     /// reference URL): Open goes there when the item is gone.
     pub pr_url: Option<String>,
@@ -377,6 +378,7 @@ fn row_for(
         },
         chat_available,
         system,
+        merged_pr_completion: system && request.dedupe_key.as_deref().is_some_and(|key| key.starts_with("merged-pr-completion:")),
         pr_url,
         created_at: request.created_at,
         duplicates,

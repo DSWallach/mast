@@ -14,6 +14,8 @@ use crate::workspace_host::WorkspaceHost;
 struct Observations {
     states: HashMap<String, String>,
     notified: HashSet<(String, String)>,
+    #[serde(default)]
+    observed_merges: HashMap<String, HashSet<String>>,
 }
 
 impl Observations {
@@ -145,25 +147,95 @@ impl PrMergedWakes {
         Ok(())
     }
 
+    fn complete_merged_items(&self, url: &str, status: &PrStatus, checkout: Option<(&Path, &str)>, allowed_spaces: Option<&HashSet<String>>) -> Result<HashSet<String>, String> {
+        use mast_proto::work_outline::MergedPrCompletion;
+        use mast_proto::work_outline_user_actions::{RequestLink, RequestLinkTarget, UserActionKind, UserActionOriginKind, UserActionRequestOrigin};
+        let pr = crate::work_outline_pr_links::pull_request_from_url(url).ok_or("invalid merged PR URL")?;
+        let chats = self.workspace.read_chats().map_err(|e| e.to_string())?;
+        let mut enabled_spaces = HashSet::new();
+        for space in self.workspace.read_spaces().map_err(|e| e.to_string())? {
+            if space.device_id != self.workspace.device_id() { continue; }
+            if allowed_spaces.is_some_and(|allowed| !allowed.contains(&space.id)) { continue; }
+            let snapshot = mast_doc::materialize_work_outline(&space.id, &self.workspace.work_outline_inputs(&space.id));
+            let Some(mode) = snapshot.space_settings.merged_pr_completion else { continue; };
+            enabled_spaces.insert(space.id.clone());
+            let mut items = HashSet::new();
+            let mut branch_items = HashSet::new();
+            for reference in &snapshot.external_references {
+                if reference.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER
+                    && reference.reference_type == mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE
+                    && mast_proto::PullRequestRef::parse_external_id(&reference.external_id).is_some_and(|r| r.key() == pr.key()) {
+                    items.insert(reference.work_item_id.clone());
+                }
+            }
+            for chat in chats.iter().filter(|c| c.space_id.as_deref() == Some(space.id.as_str())) {
+                let matches_branch = checkout.is_some_and(|(path, branch)| status.branch.as_deref() == Some(branch) && chat.cwd.as_deref().is_some_and(|cwd| Path::new(cwd) == path)
+                    && chat.branch.as_deref() == Some(branch));
+                let links = self.workspace.chat_pr_links(&chat.id).map_err(|e| e.to_string())?;
+                let matches_link = links.iter().any(|link| crate::archivable::owns_pr_link(link)
+                    && crate::chat_links::canonicalize_pr_url(&link.url) == url);
+                if let Some(item) = snapshot.assignments.iter().find(|a| a.chat_id == chat.id && a.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated).and_then(|a| a.work_item_id.as_ref()) {
+                    if matches_link { items.insert(item.clone()); }
+                    if matches_branch { branch_items.insert(item.clone()); }
+                }
+            }
+            if branch_items.len() == 1 { items.extend(branch_items); }
+            let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::System,
+                device_id: self.workspace.device_id().to_owned(), chat_id: None, message_id: None };
+            for item_id in items {
+                let Some(item) = snapshot.item(&item_id) else { continue; };
+                if item.archived_at.is_some() || item.status == mast_proto::WorkItemStatus::Completed { continue; }
+                let op = mast_proto::work_outline::derive_id(&format!("{item_id}\0{}", pr.key()), "merged-item");
+                let mutation = match mode {
+                    MergedPrCompletion::Ask => mast_proto::WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
+                        options: vec![], links: vec![RequestLink { label: "PR".into(), target: RequestLinkTarget::Pr { url: url.into() } }], facts: vec![],
+                        kind: Some(UserActionKind::Approve), priority: None, work_item_id: item_id,
+                        origin: UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() },
+                        text: format!("Mark done? {} — PR #{} merged", item.title, status.number), info: None,
+                        dedupe_key: Some(format!("merged-pr-completion:{}", pr.key())), operation_id: op,
+                    }),
+                    MergedPrCompletion::Automatic => mast_proto::WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                        work_item_id: item_id, changes: mast_proto::WorkItemChanges { status: Some(mast_proto::WorkItemStatus::Completed), ..Default::default() }, operation_id: op,
+                    }),
+                };
+                if let Err(error) = self.workspace.work_outline_mutate(&mutation, &actor, &[]) {
+                    tracing::warn!(%error, "failed to apply merged PR item automation");
+                }
+            }
+        }
+        Ok(enabled_spaces)
+    }
+
     /// Observe a successful URL refresh; failures never replace the last known state.
+    #[cfg(test)]
     pub(crate) async fn observe(&self, url: &str, status: &PrStatus) {
+        self.observe_with_checkout(url, status, None).await;
+    }
+
+    pub(crate) async fn observe_with_checkout(&self, url: &str, status: &PrStatus, checkout: Option<(&Path, &str)>) {
         let url = crate::chat_links::canonicalize_pr_url(url);
-        let previous = self
-            .observations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .states
-            .get(&url)
-            .cloned();
-        if previous
+        let (previous, observed_merge) = {
+            let observations = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+            (observations.states.get(&url).cloned(), observations.observed_merges.get(&url).cloned())
+        };
+        let transition = previous
             .as_deref()
             .is_some_and(|state| state.eq_ignore_ascii_case("open"))
-            && status.state.eq_ignore_ascii_case("merged")
-        {
+            && status.state.eq_ignore_ascii_case("merged");
+        if transition {
             if let Err(error) = self.resolve_merged_handoffs(&url, status) {
                 tracing::warn!(%error, "failed to resolve merged PR handoffs");
                 return;
             }
+        }
+        let mut enabled_spaces = None;
+        if status.state.eq_ignore_ascii_case("merged") && (transition || (observed_merge.is_some() && checkout.is_some())) {
+            match self.complete_merged_items(&url, status, checkout, if transition { None } else { observed_merge.as_ref() }) {
+                Ok(spaces) => enabled_spaces = Some(spaces),
+                Err(error) => { tracing::warn!(%error, "failed to complete merged PR items"); return; }
+            }
+        }
+        if transition {
             let chats = match self.workspace.read_chats() {
                 Ok(chats) => chats,
                 Err(error) => {
@@ -234,6 +306,10 @@ impl PrMergedWakes {
         }
         let mut observations = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         let mut updated = observations.clone();
+        if transition && checkout.is_none() && let Some(spaces) = enabled_spaces && !spaces.is_empty() {
+            updated.observed_merges.insert(url.clone(), spaces);
+        }
+        if checkout.is_some() { updated.observed_merges.remove(&url); }
         updated.states.insert(url, status.state.clone());
         if let Err(error) = save(&self.path, &updated) {
             tracing::warn!(%error, "failed to save PR state observation");
@@ -379,6 +455,33 @@ mod tests {
         ] {
             workspace.add_chat_pr_link(chat, url, source).unwrap();
         }
+        let mut completion_items = Vec::new();
+        for (space, mode) in [("completion-off", None), ("completion-ask", Some(mast_proto::work_outline::MergedPrCompletion::Ask)), ("completion-auto", Some(mast_proto::work_outline::MergedPrCompletion::Automatic))] {
+            workspace.create_space(space, "device", &format!("/tmp/{space}"), None, false).unwrap();
+            let item = mutate(mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+                space_id: space.into(), parent_work_item_id: None, placement: Default::default(), title: "Feature".into(), description: None, status: None, operation_id: format!("create-{space}"),
+            })).work_item_id.unwrap();
+            mutate(mast_proto::WorkOutlineMutation::CreateWorkItemExternalReference(mast_proto::CreateWorkItemExternalReferenceParams {
+                work_item_id: item.clone(), provider: "github".into(), reference_type: "pullRequest".into(), external_id: "acme/repo#42".into(), url: url.into(), cached_title: None, operation_id: format!("link-{space}"),
+            }));
+            mutate(mast_proto::WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
+                space_id: space.into(), field: None, worker_worktrees: false, merged_pr_completion: mode, archive_workers_after_days: None, operation_id: format!("configure-{space}"),
+            }));
+            completion_items.push((space, mode, item));
+        }
+        workspace.create_space("branch-space", "device", "/tmp/branch-space", None, false).unwrap();
+        let branch_item = mutate(mast_proto::WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
+            space_id: "branch-space".into(), parent_work_item_id: None, placement: Default::default(), title: "Branch item".into(), description: None, status: None, operation_id: "branch-item".into(),
+        })).work_item_id.unwrap();
+        workspace.create_chat("branch-worker", Some("branch-space"), Some("device"), None, Some("/tmp/branch-space".into())).unwrap();
+        workspace.set_chat_branch("branch-worker", "feature/a").unwrap();
+        mutate(mast_proto::WorkOutlineMutation::AssignChatToWorkItem(mast_proto::AssignChatToWorkItemParams {
+            chat_id: "branch-worker".into(), work_item_id: branch_item.clone(), operation_id: "branch-assign".into(),
+        }));
+        mutate(mast_proto::WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
+            space_id: "branch-space".into(), field: None, worker_worktrees: false,
+            merged_pr_completion: Some(mast_proto::work_outline::MergedPrCompletion::Ask), archive_workers_after_days: None, operation_id: "branch-setting".into(),
+        }));
         let sessions = SessionsEngine::new(
             "device".into(),
             Arc::new(RunJournal::open(directory.path().join("journal")).unwrap()),
@@ -433,6 +536,19 @@ mod tests {
         status.state = "MERGED".into();
         status.merged_at = Some("2026-11-05T12:00:00Z".into());
         tracker.observe(url, &status).await;
+        tracker.observe_with_checkout(url, &status, Some((Path::new("/tmp/branch-space"), "feature/a"))).await;
+        let branch_snapshot = mast_doc::materialize_work_outline("branch-space", &workspace.work_outline_inputs("branch-space"));
+        assert!(branch_snapshot.user_action_requests.iter().any(|r| r.work_item_id == branch_item && r.is_open()));
+        for (space, mode, item) in &completion_items {
+            let snapshot = mast_doc::materialize_work_outline(space, &workspace.work_outline_inputs(space));
+            let completed = snapshot.item(item).unwrap().status == mast_proto::WorkItemStatus::Completed;
+            let request = snapshot.user_action_requests.iter().find(|r| r.work_item_id == *item && r.is_open());
+            match mode {
+                None => { assert!(!completed); assert!(request.is_none()); }
+                Some(mast_proto::work_outline::MergedPrCompletion::Ask) => { assert!(!completed); assert!(request.unwrap().text.contains("PR #42 merged")); }
+                Some(mast_proto::work_outline::MergedPrCompletion::Automatic) => { assert!(completed); assert!(request.is_none()); }
+            }
+        }
         for (space, kind, id) in &requests {
             let snapshot = mast_doc::materialize_work_outline(space, &workspace.work_outline_inputs(space));
             let request = snapshot.user_action_request(id).unwrap();

@@ -1270,12 +1270,16 @@ impl RegistryDoc {
             }
         }
         let mut plan = if p.changes.status == Some(WorkItemStatus::Completed) {
-            self.plan_completion_resolutions(
-                &p.work_item_id,
-                p.changes.resolve_open_requests,
-                actor,
-                now_ms,
-            )?
+            if let Some(request_id) = &p.changes.completion_request_id {
+                self.plan_merged_pr_completion(&p.work_item_id, request_id, actor, now_ms)?
+            } else {
+                self.plan_completion_resolutions(
+                    &p.work_item_id,
+                    p.changes.resolve_open_requests,
+                    actor,
+                    now_ms,
+                )?
+            }
         } else {
             Vec::new()
         };

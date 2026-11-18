@@ -174,6 +174,28 @@ fn status_params(
     })
 }
 
+#[test]
+fn merged_pr_completion_only_resolves_its_own_request() {
+    let mut doc = doc_with_spaces("dev-a");
+    let item_id = item(&mut doc, "completion-item", None);
+    let actor = WorkOutlineActor { kind: WorkOutlineActorKind::System, device_id: "dev-a".into(), chat_id: None, message_id: None };
+    let request_id = apply_as(&mut doc, &actor, WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        options: vec![], links: vec![], facts: vec![], kind: Some(UserActionKind::Approve), priority: None,
+        work_item_id: item_id.clone(), origin: UserActionRequestOrigin { kind: UserActionOriginKind::System, ..Default::default() },
+        text: "Mark done?".into(), info: None, dedupe_key: Some("merged-pr-completion:acme/repo#1".into()), operation_id: "merged-request".into(),
+    })).unwrap().user_action_request_id.unwrap();
+    let other = request(&mut doc, "other-request", &item_id, None);
+    let complete = || WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+        work_item_id: item_id.clone(), changes: WorkItemChanges { status: Some(WorkItemStatus::Completed), completion_request_id: Some(request_id.clone()), ..Default::default() }, operation_id: "complete-merged".into(),
+    });
+    assert!(apply(&mut doc, complete()).is_err());
+    apply(&mut doc, resolve_params("resolve-other", &other, None)).unwrap();
+    apply(&mut doc, complete()).unwrap();
+    let snapshot = doc.work_outline_snapshot(SPACE, true);
+    assert_eq!(snapshot.item(&item_id).unwrap().status, WorkItemStatus::Completed);
+    assert!(!snapshot.user_action_request(&request_id).unwrap().is_open());
+}
+
 fn propose_params(
     op: &str,
     target: InstructionProposalTarget,

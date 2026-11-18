@@ -168,7 +168,7 @@ fn worker_automation_defaults_off_and_persists_per_space() {
     assert_eq!(defaults.merged_pr_completion, None);
     assert_eq!(defaults.archive_workers_after_days, None);
     apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
-        space_id: SPACE.into(), worker_worktrees: true,
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
         merged_pr_completion: Some(MergedPrCompletion::Ask),
         archive_workers_after_days: Some(3), operation_id: "worker-settings".into(),
     })).unwrap();
@@ -177,6 +177,15 @@ fn worker_automation_defaults_off_and_persists_per_space() {
     assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
     assert_eq!(settings.archive_workers_after_days, Some(3));
     assert_eq!(doc.work_outline_snapshot(OFF_SPACE, true).space_settings, defaults);
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: Some(mast_proto::work_outline::WorkerAutomationField::Worktrees),
+        worker_worktrees: false, merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "worker-worktrees-off".into(),
+    })).unwrap();
+    let settings = snap(&doc).space_settings;
+    assert!(!settings.worker_worktrees);
+    assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
+    assert_eq!(settings.archive_workers_after_days, Some(3));
 }
 
 #[test]
