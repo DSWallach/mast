@@ -266,18 +266,24 @@ fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Opti
         .map_or(0, |state| state.viewed_files.len())
 }
 
-fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
+fn tracker_stage_color(stage: LifecycleStage, index: usize, theme: &Theme) -> gpui::Hsla {
+    if stage == LifecycleStage::NotStarted || index > stage.index() { theme.border }
+    else if stage == LifecycleStage::Done || index < stage.index() { theme.success }
+    else { theme.accent }
+}
+
+fn tracker_stage_track(id: &str, stage: LifecycleStage, theme: &Theme) -> AnyElement {
     let labels = ["Not started", "Building", "Code review", "PR review", "Ready to merge", "Done"];
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
-    for (index, (label, lit)) in labels.into_iter().zip(stages).enumerate() {
+    for (index, label) in labels.into_iter().enumerate() {
+        let lit = stage != LifecycleStage::NotStarted && index <= stage.index();
+        let color = tracker_stage_color(stage, index, theme);
         let tip = SharedString::from(format!("{label}: {}", if lit { "observed" } else { "not observed" }));
-        track = track.child(crate::components::shell_parts::tracker_stage_indicator(theme, SharedString::from(format!("tracker-stage-{id}-{index}")), lit)
+        track = track.child(crate::components::shell_parts::tracker_stage_indicator(SharedString::from(format!("tracker-stage-{id}-{index}")), color)
             .debug_selector(move || format!("tracker-stage-{label}-{lit}"))
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
     }
-    if let Some(label) = labels.into_iter().zip(stages).filter(|(_, lit)| *lit).map(|(label, _)| label).last() {
-        track = track.child(crate::components::shell_parts::tracker_stage_label(theme, if stages[5] { "Done" } else { label }));
-    }
+    track = track.child(crate::components::shell_parts::tracker_stage_label(theme, stage.label()));
     track.into_any_element()
 }
 
@@ -285,6 +291,18 @@ fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement
 mod tracker_tests {
     use super::*;
     use crate::team::WorkerState;
+
+    #[test]
+    fn stage_track_uses_theme_colors() {
+        for theme in [Theme::light(), Theme::dark()] {
+            for index in 0..6 {
+                assert_eq!(tracker_stage_color(LifecycleStage::NotStarted, index, &theme), theme.border);
+                assert_eq!(tracker_stage_color(LifecycleStage::Done, index, &theme), theme.success);
+                assert_eq!(tracker_stage_color(LifecycleStage::PrReview, index, &theme),
+                    if index < 3 { theme.success } else if index == 3 { theme.accent } else { theme.border });
+            }
+        }
+    }
 
     fn worker(id: &str, state: WorkerState) -> WorkerFacts {
         WorkerFacts { chat_id: id.into(), title: id.into(), work_item_title: Some(id.into()), state, last_active: None, activity: None,
@@ -1651,7 +1669,7 @@ impl Shell {
             header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
         }
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("tracker-item-{}", item.id))
-            .child(header).child(tracker_stage_track(&item.id, std::array::from_fn(|index| index <= stage.index()), theme));
+            .child(header).child(tracker_stage_track(&item.id, stage, theme));
         if let Some(pr) = self.tracker.unassigned_prs.get(&item.id) {
             let url = pr.url.clone().unwrap_or_default();
             let mut label = format!("PR #{} · {}", pr.number, pr.state.to_lowercase());
@@ -1814,7 +1832,7 @@ impl Shell {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
             }
         }
-        let track = tracker_stage_track(&id, std::array::from_fn(|index| index <= stage.index()), theme);
+        let track = tracker_stage_track(&id, stage, theme);
         let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
             .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
         if let Some(todo) = self.tracker.todos.get(&id) {
