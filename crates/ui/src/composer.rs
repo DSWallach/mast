@@ -2321,6 +2321,11 @@ impl Composer {
     /// The attached-skills row: one removable chip per skill, above the input
     /// (same strip geometry as the review-comments chip, so the pill's
     /// arithmetic sizing stays exact — see [`comment_strip_height`]).
+    /// Reconcile composer-owned state with `AppState` (draft swap on
+    /// navigation, question panel, queue-edit and interrupt bookkeeping), and
+    /// repaint only when that changed something visible: the slice of state
+    /// the composer renders differs, or the reconcile itself moved composer
+    /// state. Streaming frames and other chats' updates do neither.
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         let before = self.reconcile_signature();
         self.reconcile_with_state(cx);

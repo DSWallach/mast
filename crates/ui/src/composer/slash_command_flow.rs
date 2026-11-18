@@ -1,6 +1,8 @@
 use super::*;
 
 impl Composer {
+    /// Track the `/` token on every edit: open/refresh the popup, fetch the
+    /// harness's command list on first open, filter locally per keystroke.
     pub(super) fn update_slash(
         &mut self,
         token: Option<MentionToken>,
@@ -451,9 +453,4 @@ impl Composer {
         }
     }
 
-    /// Reconcile composer-owned state with `AppState` (draft swap on
-    /// navigation, question panel, queue-edit and interrupt bookkeeping), and
-    /// repaint only when that changed something visible: the slice of state
-    /// the composer renders differs, or the reconcile itself moved composer
-    /// state. Streaming frames and other chats' updates do neither.
 }

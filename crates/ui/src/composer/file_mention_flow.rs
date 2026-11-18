@@ -409,6 +409,4 @@ impl Composer {
 
     // ---- slash commands ---------------------------------------------------
 
-    /// Track the `/` token on every edit: open/refresh the popup, fetch the
-    /// harness's command list on first open, filter locally per keystroke.
 }
