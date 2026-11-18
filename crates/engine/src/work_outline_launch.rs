@@ -482,11 +482,11 @@ impl WorkItemLaunchService {
             p.config.clone(),
             p.parent_chat_id.as_deref(),
         )?;
-        // A pinned worker worktree is not passed as a Run worktree directive,
-        // so stamp its branch here for PR tracking. This is launch-time work,
-        // never a render-time git lookup, and leaves an existing value alone.
-        if p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
-            && resolved.configuration.bindings.iter().any(|binding| binding.worktree_path.is_some())
+        // A Work Outline launch has no Run worktree directive, so stamp the
+        // branch needed for opted-in PR tracking here. This launch-time lookup
+        // leaves an existing value alone.
+        if p.parent_chat_id.is_some() && (snapshot.space_settings.merged_pr_completion.is_some()
+            || (snapshot.space_settings.worker_worktrees && resolved.configuration.bindings.iter().any(|binding| binding.worktree_path.is_some())))
             && self.workspace.chat(&chat_id).map_err(engine_error)?.is_some_and(|chat| chat.branch.is_none())
         {
             let root = std::path::PathBuf::from(&validated.execution_root);
