@@ -2,6 +2,13 @@ use super::*;
 
 struct EmptyFixture;
 
+#[test]
+fn accessible_markdown_exposes_the_selected_block_text() {
+    let tree = Arc::new(crate::markdown::parse_full("First paragraph.\n\n**Second** paragraph."));
+    let kind = RowKind::Markdown { tree, block_ix: 1 };
+    assert_eq!(row_accessible_text(&kind).as_deref(), Some("Second paragraph."));
+}
+
 impl Render for EmptyFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -109,6 +116,37 @@ fn invalid_rows_and_blocks_count_renders_without_changing_the_list(cx: &mut gpui
             let after = this.list.logical_scroll_top();
             assert_eq!(before.item_ix, after.item_ix);
             assert_eq!(before.offset_in_item, after.offset_in_item);
+        });
+    });
+}
+
+#[gpui::test]
+fn live_markdown_seeds_historical_text_before_rendering(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let transcript = cx.new(|cx| Transcript::new(state, cx));
+    let (_, vcx) = cx.add_window_view(|_, _| EmptyFixture);
+    vcx.update(|window, cx| {
+        transcript.update(cx, |this, cx| {
+            let tree = Arc::new(crate::markdown::parse_full("Historical text"));
+            let row = Row {
+                id: "live".into(), version: 0, turn_start: true,
+                kind: RowKind::LiveMarkdown { tree, block_ix: 0 },
+                entry_id: "entry".into(), timestamp: None, copy_text: None,
+            };
+            this.historical_markdown.insert(row.id.clone(), row.clone());
+            this.rows = vec![row];
+            let count = RENDERED_ROW_COUNT.with(|count| count.get());
+            let _ = this.render_row(0, window, cx);
+            assert_eq!(RENDERED_ROW_COUNT.with(|count| count.get()), count + 1);
+            let veil = &this.veils["live"];
+            assert!(veil.borrow_mut().advance(0, "Historical text", Instant::now()).is_empty());
+            assert_eq!(this.list.logical_scroll_top().item_ix, 0);
         });
     });
 }
