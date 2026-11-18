@@ -43,11 +43,10 @@ impl Composer {
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let mut dispatch_attempted = false;
             let result = Self::dispatch_send(&send, &this, cx, &mut dispatch_attempted).await;
-            let PreparedSend { engine, queue, is_new, err_chat_id, err_message_id, failed_send, comments, code_refs, restore_text, staged_skills, ordinary_staged, staged_appshots, .. } = send;
-            if queue && let Err(error) = &result {
-                tracing::warn!(chat = %err_chat_id, %error, "queue message failed");
+            if send.queue && let Err(error) = &result {
+                tracing::warn!(chat = %send.err_chat_id, %error, "queue message failed");
             }
-            if result.is_err() && is_new && !dispatch_attempted {
+            if result.is_err() && send.is_new && !dispatch_attempted {
                 // A failed new-chat send must not strand a just-minted empty
                 // chat in the sidebar (v0.2.12 "empty transcript" report).
                 // Staging now runs before CreateChat, so usually nothing was
@@ -55,17 +54,22 @@ impl Composer {
                 // leaves a row. Best-effort delete; a no-op if the chat was
                 // never materialized.
                 let _ = attachments::call_with_timeout(
-                    &engine,
+                    &send.engine,
                     cx.background_executor(),
                     methods::MUTATE,
-                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
+                    serde_json::json!({ "op": "deleteChat", "chatId": send.err_chat_id }),
                     std::time::Duration::from_secs(5),
                 )
                 .await;
             }
-            this.update(cx, |composer, cx| {
-                composer.sending = false;
-                composer
+            this.update(cx, |composer, cx| composer.finish_send(send, result, dispatch_attempted, cx)).ok();
+        }));
+    }
+
+    fn finish_send(&mut self, send: PreparedSend, result: Result<Option<String>, String>, dispatch_attempted: bool, cx: &mut Context<Self>) {
+        let PreparedSend { is_new, err_chat_id, err_message_id, failed_send, comments, code_refs, restore_text, staged_skills, ordinary_staged, staged_appshots, .. } = send;
+                self.sending = false;
+                self
                     .state
                     .update(cx, |s, _| s.end_upload_progress());
                 if let Ok(Some(message_id)) = &result {
@@ -87,8 +91,8 @@ impl Composer {
                     };
                     let mut failed_send = failed_send;
                     failed_send.key = restore_key.clone();
-                    composer.failed_send = Some(failed_send);
-                    composer.state.update(cx, |s, cx| {
+                    self.failed_send = Some(failed_send);
+                    self.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
                         if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
@@ -102,11 +106,11 @@ impl Composer {
                         for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
                         cx.notify();
                     });
-                    composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
+                    self.restore_failed_text(&restore_key, &restore_text, &message, cx);
                     if !staged_skills.is_empty() {
                         // Chips attached while the send was in flight stay;
                         // the failed send's chips rejoin them (deduped).
-                        let slot = composer.skills.entry(restore_key.clone()).or_default();
+                        let slot = self.skills.entry(restore_key.clone()).or_default();
                         let fresh = std::mem::take(slot);
                         for name in staged_skills.iter().chain(&fresh) {
                             attach_skill(slot, name);
@@ -119,7 +123,7 @@ impl Composer {
                         // target is the canvas.
                         let mut merged = ordinary_staged.clone();
                         for key in [err_chat_id.clone(), restore_key.clone()] {
-                            if let Some(slot) = composer.attachments.get_mut(&key) {
+                            if let Some(slot) = self.attachments.get_mut(&key) {
                                 let fresh: Vec<_> = slot
                                     .drain(..)
                                     .filter(|e| !merged.iter().any(|f| f.id == e.id))
@@ -127,14 +131,11 @@ impl Composer {
                                 merged.extend(fresh);
                             }
                         }
-                        composer.attachments.insert(restore_key.clone(), merged);
+                        self.attachments.insert(restore_key.clone(), merged);
                     }
-                    composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+                    self.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
                 }
                 cx.notify();
-            })
-            .ok();
-        }));
     }
 
     async fn dispatch_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool) -> Result<Option<String>, String> {
