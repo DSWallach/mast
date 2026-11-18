@@ -42,6 +42,20 @@ fn registries() -> Vec<PathBuf> {
 }
 
 /// Match transcript provenance to a registry definition only when unambiguous.
+/// The `filePath` of the registry row an import source (`…json#id`) names,
+/// read from that registry now. `None` when the registry or row is gone.
+pub(crate) fn registry_file(import_source: &str) -> Option<String> {
+    let (path, id) = import_source.rsplit_once('#')?;
+    let bytes = read(Path::new(path), 2 * 1024 * 1024).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value["scheduledTasks"]
+        .as_array()?
+        .iter()
+        .find(|row| row["id"].as_str() == Some(id))?["filePath"]
+        .as_str()
+        .map(str::to_owned)
+}
+
 pub(crate) fn imported_identity(
     file: &str,
     name: &str,
@@ -130,6 +144,9 @@ pub fn preview(
                 continue;
             };
             evaluator::validate(&schedule).map_err(fail)?;
+            // A task that repeats within the hour only catches up its latest miss briefly.
+            let sub_hourly = matches!(&schedule, TaskSchedule::Cron { expression, .. }
+                if expression.split_whitespace().next().is_some_and(|m| m.contains(['/', ',', '-'])));
             let prompt = String::from_utf8(read(Path::new(file), 128 * 1024)?).map_err(fail)?;
             if prompt
                 .lines()
@@ -171,7 +188,7 @@ pub fn preview(
                     enabled: false,
                     cutover_confirmed: false,
                     work_item_id: None,
-                    grace_minutes: if id.contains("stall-watch") { 30 } else { 360 },
+                    grace_minutes: if sub_hourly { 30 } else { 360 },
                 },
                 warnings,
             });

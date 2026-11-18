@@ -811,6 +811,42 @@ impl ExternalSessionImporter {
         Ok(repaired)
     }
 
+    /// Stamps `sourceFile` on imported runs tagged before it was recorded,
+    /// from the import cursor's transcript, so the run identity merge can
+    /// tell same-named tasks of different Claude accounts apart. Each run
+    /// is scanned once, recorded by a marker file.
+    pub fn backfill_scheduled_source_files(&self) -> Result<usize, EngineError> {
+        let markers = self.store.root().join("scheduled-source-file-v1");
+        let mut stamped = 0;
+        for chat in self.workspace.read_chats()? {
+            let Some(info) = chat
+                .scheduled_task_info
+                .as_ref()
+                .filter(|i| i.source_file.is_none())
+            else {
+                continue;
+            };
+            if chat.device_id != self.device_id || markers.join(&chat.id).is_file() {
+                continue;
+            }
+            let Some(cursor) = self.read_cursor(&chat.id)? else {
+                continue;
+            };
+            let first = first_raw_user_message(Path::new(&cursor.transcript_path));
+            if let Some((_, file)) = first.as_deref().and_then(scheduled_tag) {
+                let info = mast_proto::ScheduledChat {
+                    source_file: Some(file.to_owned()),
+                    ..info.clone()
+                };
+                self.workspace.set_chat_scheduled_task_info(&chat.id, &info)?;
+                stamped += 1;
+            }
+            let _ = std::fs::create_dir_all(&markers);
+            let _ = std::fs::write(markers.join(&chat.id), b"");
+        }
+        Ok(stamped)
+    }
+
     fn scheduled_task_markers_dir(&self) -> PathBuf {
         self.store.root().join("scheduled-task-scan-v2")
     }
@@ -1419,7 +1455,19 @@ fn scheduled_metadata(
     device: &str,
     scope: &str,
 ) -> Option<mast_proto::ScheduledChat> {
-    let text = parsed.first_user_message.as_deref()?;
+    let (name, file) = scheduled_tag(parsed.first_user_message.as_deref()?)?;
+    Some(mast_proto::ScheduledChat {
+        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
+        task_name: name.to_owned(),
+        run_id: session_id.to_owned(),
+        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
+        source_file: Some(file.to_owned()),
+        ..Default::default()
+    })
+}
+
+/// The `(name, file)` of a scheduled-task wrapper in a run's first message.
+fn scheduled_tag(text: &str) -> Option<(&str, &str)> {
     // A task wrapper must start a line; discussing a tag in prose is not a run.
     let tag = text
         .lines()
@@ -1430,16 +1478,7 @@ fn scheduled_metadata(
         .split('"')
         .next()?;
     let file = tag.split("file=\"").nth(1)?.split('"').next()?;
-    if name.is_empty() || file.is_empty() {
-        return None;
-    }
-    Some(mast_proto::ScheduledChat {
-        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
-        task_name: name.to_owned(),
-        run_id: session_id.to_owned(),
-        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
-        ..Default::default()
-    })
+    (!name.is_empty() && !file.is_empty()).then_some((name, file))
 }
 
 struct ParsedTranscript {

@@ -41,16 +41,16 @@ The following times are interpreted as America/New_York, consistent with current
 
 | Enabled task | Registry schedule in Eastern time | Migration concern |
 | --- | --- | --- |
-| Slack Briefing | Weekdays 03:30 | Slack connection and Notion procedure/output |
-| Claude Sessions Briefing | Weekdays 03:45 | Access to existing Claude session history; Notion |
-| Linear Project Daily Briefing | Weekdays 04:00 | Linear and Notion; procedure can perform writes |
-| Linear Tickets Briefing | Weekdays 04:30 | Linear and Notion |
-| GitHub priority briefing | Weekdays 04:40 | GitHub CLI and Notion; prompt says 04:55, registry wins |
-| Codespace Manager | Weekdays 04:45 | Local wrappers, credentials, skills, agents, Notion; creates/deletes resources |
-| Assistant daily summary | Weekdays 05:00 | Multiple tools and upstream briefings; existing procedure remains authoritative |
-| Codespace Stall Watch | Every 30 minutes, weekdays 09:00–17:30 | Local wrappers; narrowly permitted resume operation |
+| Chat digest | Weekdays 03:30 | Chat connection and a document-tool procedure/output |
+| Session digest | Weekdays 03:45 | Access to existing Claude session history; document tool |
+| Project digest | Weekdays 04:00 | Issue tracker and document tool; procedure can perform writes |
+| Ticket digest | Weekdays 04:30 | Issue tracker and document tool |
+| Pull request digest | Weekdays 04:40 | GitHub CLI and document tool; prompt and registry times differ, registry wins |
+| Environment cleanup | Weekdays 04:45 | Local wrappers, credentials, skills, agents; creates/deletes resources |
+| Daily summary | Weekdays 05:00 | Multiple tools and upstream digests; existing procedure remains authoritative |
+| Stall check | Every 30 minutes, weekdays 09:00–17:30 | Local wrappers; narrowly permitted resume operation |
 
-Keep all four disabled one-time jobs disabled. The retired `daily-priority-briefing` prompt has no live definition and must not be recreated. Do not put user-specific account IDs, private Notion page IDs, or raw approval lists into upstream fixtures/docs.
+Keep all four disabled one-time jobs disabled. A retired routine's prompt has no live definition and must not be recreated. Do not put user-specific account IDs, private Notion page IDs, or raw approval lists into upstream fixtures/docs.
 
 ## User experience
 
@@ -106,7 +106,7 @@ Add stable `scheduledTaskId` and `scheduledTaskRunId` chat metadata, retaining t
 
 - Store IANA timezones and calculate UTC occurrences explicitly. Use wall-clock cron semantics; document day-of-month/day-of-week OR behavior and Sunday aliases. Reject unsupported cron syntax with a clear error. Evaluate an appropriate parser/timezone dependency during implementation and pin the chosen semantics in tests.
 - Spring daylight saving gap: skip nonexistent local times. Fall repeated hour: run once at the first matching local instant. Use the same deduplication rule after restart, so the second repeated instant cannot create another run.
-- Default misfire policy: coalesce to the latest missed occurrence within a configurable grace window, proposed six hours for daily briefings and one interval for the stall watch. Skip older occurrences with an aggregate history reason. Expired one-time tasks remain expired. Never replay an unbounded backlog on restart.
+- Default misfire policy: coalesce to the latest missed occurrence within a configurable grace window, proposed six hours for daily digests and one interval for the stall check. Skip older occurrences with an aggregate history reason. Expired one-time tasks remain expired. Never replay an unbounded backlog on restart.
 - Default overlap policy: one active occurrence per task, including queued launch and waiting-for-approval/input. Record newer occurrences as skipped while active; do not build a growing queue. Manual runs obey this too. Use a configurable global scheduled-run limit, initially two, and a bounded oldest-due-first queue. Recheck grace and paused state before dispatch from that queue.
 - Existing time ordering is not a dependency guarantee. Preserve schedules during import and show freshness issues reported by existing procedures. Explicit task dependencies and conditional workflows can follow later; do not silently invent them during migration.
 - Recheck pause/delete/revision/ownership before dispatch, serializing those changes with claims. Scheduled jobs do not bypass existing execution checks or auto-continue settings.
@@ -128,7 +128,7 @@ The promise is one logical occurrence and idempotent dispatch, not exactly-once 
 5. Present permission differences explicitly. Claude `auto`, `acceptEdits`, and per-tool `approvedPermissions` are not equivalent to Mast's boolean auto-approve. Never translate scoped approvals into permission bypass. Use Ask by default, or require an explicit task-specific choice of Mast's existing Auto-approve behavior. Exact scoped approval compatibility, if required for these tasks, is a separately tested extension to the existing permission control channel, not a scheduler-specific bypass. Until resolved, mark the task as requiring setup.
 6. Validate with fixtures and supervised runs that obey real task permissions. Do not label a write-capable run a dry run unless writes are actually suppressed by the chosen execution mechanism. Statically importing a prompt never authorizes executing it.
 7. For each task, have the user pause its Claude schedule through the supported Claude surface, verify it is paused and no source run is in flight, then activate Mast with a cutover timestamp. Ignore source occurrences before that boundary. If source state cannot be verified, keep Mast paused and show the remaining step. Avoid editing Claude's private JSON while it is running.
-8. Migrate briefings before the assistant summary and Codespace automation, verify results and tool parity, then retire the original schedules. Rollback pauses Mast, drains/cancels its pending work, confirms no active occurrence remains, and re-enables Claude from a new boundary.
+8. Migrate the digests before the daily summary and environment automation, verify results and tool parity, then retire the original schedules. Rollback pauses Mast, drains/cancels its pending work, confirms no active occurrence remains, and re-enables Claude from a new boundary.
 
 ## Implementation sequence and acceptance
 
@@ -137,7 +137,7 @@ The promise is one logical occurrence and idempotent dispatch, not exactly-once 
 3. **Launch and lifecycle integration.** Extract the shared launch helper; add dispatcher/reconciler, task provenance, and bounded concurrency. Acceptance: failure injection after each durable launch step repairs the same chat/message/command; ambiguous started runs are not relaunched; normal Work Outline launches retain their existing guarantees; approval/input/cancel outcomes are accurate.
 4. **RPC and interface.** Register list/watch, create/update, enable/pause, run-now, delete, paginated run-history, and import-preview/apply methods using existing RPC authentication/device routing. Mutations use idempotency keys and expected revision checks. Return a latest-session summary per task for sidebar/overview rendering, using the same ordering rule as history. Add Scheduled tasks UI and notifications. Acceptance: a user can create a task, preview times, run it, inspect its chat, pause it remotely on the owner, and resolve a blocked setup state. Both sidebar and overview show one latest session per task by default; the session header and overview history action open older editions. Reading or continuing an older session does not reorder editions, and a new run does not interrupt that reading. Verify manual runs, skipped occurrences, task renames, same-name tasks, imported history, pagination, and restart preserve these rules. Unsupported clients read additive metadata safely.
 5. **Migration and permission readiness.** Implement the read-only importer and preview, with redacted fixtures matching both observed registry locations. Acceptance: 12 source definitions produce eight recurring candidates and four disabled one-time entries; the retired orphan prompt stays excluded; repeat import is idempotent; timezone/model/tool/permission mismatches remain visible; enabling requires a verified cutover boundary.
-6. **Pilot and operating guide.** Document host availability, headless deployment, permissions, missed runs, recovery, and rollback. Run a synthetic overnight/restart pilot before supervised real briefings. Acceptance: one logical run per due time, correct Eastern timestamps, bounded catch-up, usable notices for unavailable tools, and no duplicate Claude/Mast dispatch across the cutover boundary.
+6. **Pilot and operating guide.** Document host availability, headless deployment, permissions, missed runs, recovery, and rollback. Run a synthetic overnight/restart pilot before supervised real runs. Acceptance: one logical run per due time, correct Eastern timestamps, bounded catch-up, usable notices for unavailable tools, and no duplicate Claude/Mast dispatch across the cutover boundary.
 
 Validation uses isolated temporary homes/profiles, injected tick times, mock harnesses, and sanitized registries; no production tasks are executed by the tests. The native application build, focused protocol/scheduler/UI suites, and existing external-import, Work Outline launch, and profile-isolation regressions passed. New Rust modules pass formatting checks, and the complete diff passes whitespace checks.
 

@@ -2587,6 +2587,7 @@ impl Overview {
         let by_id: HashMap<&str, &OverviewRow> =
             rows.iter().map(|row| (row.chat.id.as_str(), row)).collect();
         let state = self.state.read(cx);
+        let hidden_runs = mast_proto::hidden_task_chat_ids(&state.chats);
         state
             .chats
             .iter()
@@ -2610,6 +2611,7 @@ impl Overview {
                 });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 let visible = shown_by_toggles
+                    && !hidden_runs.contains(chat.id.as_str())
                     && self
                         .sidebar_scope
                         .as_deref()
@@ -9163,7 +9165,7 @@ mod logic_tests {
                 "id": id, "deviceId": "host", "archived": false, "cwd": "/work/alpha",
                 "createdAt": "2026-01-01T00:00:00Z",
                 "scheduledTaskInfo": {
-                    "taskId": task, "taskName": "stall-watch", "runId": id,
+                    "taskId": task, "taskName": "routine-a", "runId": id,
                     "sessionCreatedAt": created, "retired": retired
                 }
             }))
@@ -9193,7 +9195,7 @@ mod logic_tests {
                 "id": "watch", "revision": 1, "deviceId": "host", "createdAt": 0,
                 "updatedAt": 0, "nextDue": 1_800_000_000_000i64,
                 "draft": {
-                    "name": "Codespace Stall Watch", "prompt": "p", "cwd": "/work",
+                    "name": "Workspace health check", "prompt": "p", "cwd": "/work",
                     "spaceId": null, "enabled": true, "graceMinutes": 30,
                     "schedule": {"type": "cron", "expression": "*/30 9-17 * * 1-5",
                         "timezone": "America/New_York"},
@@ -9230,7 +9232,17 @@ mod logic_tests {
                 .unwrap()
                 .chat;
             let (task, _) = o.task_for(latest).expect("the host reported the task");
-            assert_eq!(task.draft.name, "Codespace Stall Watch");
+            assert_eq!(task.draft.name, "Workspace health check");
+            // The Work Outline sees every run but shows only the latest.
+            let visible = |id: &str| {
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == id)
+                    .unwrap_or_else(|| panic!("{id} reaches the outline"))
+                    .visible
+            };
+            assert!(visible("latest") && visible("plain"));
+            assert!(!visible("older") && !visible("gone"));
         });
         assert!(vcx.debug_bounds("overview-task-row-watch").is_some());
         assert!(vcx.debug_bounds("overview-task-history-watch").is_some());

@@ -968,6 +968,13 @@ impl Render for ScheduledTasksPage {
                 .find(|h| h.id == config.harness)
                 .map(|h| h.name.clone())
                 .unwrap_or_else(|| format!("{:?}", config.harness));
+            // An older host would drop the field on save, so it is not offered.
+            let work_item_supported = self.target.as_deref().is_some_and(|device| {
+                self.state.read(cx).device_supports(
+                    device,
+                    mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                )
+            });
             for (key, label, value) in [
                 ("harness", "Agent", harness_label.as_str()),
                 ("space", "Space", space_label.as_str()),
@@ -975,7 +982,10 @@ impl Render for ScheduledTasksPage {
                 ("model", "Model", model_label.as_str()),
                 ("thinking", "Thinking level", thinking_label.as_str()),
                 ("contextWindow", "Context window", context_label),
-            ] {
+            ]
+            .into_iter()
+            .filter(|(key, ..)| *key != "workItem" || work_item_supported)
+            {
                 selects = selects.child(
                     div()
                         .flex()
@@ -1509,6 +1519,42 @@ impl Render for ScheduledTasksPage {
 mod tests {
     use super::*;
     #[gpui::test]
+    fn the_work_item_field_needs_a_host_that_stores_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            for (id, capabilities) in [
+                ("current", vec![mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
+                ("older", vec![]),
+            ] {
+                s.devices.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "name": id, "platform": "macos", "capabilities": capabilities,
+                    }))
+                    .unwrap(),
+                );
+            }
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(1600.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-workItem").is_some());
+        page.update(cx, |p, cx| {
+            p.target = Some("older".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-workItem").is_none());
+        assert!(cx.debug_bounds("task-select-space").is_some());
+    }
+
+    #[gpui::test]
     fn task_list_opens_settings_with_only_that_tasks_history_below(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let state = cx.new(|_| AppState::new());
@@ -1674,7 +1720,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "id": id, "deviceId": "host", "archived": false,
                 "createdAt": "2026-01-01T00:00:00Z",
-                "scheduledTaskInfo": {"taskId": task, "taskName": "daily-priority-briefing",
+                "scheduledTaskInfo": {"taskId": task, "taskName": "retired-routine",
                     "runId": id, "sessionCreatedAt": created, "retired": true}
             }))
             .unwrap()
@@ -1898,16 +1944,17 @@ mod tests {
                         let mut p = ScheduledTasksPage::new(state.clone(), cx);
                         p.target = Some("host".into());
                         state.update(cx, |s, _| {
-                            s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Morning engineering briefing","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Morning engineering briefing","runId":"morning-previous"}})).unwrap()];
+                            s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos","capabilities":[mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]})).unwrap());
+                            s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
                         });
                         p.edit(None, cx);
                         p.editor.as_mut().unwrap().id = "morning".into();
                         p.editor.as_mut().unwrap().revision = 2;
                         let e = p.editor.as_ref().unwrap();
-                        e.name.update(cx, |i,cx|i.set_text("Morning engineering briefing",cx));
-                        e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-briefing",cx));
+                        e.name.update(cx, |i,cx|i.set_text("Daily summary",cx));
+                        e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-summary",cx));
                         e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
-                        p.editor.as_mut().unwrap().draft.work_item_id = Some("morning-briefings".into());
+                        p.editor.as_mut().unwrap().draft.work_item_id = Some("routines".into());
                         p.error = None;
                         p
                     });
@@ -1927,9 +1974,9 @@ mod tests {
                     };
                     state.update(cx, |s, _| {
                         s.chats = vec![
-                            retired("a", "old-briefing", "daily-priority-briefing"),
-                            retired("b", "old-briefing", "daily-priority-briefing"),
-                            retired("c", "flip-check", "allocation-flip-check-morning"),
+                            retired("a", "old-routine", "routine-a"),
+                            retired("b", "old-routine", "routine-a"),
+                            retired("c", "nightly", "nightly-check"),
                         ];
                     });
                     let page = cx.new(|cx| {

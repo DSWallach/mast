@@ -817,6 +817,11 @@ pub struct WorkOutlineSnapshot {
     /// spaces" Outline view adds them client-side).
     #[serde(default)]
     pub unassociated_chat_ids: Vec<String>,
+    /// Scheduled runs of this Space that are not their task's latest run, or
+    /// whose task is retired, sorted. They stay in each item's `chat_ids` so
+    /// lookups find their item; lists and counts leave them out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_run_chat_ids: Vec<String>,
     /// Sorted by reference id.
     #[serde(default)]
     pub external_references: Vec<WorkItemExternalReferenceView>,
@@ -954,6 +959,7 @@ impl WorkOutlineSnapshot {
             && self.items == other.items
             && self.assignments == other.assignments
             && self.unassociated_chat_ids == other.unassociated_chat_ids
+            && self.hidden_run_chat_ids == other.hidden_run_chat_ids
             && self.external_references == other.external_references
             && self.repairs == other.repairs
             && self.instructions == other.instructions
@@ -1052,6 +1058,18 @@ impl WorkOutlineSnapshot {
 
     pub fn item(&self, id: &str) -> Option<&WorkItemView> {
         self.items.iter().find(|item| item.id == id)
+    }
+
+    /// A superseded or retired scheduled run, which lists and counts skip.
+    pub fn is_hidden_run(&self, chat_id: &str) -> bool {
+        self.hidden_run_chat_ids
+            .binary_search_by(|id| id.as_str().cmp(chat_id))
+            .is_ok()
+    }
+
+    /// `item`'s chats as lists show them: without hidden scheduled runs.
+    pub fn listed_chat_ids<'a>(&'a self, item: &'a WorkItemView) -> impl Iterator<Item = &'a String> {
+        item.chat_ids.iter().filter(|id| !self.is_hidden_run(id))
     }
 
     /// Effective instructions of one item, resolved over this snapshot's
@@ -2259,6 +2277,7 @@ mod tests {
                 state: WorkItemChatAssignmentState::DanglingWorkItem,
             }],
             unassociated_chat_ids: vec!["chat-2".into()],
+            hidden_run_chat_ids: vec!["chat-2".into()],
             external_references: vec![WorkItemExternalReferenceView {
                 id: "ref-1".into(),
                 space_id: "space-1".into(),

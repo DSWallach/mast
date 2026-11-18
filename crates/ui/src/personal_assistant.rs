@@ -28,9 +28,10 @@ pub(crate) struct PersonalAssistantState {
 }
 
 impl PersonalAssistantState {
-    /// The picked chat, or any run of its scheduled task.
-    pub(crate) fn covers(&self, chat: &Chat) -> bool {
-        self.assistant.as_ref().is_some_and(|a| a.covers(chat))
+    /// The picked chat, or any run of its scheduled task (`chats`: every
+    /// chat, where a merged imported task is looked up).
+    pub(crate) fn covers(&self, chat: &Chat, chats: &[Chat]) -> bool {
+        self.assistant.as_ref().is_some_and(|a| a.covers(chat, chats))
     }
 
     /// The chat the sidebar shows and opens (a task's latest run).
@@ -75,7 +76,7 @@ impl AppState {
         self.chats
             .iter()
             .find(|c| c.id == chat_id)
-            .is_some_and(|c| self.personal_assistant.covers(c))
+            .is_some_and(|c| self.personal_assistant.covers(c, &self.chats))
     }
 
     /// The 1 s heartbeat: read the designation until the first read lands.
@@ -211,9 +212,9 @@ mod tests {
         assert!(!state.apply(reply(None)));
         assert!(!state.load_due(Instant::now()));
         assert!(state.apply(reply(Some("c1"))));
-        assert!(state.covers(&chat("c1")));
+        assert!(state.covers(&chat("c1"), &[]));
         assert!(!state.apply(reply(Some("c1"))));
         assert!(state.apply(reply(None)));
-        assert!(!state.covers(&chat("c1")));
+        assert!(!state.covers(&chat("c1"), &[]));
     }
 }

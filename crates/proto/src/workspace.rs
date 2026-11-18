@@ -37,6 +37,10 @@ pub mod capabilities {
     /// only to devices that advertise it.
     pub const TOKEN_USAGE_V1:&str="token-usage-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
+    /// The host stores a scheduled task's `workItemId`, attaches each run to
+    /// that item and delivers its instructions. Clients offer the Work item
+    /// field only for hosts that advertise it; older hosts drop the field.
+    pub const SCHEDULED_TASK_WORK_ITEM_V1: &str = "scheduled-task-work-item-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
     /// Linear Work Outline operations (`setSpaceLinearEnabled`,
     /// `createWorkItemFromLinear`, `linkLinearProject`).
@@ -78,6 +82,7 @@ pub mod capabilities {
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
+        SCHEDULED_TASK_WORK_ITEM_V1,
         TOKEN_USAGE_V1,
         LINEAR_V1,
         PR_REVIEW_SYNC_V1,

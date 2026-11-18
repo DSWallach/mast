@@ -17,9 +17,9 @@ Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
 Choose a **Work item** within the selected Space to attach each run to that item
 and deliver its inherited instructions. Changing the Space clears the work item.
-The execution device must support task-to-item attachment. Older engines ignore
-the work-item field when saving a task, so they run without the item association
-or its inherited instructions; update the execution device before using it.
+The field appears only when the execution device supports task-to-item
+attachment; update an older execution device to use it. A run whose agent cannot
+receive the item's instructions fails before it creates a session.
 Each run captures its configuration, so editing a task changes future editions.
 You can change the model or switch agents, including Claude Code to Codex, after
 a task has run. Past editions retain their original agent and model.
@@ -55,7 +55,8 @@ session. **Delete** removes the schedule while retaining its run history.
 ## Read editions
 
 The sidebar, Overview, and Work Outline show only the latest unarchived run per
-task on each device. In Overview list mode, each task has a row with its name,
+task on each device. An older run attached to a work item stays attached to it
+and is hidden from the item's chat list and count. In Overview list mode, each task has a row with its name,
 schedule, next run, and last outcome. Click the row to open the latest run or
 choose **History** to see past runs. Reading or replying to an older edition
 does not promote it. The task manager lists
@@ -68,7 +69,9 @@ edition you are reading.
 Imported Claude editions use their original transcript timestamps when choosing
 the latest edition. Task identity includes source provenance; identical display
 names do not merge unrelated tasks. Imported runs join their native task once
-the matching source is imported. Deleted tasks and source tasks never imported
+the matching source is imported: the run's task name and prompt file must both
+match that source, so a same-named task from another Claude account stays apart.
+A personal assistant chosen on an imported run follows its task after the join. Deleted tasks and source tasks never imported
 into Mast appear under **Retired tasks** in Scheduled tasks; their runs stay
 readable in history and are hidden from the sidebar, Overview, and Work Outline.
 

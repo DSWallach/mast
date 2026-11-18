@@ -1016,7 +1016,10 @@ impl AgentToolsService {
             .filter(|g| g.space_id == grant.space_id)
             .map(|g| g.space_id);
         // A later run of the assistant's scheduled task is the assistant too.
-        let personal_assistant = self.tokens.personal_assistant().is_assistant(&chat);
+        let personal_assistant = self
+            .tokens
+            .personal_assistant()
+            .is_assistant(&chat, || self.workspace.read_chats().unwrap_or_default());
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
@@ -2775,11 +2778,11 @@ impl SubtreeWalk<'_> {
     }
 
     /// The item's attached Chats (id, title, status, lastMessageAt) and how
-    /// many were left out.
+    /// many were left out. Superseded scheduled runs are not listed.
     fn chats_of(&self, item: &mast_proto::WorkItemView) -> (Vec<Value>, usize) {
         let mut chats = Vec::new();
         let mut omitted = 0usize;
-        for chat_id in &item.chat_ids {
+        for chat_id in self.snapshot.listed_chat_ids(item) {
             let Some(chat) = self.workspace.chat(chat_id).ok().flatten() else {
                 continue;
             };

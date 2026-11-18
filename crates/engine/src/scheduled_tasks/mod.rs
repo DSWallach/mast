@@ -88,7 +88,7 @@ impl ScheduledTasks {
                     .into_iter()
                     .filter(|t| !t.deleted)
                     .collect();
-                response.runs = self.0.store.runs(None, None)?;
+                response.runs = self.listed_runs()?;
                 return Ok(response);
             }
         }
@@ -276,8 +276,25 @@ impl ScheduledTasks {
             .into_iter()
             .filter(|t| !t.deleted)
             .collect();
-        response.runs = self.0.store.runs(None, None)?;
+        response.runs = self.listed_runs()?;
         Ok(response)
+    }
+    /// The newest runs across tasks plus every task's own newest run, newest
+    /// first, so each task's last outcome is listed however rarely it runs.
+    fn listed_runs(&self) -> Result<Vec<ScheduledRun>, EngineError> {
+        let mut runs = self.0.store.runs(None, None)?;
+        for latest in self.0.store.latest_per_task()? {
+            if !runs.iter().any(|r| r.id == latest.id) {
+                runs.push(latest);
+            }
+        }
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(runs)
+    }
+    /// When run identities were last reconciled; `None` = due on the next tick.
+    #[doc(hidden)]
+    pub fn identities_checked_at(&self) -> Option<i64> {
+        *self.0.identities_checked.lock().unwrap_or_else(|e| e.into_inner())
     }
     /// Rewrite this device's run identities to match its task ledger, in one
     /// registry write. Gated on a synced registry like the orphan sweep in
@@ -293,7 +310,12 @@ impl ScheduledTasks {
         }
         let chats = self.0.workspace.read_chats()?;
         let tasks = self.0.store.tasks()?;
-        let updates = identity::plan(&chats, &tasks, self.0.workspace.device_id());
+        let task_files = tasks
+            .iter()
+            .filter(|t| !t.deleted)
+            .filter_map(|t| Some((t.id.clone(), import::registry_file(t.import_source.as_deref()?)?)))
+            .collect();
+        let updates = identity::plan(&chats, &tasks, &task_files, self.0.workspace.device_id());
         let written = self.0.workspace.set_chats_scheduled_task_info(&updates)?;
         *checked() = Some(now);
         if written > 0 {

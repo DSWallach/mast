@@ -5073,7 +5073,7 @@ impl Shell {
                                 && !present.contains(&chat.id)
                                 && !chat.archived
                                 && chat.scheduled_task_info.is_some()
-                                && !state.personal_assistant.covers(chat)
+                                && !state.personal_assistant.covers(chat, &state.chats)
                         })
                         .map(|chat| (state.display_status_for(chat, now), chat.clone())),
                 );
@@ -6056,7 +6056,7 @@ impl Shell {
             let assistant_data = assistant_chat.map(|chat| {
                 let selected = state
                     .selected_chat_row()
-                    .is_some_and(|selected| state.personal_assistant.covers(selected));
+                    .is_some_and(|selected| state.personal_assistant.covers(selected, &state.chats));
                 (
                     self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state),
                     selected,
@@ -6283,7 +6283,7 @@ impl Shell {
                         .as_ref()
                         .is_none_or(|ids| ids.contains(&c.id))
                 })
-                .filter(|c| !state.personal_assistant.covers(c))
+                .filter(|c| !state.personal_assistant.covers(c, &state.chats))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

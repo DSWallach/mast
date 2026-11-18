@@ -1,6 +1,8 @@
 //! Run identity backfill: imported runs join the native task imported from
 //! the same Claude task, and runs whose task is gone are retired. Only the
 //! host device rewrites its own chats.
+use std::collections::HashMap;
+
 use mast_proto::{Chat, ScheduledChat, ScheduledTask};
 
 /// The registry task name a native task was imported from (`…json#name`).
@@ -13,10 +15,12 @@ fn source_name(task: &ScheduledTask) -> Option<&str> {
 }
 
 /// The `scheduledTaskInfo` rewrites that bring `device`'s runs in line with
-/// its task ledger. Empty once applied, so repeating it writes nothing.
+/// its task ledger. `task_files` maps a native task id to its registry row's
+/// `filePath`. Empty once applied, so repeating it writes nothing.
 pub(crate) fn plan(
     chats: &[Chat],
     tasks: &[ScheduledTask],
+    task_files: &HashMap<String, String>,
     device: &str,
 ) -> Vec<(String, ScheduledChat)> {
     let tasks: Vec<&ScheduledTask> = tasks.iter().filter(|t| t.device_id == device).collect();
@@ -31,10 +35,19 @@ pub(crate) fn plan(
             None => {
                 // Never by display name alone: the name must be the import
                 // source's task name, and only one live task may claim it.
-                let mut claims = tasks
+                let named: Vec<&&ScheduledTask> = tasks
                     .iter()
-                    .filter(|t| !t.deleted && source_name(t) == Some(info.task_name.as_str()));
+                    .filter(|t| !t.deleted && source_name(t) == Some(info.task_name.as_str()))
+                    .collect();
+                // Same-named tasks of different Claude accounts differ in
+                // their prompt file. A run whose file is not known yet waits
+                // for the backfill rather than joining or retiring.
+                let file = info.source_file.as_deref();
+                let mut claims = named.iter().filter(|t| {
+                    file.is_some() && task_files.get(&t.id).map(String::as_str) == file
+                });
                 match (claims.next(), claims.next()) {
+                    _ if file.is_none() && !named.is_empty() => {}
                     (Some(task), None) => {
                         next.legacy_task_id = info
                             .legacy_task_id
@@ -94,7 +107,7 @@ mod tests {
         }
     }
 
-    fn run(id: &str, device: &str, task_id: &str, name: &str) -> Chat {
+    fn run(id: &str, device: &str, task_id: &str, name: &str, file: Option<&str>) -> Chat {
         let mut chat: Chat = serde_json::from_value(serde_json::json!({
             "id": id, "deviceId": device, "archived": false,
             "createdAt": "2026-01-01T00:00:00Z"
@@ -104,9 +117,17 @@ mod tests {
             task_id: task_id.into(),
             task_name: name.into(),
             run_id: id.into(),
+            source_file: file.map(str::to_owned),
             ..Default::default()
         });
         chat
+    }
+
+    fn files(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(task, file)| (task.to_string(), file.to_string()))
+            .collect()
     }
 
     fn apply(chats: &mut [Chat], updates: Vec<(String, ScheduledChat)>) {
@@ -124,15 +145,16 @@ mod tests {
         let tasks = vec![task(
             "native",
             "d",
-            Some("/a/scheduled-tasks.json#stall-watch"),
+            Some("/a/scheduled-tasks.json#routine-a"),
             false,
         )];
+        let files = files(&[("native", "/a/routine-a.md")]);
         let mut chats = vec![
-            run("legacy", "d", "fafa", "stall-watch"),
-            run("native-run", "d", "native", "Codespace Stall Watch"),
-            run("plain-name", "d", "zzz", "Codespace Stall Watch"),
+            run("legacy", "d", "fafa", "routine-a", Some("/a/routine-a.md")),
+            run("native-run", "d", "native", "Routine A", None),
+            run("plain-name", "d", "zzz", "Routine A", Some("/a/routine-a.md")),
         ];
-        let updates = plan(&chats, &tasks, "d");
+        let updates = plan(&chats, &tasks, &files, "d");
         apply(&mut chats, updates);
         let legacy = chats[0].scheduled_task_info.as_ref().unwrap();
         assert_eq!(legacy.task_id, "native");
@@ -151,37 +173,62 @@ mod tests {
         assert_eq!(display.task_id, "zzz");
         assert!(display.retired);
         assert!(
-            plan(&chats, &tasks, "d").is_empty(),
+            plan(&chats, &tasks, &files, "d").is_empty(),
             "second pass writes nothing"
         );
     }
 
     #[test]
-    fn same_name_from_two_sources_is_left_alone() {
-        let tasks = vec![
-            task(
-                "one",
-                "d",
-                Some("/account-a/scheduled-tasks.json#slack-briefing"),
-                false,
-            ),
-            task(
-                "two",
-                "d",
-                Some("/account-b/scheduled-tasks.json#slack-briefing"),
-                false,
-            ),
+    fn a_second_account_with_the_same_task_name_never_joins() {
+        let tasks = vec![task(
+            "native",
+            "d",
+            Some("/account-a/scheduled-tasks.json#nightly-check"),
+            false,
+        )];
+        let files = files(&[("native", "/account-a/nightly-check.md")]);
+        let mut chats = vec![
+            run("ours", "d", "old-a", "nightly-check", Some("/account-a/nightly-check.md")),
+            run("theirs", "d", "old-b", "nightly-check", Some("/account-b/nightly-check.md")),
         ];
-        let chats = vec![run("legacy", "d", "old", "slack-briefing")];
-        assert!(plan(&chats, &tasks, "d").is_empty());
+        let updates = plan(&chats, &tasks, &files, "d");
+        apply(&mut chats, updates);
+        let info = |i: usize| chats[i].scheduled_task_info.clone().unwrap();
+        assert_eq!(info(0).task_id, "native");
+        assert_eq!(info(1).task_id, "old-b");
+        assert!(info(1).retired, "no live task claims the other account's run");
+    }
+
+    #[test]
+    fn a_run_whose_file_is_unknown_waits_for_the_backfill() {
+        let tasks = vec![task("native", "d", Some("/r.json#routine-b"), false)];
+        let files = files(&[("native", "/r/routine-b.md")]);
+        let chats = vec![run("legacy", "d", "old", "routine-b", None)];
+        assert!(plan(&chats, &tasks, &files, "d").is_empty());
+        // Without a registry file the native task claims nothing.
+        let chats = vec![run("legacy", "d", "old", "routine-b", Some("/r/routine-b.md"))];
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
+        assert!(updates[0].1.retired && updates[0].1.task_id == "old");
+    }
+
+    #[test]
+    fn same_name_and_file_from_two_sources_is_left_alone() {
+        let tasks = vec![
+            task("one", "d", Some("/account-a/scheduled-tasks.json#nightly-check"), false),
+            task("two", "d", Some("/account-b/scheduled-tasks.json#nightly-check"), false),
+        ];
+        let files = files(&[("one", "/shared/check.md"), ("two", "/shared/check.md")]);
+        let chats = vec![run("legacy", "d", "old", "nightly-check", Some("/shared/check.md"))];
+        assert!(plan(&chats, &tasks, &files, "d").is_empty());
     }
 
     #[test]
     fn other_devices_are_never_rewritten_or_matched() {
-        let tasks = vec![task("native", "a", Some("/r.json#briefing"), false)];
-        let chats = vec![run("peer", "b", "old", "briefing")];
-        assert!(plan(&chats, &tasks, "a").is_empty());
-        let updates = plan(&chats, &tasks, "b");
+        let tasks = vec![task("native", "a", Some("/r.json#routine-b"), false)];
+        let files = files(&[("native", "/r/routine-b.md")]);
+        let chats = vec![run("peer", "b", "old", "routine-b", Some("/r/routine-b.md"))];
+        assert!(plan(&chats, &tasks, &files, "a").is_empty());
+        let updates = plan(&chats, &tasks, &files, "b");
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].1.task_id, "old", "no task on b claims it");
         assert!(updates[0].1.retired);
@@ -190,22 +237,22 @@ mod tests {
     #[test]
     fn retired_and_deleted_tasks_hide_until_a_live_task_returns() {
         let mut tasks = vec![
-            task("deleted", "d", Some("/r.json#manager"), true),
+            task("deleted", "d", Some("/r.json#routine-c"), true),
             task("kept", "d", None, false),
         ];
         let mut chats = vec![
-            run("of-deleted", "d", "deleted", "Manager"),
-            run("retired-routine", "d", "legacy", "daily-priority-briefing"),
-            run("of-kept", "d", "kept", "Kept"),
+            run("of-deleted", "d", "deleted", "Routine C", None),
+            run("retired-run", "d", "legacy", "retired-routine", Some("/r/retired.md")),
+            run("of-kept", "d", "kept", "Kept", None),
         ];
-        let updates = plan(&chats, &tasks, "d");
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
         apply(&mut chats, updates);
         let retired = |c: &Chat| c.scheduled_task_info.as_ref().unwrap().retired;
         assert!(retired(&chats[0]) && retired(&chats[1]) && !retired(&chats[2]));
-        assert!(plan(&chats, &tasks, "d").is_empty());
+        assert!(plan(&chats, &tasks, &HashMap::new(), "d").is_empty());
         // Re-importing the task revives the same identity.
         tasks[0].deleted = false;
-        let updates = plan(&chats, &tasks, "d");
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
         apply(&mut chats, updates);
         assert!(!retired(&chats[0]));
     }
