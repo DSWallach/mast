@@ -107,6 +107,11 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
         state.chats_synced = true;
         state.spaces_synced = true;
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"fixture-space","deviceId":"local","path":"/fixture/project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.chats = [("chat-api", "API coordinator", None), ("chat-auth", "Auth worker", Some("chat-api"))]
+            .into_iter().map(|(id, title, parent)| serde_json::from_value(serde_json::json!({
+                "id":id, "deviceId":"local", "spaceId":"fixture-space", "title":title,
+                "parentChatId":parent, "archived":false, "createdAt":"2026-09-08T00:00:00Z"
+            })).unwrap()).collect();
         state.chats = [
             ("fixture-chat", "Review the workspace"),
             ("fixture-design", "Design review"),
