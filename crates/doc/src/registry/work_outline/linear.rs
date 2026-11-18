@@ -73,6 +73,7 @@ pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpa
     WorkOutlineSpaceSettings {
         worker_worktrees: row.and_then(|r| r.fields.get("workerWorktrees")).and_then(Value::as_bool).unwrap_or(false),
         merged_pr_completion: row.and_then(|r| r.fields.get("mergedPrCompletion")).and_then(|v| serde_json::from_value(v.clone()).ok()),
+        merged_pr_completion_since: row.and_then(|r| r.fields.get("mergedPrCompletionSince")).and_then(Value::as_i64),
         archive_workers_after_days: row.and_then(|r| r.fields.get("archiveWorkersAfterDays")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0),
         resolve_merged_handoffs: row
             .and_then(|row| row.fields.get("resolveMergedHandoffs"))
@@ -134,6 +135,7 @@ impl RegistryDoc {
         }
         if p.field.is_none_or(|field| field == WorkerAutomationField::MergedPrCompletion) {
             fields.insert("mergedPrCompletion".into(), json!(p.merged_pr_completion));
+            fields.insert("mergedPrCompletionSince".into(), json!(p.merged_pr_completion.map(|_| now_ms)));
         }
         if p.field.is_none_or(|field| field == WorkerAutomationField::ArchiveWorkers) {
             fields.insert("archiveWorkersAfterDays".into(), json!(p.archive_workers_after_days));

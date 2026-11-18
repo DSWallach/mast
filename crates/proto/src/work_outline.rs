@@ -461,6 +461,9 @@ pub struct WorkOutlineSpaceSettings {
     /// Action to take when a linked pull request merges (default off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_pr_completion: Option<MergedPrCompletion>,
+    /// When the current completion mode was enabled, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion_since: Option<i64>,
     /// Archive eligible worker chats after this many days; absent disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_workers_after_days: Option<u32>,
@@ -584,6 +587,7 @@ impl Default for WorkOutlineSpaceSettings {
         Self {
             worker_worktrees: false,
             merged_pr_completion: None,
+            merged_pr_completion_since: None,
             archive_workers_after_days: None,
             resolve_merged_handoffs: true,
             linear_enabled: false,
