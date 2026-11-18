@@ -813,11 +813,11 @@ fn sidebar_delta(a: SidebarCounts, b: SidebarCounts) -> SidebarCounts {
     }
 }
 
-const BUDGET_CHATS: usize = 200;
+const BUDGET_CHATS: usize = 360;
 const BUDGET_WORKING: usize = 5;
 const BUDGET_FRAMES: u64 = 30;
 
-/// 200 chats in an open sidebar, 5 working. Returns the shell, its sidebar pane
+/// 360 chats in an open sidebar, 5 working. Returns the shell, its sidebar pane
 /// and the window context after the first frames have settled.
 fn sidebar_budget_fixture(
     cx: &mut TestAppContext,
