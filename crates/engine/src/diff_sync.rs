@@ -42,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -180,6 +180,8 @@ struct CheckoutEntry {
     handled_kicks: AtomicU64,
     /// Set once the fs watchers are attached (or setup was abandoned).
     watch_attached: AtomicBool,
+    /// Most recent chat activity, updated even while setup is queued.
+    watch_priority: Arc<AtomicI64>,
     /// Debug-only measurement of the post-attachment kick.
     attach_timing: Mutex<Option<(std::time::Instant, u64)>>,
     /// Keeps the recursive fs watchers alive; dropped on entry close. Filled
@@ -336,7 +338,19 @@ pub struct CheckoutDiffSync {
     inner: Arc<DiffSyncInner>,
 }
 
+/// Holds all watch setup slots for deterministic attachment tests.
+#[doc(hidden)]
+pub struct WatchSetupPause { _permits: Vec<WatchSetupPermit> }
+
 impl CheckoutDiffSync {
+    #[doc(hidden)]
+    pub async fn pause_watch_setups_for_test() -> WatchSetupPause {
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_WATCH_SETUPS {
+            permits.push(watch_setup_queue().acquire(Arc::new(AtomicI64::new(0))).await.unwrap());
+        }
+        WatchSetupPause { _permits: permits }
+    }
     /// Build and start the sync loop: follows the workspace chat watch and runs the
     /// 2-minute repair tick. Requires a tokio runtime.
     pub fn start(
@@ -462,6 +476,16 @@ impl CheckoutDiffSync {
                 && entry.handled_kicks.load(Ordering::SeqCst)
                     >= entry.kick_tx.sent.load(Ordering::SeqCst)
         })
+    }
+
+    /// Whether setup has finished for this cwd, including fallback to repair.
+    /// A completed setup does not necessarily have live root coverage.
+    pub fn is_attached(&self, cwd: &str) -> bool {
+        let id = lock(&self.inner.identities).get(cwd).map(|identity| identity.id.clone());
+        let entries = lock(&self.inner.entries);
+        id.as_ref().and_then(|id| entries.get(id))
+            .or_else(|| entries.values().find(|entry| entry.identity.root == Path::new(cwd)))
+            .is_some_and(|entry| entry.watch_attached.load(Ordering::SeqCst))
     }
 
     /// Regroup this device's chats by checkout identity, then (re)build watchers.
@@ -954,7 +978,11 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     // one diff per member. Member entries carry no Chats: the Chat's row and
     // edge sidecar stay keyed to its execution root (`chat.cwd`).
     let bindings = inner.workspace.chat_execution_bindings();
-    let mut member_paths: Vec<(String, mast_proto::RepositoryBinding)> = Vec::new();
+    let mut member_paths: Vec<(String, mast_proto::RepositoryBinding, i64)> = Vec::new();
+    let chat_priorities: HashMap<String, i64> = chats.iter()
+        .map(|chat| (chat.id.clone(), chat_watch_priority(std::slice::from_ref(chat))))
+        .collect();
+    let mut checkout_priorities: HashMap<String, i64> = HashMap::new();
     let local_chat_ids: HashSet<String> = chats
         .iter()
         .filter(|chat| chat.device_id == inner.device_id)
@@ -974,7 +1002,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     .bindings
                     .iter()
                     .filter(|b| b.member || b.primary)
-                    .map(|b| (b.checkout_path().to_owned(), b.clone())),
+                    .map(|b| (b.checkout_path().to_owned(), b.clone(), chat_priorities[&chat.id])),
             );
         }
         let Some(cwd) = chat.cwd.clone() else {
@@ -1006,7 +1034,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             .1
             .push(chat);
     }
-    for (path, binding) in member_paths {
+    for (path, binding, priority) in member_paths {
         let identity = match resolved.get(&path) {
             Some(identity) => identity.clone(),
             None => {
@@ -1024,6 +1052,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                 tracing::debug!(path = %path, "diff-sync: member checkout identity differs from its binding");
                 continue;
             }
+            checkout_priorities.entry(identity.id.clone()).and_modify(|p| *p = (*p).max(priority)).or_insert(priority);
             groups
                 .entry(identity.id.clone())
                 .or_insert_with(|| (identity, Vec::new()));
@@ -1049,6 +1078,8 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                 .map(|target| &target.identity)
                 .chain(ref_targets.iter().map(|target| &target.identity))
             {
+                let priority = chat_priorities.get(&row.chat_id).copied().unwrap_or(0);
+                checkout_priorities.entry(identity.id.clone()).and_modify(|p| *p = (*p).max(priority)).or_insert(priority);
                 groups
                     .entry(identity.id.clone())
                     .or_insert_with(|| (identity.clone(), Vec::new()));
@@ -1103,9 +1134,11 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
 
     // Update surviving entries; add new ones (initial sync kicked on add).
     for (checkout_id, (identity, chats)) in groups {
+        let priority = chat_watch_priority(&chats).max(checkout_priorities.get(&checkout_id).copied().unwrap_or(0));
         let existing = lock(&inner.entries).get(&checkout_id).cloned();
         match existing {
             Some(entry) => {
+                entry.watch_priority.store(priority, Ordering::Relaxed);
                 let has_new = {
                     let mut held = lock(&entry.chats);
                     let previous: HashSet<String> = held.iter().map(|c| c.id.clone()).collect();
@@ -1118,7 +1151,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     entry.kick_tx.send(); // new chat needs a sidecar now
                 }
             }
-            None => add_entry(inner, identity, chats),
+            None => add_entry(inner, identity, chats, priority),
         }
     }
 }
@@ -1140,6 +1173,84 @@ const HEAVY_DIR_NAMES: &[&str] = &[
 /// one entry per checkout (~100+ worktrees); unbounded, they all walk together
 /// and pin every core for minutes.
 const MAX_CONCURRENT_WATCH_SETUPS: usize = 2;
+
+fn chat_watch_priority(chats: &[Chat]) -> i64 {
+    chats.iter().filter(|chat| !chat.archived)
+        .map(|chat| chat.last_message_at.unwrap_or(chat.created_at).timestamp_millis())
+        .max().unwrap_or(0)
+}
+
+struct WatchSetupWaiter {
+    priority: Arc<AtomicI64>,
+    sender: tokio::sync::oneshot::Sender<WatchSetupPermit>,
+}
+
+struct WatchSetupQueueState {
+    available: usize,
+    priority_turn: bool,
+    waiters: std::collections::VecDeque<WatchSetupWaiter>,
+}
+
+struct WatchSetupQueue(Mutex<WatchSetupQueueState>);
+
+struct WatchSetupPermit(Arc<WatchSetupQueue>);
+
+impl Drop for WatchSetupPermit {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.0);
+        state.available += 1;
+        drop(state);
+        self.0.dispatch();
+    }
+}
+
+impl WatchSetupQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(WatchSetupQueueState {
+            available: MAX_CONCURRENT_WATCH_SETUPS,
+            priority_turn: true,
+            waiters: std::collections::VecDeque::new(),
+        })))
+    }
+
+    async fn acquire(self: &Arc<Self>, priority: Arc<AtomicI64>) -> Option<WatchSetupPermit> {
+        self.enqueue(priority).await.ok()
+    }
+
+    fn enqueue(self: &Arc<Self>, priority: Arc<AtomicI64>) -> tokio::sync::oneshot::Receiver<WatchSetupPermit> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        lock(&self.0).waiters.push_back(WatchSetupWaiter { priority, sender });
+        self.dispatch();
+        receiver
+    }
+
+    fn dispatch(self: &Arc<Self>) {
+        let mut rejected = Vec::new();
+        let mut state = lock(&self.0);
+        while state.available > 0 && !state.waiters.is_empty() {
+            // Alternate the most recent checkout with the oldest waiter, so
+            // a stream of new activity cannot starve the background queue.
+            let index = if state.priority_turn {
+                state.waiters.iter().enumerate()
+                    .max_by_key(|(index, waiter)| (waiter.priority.load(Ordering::Relaxed), std::cmp::Reverse(*index)))
+                    .map(|(index, _)| index).unwrap_or(0)
+            } else { 0 };
+            state.priority_turn = !state.priority_turn;
+            let waiter = state.waiters.remove(index).unwrap();
+            state.available -= 1;
+            if let Err(permit) = waiter.sender.send(WatchSetupPermit(self.clone())) {
+                rejected.push(permit);
+            }
+        }
+        drop(state);
+        drop(rejected);
+    }
+}
+
+fn watch_setup_queue() -> &'static Arc<WatchSetupQueue> {
+    static QUEUE: OnceLock<Arc<WatchSetupQueue>> = OnceLock::new();
+    QUEUE.get_or_init(WatchSetupQueue::new)
+}
 
 fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -1266,7 +1377,7 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
     targets
 }
 
-fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
+fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>, priority: i64) {
     let (tx, kick_rx) = mpsc::unbounded_channel();
     let kick_tx = Kicker { tx, sent: Arc::new(AtomicU64::new(0)) };
     let probe_phase = {
@@ -1275,6 +1386,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         identity.id.hash(&mut hasher);
         hasher.finish() % REPAIR_BACKOFF_STRIDE
     };
+    let priority = Arc::new(AtomicI64::new(priority));
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
@@ -1283,6 +1395,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_tx: kick_tx.clone(),
         handled_kicks: AtomicU64::new(0),
         watch_attached: AtomicBool::new(false),
+        watch_priority: priority.clone(),
         attach_timing: Mutex::new(None),
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
@@ -1341,6 +1454,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         .then(std::time::Instant::now);
     let checkout = enqueued.map(|_| entry.identity.root.clone());
     tokio::spawn(async move {
+        let Some(_priority_permit) = watch_setup_queue().acquire(priority).await else { return };
         let Ok(_permit) = watch_setup_gate().clone().acquire_owned().await else { return };
         if let (Some(start), Some(checkout)) = (enqueued, checkout) {
             tracing::debug!(target: "diff_sync::attach", checkout = %checkout.display(), stage = "permit", elapsed_us = start.elapsed().as_micros() as u64);
@@ -3538,6 +3652,34 @@ mod watch_budget_tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn watch_setup_priority_changes_and_fifo_prevents_starvation() {
+        use std::sync::atomic::AtomicI64;
+        use super::WatchSetupQueue;
+        let queue = WatchSetupQueue::new();
+        let priority = |value| Arc::new(AtomicI64::new(value));
+        let first = queue.acquire(priority(0)).await.unwrap();
+        let second = queue.acquire(priority(0)).await.unwrap();
+        let mut oldest = queue.enqueue(priority(1));
+        let changed = priority(0);
+        let mut recent = queue.enqueue(changed.clone());
+        let mut next = queue.enqueue(priority(2));
+        changed.store(10, Ordering::Relaxed);
+
+        drop(first);
+        let recent_permit = recent.try_recv().expect("updated priority goes first");
+        assert!(oldest.try_recv().is_err());
+        drop(second);
+        let oldest_permit = oldest.try_recv().expect("oldest waiter gets the next slot");
+        // Even new, higher-priority arrivals cannot prevent FIFO progress.
+        let mut later = queue.enqueue(priority(20));
+        drop(recent_permit);
+        let later_permit = later.try_recv().expect("priority turn");
+        drop(oldest_permit);
+        let next_permit = next.try_recv().expect("remaining waiter is not starved");
+        drop((later_permit, next_permit));
+    }
 
     #[tokio::test]
     async fn branch_review_base_counts_commits_without_fetching() {
