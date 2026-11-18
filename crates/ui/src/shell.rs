@@ -2912,6 +2912,9 @@ impl Shell {
             if panels.changes_open && self.resolved_right_active(cx) == RightSurface::Team {
                 let chat_id = self.active_chat.clone();
                 self.load_tracker_project(&chat_id, false, cx);
+                self.watch_tracker_sync(&chat_id, cx);
+            } else {
+                self.stop_tracker_sync();
             }
         }
         self.prewarm_workspace_search(cx);
@@ -3067,10 +3070,15 @@ impl Shell {
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.changes_open = open);
         if !open {
+            self.stop_tracker_sync();
             self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
             // with the conversation gone read as a broken chat.
             self.right_pane_expanded = false;
+        } else if self.resolved_right_active(cx) == RightSurface::Team {
+            let chat_id = self.active_chat.clone();
+            self.load_tracker_project(&chat_id, false, cx);
+            self.watch_tracker_sync(&chat_id, cx);
         }
         let to = self.right_target(cx);
         self.right_tween = Some(WidthTween::new(from, to));
@@ -3260,6 +3268,7 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if surface != RightSurface::Team { self.stop_tracker_sync(); }
         if self.resolved_right_active(cx) != surface {
             self.suspend_file_images(cx);
         }
@@ -3291,6 +3300,7 @@ impl Shell {
             RightSurface::Team => {
                 let chat_id = self.active_chat.clone();
                 self.load_tracker_project(&chat_id, false, cx);
+                self.watch_tracker_sync(&chat_id, cx);
             }
             RightSurface::Picker | RightSurface::Item | RightSurface::Review => {}
         }

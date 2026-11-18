@@ -141,6 +141,7 @@ struct Inner {
     /// cache directory is set). Keys: `my`, `project:<id>`.
     issue_lists: SwrStore<Vec<LinearIssueSummary>, LinearError>,
     project_issue_failures: Mutex<HashMap<String, ProjectIssueFailure>>,
+    sync_watches: Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
     project_lists: SwrStore<Vec<LinearProjectSummary>, LinearError>,
     /// One project's detail per id (the canonical plan panel).
     project_details: SwrStore<LinearProjectDetail, LinearError>,
@@ -207,6 +208,7 @@ impl LinearService {
                 inflight: Mutex::new(HashMap::new()),
                 issue_lists: SwrStore::new(LIST_CACHE_TTL),
                 project_issue_failures: Mutex::new(HashMap::new()),
+                sync_watches: Mutex::new(HashMap::new()),
                 project_lists: SwrStore::new(LIST_CACHE_TTL),
                 project_details: SwrStore::new(LIST_CACHE_TTL),
                 key_change: tokio::sync::Mutex::new(()),
@@ -231,6 +233,18 @@ impl LinearService {
     /// Changes whenever this account's credential caches are invalidated.
     pub fn credential_revision(&self) -> u64 {
         self.inner.key_revision.load(Ordering::SeqCst)
+    }
+
+    /// Subscribe to completed passes of the existing Space sync loop.
+    pub fn watch_sync(&self, space_id: &str) -> tokio::sync::watch::Receiver<u64> {
+        let mut watches = lock(&self.inner.sync_watches);
+        watches.entry(space_id.to_owned()).or_insert_with(|| tokio::sync::watch::channel(0).0).subscribe()
+    }
+
+    fn notify_sync(&self, space_id: &str) {
+        lock(&self.inner.sync_watches).entry(space_id.to_owned())
+            .or_insert_with(|| tokio::sync::watch::channel(0).0)
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     /// Return the service and caches belonging to one account. Absent selects
@@ -965,6 +979,19 @@ impl Default for LinearService {
 #[cfg(test)]
 mod account_service_tests {
     use super::*;
+
+    #[test]
+    fn sync_notifications_are_scoped_to_the_space() {
+        let service = LinearService::default();
+        let mut first = service.watch_sync("first");
+        let second = service.watch_sync("second");
+        service.notify_sync("first");
+        assert!(first.has_changed().unwrap());
+        assert_eq!(*first.borrow_and_update(), 1);
+        assert!(!second.has_changed().unwrap());
+        service.notify_sync("third");
+        assert_eq!(*service.watch_sync("third").borrow(), 1);
+    }
 
     #[test]
     fn project_issue_failures_back_off_and_missing_projects_do_not_retry() {

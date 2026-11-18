@@ -39,6 +39,7 @@ pub(super) struct TrackerState {
     linear_projects: std::collections::HashMap<(String, String, u64), Vec<mast_proto::linear::LinearIssueSummary>>,
     linear_loading: std::collections::HashSet<(String, String, u64)>,
     linear_errors: std::collections::HashMap<(String, String, u64), crate::linear::client::LinearUiError>,
+    linear_sync_task: Option<Task<()>>,
     linear_project_linked: bool,
     source_label: String,
     source_notice: Option<String>,
@@ -66,6 +67,14 @@ fn tracker_matches(row: &LifecycleRow, filter: TrackerFilter) -> bool {
         TrackerFilter::NeedsYou => row.needs_you,
         TrackerFilter::Stage(stage) => row.stage == stage,
     }
+}
+
+fn tracker_sync_revision(value: &serde_json::Value, initial: bool, seen: &mut Option<u64>) -> bool {
+    let Some(revision) = value.as_u64() else { return false; };
+    if initial && seen.is_some_and(|previous| revision < previous) { *seen = None; }
+    if revision == 0 || *seen == Some(revision) { return false; }
+    *seen = Some(revision);
+    true
 }
 
 fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallback: &str) -> String {
@@ -238,6 +247,16 @@ mod tracker_tests {
     }
 
     #[test]
+    fn tracker_sync_ignores_duplicates_and_accepts_engine_restarts() {
+        let mut seen = None;
+        assert!(!tracker_sync_revision(&serde_json::json!(0), true, &mut seen));
+        assert!(tracker_sync_revision(&serde_json::json!(3), false, &mut seen));
+        assert!(!tracker_sync_revision(&serde_json::json!(3), true, &mut seen));
+        assert!(!tracker_sync_revision(&serde_json::json!(0), true, &mut seen));
+        assert!(tracker_sync_revision(&serde_json::json!(1), false, &mut seen));
+    }
+
+    #[test]
     fn tracker_selects_open_pr_and_preserves_unloaded_reference() {
         let pr = |number, state: &str| WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number,
             url: format!("https://github.com/example/project/pull/{number}"), checks: None, review: None, draft: false, state: state.into() };
@@ -381,6 +400,50 @@ impl Shell {
                 cx.notify();
             }).ok();
         }).detach();
+    }
+
+    pub(super) fn stop_tracker_sync(&mut self) {
+        self.tracker.linear_sync_task = None;
+    }
+
+    pub(super) fn watch_tracker_sync(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.stop_tracker_sync();
+        let Some((space, _, _, _)) = self.tracker_linear_project(chat_id, cx) else { return; };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
+        let chat_id = chat_id.to_owned();
+        self.tracker.linear_sync_task = Some(cx.spawn(async move |shell, cx| {
+            let mut attempt = 0;
+            let mut seen_revision = None;
+            // This loop only reconnects a broken event stream; it never polls.
+            loop {
+                let params = serde_json::json!({ "spaceId": space });
+                let mut subscription = match engine.client().subscribe_checked(mast_rpc::methods::WATCH_LINEAR_SYNC, params).await {
+                    Ok(subscription) => subscription,
+                    Err(mast_rpc::RpcError::UnknownMethod(_)) => return,
+                    Err(_) => {
+                        let delay = mast_harness::backoff::delay_for_attempt(std::time::Duration::from_secs(5), std::time::Duration::from_secs(300), attempt);
+                        attempt = attempt.saturating_add(1);
+                        cx.background_executor().timer(mast_harness::backoff::jittered(delay)).await;
+                        continue;
+                    }
+                };
+                let mut first = true;
+                while let Some(value) = subscription.recv().await {
+                    let initial = first;
+                    first = false;
+                    if !tracker_sync_revision(&value, initial, &mut seen_revision) { continue; }
+                    if !initial { attempt = 0; }
+                    if shell.update(cx, |shell, cx| {
+                        if shell.active_chat == chat_id && shell.right_pane_open(cx) && shell.resolved_right_active(cx) == RightSurface::Team {
+                            shell.load_tracker_project(&chat_id, false, cx);
+                        }
+                    }).is_err() { return; }
+                }
+                let delay = mast_harness::backoff::delay_for_attempt(std::time::Duration::from_secs(5), std::time::Duration::from_secs(300), attempt);
+                attempt = attempt.saturating_add(1);
+                cx.background_executor().timer(mast_harness::backoff::jittered(delay)).await;
+            }
+        }));
     }
 
     pub(super) fn invalidate_tracker_review(&mut self) {

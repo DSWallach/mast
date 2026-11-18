@@ -2683,6 +2683,10 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
             }
+            methods::WATCH_LINEAR_SYNC => {
+                let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
+                Ok(RpcReply::Stream(watch_stream(self.linear.watch_sync(&p.space_id))))
+            }
             methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
                 let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
                 let (pack, redactions) = self

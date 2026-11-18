@@ -615,6 +615,17 @@ async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn linear_sync_watch_emits_after_the_existing_space_pass() {
+    let rig = rig().await;
+    rig.enable(SPACE, true).await;
+    let mut watch = rig.client.subscribe_checked(methods::WATCH_LINEAR_SYNC, json!({ "spaceId": SPACE })).await.unwrap();
+    assert_eq!(watch.recv().await.unwrap(), json!(0));
+    let outline = Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()));
+    mast_engine::linear::sync::sync_enabled_spaces(&rig.core.linear, &outline, &rig.core.workspace, None).await;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), watch.recv()).await.unwrap().unwrap(), json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn list_queries_paginate_and_parse() {
     let rig = rig().await;
     {
