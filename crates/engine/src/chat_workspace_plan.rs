@@ -285,7 +285,7 @@ pub(crate) fn chat_worktree_target_for_slug(
     };
     let worktrees_base = worktrees_base_dir(&superproject_root)?;
     Ok((
-        normalize_path(&worktrees_base.join(&label).join(&slug)),
+        normalize_path(&worktrees_base.join(&label).join(slug)),
         slug.to_owned(),
     ))
 }
@@ -322,7 +322,7 @@ pub(crate) fn create_chat_worktree_for_slug(repo_path: &Path, slug: &str) -> Res
         "WORKSPACE_WORKTREES_DIR",
     )?;
 
-    let candidate = normalize_path(&worktrees_base.join(&label).join(&slug));
+    let candidate = normalize_path(&worktrees_base.join(&label).join(slug));
     assert_outside_submodules(&candidate, &superproject_root, "worktree target")?;
     if candidate.exists() {
         return Err(EngineError::Other(format!(
@@ -344,7 +344,7 @@ pub(crate) fn create_chat_worktree_for_slug(repo_path: &Path, slug: &str) -> Res
             "worktree",
             "add",
             "-b",
-            &slug,
+            slug,
             &candidate.to_string_lossy(),
             &default_branch,
         ],

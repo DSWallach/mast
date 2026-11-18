@@ -502,7 +502,7 @@ impl WorkItemDetails {
                 .projects
                 .get(crate::linear::store::account_scope(snapshot))
                 .and_then(|projects| {
-                    crate::linear::project_links::repair_target(&reference, &projects).cloned()
+                    crate::linear::project_links::repair_target(&reference, projects).cloned()
                 });
             let fix = repair.map(|project| {
                 let reference = reference.clone();
