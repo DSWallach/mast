@@ -179,9 +179,33 @@ impl ScheduledTasksPage {
         self.load(cx);
         self.load_catalog(cx);
     }
+    fn output_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_TASK_OUTPUT_V1)
+        })
+    }
+
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
             return;
+        }
+        if let ScheduledTasksRequest::Save { draft, .. } = &request
+            && draft.output == ScheduledTaskOutput::Background
+        {
+            let error = if !self.output_supported(cx) {
+                Some("Update the execution device to save a background task")
+            } else if draft.work_item_id.is_none() {
+                Some("Choose a work item for background output")
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.error = Some("Engine disconnected".into());
@@ -198,6 +222,14 @@ impl ScheduledTasksPage {
         let is_preview = matches!(request, ScheduledTasksRequest::Preview { .. });
         let is_import_preview = matches!(request, ScheduledTasksRequest::ImportPreview { .. });
         let mut params = serde_json::to_value(request).unwrap();
+        if saved_id.is_some() && self.output_supported(cx) {
+            // An explicit Interactive selection differs from an older
+            // client's save without a mode.
+            let output = &mut params["draft"]["output"];
+            if output.is_null() {
+                *output = serde_json::json!(ScheduledTaskOutput::Interactive);
+            }
+        }
         params["targetDeviceId"] = serde_json::json!(target);
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -431,6 +463,11 @@ impl ScheduledTasksPage {
                     grace_minutes: 360,
                     cutover_confirmed: false,
                     work_item_id: None,
+                    output: if self.output_supported(cx) {
+                        ScheduledTaskOutput::Background
+                    } else {
+                        ScheduledTaskOutput::Interactive
+                    },
                 },
             )
         };
@@ -609,6 +646,12 @@ impl ScheduledTasksPage {
                         e.draft.config.reasoning =
                             serde_json::from_value(serde_json::json!(value)).ok();
                     }
+                }
+                "output" => {
+                    e.draft.output = match value.as_str() {
+                        "background" => ScheduledTaskOutput::Background,
+                        _ => ScheduledTaskOutput::Interactive,
+                    };
                 }
                 "workItem" => e.draft.work_item_id = (!value.is_empty()).then_some(value.clone()),
                 "contextWindow" => {
@@ -951,6 +994,8 @@ impl Render for ScheduledTasksPage {
                 .space_id
                 .as_deref()
                 .and_then(|space| self.state.read(cx).work_outline(space).snapshot().cloned());
+            let background = e.draft.output == ScheduledTaskOutput::Background;
+            let output_supported = self.output_supported(cx);
             let work_item_label = e
                 .draft
                 .work_item_id
@@ -961,7 +1006,14 @@ impl Render for ScheduledTasksPage {
                         .and_then(|s| s.item(id))
                         .map_or_else(|| id.to_owned(), |item| item.title.clone())
                 })
-                .unwrap_or("None".into());
+                .unwrap_or_else(|| {
+                    if background {
+                        "Choose work item"
+                    } else {
+                        "None"
+                    }
+                    .into()
+                });
             let harness_label = self
                 .harnesses
                 .iter()
@@ -978,14 +1030,34 @@ impl Render for ScheduledTasksPage {
             for (key, label, value) in [
                 ("harness", "Agent", harness_label.as_str()),
                 ("space", "Space", space_label.as_str()),
-                ("workItem", "Work item", work_item_label.as_str()),
+                (
+                    "output",
+                    "Output",
+                    if background {
+                        "Background"
+                    } else {
+                        "Interactive"
+                    },
+                ),
+                (
+                    "workItem",
+                    if background {
+                        "Work item (required)"
+                    } else {
+                        "Work item"
+                    },
+                    work_item_label.as_str(),
+                ),
                 ("model", "Model", model_label.as_str()),
                 ("thinking", "Thinking level", thinking_label.as_str()),
                 ("contextWindow", "Context window", context_label),
             ]
             .into_iter()
-            .filter(|(key, ..)| *key != "workItem" || work_item_supported)
-            {
+            .filter(|(key, ..)| match *key {
+                "output" => output_supported,
+                "workItem" => work_item_supported,
+                _ => true,
+            }) {
                 selects = selects.child(
                     div()
                         .flex()
@@ -1011,11 +1083,23 @@ impl Render for ScheduledTasksPage {
                 );
             }
             content = content.child(selects);
-            if e.draft.work_item_id.is_some() {
+            if output_supported {
                 content = content.child(
                     div().text_size(px(12.0)).text_color(theme.text_muted).child(
-                        "Each run is attached to this work item and receives its instructions. The item lists the latest run; older runs stay in Run history.",
+                        if background {
+                            "Runs attach to a work item and stay in Run history, out of the sidebar and Overview."
+                        } else {
+                            "The latest run appears in the sidebar and Overview."
+                        },
                     ),
+                );
+            }
+            if e.draft.work_item_id.is_some() {
+                content = content.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("Runs attached to this work item receive its instructions."),
                 );
             }
             if let Some(key) = self.choices {
@@ -1049,7 +1133,13 @@ impl Render for ScheduledTasksPage {
                                 }),
                         )
                         .collect(),
-                    "workItem" => std::iter::once((String::new(), "None".into()))
+                    "output" => vec![
+                        ("interactive".into(), "Interactive".into()),
+                        ("background".into(), "Background".into()),
+                    ],
+                    "workItem" => (!background)
+                        .then(|| (String::new(), "None".into()))
+                        .into_iter()
                         .chain(work_items.iter().flat_map(|s| {
                             s.items.iter().filter(|i| i.archived_at.is_none()).map(|i| {
                                 (
@@ -1101,7 +1191,11 @@ impl Render for ScheduledTasksPage {
                 };
                 let mut menu = div().flex().flex_wrap().gap(px(5.0));
                 if choices.is_empty() {
-                    menu = menu.child("This model uses its default setting.");
+                    menu = menu.child(if key == "workItem" {
+                        "Choose a Space with an active work item."
+                    } else {
+                        "This model uses its default setting."
+                    });
                 }
                 for (value, label) in choices {
                     menu = menu.child(
@@ -1524,7 +1618,14 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |s, _| {
             for (id, capabilities) in [
-                ("current", vec![mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
+                (
+                    "current",
+                    vec![
+                        capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                        capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                    ],
+                ),
+                ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
                 ("older", vec![]),
             ] {
                 s.devices.push(
@@ -1545,6 +1646,32 @@ mod tests {
         cx.simulate_resize(gpui::size(px(900.0), px(1600.0)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-workItem").is_some());
+        assert!(cx.debug_bounds("task-select-output").is_some());
+        page.update(cx, |p, cx| {
+            assert_eq!(
+                p.editor_draft(cx).unwrap().output,
+                ScheduledTaskOutput::Background
+            );
+            p.save(cx);
+            assert_eq!(
+                p.error.as_deref(),
+                Some("Choose a work item for background output")
+            );
+            p.choice("output", "interactive".into(), cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().output,
+                ScheduledTaskOutput::Interactive
+            );
+            p.target = Some("item-only".into());
+            p.edit(None, cx);
+            assert_eq!(
+                p.editor_draft(cx).unwrap().output,
+                ScheduledTaskOutput::Interactive
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-workItem").is_some());
+        assert!(cx.debug_bounds("task-select-output").is_none());
         page.update(cx, |p, cx| {
             p.target = Some("older".into());
             cx.notify();
@@ -1555,15 +1682,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn task_list_opens_settings_with_only_that_tasks_history_below(cx: &mut gpui::TestAppContext) {
+    fn task_list_opens_settings_with_only_that_tasks_history_including_background_runs(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let state = cx.new(|_| AppState::new());
         let (page, cx) = cx.add_window_view(|_, cx| {
             let mut p = ScheduledTasksPage::new(state.clone(), cx);
             state.update(cx, |s, _| {
-                s.chats = [("morning-run", "morning"), ("weekly-run", "weekly")].into_iter().map(|(id, task)| {
-                    serde_json::from_value(serde_json::json!({"id":id,"deviceId":"host","archived":false,"createdAt":"2026-01-01T00:00:00Z","scheduledTaskInfo":{"taskId":task,"taskName":task,"runId":id}})).unwrap()
+                s.chats = [("morning-run", "morning", "background"), ("weekly-run", "weekly", "interactive")].into_iter().map(|(id, task, output)| {
+                    serde_json::from_value(serde_json::json!({"id":id,"deviceId":"host","archived":false,"createdAt":"2026-01-01T00:00:00Z","scheduledTaskInfo":{"taskId":task,"taskName":task,"runId":id,"output":output}})).unwrap()
                 }).collect();
+                let now = chrono::Utc::now();
+                assert_eq!(s.overview_chats(now).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
+                assert_eq!(s.sidebar_chats(now, None).iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["weekly-run"]);
             });
             p.target = Some("host".into());
             p.edit(None, cx);
@@ -1932,11 +2064,18 @@ mod tests {
             ("dark", crate::theme::Appearance::Dark),
             ("light", crate::theme::Appearance::Light),
         ] {
-            for (host, supports_work_item) in [("current", true), ("older", false)] {
-                let capabilities = if supports_work_item {
-                    vec![mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]
-                } else {
+            for (host, output) in [
+                ("interactive", ScheduledTaskOutput::Interactive),
+                ("background", ScheduledTaskOutput::Background),
+                ("older", ScheduledTaskOutput::Interactive),
+            ] {
+                let capabilities = if host == "older" {
                     vec![]
+                } else {
+                    vec![
+                        capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                        capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                    ]
                 };
                 crate::snapshot::render_to_png(
                     &format!("scheduled-task-editor-{host}-{name}"),
@@ -1960,7 +2099,9 @@ mod tests {
                             e.name.update(cx, |i,cx|i.set_text("Daily summary",cx));
                             e.cwd.update(cx, |i,cx|i.set_text("/work/scheduled-tasks/very-long-working-directory-for-the-daily-summary",cx));
                             e.prompt.update(cx, |i,cx|i.set_text("Read the current procedure.\nSummarize open work, changes, and outstanding questions.\nKeep the links to original sources.\n",cx));
-                            p.editor.as_mut().unwrap().draft.work_item_id = supports_work_item.then(|| "routines".into());
+                            let draft = &mut p.editor.as_mut().unwrap().draft;
+                            draft.work_item_id = (host != "older").then(|| "routines".into());
+                            draft.output = output;
                             p.error = None;
                             p
                         });

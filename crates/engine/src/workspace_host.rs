@@ -239,6 +239,11 @@ pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
 }
 
+enum ChatOrigin {
+    Parent(String),
+    Scheduled(mast_proto::ScheduledChat),
+}
+
 impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
@@ -1822,8 +1827,60 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            parent_chat_id.map(ChatOrigin::Parent),
+        )
+    }
+
+    /// Publish scheduled provenance with the chat so a background run is
+    /// hidden even before its work-item assignment arrives.
+    pub(crate) fn create_scheduled_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        config: ChatConfig,
+        cwd: String,
+        task: mast_proto::ScheduledChat,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::Scheduled(task)),
+        )
+    }
+
+    fn create_chat_with_origin(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        origin: Option<ChatOrigin>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
-            return Ok(()); // idempotent: optimistic client retries never duplicate
+            // Older launchers could stop after creating the chat but before
+            // recording its provenance. Complete that step on recovery.
+            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+                self.mutate(|doc| {
+                    if doc
+                        .chat(chat_id)?
+                        .is_some_and(|chat| chat.scheduled_task_info.is_none())
+                    {
+                        doc.set_chat_scheduled_task_info(chat_id, task)?;
+                    }
+                    Ok::<(), mast_doc::DocError>(())
+                })?;
+            }
+            return Ok(());
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -1840,6 +1897,11 @@ impl WorkspaceHost {
                     "createChat needs a spaceId or a deviceId".into(),
                 ));
             }
+        };
+        let (parent_chat_id, scheduled_task_info) = match origin {
+            Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
+            Some(ChatOrigin::Scheduled(task)) => (None, Some(task)),
+            _ => (None, None),
         };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
@@ -1868,11 +1930,13 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 actual_model: None,
-                scheduled_task: None,
-                scheduled_task_info: None,
+                scheduled_task: scheduled_task_info
+                    .as_ref()
+                    .map(|task| task.task_name.clone()),
+                scheduled_task_info,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                parent_chat_id,
                 side_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,

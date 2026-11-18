@@ -62,6 +62,9 @@ impl PersonalAssistant {
     }
 
     fn covers_with<'a>(&self, chat: &Chat, merged: impl FnOnce() -> Option<&'a str>) -> bool {
+        if chat.is_background_task_run() {
+            return false;
+        }
         if chat.id == self.chat_id {
             return true;
         }
@@ -105,7 +108,9 @@ impl PersonalAssistant {
                 return Some(latest);
             }
         }
-        chats.iter().find(|c| c.id == self.chat_id)
+        chats
+            .iter()
+            .find(|c| c.id == self.chat_id && !c.is_background_task_run())
     }
 }
 
@@ -165,6 +170,24 @@ mod tests {
         assert!(!assistant.covers(&chats[2], &chats));
         assert!(!assistant.covers(&chats[1], &[]), "without the merge in view");
         assert_eq!(assistant.current(&chats).map(|c| c.id.as_str()), Some("native-run"));
+    }
+
+    #[test]
+    fn a_scheduled_assistant_only_covers_interactive_runs() {
+        let mut background = run("background", "t1", 3, "s1");
+        background.scheduled_task_info.as_mut().unwrap().output =
+            crate::ScheduledTaskOutput::Background;
+        let chats = [
+            run("picked", "t1", 1, "s1"),
+            run("interactive", "t1", 2, "s1"),
+            background,
+        ];
+        let assistant = PersonalAssistant::for_chat(&chats[0], 0);
+        assert!(!assistant.covers(&chats[2], &chats));
+        assert_eq!(
+            assistant.current(&chats).map(|c| c.id.as_str()),
+            Some("interactive")
+        );
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub mod capabilities {
     /// that item and delivers its instructions. Clients offer the Work item
     /// field only for hosts that advertise it; older hosts drop the field.
     pub const SCHEDULED_TASK_WORK_ITEM_V1: &str = "scheduled-task-work-item-v1";
+    /// The host stores scheduled task output modes and launches background runs.
+    pub const SCHEDULED_TASK_OUTPUT_V1: &str = "scheduled-task-output-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
     /// Linear Work Outline operations (`setSpaceLinearEnabled`,
     /// `createWorkItemFromLinear`, `linkLinearProject`).
@@ -87,6 +89,7 @@ pub mod capabilities {
         WORK_OUTLINE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
         SCHEDULED_TASK_WORK_ITEM_V1,
+        SCHEDULED_TASK_OUTPUT_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
         LINEAR_V1,

@@ -62,6 +62,33 @@ fn fixed_session_cards_confirm_before_discarding_details(cx: &mut gpui::TestAppC
     }
 }
 
+#[gpui::test]
+fn a_selected_background_run_stays_out_of_the_overview_cards(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_overview, state, vcx) = outline_overview(cx, dir.path());
+    state.update(vcx, |state, cx| {
+        let chat = state
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == CHAT_API)
+            .unwrap();
+        chat.scheduled_task_info = Some(mast_proto::ScheduledChat {
+            task_id: "daily".into(),
+            task_name: "Daily".into(),
+            run_id: "run".into(),
+            output: mast_proto::ScheduledTaskOutput::Background,
+            ..Default::default()
+        });
+        state.selected_chat = Some(CHAT_API.into());
+        state.set_personal_assistant(CHAT_API, cx);
+        assert!(state.personal_assistant.current(&state.chats).is_none());
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(vcx.debug_bounds("overview-current-session").is_none());
+    assert!(vcx.debug_bounds("overview-assistant").is_none());
+}
+
 struct EmptyCopyHost {
     overview: Entity<Overview>,
     outline: bool,

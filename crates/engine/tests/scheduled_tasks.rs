@@ -24,6 +24,7 @@ fn draft(root: &std::path::Path) -> ScheduledTaskDraft {
         grace_minutes: 360,
         cutover_confirmed: false,
         work_item_id: None,
+        output: Default::default(),
     }
 }
 #[tokio::test]
@@ -1003,6 +1004,104 @@ async fn a_task_with_a_work_item_attaches_each_run_and_pins_its_instructions() {
         commands[0].payload,
         mast_doc::SessionCommandPayload::RunWithInstructions { .. }
     ));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_tasks_require_an_item_and_launch_a_hidden_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, client, item) = item_core(&root).await;
+    let service = &core.scheduled_tasks;
+    let mut draft = item_draft(&root, None);
+    draft.output = ScheduledTaskOutput::Background;
+    let save = |draft| ScheduledTasksRequest::Save {
+        id: "background".into(),
+        expected_revision: 0,
+        draft,
+        operation_id: "save-background".into(),
+    };
+    let error = service.request(save(draft.clone())).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Background tasks require a work item")
+    );
+
+    draft.work_item_id = Some(item.clone());
+    service.request(save(draft.clone())).await.unwrap();
+    draft.output = ScheduledTaskOutput::Interactive;
+    let update = |revision| {
+        serde_json::to_value(ScheduledTasksRequest::Save {
+            id: "background".into(),
+            expected_revision: revision,
+            draft: draft.clone(),
+            operation_id: format!("edit-background-{revision}"),
+        })
+        .unwrap()
+    };
+    let legacy = update(1);
+    assert!(legacy.pointer("/draft/output").is_none());
+    let edited: ScheduledTasksSnapshot = client
+        .call_as(mast_rpc::methods::SCHEDULED_TASKS, legacy)
+        .await
+        .unwrap();
+    assert_eq!(edited.tasks[0].draft.output, ScheduledTaskOutput::Background);
+
+    let queued = service
+        .request(ScheduledTasksRequest::RunNow {
+            id: "background".into(),
+            operation_id: "run-background".into(),
+        })
+        .await
+        .unwrap();
+    let mut explicit = update(2);
+    explicit["draft"]["output"] = serde_json::json!("interactive");
+    let edited: ScheduledTasksSnapshot = client
+        .call_as(mast_rpc::methods::SCHEDULED_TASKS, explicit)
+        .await
+        .unwrap();
+    assert_eq!(edited.tasks[0].draft.output, ScheduledTaskOutput::Interactive);
+
+    service
+        .tick(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+
+    let chat_id = queued.runs[0].chat_id.as_ref().unwrap();
+    let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+    assert!(chat.is_background_task_run());
+    let outline = mast_doc::materialize_work_outline(
+        ITEM_SPACE,
+        &core.workspace.work_outline_inputs(ITEM_SPACE),
+    );
+    assert_eq!(outline.item(&item).unwrap().chat_ids, [chat_id.clone()]);
+    assert_eq!(outline.hidden_run_chat_ids, [chat_id.clone()]);
+    let history = service
+        .request(ScheduledTasksRequest::History {
+            id: "background".into(),
+            before: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.runs[0].chat_id.as_ref(), Some(chat_id));
+    assert_eq!(
+        history.runs[0].snapshot.output,
+        ScheduledTaskOutput::Background
+    );
+
+    let error = client
+        .call(
+            mast_rpc::methods::SET_PERSONAL_ASSISTANT,
+            serde_json::json!({ "chatId": chat_id }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("background task runs cannot be the personal assistant")
+    );
     core.shutdown().await;
 }
 
