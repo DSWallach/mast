@@ -37,6 +37,9 @@ mod tool_group_render;
 mod user_message_render;
 mod viewport_restoration;
 
+#[cfg(test)]
+thread_local! { static ACCESSIBLE_TEXT_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 use thought_flattening::*;
 
 pub use stick_spring::StickSpring;

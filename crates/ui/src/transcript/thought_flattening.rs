@@ -210,9 +210,6 @@ pub(super) fn with_accessible_text(
     }
 }
 
-#[cfg(test)]
-thread_local! { static ACCESSIBLE_TEXT_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-
 /// Text a transcript row exposes to the accessibility tree; `None` for rows
 /// with no readable text of their own (tool groups, chips, images).
 pub(super) fn row_accessible_text(kind: &RowKind) -> Option<SharedString> {
