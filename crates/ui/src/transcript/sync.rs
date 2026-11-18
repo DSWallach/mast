@@ -11,6 +11,11 @@ struct SyncRows {
     tail_streaming: bool,
 }
 
+struct SyncDiff {
+    baseline_changed: bool,
+    rows_diff: Option<(Range<usize>, usize)>,
+}
+
 impl Transcript {
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
@@ -20,264 +25,10 @@ impl Transcript {
         };
         let attached = self.attach_transcript(selected, replay);
 
-        let SyncRows { new_rows, entries_empty, tail_streaming } = self.build_sync_rows(cx);
-
-        let baseline = self
-            .chat_id
-            .as_deref()
-            .and_then(|id| self.state.read(cx).transcript_baseline(id))
-            .cloned();
-        let baseline_changed = baseline.as_ref().is_some_and(|baseline| {
-            self.last_replay_baseline
-                .as_ref()
-                .is_none_or(|previous| !Arc::ptr_eq(previous, baseline))
-        });
-        let mut historical_tools: HashMap<SharedString, HashSet<String>> = HashMap::new();
-        let mut fully_historical: HashSet<SharedString> = HashSet::new();
-        if baseline_changed {
-            let baseline = baseline.as_ref().unwrap();
-            let state = self.state.read(cx);
-            let entries = match &self.doc_override {
-                Some(id) => state.sub_transcript(id),
-                None => &state.transcript,
-            };
-            let previous_markdown = std::mem::take(&mut self.historical_markdown);
-            let prepared = self
-                .chat_id
-                .as_ref()
-                .and_then(|id| state.prepared_transcripts.get(id));
-            let mut historical_rows = Vec::new();
-            for entry in entries {
-                let covered = prepared.map_or_else(
-                    || baseline.covers(entry),
-                    |p| {
-                        Arc::ptr_eq(baseline, &p.navigation_baseline)
-                            || p.fully_historical.contains(&entry.id)
-                    },
-                );
-                if covered {
-                    fully_historical.insert(entry.id.clone().into());
-                    continue;
-                }
-                if let Some(rows) = self
-                    .chat_id
-                    .as_ref()
-                    .and_then(|id| state.prepared_transcripts.get(id))
-                    .and_then(|p| p.historical.get(&entry.id))
-                {
-                    historical_rows.extend(rows.iter().cloned());
-                    continue;
-                }
-                let Some(historical) = baseline.historical_entry(entry) else {
-                    continue;
-                };
-                historical_rows.extend(rows_for_entry(&historical, false, &mut |_, text| {
-                    Arc::new(parse_full(text))
-                }));
-            }
-            // A normal opening snapshot is entirely historical. Share its
-            // parsed trees instead of parsing the whole transcript twice;
-            // only an entry mixing historical and live parts needs a prefix.
-            historical_rows.extend(
-                new_rows
-                    .iter()
-                    .filter(|row| {
-                        fully_historical.contains(&row.entry_id)
-                            && matches!(row.kind, RowKind::LiveMarkdown { .. })
-                    })
-                    .cloned(),
-            );
-            for row in historical_rows {
-                match &row.kind {
-                    RowKind::ToolGroup { tools, .. }
-                        if !fully_historical.contains(&row.entry_id) =>
-                    {
-                        historical_tools
-                            .entry(row.entry_id.clone())
-                            .or_default()
-                            .extend(tools.iter().map(|tool| tool.part_id.clone()));
-                    }
-                    RowKind::LiveMarkdown { .. } => {
-                        if previous_markdown
-                            .get(&row.id)
-                            .is_none_or(|old| old.version != row.version)
-                        {
-                            self.veils.remove(&row.id);
-                        }
-                        self.historical_markdown.insert(row.id.clone(), row);
-                    }
-                    _ => {}
-                }
-            }
-            self.last_replay_baseline = Some(baseline.clone());
-        }
-
-        // Give only rows that ARRIVE after the replay baseline an entrance.
-        // The first populated frame after a chat attach may already contain a
-        // live tool group; treating it as history prevents a whole existing
-        // task tree from reanimating on every chat switch.
-        let replay_baseline = self.veil_attach_pending && !entries_empty;
-        if replay_baseline {
-            // Retain explicit user pins, but never resume an old arrival or
-            // closing animation when revisiting the retained transcript.
-            self.tool_group_reveals.clear();
-            for fold in self.folds.values_mut() {
-                fold.toggled_at = None;
-                fold.disclosure_at = None;
-            }
-        }
-        // Tool-group reveal bookkeeping only changes for rows inside the diff
-        // when nothing resets the whole transcript: an unchanged (id, version)
-        // row would recompute the same `starts` from its own previous value.
-        // Computed once: the same diff drives this scan, the prune and the
-        // list splice.
-        let rows_diff = diff_rows(&self.rows, &new_rows);
-        let incremental = !attached && !baseline_changed && !replay_baseline;
-        let (old_scan, new_scan) = match (&rows_diff, incremental) {
-            (Some((old_range, count)), true) => (
-                old_range.clone(),
-                old_range.start..old_range.start + count,
-            ),
-            (None, true) => (0..0, 0..0),
-            _ => (0..self.rows.len(), 0..new_rows.len()),
-        };
-        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self.rows
-            [old_scan.clone()]
-            .iter()
-            .inspect(|_| sync_scan_visit())
-            .filter(|row| !fully_historical.contains(&row.entry_id))
-            .filter_map(|row| match &row.kind {
-                RowKind::ToolGroup { tools, .. } => {
-                    let reveal = self.tool_group_reveals.get(&row.id);
-                    Some((
-                        row.id.clone(),
-                        tools
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, tool)| {
-                                (
-                                    tool.part_id.clone(),
-                                    reveal.and_then(|r| r.starts.get(ix).copied().flatten()),
-                                )
-                            })
-                            .collect(),
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
-        let now = Instant::now();
-        let mut live_tool_groups = HashSet::new();
-        for row in &new_rows[new_scan.clone()] {
-            sync_scan_visit();
-            let RowKind::ToolGroup { tools, .. } = &row.kind else {
-                continue;
-            };
-            // Agent/spawn groups are standalone cards, not task trees.
-            if !tool_group_collapses(tools) {
-                continue;
-            }
-            live_tool_groups.insert(row.id.clone());
-            let historical = historical_tools.get(&row.entry_id);
-            let whole_group_historical =
-                fully_historical.contains(&row.entry_id) || (replay_baseline && baseline.is_none());
-            let is_historical = |tool: &ToolItem| {
-                whole_group_historical || historical.is_some_and(|ids| ids.contains(&tool.part_id))
-            };
-            let historical_count = if whole_group_historical {
-                tools.len()
-            } else {
-                tools.iter().filter(|tool| is_historical(tool)).count()
-            };
-            let previous = previous_tools.get(&row.id);
-            let is_new_group = historical_count == 0 && previous.is_none();
-            let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
-            if baseline_changed && historical_count > 0 {
-                reveal.rendered_open = None;
-                if let Some(fold) = self.folds.get_mut(&row.id) {
-                    fold.toggled_at = None;
-                    fold.disclosure_at = None;
-                }
-            }
-            reveal.shimmer_started_at.get_or_insert(now);
-            if is_new_group {
-                reveal.header_started_at.get_or_insert(now);
-            }
-            if baseline_changed && historical_count == tools.len() {
-                reveal.header_started_at = None;
-            }
-            let first_row_delay = if is_new_group { TOOL_FIRST_ROW_DELAY_MS } else { 0 };
-            let mut arrival_ix = 0;
-            if whole_group_historical {
-                reveal.starts.clear();
-                reveal.starts.resize(tools.len(), None);
-                continue;
-            }
-            reveal.starts = tools
-                .iter()
-                .map(|tool| {
-                    if is_historical(tool) {
-                        return None;
-                    }
-                    if let Some(start) = previous.and_then(|tools| tools.get(&tool.part_id)) {
-                        return *start;
-                    }
-                    let start = now
-                        + Duration::from_millis(first_row_delay + arrival_ix * TOOL_ROW_STAGGER_MS);
-                    arrival_ix += 1;
-                    Some(start)
-                })
-                .collect();
-        }
-        if incremental {
-            // Unchanged rows keep their reveal; only groups that left the diff
-            // range (removed or no longer collapsing) are dropped.
-            for row in &self.rows[old_scan.clone()] {
-                if matches!(row.kind, RowKind::ToolGroup { .. })
-                    && !live_tool_groups.contains(&row.id)
-                {
-                    self.tool_group_reveals.remove(&row.id);
-                }
-            }
-        } else {
-            self.tool_group_reveals
-                .retain(|row_id, _| live_tool_groups.contains(row_id));
-        }
-
-        // Runtime scroll handles follow the stable code rows exactly. A live
-        // block keeps its handle through completion; deleted/reindexed tail
-        // blocks and the previous chat cannot accumulate stale handles.
-        self.prune_code_fences(attached, &rows_diff, &new_rows);
-
-        // Text already streamed before this (re)attach is the veil BASELINE:
-        // its rows' veils seed instead of fading (render creates them from
-        // this set), so only post-switch appends animate. Captured from the
-        // first NON-EMPTY transcript after attach — the replay frame — never
-        // the attach-time sync, whose transcript is still empty (selection
-        // clears it; the doc watch refills it async).
-        if self.veil_attach_pending
-            && (!entries_empty || replay.authoritative_empty() || baseline_changed)
-        {
-            self.veil_attach_pending = false;
-            self.veil_baseline = new_rows
-                .iter()
-                .filter(|r| baseline.is_none() && matches!(r.kind, RowKind::LiveMarkdown { .. }))
-                .map(|r| r.id.clone())
-                .collect();
-        }
-
-        // Veils live exactly as long as their live row — drop them on the
-        // live→complete flip (any mid-fade chunk snaps to full, matching the
-        // row's version splice).
-        let active_markdown: HashSet<&SharedString> = new_rows
-            .iter()
-            .filter(|row| matches!(row.kind, RowKind::LiveMarkdown { .. }))
-            .map(|row| &row.id)
-            .collect();
-        self.veils.retain(|id, _| active_markdown.contains(id));
-        self.veil_baseline.retain(|id| active_markdown.contains(id));
-        self.historical_markdown
-            .retain(|id, _| active_markdown.contains(id));
+        let rows = self.build_sync_rows(cx);
+        let SyncDiff { baseline_changed, rows_diff } =
+            self.reconcile_replay_and_tools(&rows, attached, replay, cx);
+        let SyncRows { new_rows, tail_streaming, .. } = rows;
 
         // Capture this before the row splice changes the list's measured end.
         // When the user is truly live-following, retaining the end anchor
@@ -590,6 +341,274 @@ impl Transcript {
         };
 
         SyncRows { new_rows, entries_empty, tail_streaming }
+    }
+    fn reconcile_replay_and_tools(
+        &mut self,
+        rows: &SyncRows,
+        attached: bool,
+        replay: TranscriptReplayState,
+        cx: &mut Context<Self>,
+    ) -> SyncDiff {
+        let new_rows = &rows.new_rows;
+        let entries_empty = rows.entries_empty;
+        let baseline = self
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.state.read(cx).transcript_baseline(id))
+            .cloned();
+        let baseline_changed = baseline.as_ref().is_some_and(|baseline| {
+            self.last_replay_baseline
+                .as_ref()
+                .is_none_or(|previous| !Arc::ptr_eq(previous, baseline))
+        });
+        let mut historical_tools: HashMap<SharedString, HashSet<String>> = HashMap::new();
+        let mut fully_historical: HashSet<SharedString> = HashSet::new();
+        if baseline_changed {
+            let baseline = baseline.as_ref().unwrap();
+            let state = self.state.read(cx);
+            let entries = match &self.doc_override {
+                Some(id) => state.sub_transcript(id),
+                None => &state.transcript,
+            };
+            let previous_markdown = std::mem::take(&mut self.historical_markdown);
+            let prepared = self
+                .chat_id
+                .as_ref()
+                .and_then(|id| state.prepared_transcripts.get(id));
+            let mut historical_rows = Vec::new();
+            for entry in entries {
+                let covered = prepared.map_or_else(
+                    || baseline.covers(entry),
+                    |p| {
+                        Arc::ptr_eq(baseline, &p.navigation_baseline)
+                            || p.fully_historical.contains(&entry.id)
+                    },
+                );
+                if covered {
+                    fully_historical.insert(entry.id.clone().into());
+                    continue;
+                }
+                if let Some(rows) = self
+                    .chat_id
+                    .as_ref()
+                    .and_then(|id| state.prepared_transcripts.get(id))
+                    .and_then(|p| p.historical.get(&entry.id))
+                {
+                    historical_rows.extend(rows.iter().cloned());
+                    continue;
+                }
+                let Some(historical) = baseline.historical_entry(entry) else {
+                    continue;
+                };
+                historical_rows.extend(rows_for_entry(&historical, false, &mut |_, text| {
+                    Arc::new(parse_full(text))
+                }));
+            }
+            // A normal opening snapshot is entirely historical. Share its
+            // parsed trees instead of parsing the whole transcript twice;
+            // only an entry mixing historical and live parts needs a prefix.
+            historical_rows.extend(
+                new_rows
+                    .iter()
+                    .filter(|row| {
+                        fully_historical.contains(&row.entry_id)
+                            && matches!(row.kind, RowKind::LiveMarkdown { .. })
+                    })
+                    .cloned(),
+            );
+            for row in historical_rows {
+                match &row.kind {
+                    RowKind::ToolGroup { tools, .. }
+                        if !fully_historical.contains(&row.entry_id) =>
+                    {
+                        historical_tools
+                            .entry(row.entry_id.clone())
+                            .or_default()
+                            .extend(tools.iter().map(|tool| tool.part_id.clone()));
+                    }
+                    RowKind::LiveMarkdown { .. } => {
+                        if previous_markdown
+                            .get(&row.id)
+                            .is_none_or(|old| old.version != row.version)
+                        {
+                            self.veils.remove(&row.id);
+                        }
+                        self.historical_markdown.insert(row.id.clone(), row);
+                    }
+                    _ => {}
+                }
+            }
+            self.last_replay_baseline = Some(baseline.clone());
+        }
+
+        // Give only rows that ARRIVE after the replay baseline an entrance.
+        // The first populated frame after a chat attach may already contain a
+        // live tool group; treating it as history prevents a whole existing
+        // task tree from reanimating on every chat switch.
+        let replay_baseline = self.veil_attach_pending && !entries_empty;
+        if replay_baseline {
+            // Retain explicit user pins, but never resume an old arrival or
+            // closing animation when revisiting the retained transcript.
+            self.tool_group_reveals.clear();
+            for fold in self.folds.values_mut() {
+                fold.toggled_at = None;
+                fold.disclosure_at = None;
+            }
+        }
+        // Tool-group reveal bookkeeping only changes for rows inside the diff
+        // when nothing resets the whole transcript: an unchanged (id, version)
+        // row would recompute the same `starts` from its own previous value.
+        // Computed once: the same diff drives this scan, the prune and the
+        // list splice.
+        let rows_diff = diff_rows(&self.rows, new_rows);
+        let incremental = !attached && !baseline_changed && !replay_baseline;
+        let (old_scan, new_scan) = match (&rows_diff, incremental) {
+            (Some((old_range, count)), true) => (
+                old_range.clone(),
+                old_range.start..old_range.start + count,
+            ),
+            (None, true) => (0..0, 0..0),
+            _ => (0..self.rows.len(), 0..new_rows.len()),
+        };
+        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self.rows
+            [old_scan.clone()]
+            .iter()
+            .inspect(|_| sync_scan_visit())
+            .filter(|row| !fully_historical.contains(&row.entry_id))
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => {
+                    let reveal = self.tool_group_reveals.get(&row.id);
+                    Some((
+                        row.id.clone(),
+                        tools
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, tool)| {
+                                (
+                                    tool.part_id.clone(),
+                                    reveal.and_then(|r| r.starts.get(ix).copied().flatten()),
+                                )
+                            })
+                            .collect(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        let now = Instant::now();
+        let mut live_tool_groups = HashSet::new();
+        for row in &new_rows[new_scan.clone()] {
+            sync_scan_visit();
+            let RowKind::ToolGroup { tools, .. } = &row.kind else {
+                continue;
+            };
+            // Agent/spawn groups are standalone cards, not task trees.
+            if !tool_group_collapses(tools) {
+                continue;
+            }
+            live_tool_groups.insert(row.id.clone());
+            let historical = historical_tools.get(&row.entry_id);
+            let whole_group_historical =
+                fully_historical.contains(&row.entry_id) || (replay_baseline && baseline.is_none());
+            let is_historical = |tool: &ToolItem| {
+                whole_group_historical || historical.is_some_and(|ids| ids.contains(&tool.part_id))
+            };
+            let historical_count = if whole_group_historical {
+                tools.len()
+            } else {
+                tools.iter().filter(|tool| is_historical(tool)).count()
+            };
+            let previous = previous_tools.get(&row.id);
+            let is_new_group = historical_count == 0 && previous.is_none();
+            let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
+            if baseline_changed && historical_count > 0 {
+                reveal.rendered_open = None;
+                if let Some(fold) = self.folds.get_mut(&row.id) {
+                    fold.toggled_at = None;
+                    fold.disclosure_at = None;
+                }
+            }
+            reveal.shimmer_started_at.get_or_insert(now);
+            if is_new_group {
+                reveal.header_started_at.get_or_insert(now);
+            }
+            if baseline_changed && historical_count == tools.len() {
+                reveal.header_started_at = None;
+            }
+            let first_row_delay = if is_new_group { TOOL_FIRST_ROW_DELAY_MS } else { 0 };
+            let mut arrival_ix = 0;
+            if whole_group_historical {
+                reveal.starts.clear();
+                reveal.starts.resize(tools.len(), None);
+                continue;
+            }
+            reveal.starts = tools
+                .iter()
+                .map(|tool| {
+                    if is_historical(tool) {
+                        return None;
+                    }
+                    if let Some(start) = previous.and_then(|tools| tools.get(&tool.part_id)) {
+                        return *start;
+                    }
+                    let start = now
+                        + Duration::from_millis(first_row_delay + arrival_ix * TOOL_ROW_STAGGER_MS);
+                    arrival_ix += 1;
+                    Some(start)
+                })
+                .collect();
+        }
+        if incremental {
+            // Unchanged rows keep their reveal; only groups that left the diff
+            // range (removed or no longer collapsing) are dropped.
+            for row in &self.rows[old_scan.clone()] {
+                if matches!(row.kind, RowKind::ToolGroup { .. })
+                    && !live_tool_groups.contains(&row.id)
+                {
+                    self.tool_group_reveals.remove(&row.id);
+                }
+            }
+        } else {
+            self.tool_group_reveals
+                .retain(|row_id, _| live_tool_groups.contains(row_id));
+        }
+
+        // Runtime scroll handles follow the stable code rows exactly. A live
+        // block keeps its handle through completion; deleted/reindexed tail
+        // blocks and the previous chat cannot accumulate stale handles.
+        self.prune_code_fences(attached, &rows_diff, new_rows);
+
+        // Text already streamed before this (re)attach is the veil BASELINE:
+        // its rows' veils seed instead of fading (render creates them from
+        // this set), so only post-switch appends animate. Captured from the
+        // first NON-EMPTY transcript after attach — the replay frame — never
+        // the attach-time sync, whose transcript is still empty (selection
+        // clears it; the doc watch refills it async).
+        if self.veil_attach_pending
+            && (!entries_empty || replay.authoritative_empty() || baseline_changed)
+        {
+            self.veil_attach_pending = false;
+            self.veil_baseline = new_rows
+                .iter()
+                .filter(|r| baseline.is_none() && matches!(r.kind, RowKind::LiveMarkdown { .. }))
+                .map(|r| r.id.clone())
+                .collect();
+        }
+
+        // Veils live exactly as long as their live row — drop them on the
+        // live→complete flip (any mid-fade chunk snaps to full, matching the
+        // row's version splice).
+        let active_markdown: HashSet<&SharedString> = new_rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::LiveMarkdown { .. }))
+            .map(|row| &row.id)
+            .collect();
+        self.veils.retain(|id, _| active_markdown.contains(id));
+        self.veil_baseline.retain(|id| active_markdown.contains(id));
+        self.historical_markdown
+            .retain(|id, _| active_markdown.contains(id));
+
+        SyncDiff { baseline_changed, rows_diff }
     }
 
 }
