@@ -1854,6 +1854,7 @@ impl Shell {
                     let request_id = request_id.clone();
                     row = row.child("Resolve stale request — PR merged")
                         .child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-resolve-request-{index}"), "Resolve", false)
+                            .debug_selector(move || format!("cleanup-resolve-request-{index}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.resolve_tracker_stale_request(request_id.clone(), cx))));
                 }
             }

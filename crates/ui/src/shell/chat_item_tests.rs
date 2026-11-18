@@ -1590,6 +1590,44 @@ fn tracker_shows_state_specific_actions(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_resolves_merged_review_without_hiding_other_questions(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.user_action_requests.push(request("review", "s1", API, "w-0", "Ready for review: example"));
+        snapshot.user_action_requests.push(request("question", "s1", API, "w-1", "Which calendar?"));
+    });
+    add_workers(&shell, vcx, 2);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
+                recorded.lock().unwrap().push((method.to_owned(), params.clone()));
+                Ok(serde_json::json!({}))
+            })));
+        });
+        for index in 0..2 {
+            let status: mast_engine::pr_ticket_cache::ChatLinkStatus = serde_json::from_value(serde_json::json!({
+                "isWorktree": false, "pr": {"number": 57 + index, "url": format!("https://github.com/example/project/pull/{}", 57 + index), "state": "MERGED",
+                    "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false}
+            })).unwrap();
+            shell.chat_header_links.insert(format!("w-{index}"), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        }
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(!has(vcx, "tracker-answer-w-0"));
+    assert!(has(vcx, "tracker-answer-w-1"));
+    click_selector(vcx, "tracker-cleanup-toggle");
+    draw(vcx);
+    click_selector(vcx, "cleanup-resolve-request-0");
+    vcx.run_until_parked();
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|(_, params)| params["op"] == "resolveUserActionRequest"
+        && params["userActionRequestId"] == "review" && params["note"] == "PR merged"));
+}
+
+#[gpui::test]
 fn tracker_offers_merge_for_approved_passing_pr_without_handoff(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 1);
