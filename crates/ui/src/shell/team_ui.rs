@@ -322,7 +322,12 @@ mod tracker_tests {
 
     #[test]
     fn stage_track_uses_theme_colors() {
-        for theme in [Theme::light(), Theme::dark()] {
+        for (appearance, variant) in [
+            (crate::theme::Appearance::Light, "mast-light"), (crate::theme::Appearance::Dark, "mast-dark"),
+            (crate::theme::Appearance::Light, "industrial-light"), (crate::theme::Appearance::Dark, "industrial-dark"),
+            (crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark"),
+        ] {
+            let theme = Theme::for_selection(appearance, variant, mast_theme::AccentSelection::ThemeDefault, mast_theme::SurfacePreference::default());
             for index in 0..6 {
                 assert_eq!(tracker_stage_color(LifecycleStage::NotStarted, index, &theme), theme.border);
                 assert_eq!(tracker_stage_color(LifecycleStage::Done, index, &theme), theme.success);
@@ -1091,6 +1096,14 @@ impl Shell {
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
             snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
+                id: "fixture-merged-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-item-2".into(),
+                chat_id: "fixture-worker-2".into(), text: "Which calendar should the report use?".into(),
+                kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
+                origin_kind: Default::default(), message_id: None, tool_call_id: None, info: None, options: Vec::new(),
+                links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
+                state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
+            });
+            snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
                 id: "fixture-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-root".into(),
                 chat_id: "fixture-worker-5".into(), text: "Use the compact layout first?".into(),
                 kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
@@ -1127,7 +1140,7 @@ impl Shell {
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
             let pr = (index < 4 || index == 7).then(|| PrStatus {
                 additions: Some(312), deletions: Some(48),
-                number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
+                number: index + 20, url: Some(url), state: if index == 2 || index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
                 title: None, branch: Some(format!("tracker/task-{index}")), head_sha: Some("fixture-head".into()), mergeable: String::new(),
@@ -1383,7 +1396,6 @@ impl Shell {
                     && request.is_unresolved() && request.effective_kind() != mast_proto::work_outline_user_actions::UserActionKind::Notice
                     && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)).collect();
                 let stale: Vec<_> = relevant.iter().copied().filter(|request| stale_review_request(request)).collect();
-                if stale.is_empty() { continue; }
                 for request in &stale {
                     local_cleanup.push(TrackerCleanup::StaleRequest { request_id: request.id.clone() });
                     requests.remove(&request.chat_id);
@@ -1917,8 +1929,8 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
                 .into_any_element();
         }
-        let group = worker.tracker_group();
         let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
+        let group = worker.tracker_group();
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
             && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
         let status = if stage == LifecycleStage::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
@@ -2029,7 +2041,7 @@ impl Shell {
         }
         let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
         let request = self.tracker.requests.get(&id);
-        let activity = request.map(|request| if group == TrackerGroup::NeedsYou { format!("Asked: {request}") } else { request.clone() })
+        let activity = request.map(|request| if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you) { format!("Asked: {request}") } else { request.clone() })
             .or_else(|| worker.activity.clone())
             .or_else(|| stalled.as_ref().map(|(label, _)| label.clone())).unwrap_or_default();
         let activity = [activity, age.clone()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -2046,7 +2058,8 @@ impl Shell {
         }
         let mut actions = div().flex().items_center().gap(px(Theme::SPACE_SM))
             .debug_selector({ let id = id.clone(); move || format!("tracker-actions-{id}") });
-        if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you) {
+        if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you)
+            && (group == TrackerGroup::NeedsYou || stage == LifecycleStage::Done) {
             let answer_id = id.clone();
             actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-answer-{id}"), "Answer", true)
                 .debug_selector({ let id = id.clone(); move || format!("tracker-answer-{id}") })
