@@ -352,6 +352,18 @@ impl PrTicketCache {
             .map(|entry| entry.data.clone())
     }
 
+    /// Read an already cached branch lookup without scheduling git or network
+    /// work. `checkout` selects the same namespace used for checkout targets.
+    pub fn peek_pr_branch(&self, cwd: &str, branch: &str, checkout: bool) -> Option<Option<PrStatus>> {
+        let key = if checkout {
+            PrKey::CheckoutBranch { cwd: PathBuf::from(cwd), branch: branch.to_owned() }
+        } else {
+            PrKey::Branch { cwd: PathBuf::from(cwd), branch: branch.to_owned() }
+        };
+        let cache = lock(&self.inner.pr_cache);
+        cache.get(&key).filter(|entry| entry.fresh_pr()).map(|entry| entry.data.clone())
+    }
+
     pub fn new() -> Self {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
         Self {
@@ -1626,6 +1638,16 @@ mod tests {
             fetched_at: Instant::now(),
         });
         assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn peek_pr_branch_uses_the_correct_cache_namespace_without_queuing() {
+        let cache = PrTicketCache::new();
+        let key = PrKey::CheckoutBranch { cwd: PathBuf::from("/repo"), branch: "feature".into() };
+        lock(&cache.inner.pr_cache).insert(key, Entry { data: None, fetched_at: Instant::now() });
+        assert!(matches!(cache.peek_pr_branch("/repo", "feature", true), Some(None)));
+        assert!(cache.peek_pr_branch("/repo", "feature", false).is_none());
         assert!(lock(&cache.inner.pending_pr).is_empty());
     }
 

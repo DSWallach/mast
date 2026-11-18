@@ -42,6 +42,21 @@ pub enum HealthEntry {
     StaleChat { chat_id: String },
 }
 
+/// Select live items in one subtree in a single pass over the materialized
+/// parent-before-child snapshot. This never widens to the enclosing project.
+pub fn subtree_items<'a>(snapshot: &'a mast_proto::WorkOutlineSnapshot, root: &str) -> Vec<&'a mast_proto::WorkItemView> {
+    use std::collections::HashSet;
+    let mut included = HashSet::new();
+    let mut items = Vec::new();
+    for item in &snapshot.items {
+        if item.archived_at.is_none() && (item.id == root || item.parent_work_item_id.as_deref().is_some_and(|id| included.contains(id))) {
+            included.insert(item.id.as_str());
+            items.push(item);
+        }
+    }
+    items
+}
+
 /// Builds the list from a single snapshot, without IO or mutations. Inputs
 /// must already be restricted to the caller's permitted subtree.
 pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPullRequest]) -> Vec<HealthEntry> {
@@ -84,6 +99,22 @@ pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_does_not_include_siblings_or_archived_descendants() {
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "space", "items": [
+                {"id": "root", "spaceId": "space"},
+                {"id": "child", "spaceId": "space", "parentWorkItemId": "root"},
+                {"id": "archived", "spaceId": "space", "parentWorkItemId": "root", "archivedAt": 1},
+                {"id": "hidden", "spaceId": "space", "parentWorkItemId": "archived"},
+                {"id": "sibling", "spaceId": "space"}
+            ]
+        })).unwrap();
+        let ids: Vec<_> = subtree_items(&snapshot, "root").into_iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["root", "child"]);
+        assert!(subtree_items(&snapshot, "missing").is_empty());
+    }
 
     #[test]
     fn detects_each_condition_and_ignores_finished_chats() {
