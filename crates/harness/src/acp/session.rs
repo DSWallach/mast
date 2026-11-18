@@ -81,12 +81,7 @@ impl AcpSessionState {
         // a full channel never parses the response): past it the call
         // is abandoned and the steer redelivered.
         if let Some((text, mut fut)) = self.steering_call.take() {
-            let outcome = match tokio::time::timeout(
-                Duration::from_millis(1000),
-                &mut fut,
-            )
-            .await
-            {
+            let outcome = match tokio::time::timeout(Duration::from_millis(1000), &mut fut).await {
                 Ok(Ok(resp)) => resp
                     .get("outcome")
                     .and_then(Value::as_str)
@@ -125,8 +120,12 @@ impl AcpSessionState {
         while let Ok(inc) = incoming.try_recv() {
             match inc {
                 Incoming::Notification { method, params } => {
-                    let events =
-                        session_update_events(&method, &params, &self.session_id, &mut self.subagents);
+                    let events = session_update_events(
+                        &method,
+                        &params,
+                        &self.session_id,
+                        &mut self.subagents,
+                    );
                     for ev in events {
                         if !send(&self.event_tx, ev).await {
                             consumer_gone = true;
@@ -161,7 +160,9 @@ impl AcpSessionState {
         let (prev, _next) = rotate(&mut self.assistant_message_id);
         if !send(
             &self.event_tx,
-            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+            AgentEvent::AssistantMessageCompleted {
+                assistant_message_id: prev,
+            },
         )
         .await
         {
@@ -176,7 +177,9 @@ impl AcpSessionState {
         }
         let (status, mut error) = stop_outcome(&res, self.interrupted);
         if !self.interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
-            error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+            error = Some(format!(
+                "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
+            ));
         }
         self.done_current = true;
         if self.interrupted {
@@ -224,7 +227,11 @@ impl AcpSessionState {
     async fn accept_incoming(&mut self, inc: Option<Incoming>) -> LoopControl {
         match inc {
             Some(Incoming::Notification { method, params }) => {
-                if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != self.session_id) {
+                if params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id != self.session_id)
+                {
                     return LoopControl::Continue;
                 }
                 self.last_update_at = tokio::time::Instant::now();
@@ -271,9 +278,10 @@ impl AcpSessionState {
                         .get("promptId")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
-                    let stale = pid.as_deref().is_some_and(|p| {
-                        self.completed_prompts.iter().any(|c| c == p)
-                    }) || (pid.is_some() && pid != self.current_prompt_id);
+                    let stale = pid
+                        .as_deref()
+                        .is_some_and(|p| self.completed_prompts.iter().any(|c| c == p))
+                        || (pid.is_some() && pid != self.current_prompt_id);
                     if !stale {
                         let stop = params
                             .get("stopReason")
@@ -285,9 +293,8 @@ impl AcpSessionState {
                                 let _ = old.await;
                             });
                         }
-                        self.turn = Some(Box::pin(async move {
-                            Ok(json!({ "stopReason": stop }))
-                        }));
+                        self.turn =
+                            Some(Box::pin(async move { Ok(json!({ "stopReason": stop })) }));
                     }
                 }
                 // Other notifications (other sessions, agent noise) are
@@ -332,7 +339,9 @@ impl AcpSessionState {
                     let (prev, _next) = rotate(&mut self.assistant_message_id);
                     let _ = send(
                         &self.event_tx,
-                        AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                        AgentEvent::AssistantMessageCompleted {
+                            assistant_message_id: prev,
+                        },
                     )
                     .await;
                     if let Some(usage) = usage_from_response(&res) {
@@ -407,8 +416,12 @@ impl AcpSessionState {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
-                            let events =
-                                session_update_events(&method, &params, &self.session_id, &mut self.subagents);
+                            let events = session_update_events(
+                                &method,
+                                &params,
+                                &self.session_id,
+                                &mut self.subagents,
+                            );
                             for ev in events {
                                 if !send(&self.event_tx, ev).await {
                                     consumer_gone = true;
@@ -423,7 +436,7 @@ impl AcpSessionState {
                                 &method,
                                 &params,
                                 &self.request_input,
-                        &self.session_id,
+                                &self.session_id,
                             ) {
                                 if !send(&self.event_tx, ev).await {
                                     consumer_gone = true;
@@ -473,8 +486,7 @@ impl AcpSessionState {
                     "steering answered noRunningTurn with a prompt \
                      outstanding; arming starved-turn recovery"
                 );
-                self.starve_deadline =
-                    Some(tokio::time::Instant::now() + STARVE_GRACE);
+                self.starve_deadline = Some(tokio::time::Instant::now() + STARVE_GRACE);
             }
             self.queued_steers.push_back(text);
         } else {
@@ -545,7 +557,9 @@ impl AcpSessionState {
         let (prev, _next) = rotate(&mut self.assistant_message_id);
         if !send(
             &self.event_tx,
-            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+            AgentEvent::AssistantMessageCompleted {
+                assistant_message_id: prev,
+            },
         )
         .await
         {
@@ -604,8 +618,7 @@ impl AcpSessionState {
                     // steer lines up behind it and dispatches at flush.
                     self.queued_steers.push_back(text);
                 } else if self.turn.is_none()
-                    && (!self.open_tools.is_empty()
-                        || self.last_update_at.elapsed() < BUSY_RECENT)
+                    && (!self.open_tools.is_empty() || self.last_update_at.elapsed() < BUSY_RECENT)
                 {
                     // Mid self-continued turn (see BUSY_RECENT above):
                     // cancel it rather than prompt into the starve.
@@ -620,8 +633,7 @@ impl AcpSessionState {
                         Some(json!({ "sessionId": self.session_id })),
                     );
                     self.queued_steers.push_back(text);
-                    self.cancel_flush_deadline =
-                        Some(tokio::time::Instant::now() + CANCEL_FLUSH);
+                    self.cancel_flush_deadline = Some(tokio::time::Instant::now() + CANCEL_FLUSH);
                 } else if self.turn.is_none() {
                     // Idle between turns: a steer is simply the next turn.
                     let (prev, next) = rotate(&mut self.assistant_message_id);
@@ -684,7 +696,10 @@ impl AcpSessionState {
         self.interrupt_sent = true;
         self.interrupted = true;
         if has_turn {
-            self.client.notify("session/cancel", Some(json!({ "sessionId": self.session_id })));
+            self.client.notify(
+                "session/cancel",
+                Some(json!({ "sessionId": self.session_id })),
+            );
             if let Some(pid) = crate::process::signal_target(child) {
                 self.escalation_target = Some(pid);
                 self.escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
@@ -712,11 +727,7 @@ impl AcpSessionState {
         ));
     }
 
-    fn escalate_interrupt(
-        &mut self,
-        escalation_signal: &mut Signal,
-        kill_grace: Duration,
-    ) {
+    fn escalate_interrupt(&mut self, escalation_signal: &mut Signal, kill_grace: Duration) {
         // Once escalation starts, a late response no longer owns this turn.
         self.turn = None;
         if let Some(target) = &self.escalation_target {
@@ -731,7 +742,6 @@ impl AcpSessionState {
         };
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn finish_session(
         &mut self,
         child: &mut Child,
@@ -756,7 +766,8 @@ impl AcpSessionState {
         // consumer already hung up.
         if !self.event_tx.is_closed() {
             if self.interrupted && !self.done_after_interrupt {
-                let _ = self.event_tx
+                let _ = self
+                    .event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Interrupted,
                         result: None,
@@ -775,7 +786,8 @@ impl AcpSessionState {
                 };
                 child.request_group_shutdown();
                 stderr_tail.wait_closed().await;
-                let _ = self.event_tx
+                let _ = self
+                    .event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
@@ -789,15 +801,13 @@ impl AcpSessionState {
         child.shutdown(kill_grace).await;
     }
 
-    async fn expire_prompt_stall(
-        &mut self,
-        agent_name: &str,
-        stall_hint: &str,
-    ) {
+    async fn expire_prompt_stall(&mut self, agent_name: &str, stall_hint: &str) {
         let _ = send(
             &self.event_tx,
             AgentEvent::Error {
-                code: None, resets_at: None, message: format!(
+                code: None,
+                resets_at: None,
+                message: format!(
                     "{agent_name} did not respond to the prompt at all \
                      (no wire activity for {}s). {}",
                     self.prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
@@ -908,14 +918,8 @@ async fn establish_session(
     if harness == HarnessId::Devin
         && let Some(model) = request.model.as_deref()
     {
-        devin_models::wait_for_model(
-            client,
-            incoming,
-            &session_id,
-            &mut session_response,
-            model,
-        )
-        .await?;
+        devin_models::wait_for_model(client, incoming, &session_id, &mut session_response, model)
+            .await?;
     }
     // ACP has had two model-selection surfaces. Newer config-option agents
     // use category=model below; Grok Build currently advertises only the
@@ -938,9 +942,7 @@ async fn establish_session(
             &request.model_options,
         )?;
     }
-    if let Some(model) =
-        first_class_model_change(&session_response, requested_model.as_deref())?
-    {
+    if let Some(model) = first_class_model_change(&session_response, requested_model.as_deref())? {
         request_draining(
             client,
             incoming,
@@ -1057,7 +1059,11 @@ pub(super) async fn run_session(session: Session) {
         effort_in_model_id,
         effort_values,
     );
-    let EstablishedSession { session_id, steer_ext, init_commands } = tokio::select! {
+    let EstablishedSession {
+        session_id,
+        steer_ext,
+        init_commands,
+    } = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -1364,7 +1370,7 @@ pub(super) async fn run_session(session: Session) {
         }
     }
 
-    state.finish_session(
-        &mut child, agent_name, &stderr_tail, kill_grace,
-    ).await;
+    state
+        .finish_session(&mut child, agent_name, &stderr_tail, kill_grace)
+        .await;
 }
