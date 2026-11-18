@@ -279,6 +279,40 @@ struct OutlineFixture {
     _shell: Entity<crate::shell::Shell>,
 }
 
+struct SpaceSettingsFixture {
+    details: Entity<crate::work_outline::details_panel::WorkItemDetails>,
+    _shell: Entity<crate::shell::Shell>,
+}
+
+impl gpui::Render for SpaceSettingsFixture {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{div, prelude::*};
+        div().size_full().child(self.details.clone())
+    }
+}
+
+pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + use<>> {
+    let mut snapshot = outline_with_requests("s1");
+    snapshot.space_settings.worker_worktrees = true;
+    snapshot.space_settings.merged_pr_completion = Some(mast_proto::work_outline::MergedPrCompletion::Ask);
+    snapshot.space_settings.archive_workers_after_days = Some(3);
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.connection = mast_proto::view::ConnectionStatus::Ready;
+        state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+        state.selected_space = Some("s1".into());
+        state.set_work_outline_for_test(snapshot.clone());
+        state
+    });
+    let boot = crate::EngineBootConfig { data_dir, ipc_port: 0, edge_url: String::new(), edge_token: None,
+        org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
+    let shell = cx.new(|cx| crate::shell::Shell::new(state.clone(), boot, cx));
+    let details = cx.new(|cx| crate::work_outline::details_panel::WorkItemDetails::new(
+        state, shell.downgrade(), "s1".into(), "".into(), cx));
+    details.update(cx, |details, _| details.set_data(Some(Arc::new(snapshot)), Arc::new(Vec::new())));
+    cx.new(|_| SpaceSettingsFixture { details, _shell: shell })
+}
+
 /// Offline Overview with its outline toolbar visible.
 pub fn overview_fixture(cx: &mut App) -> Entity<crate::overview::Overview> {
     let state = cx.new(|_| {
