@@ -1,5 +1,35 @@
 use super::*;
 
+pub(super) fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
+    transition.map(|(from, to)| from.max(to)).unwrap_or(target)
+}
+
+pub(super) fn right_panel_content_width(
+    target: f32,
+    transition: Option<(f32, f32)>,
+    takeover_width: Option<f32>,
+) -> f32 {
+    takeover_width.unwrap_or_else(|| stable_panel_content_width(target, transition))
+}
+
+pub(super) fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
+    (viewport - sidebar - right).max(0.0)
+}
+
+/// Maximum width the right pane may occupy while retaining the conversation
+/// floor. On unusually small windows this deliberately falls below the right
+/// pane's preferred minimum: the chat remains usable and the side surface
+/// yields the scarce space.
+pub(super) fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
+    (viewport - sidebar - chat_floor).max(0.0)
+}
+
+/// Width used by right-pane takeover. Unlike manual resizing, takeover is
+/// intentionally allowed to consume the conversation column completely.
+pub(super) fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
+    (viewport - sidebar).max(0.0)
+}
+
 impl Shell {
     pub(super) fn terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
         if let Some(terminal) = &self.terminal {

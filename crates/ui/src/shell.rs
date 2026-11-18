@@ -92,6 +92,7 @@ pub use navigation::{ChatPanels, SessionPanels, NavEntry, NavHistory, Route, Set
 mod outside_file_ui;
 mod overlays;
 mod pane_geometry;
+use pane_geometry::{stable_panel_content_width, right_panel_content_width, conversation_width, right_pane_max_width, right_pane_takeover_width};
 #[cfg(test)]
 mod perf_tests;
 mod pr_review_ui;
@@ -287,22 +288,6 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
-fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
-    transition.map(|(from, to)| from.max(to)).unwrap_or(target)
-}
-
-fn right_panel_content_width(
-    target: f32,
-    transition: Option<(f32, f32)>,
-    takeover_width: Option<f32>,
-) -> f32 {
-    takeover_width.unwrap_or_else(|| stable_panel_content_width(target, transition))
-}
-
-fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
-    (viewport - sidebar - right).max(0.0)
-}
-
 fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f32 {
     if is_chat_route && has_selected_chat {
         1.0
@@ -316,20 +301,6 @@ fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
-
-/// Maximum width the right pane may occupy while retaining the conversation
-/// floor. On unusually small windows this deliberately falls below the right
-/// pane's preferred minimum: the chat remains usable and the side surface
-/// yields the scarce space.
-fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
-    (viewport - sidebar - chat_floor).max(0.0)
-}
-
-/// Width used by right-pane takeover. Unlike manual resizing, takeover is
-/// intentionally allowed to consume the conversation column completely.
-fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
-    (viewport - sidebar).max(0.0)
-}
 
 /// One right-pane surface tab: a workspace browser, an individual workspace
 /// file editor, a Git diff or history page, an embedded terminal, or a
