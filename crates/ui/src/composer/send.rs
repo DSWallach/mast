@@ -39,11 +39,15 @@ struct PreparedSend {
 
 impl Composer {
     pub(super) fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
-        let Some(send) = self.prepare_send(text, queue, cx) else { return; };
+        let Some(send) = self.prepare_send(text, queue, cx) else {
+            return;
+        };
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let mut dispatch_attempted = false;
             let result = Self::dispatch_send(&send, &this, cx, &mut dispatch_attempted).await;
-            if send.queue && let Err(error) = &result {
+            if send.queue
+                && let Err(error) = &result
+            {
                 tracing::warn!(chat = %send.err_chat_id, %error, "queue message failed");
             }
             if result.is_err() && send.is_new && !dispatch_attempted {
@@ -62,99 +66,150 @@ impl Composer {
                 )
                 .await;
             }
-            this.update(cx, |composer, cx| composer.finish_send(send, result, dispatch_attempted, cx)).ok();
+            this.update(cx, |composer, cx| {
+                composer.finish_send(send, result, dispatch_attempted, cx)
+            })
+            .ok();
         }));
     }
 
-    fn finish_send(&mut self, send: PreparedSend, result: Result<Option<String>, String>, dispatch_attempted: bool, cx: &mut Context<Self>) {
-        let PreparedSend { is_new, err_chat_id, err_message_id, failed_send, comments, code_refs, restore_text, staged_skills, ordinary_staged, staged_appshots, .. } = send;
-                self.sending = false;
-                self
-                    .state
-                    .update(cx, |s, _| s.end_upload_progress());
-                if let Ok(Some(message_id)) = &result {
-                    cx.emit(ComposerEvent::Queued {
-                        chat_id: err_chat_id.clone(),
-                        message_id: message_id.clone(),
-                    });
+    fn finish_send(
+        &mut self,
+        send: PreparedSend,
+        result: Result<Option<String>, String>,
+        dispatch_attempted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let PreparedSend {
+            is_new,
+            err_chat_id,
+            err_message_id,
+            failed_send,
+            comments,
+            code_refs,
+            restore_text,
+            staged_skills,
+            ordinary_staged,
+            staged_appshots,
+            ..
+        } = send;
+        self.sending = false;
+        self.state.update(cx, |s, _| s.end_upload_progress());
+        if let Ok(Some(message_id)) = &result {
+            cx.emit(ComposerEvent::Queued {
+                chat_id: err_chat_id.clone(),
+                message_id: message_id.clone(),
+            });
+        }
+        if let Err(message) = result {
+            // Failure: red banner, echo removed, prompt back in the
+            // draft, staged files back in the stash. A failed NEW
+            // chat restores to the CANVAS (key "") and navigates back
+            // there — the minted chat is gone (deleted above), so
+            // nothing may restore under its key.
+            let restore_key = if is_new && !dispatch_attempted {
+                String::new()
+            } else {
+                err_chat_id.clone()
+            };
+            let mut failed_send = failed_send;
+            failed_send.key = restore_key.clone();
+            self.failed_send = Some(failed_send);
+            self.state.update(cx, |s, cx| {
+                s.remove_echo(&err_chat_id, &err_message_id);
+                s.end_pending_send(&err_chat_id, &err_message_id);
+                if is_new
+                    && !dispatch_attempted
+                    && s.selected_chat.as_deref() == Some(err_chat_id.as_str())
+                {
+                    // Back to the canvas; the navigation draft-swap
+                    // loads the restored draft below.
+                    s.select_chat(None, cx);
                 }
-                if let Err(message) = result {
-                    // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the stash. A failed NEW
-                    // chat restores to the CANVAS (key "") and navigates back
-                    // there — the minted chat is gone (deleted above), so
-                    // nothing may restore under its key.
-                    let restore_key = if is_new && !dispatch_attempted {
-                        String::new()
-                    } else {
-                        err_chat_id.clone()
-                    };
-                    let mut failed_send = failed_send;
-                    failed_send.key = restore_key.clone();
-                    self.failed_send = Some(failed_send);
-                    self.state.update(cx, |s, cx| {
-                        s.remove_echo(&err_chat_id, &err_message_id);
-                        s.end_pending_send(&err_chat_id, &err_message_id);
-                        if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
-                            // Back to the canvas; the navigation draft-swap
-                            // loads the restored draft below.
-                            s.select_chat(None, cx);
-                        }
-                        for comment in &comments {
-                            s.add_review_comment(&restore_key, comment.clone());
-                        }
-                        for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
-                        cx.notify();
-                    });
-                    self.restore_failed_text(&restore_key, &restore_text, &message, cx);
-                    if !staged_skills.is_empty() {
-                        // Chips attached while the send was in flight stay;
-                        // the failed send's chips rejoin them (deduped).
-                        let slot = self.skills.entry(restore_key.clone()).or_default();
-                        let fresh = std::mem::take(slot);
-                        for name in staged_skills.iter().chain(&fresh) {
-                            attach_skill(slot, name);
-                        }
-                    }
-                    if !ordinary_staged.is_empty() {
-                        // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back —
-                        // draining the minted chat's slot too when the restore
-                        // target is the canvas.
-                        let mut merged = ordinary_staged.clone();
-                        for key in [err_chat_id.clone(), restore_key.clone()] {
-                            if let Some(slot) = self.attachments.get_mut(&key) {
-                                let fresh: Vec<_> = slot
-                                    .drain(..)
-                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
-                                    .collect();
-                                merged.extend(fresh);
-                            }
-                        }
-                        self.attachments.insert(restore_key.clone(), merged);
-                    }
-                    self.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+                for comment in &comments {
+                    s.add_review_comment(&restore_key, comment.clone());
+                }
+                for reference in &code_refs {
+                    s.add_code_ref(&restore_key, reference.clone());
                 }
                 cx.notify();
+            });
+            self.restore_failed_text(&restore_key, &restore_text, &message, cx);
+            if !staged_skills.is_empty() {
+                // Chips attached while the send was in flight stay;
+                // the failed send's chips rejoin them (deduped).
+                let slot = self.skills.entry(restore_key.clone()).or_default();
+                let fresh = std::mem::take(slot);
+                for name in staged_skills.iter().chain(&fresh) {
+                    attach_skill(slot, name);
+                }
+            }
+            if !ordinary_staged.is_empty() {
+                // Merge by id (stashAttachments): files the user staged
+                // while the send was in flight survive the hand-back —
+                // draining the minted chat's slot too when the restore
+                // target is the canvas.
+                let mut merged = ordinary_staged.clone();
+                for key in [err_chat_id.clone(), restore_key.clone()] {
+                    if let Some(slot) = self.attachments.get_mut(&key) {
+                        let fresh: Vec<_> = slot
+                            .drain(..)
+                            .filter(|e| !merged.iter().any(|f| f.id == e.id))
+                            .collect();
+                        merged.extend(fresh);
+                    }
+                }
+                self.attachments.insert(restore_key.clone(), merged);
+            }
+            self.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+        }
+        cx.notify();
     }
 
-    async fn dispatch_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool) -> Result<Option<String>, String> {
+    async fn dispatch_send(
+        send: &PreparedSend,
+        this: &gpui::WeakEntity<Composer>,
+        cx: &mut gpui::AsyncApp,
+        dispatch_attempted: &mut bool,
+    ) -> Result<Option<String>, String> {
         #[cfg(test)]
         let fail_send_before_dispatch = send.fail_send_before_dispatch;
-        let (content, attachment_paths, transfers) = Self::stage_send_attachments(send, this, cx).await?;
+        let (content, attachment_paths, transfers) =
+            Self::stage_send_attachments(send, this, cx).await?;
 
         let (cwd, run_worktree) = Self::create_send_chat(send, cx).await;
 
         let cwd = Self::resolve_send_workspace(send, this, cx, cwd).await;
 
-                #[cfg(test)]
-                if fail_send_before_dispatch {
-                    return Err("Injected pre-dispatch failure".into());
-                }
-        Self::queue_send(send, this, cx, dispatch_attempted, cwd, run_worktree, content, attachment_paths, transfers).await
+        #[cfg(test)]
+        if fail_send_before_dispatch {
+            return Err("Injected pre-dispatch failure".into());
+        }
+        Self::queue_send(
+            send,
+            this,
+            cx,
+            dispatch_attempted,
+            cwd,
+            run_worktree,
+            content,
+            attachment_paths,
+            transfers,
+        )
+        .await
     }
 
-    async fn queue_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool, cwd: String, run_worktree: Option<mast_proto::WorktreeSpec>, content: String, attachment_paths: Vec<String>, transfers: Vec<serde_json::Value>) -> Result<Option<String>, String> {
+    async fn queue_send(
+        send: &PreparedSend,
+        this: &gpui::WeakEntity<Composer>,
+        cx: &mut gpui::AsyncApp,
+        dispatch_attempted: &mut bool,
+        cwd: String,
+        run_worktree: Option<mast_proto::WorktreeSpec>,
+        content: String,
+        attachment_paths: Vec<String>,
+        transfers: Vec<serde_json::Value>,
+    ) -> Result<Option<String>, String> {
         let engine = &send.engine;
         let message_id = &send.message_id;
         let chat_id = &send.chat_id;
@@ -165,239 +220,254 @@ impl Composer {
         let text = &send.text;
         let queue = send.queue;
         let clean_queue_attachment_text = send.clean_queue_attachment_text;
-                if queue {
-                    // A queue row is editable UI state, so its text must stay
-                    // free of the internal attachment-path trailer. The host
-                    // rebuilds that transport when it promotes the row.
-                    let appshot_paths = staged.iter().zip(&attachment_paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone())).collect();
-                    let queue_body = appshots::with_appshots(&text, &staged_appshots, &appshot_paths);
-                    let queue_text = if !clean_queue_attachment_text {
-                        content.as_str()
-                    } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
-                        attachments::ATTACHMENT_ONLY_TEXT
-                    } else {
-                        queue_body.as_str()
-                    };
-                    let params = serde_json::json!({
-                        "chatId": chat_id,
-                        "messageId": message_id,
-                        "text": queue_text,
-                        "attachments": attachment_paths,
-                        "holdForTurnEnd": true,
-                    });
-                    let reply = engine
-                        .client()
-                        .call(methods::QUEUE_MESSAGE, params)
-                        .await
-                        // A pinned row the host can't deliver is refused
-                        // with an actionable instruction-delivery message.
-                        .map_err(|e| instruction_reset::send_failure_text(&e.to_string()))?;
-                    let queue_id = reply
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .ok_or_else(|| "Send failed: queue did not return an id".to_string())?;
-                    return Ok(Some(queue_id.to_string()));
-                }
-
-                let expects_setup_handoff = run_worktree
-                    .as_ref()
-                    .and_then(|spec| spec.space_id.as_ref())
-                    .is_some();
-                let command = SessionCommandPayload::Run {
-                    request: RunRequest {
-                        prompt: content.clone(),
-                        harness: resolved.harness,
-                        model: resolved.model.clone(),
-                        reasoning: resolved.reasoning,
-                        model_options: resolved.model_options.clone(),
-                        cwd,
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        // The chat's persisted approval mode (chip in the
-                        // pickers row; new-chat draft on first send).
-                        auto_approve: resolved.auto_approve,
-                        resume: None,
-                        attachments: attachment_paths,
-                        worktree: run_worktree,
-                        instructions: None,
-                    },
-                    message_id: message_id.clone(),
-                };
-                let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
-                let mut params = serde_json::json!({ "chatId": chat_id, "command": command, "commandId": message_id });
-                if !transfers.is_empty() {
-                    params["transfers"] = serde_json::Value::Array(transfers);
-                }
-                // Deadline-bounded: QueueCommand is a local write (in-process
-                // or IPC), but a deferred engine handle can park forever.
-                *dispatch_attempted = true;
-                let queued = attachments::call_with_timeout(
-                    &engine,
-                    cx.background_executor(),
-                    methods::QUEUE_COMMAND,
-                    params,
-                    std::time::Duration::from_secs(30),
-                )
+        if queue {
+            // A queue row is editable UI state, so its text must stay
+            // free of the internal attachment-path trailer. The host
+            // rebuilds that transport when it promotes the row.
+            let appshot_paths = staged
+                .iter()
+                .zip(&attachment_paths)
+                .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+                .collect();
+            let queue_body = appshots::with_appshots(&text, &staged_appshots, &appshot_paths);
+            let queue_text = if !clean_queue_attachment_text {
+                content.as_str()
+            } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
+                attachments::ATTACHMENT_ONLY_TEXT
+            } else {
+                queue_body.as_str()
+            };
+            let params = serde_json::json!({
+                "chatId": chat_id,
+                "messageId": message_id,
+                "text": queue_text,
+                "attachments": attachment_paths,
+                "holdForTurnEnd": true,
+            });
+            let reply = engine
+                .client()
+                .call(methods::QUEUE_MESSAGE, params)
                 .await
-                // Ingestion refuses an instruction-bearing send to a host
-                // that can't deliver it (`instructionHostUnsupported`): show
-                // its actionable message; the failure path keeps the draft.
-                .map_err(|e| instruction_reset::send_failure_text(&e))?;
-                if expects_setup_handoff
-                    && let Some(command_id) = queued
-                        .get("commandId")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                {
-                    let poll_engine = engine.clone();
-                    let poll_chat_id = chat_id.clone();
-                    let poll_target_device_id = host_device_id.clone();
-                    this.update(cx, |_, cx| {
-                        cx.spawn(async move |this, cx| {
-                            for _ in 0..480 {
-                                let mut params = serde_json::json!({
-                                    "chatId": poll_chat_id,
-                                    "commandId": command_id,
-                                });
-                                if let (Some(target), Some(object)) =
-                                    (&poll_target_device_id, params.as_object_mut())
-                                {
-                                    object.insert(
-                                        "targetDeviceId".into(),
-                                        serde_json::Value::String(target.clone()),
-                                    );
-                                }
-                                match attachments::call_with_timeout(
-                                    &poll_engine,
-                                    cx.background_executor(),
-                                    methods::TAKE_PROJECT_ACTION_SETUP,
-                                    params,
-                                    std::time::Duration::from_secs(10),
-                                )
-                                .await
-                                {
-                                    Ok(value) if value.get("ready").and_then(|v| v.as_bool()) == Some(true) => {
-                                        let setup_action = value
-                                            .get("setupAction")
-                                            .cloned()
-                                            .filter(|value| !value.is_null())
-                                            .and_then(|value| serde_json::from_value(value).ok());
-                                        let setup_error = value
-                                            .get("setupError")
-                                            .and_then(|value| value.as_str())
-                                            .map(str::to_string);
-                                        this.update(cx, |_, cx| {
-                                            cx.emit(ComposerEvent::WorktreeSetup {
-                                                chat_id: poll_chat_id.clone(),
-                                                setup_action,
-                                                setup_error,
-                                                target_device_id: poll_target_device_id.clone(),
-                                            });
-                                        })
-                                        .ok();
-                                        return;
-                                    }
-                                    Err(error) if error.starts_with("unknown method: ") => return,
-                                    Ok(_) | Err(_) => {}
-                                }
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(250))
-                                    .await;
-                            }
-                            tracing::warn!(
-                                chat = %poll_chat_id,
-                                command = %command_id,
-                                "worktree setup handoff timed out"
+                // A pinned row the host can't deliver is refused
+                // with an actionable instruction-delivery message.
+                .map_err(|e| instruction_reset::send_failure_text(&e.to_string()))?;
+            let queue_id = reply
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Send failed: queue did not return an id".to_string())?;
+            return Ok(Some(queue_id.to_string()));
+        }
+
+        let expects_setup_handoff = run_worktree
+            .as_ref()
+            .and_then(|spec| spec.space_id.as_ref())
+            .is_some();
+        let command = SessionCommandPayload::Run {
+            request: RunRequest {
+                prompt: content.clone(),
+                harness: resolved.harness,
+                model: resolved.model.clone(),
+                reasoning: resolved.reasoning,
+                model_options: resolved.model_options.clone(),
+                cwd,
+                sandbox: SandboxLevel::WorkspaceWrite,
+                // The chat's persisted approval mode (chip in the
+                // pickers row; new-chat draft on first send).
+                auto_approve: resolved.auto_approve,
+                resume: None,
+                attachments: attachment_paths,
+                worktree: run_worktree,
+                instructions: None,
+            },
+            message_id: message_id.clone(),
+        };
+        let command = serde_json::to_value(&command).map_err(|e| format!("Send failed: {e}"))?;
+        let mut params =
+            serde_json::json!({ "chatId": chat_id, "command": command, "commandId": message_id });
+        if !transfers.is_empty() {
+            params["transfers"] = serde_json::Value::Array(transfers);
+        }
+        // Deadline-bounded: QueueCommand is a local write (in-process
+        // or IPC), but a deferred engine handle can park forever.
+        *dispatch_attempted = true;
+        let queued = attachments::call_with_timeout(
+            &engine,
+            cx.background_executor(),
+            methods::QUEUE_COMMAND,
+            params,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        // Ingestion refuses an instruction-bearing send to a host
+        // that can't deliver it (`instructionHostUnsupported`): show
+        // its actionable message; the failure path keeps the draft.
+        .map_err(|e| instruction_reset::send_failure_text(&e))?;
+        if expects_setup_handoff
+            && let Some(command_id) = queued
+                .get("commandId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        {
+            let poll_engine = engine.clone();
+            let poll_chat_id = chat_id.clone();
+            let poll_target_device_id = host_device_id.clone();
+            this.update(cx, |_, cx| {
+                cx.spawn(async move |this, cx| {
+                    for _ in 0..480 {
+                        let mut params = serde_json::json!({
+                            "chatId": poll_chat_id,
+                            "commandId": command_id,
+                        });
+                        if let (Some(target), Some(object)) =
+                            (&poll_target_device_id, params.as_object_mut())
+                        {
+                            object.insert(
+                                "targetDeviceId".into(),
+                                serde_json::Value::String(target.clone()),
                             );
-                        })
-                        .detach();
-                    })
-                    .ok();
-                }
-                Ok(None)
+                        }
+                        match attachments::call_with_timeout(
+                            &poll_engine,
+                            cx.background_executor(),
+                            methods::TAKE_PROJECT_ACTION_SETUP,
+                            params,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                        {
+                            Ok(value)
+                                if value.get("ready").and_then(|v| v.as_bool()) == Some(true) =>
+                            {
+                                let setup_action = value
+                                    .get("setupAction")
+                                    .cloned()
+                                    .filter(|value| !value.is_null())
+                                    .and_then(|value| serde_json::from_value(value).ok());
+                                let setup_error = value
+                                    .get("setupError")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_string);
+                                this.update(cx, |_, cx| {
+                                    cx.emit(ComposerEvent::WorktreeSetup {
+                                        chat_id: poll_chat_id.clone(),
+                                        setup_action,
+                                        setup_error,
+                                        target_device_id: poll_target_device_id.clone(),
+                                    });
+                                })
+                                .ok();
+                                return;
+                            }
+                            Err(error) if error.starts_with("unknown method: ") => return,
+                            Ok(_) | Err(_) => {}
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    tracing::warn!(
+                        chat = %poll_chat_id,
+                        command = %command_id,
+                        "worktree setup handoff timed out"
+                    );
+                })
+                .detach();
+            })
+            .ok();
+        }
+        Ok(None)
     }
 
-    async fn resolve_send_workspace(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, mut cwd: String) -> String {
+    async fn resolve_send_workspace(
+        send: &PreparedSend,
+        this: &gpui::WeakEntity<Composer>,
+        cx: &mut gpui::AsyncApp,
+        mut cwd: String,
+    ) -> String {
         let engine = &send.engine;
         let chat_id = &send.chat_id;
         let workspace_choice = send.workspace_choice;
         let space_path = &send.space_path;
         let workspace_message = &send.workspace_message;
         let worktree_name_source = &send.worktree_name_source;
-                // Worktree chip pre-dispatch step (new chats only; after
-                // createChat so the engine has a row to stamp the worktree
-                // cwd onto). Never fails the send: every error path falls
-                // back to the base checkout.
-                if let (Some(choice), Some(repo_path)) = (workspace_choice, &space_path) {
-                    use crate::workspace_chip as wc;
-                    let set_outcome = |outcome: wc::WorkspaceOutcome, failure: Option<String>, cx: &mut gpui::AsyncApp| {
-                        let chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer
-                                .pickers
-                                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, outcome, cx));
-                            if let Some(failure) = failure {
-                                composer.failure = Some(failure.into());
-                                composer.failure_key = Some(chat_id.clone());
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                    };
-                    let mut create = choice.first_step() == wc::PreSendStep::Create;
-                    let mut plan_reply: Option<wc::PlanReply> = None;
-                    if choice.first_step() == wc::PreSendStep::Plan {
-                        let planned = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::PLAN_CHAT_WORKSPACE,
-                            serde_json::json!({ "message": workspace_message, "cwd": repo_path }),
-                            wc::PLAN_TIMEOUT,
-                        )
-                        .await
-                        .and_then(|value| wc::decode_plan(&value));
-                        if wc::should_create_after_plan(&planned) {
-                            create = true;
-                            plan_reply = planned.ok();
-                            set_outcome(wc::WorkspaceOutcome::Creating, None, cx);
-                        } else {
-                            if let Err(err) = &planned {
-                                tracing::warn!(error = %err, "PlanChatWorkspace failed; using the main checkout");
-                            }
-                            set_outcome(wc::main_after_plan(planned), None, cx);
-                        }
+        // Worktree chip pre-dispatch step (new chats only; after
+        // createChat so the engine has a row to stamp the worktree
+        // cwd onto). Never fails the send: every error path falls
+        // back to the base checkout.
+        if let (Some(choice), Some(repo_path)) = (workspace_choice, &space_path) {
+            use crate::workspace_chip as wc;
+            let set_outcome = |outcome: wc::WorkspaceOutcome,
+                               failure: Option<String>,
+                               cx: &mut gpui::AsyncApp| {
+                let chat_id = chat_id.clone();
+                this.update(cx, |composer, cx| {
+                    composer
+                        .pickers
+                        .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, outcome, cx));
+                    if let Some(failure) = failure {
+                        composer.failure = Some(failure.into());
+                        composer.failure_key = Some(chat_id.clone());
                     }
-                    if create {
-                        let created = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::CREATE_CHAT_WORKTREE,
-                            serde_json::json!({
-                                "chatId": chat_id,
-                                "repoPath": repo_path,
-                                "name": wc::worktree_name(&worktree_name_source),
-                            }),
-                            wc::CREATE_TIMEOUT,
-                        )
-                        .await;
-                        let resolution = wc::resolve_create(created, plan_reply);
-                        if let Some(worktree) = resolution.cwd {
-                            // The engine already stamped the chat's dispatch
-                            // cwd; the Run request agrees with it.
-                            cwd = worktree;
-                        } else if let Some(failure) = &resolution.failure {
-                            tracing::warn!(error = %failure, "CreateChatWorktree failed; dispatching in the base checkout");
-                        }
-                        set_outcome(resolution.outcome, resolution.failure, cx);
+                    cx.notify();
+                })
+                .ok();
+            };
+            let mut create = choice.first_step() == wc::PreSendStep::Create;
+            let mut plan_reply: Option<wc::PlanReply> = None;
+            if choice.first_step() == wc::PreSendStep::Plan {
+                let planned = attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    wc::PLAN_CHAT_WORKSPACE,
+                    serde_json::json!({ "message": workspace_message, "cwd": repo_path }),
+                    wc::PLAN_TIMEOUT,
+                )
+                .await
+                .and_then(|value| wc::decode_plan(&value));
+                if wc::should_create_after_plan(&planned) {
+                    create = true;
+                    plan_reply = planned.ok();
+                    set_outcome(wc::WorkspaceOutcome::Creating, None, cx);
+                } else {
+                    if let Err(err) = &planned {
+                        tracing::warn!(error = %err, "PlanChatWorkspace failed; using the main checkout");
                     }
+                    set_outcome(wc::main_after_plan(planned), None, cx);
                 }
+            }
+            if create {
+                let created = attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    wc::CREATE_CHAT_WORKTREE,
+                    serde_json::json!({
+                        "chatId": chat_id,
+                        "repoPath": repo_path,
+                        "name": wc::worktree_name(&worktree_name_source),
+                    }),
+                    wc::CREATE_TIMEOUT,
+                )
+                .await;
+                let resolution = wc::resolve_create(created, plan_reply);
+                if let Some(worktree) = resolution.cwd {
+                    // The engine already stamped the chat's dispatch
+                    // cwd; the Run request agrees with it.
+                    cwd = worktree;
+                } else if let Some(failure) = &resolution.failure {
+                    tracing::warn!(error = %failure, "CreateChatWorktree failed; dispatching in the base checkout");
+                }
+                set_outcome(resolution.outcome, resolution.failure, cx);
+            }
+        }
 
         cwd
     }
 
-    async fn create_send_chat(send: &PreparedSend, cx: &mut gpui::AsyncApp) -> (String, Option<mast_proto::WorktreeSpec>) {
+    async fn create_send_chat(
+        send: &PreparedSend,
+        cx: &mut gpui::AsyncApp,
+    ) -> (String, Option<mast_proto::WorktreeSpec>) {
         let engine = &send.engine;
         let chat_id = &send.chat_id;
         let is_new = send.is_new;
@@ -407,132 +477,132 @@ impl Composer {
         let device_id = &send.device_id;
         let space_id = &send.space_id;
         let space_path = &send.space_path;
-                // Resolve the working directory: existing chats keep theirs;
-                // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
-                // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree created off the
-                // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
-                let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
-                } else {
-                    existing_cwd
+        // Resolve the working directory: existing chats keep theirs;
+        // new chats run per the checkout plan (t3code env-mode): the
+        // space's folder as-is, an EXISTING worktree of the picked ref
+        // (a plain cwd override — multiple sessions share one
+        // worktree), or a fresh isolated worktree created off the
+        // picked base ref (CreateWorktree on send, targeted at the
+        // space's device; the RPC relay-forwards).
+        let mut cwd = if is_new {
+            // Project-less sessions run from the host's home dir —
+            // "~" is expanded on the host when the run spawns.
+            space_path.clone().or_else(|| Some("~".to_string()))
+        } else {
+            existing_cwd
+        }
+        .unwrap_or_else(|| ".".to_string());
+        let mut worktree_cwd: Option<String> = None;
+        // Fresh-worktree plans ride the QUEUED Run command (a
+        // WorktreeSpec the HOST materializes at drain time) instead of
+        // a blocking CreateWorktree relay RPC here: the RPC had no
+        // timeout, so a lost relay frame wedged the send on "Sending…"
+        // forever while the session ran remotely anyway (2026-08-18).
+        let mut run_worktree: Option<mast_proto::WorktreeSpec> = None;
+        // The picked ref rides createChat so the session footer names
+        // it from the first frame (it read "Select ref" until the
+        // host's diff reconciler got around to stamping the branch).
+        let mut chat_branch: Option<String> = None;
+        if is_new && space_path.is_some() {
+            match &plan {
+                crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
+                    chat_branch = branch.clone();
                 }
-                .unwrap_or_else(|| ".".to_string());
-                let mut worktree_cwd: Option<String> = None;
-                // Fresh-worktree plans ride the QUEUED Run command (a
-                // WorktreeSpec the HOST materializes at drain time) instead of
-                // a blocking CreateWorktree relay RPC here: the RPC had no
-                // timeout, so a lost relay frame wedged the send on "Sending…"
-                // forever while the session ran remotely anyway (2026-08-18).
-                let mut run_worktree: Option<mast_proto::WorktreeSpec> = None;
-                // The picked ref rides createChat so the session footer names
-                // it from the first frame (it read "Select ref" until the
-                // host's diff reconciler got around to stamping the branch).
-                let mut chat_branch: Option<String> = None;
-                if is_new && space_path.is_some() {
-                    match &plan {
-                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
-                            cwd = path.clone();
-                            worktree_cwd = Some(path.clone());
-                            chat_branch = Some(branch.clone());
-                        }
-                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
-                            // Footer shows the base until the host stamps the
-                            // actual zeron/<name> branch post-creation. cwd
-                            // stays the repo folder — an old host that doesn't
-                            // know the spec degrades to the main checkout
-                            // instead of failing the run.
-                            chat_branch = base.clone();
-                            if let Some(repo_path) = &space_path {
-                                // A remote repo's branch list loads over the
-                                // relay — on a bad link it may never arrive
-                                // and the picker has no base. That must NOT
-                                // silently drop the isolation the user picked
-                                // (2026-08-19: "New worktree" ran in the main
-                                // checkout): default to HEAD, which git — any
-                                // host version — resolves as the repo's
-                                // current checkout state.
-                                let base =
-                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
-                                run_worktree = Some(mast_proto::WorktreeSpec {
-                                    repo_path: repo_path.clone(),
-                                    base,
-                                    space_id: space_id.clone(),
-                                });
-                            }
-                        }
+                crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
+                    cwd = path.clone();
+                    worktree_cwd = Some(path.clone());
+                    chat_branch = Some(branch.clone());
+                }
+                crate::pickers::CheckoutPlan::NewWorktree { base } => {
+                    // Footer shows the base until the host stamps the
+                    // actual zeron/<name> branch post-creation. cwd
+                    // stays the repo folder — an old host that doesn't
+                    // know the spec degrades to the main checkout
+                    // instead of failing the run.
+                    chat_branch = base.clone();
+                    if let Some(repo_path) = &space_path {
+                        // A remote repo's branch list loads over the
+                        // relay — on a bad link it may never arrive
+                        // and the picker has no base. That must NOT
+                        // silently drop the isolation the user picked
+                        // (2026-08-19: "New worktree" ran in the main
+                        // checkout): default to HEAD, which git — any
+                        // host version — resolves as the repo's
+                        // current checkout state.
+                        let base = base.clone().unwrap_or_else(|| "HEAD".to_string());
+                        run_worktree = Some(mast_proto::WorktreeSpec {
+                            repo_path: repo_path.clone(),
+                            base,
+                            space_id: space_id.clone(),
+                        });
                     }
                 }
+            }
+        }
 
-                // Best-effort Mutate createChat with the picked config: the
-                // engine resolves device + cwd from the PROJECT row when one
-                // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
-                if is_new {
-                    let mut mutate = serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat_id,
-                    });
-                    if let Some(object) = mutate.as_object_mut() {
-                        match &space_id {
-                            Some(space_id) => {
-                                object.insert(
-                                    "spaceId".into(),
-                                    serde_json::Value::String(space_id.clone()),
-                                );
-                            }
-                            None => {
-                                object.insert(
-                                    "deviceId".into(),
-                                    serde_json::Value::String(device_id.clone()),
-                                );
-                            }
-                        }
+        // Best-effort Mutate createChat with the picked config: the
+        // engine resolves device + cwd from the PROJECT row when one
+        // is picked; project-less chats name the host device outright
+        // (idempotent; the doc host would materialize the chat on
+        // first command anyway, so failures are non-fatal).
+        if is_new {
+            let mut mutate = serde_json::json!({
+                "op": "createChat",
+                "chatId": chat_id,
+            });
+            if let Some(object) = mutate.as_object_mut() {
+                match &space_id {
+                    Some(space_id) => {
+                        object.insert(
+                            "spaceId".into(),
+                            serde_json::Value::String(space_id.clone()),
+                        );
                     }
-                    if let Some(object) = mutate.as_object_mut() {
-                        if let Some(worktree_cwd) = &worktree_cwd {
-                            object.insert(
-                                "cwd".into(),
-                                serde_json::Value::String(worktree_cwd.clone()),
-                            );
-                        }
-                        if let Some(branch) = &chat_branch {
-                            object.insert(
-                                "branch".into(),
-                                serde_json::Value::String(branch.clone()),
-                            );
-                        }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
-                        }
-                    }
-                    if let Err(err) = attachments::call_with_timeout(
-                        &engine,
-                        cx.background_executor(),
-                        methods::MUTATE,
-                        mutate,
-                        std::time::Duration::from_secs(30),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                    None => {
+                        object.insert(
+                            "deviceId".into(),
+                            serde_json::Value::String(device_id.clone()),
+                        );
                     }
                 }
+            }
+            if let Some(object) = mutate.as_object_mut() {
+                if let Some(worktree_cwd) = &worktree_cwd {
+                    object.insert(
+                        "cwd".into(),
+                        serde_json::Value::String(worktree_cwd.clone()),
+                    );
+                }
+                if let Some(branch) = &chat_branch {
+                    object.insert("branch".into(), serde_json::Value::String(branch.clone()));
+                }
+                if let Some(config) = resolved.chat_config()
+                    && let Ok(config) = serde_json::to_value(&config)
+                {
+                    object.insert("config".into(), config);
+                }
+            }
+            if let Err(err) = attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::MUTATE,
+                mutate,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+            }
+        }
 
         (cwd, run_worktree)
     }
 
-    async fn stage_send_attachments(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp) -> Result<(String, Vec<String>, Vec<serde_json::Value>), String> {
+    async fn stage_send_attachments(
+        send: &PreparedSend,
+        this: &gpui::WeakEntity<Composer>,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<(String, Vec<String>, Vec<serde_json::Value>), String> {
         let engine = &send.engine;
         let message_id = &send.message_id;
         let chat_id = &send.chat_id;
@@ -547,154 +617,172 @@ impl Composer {
         let upload_ids = &send.upload_ids;
         let echo_paths = &send.echo_paths;
         let echo_text = &send.echo_text;
-                // Attachments stage FIRST — before the chat row or anything
-                // else exists. Staging is chat-independent (keyed by
-                // uploadId), and ordering it first makes a new-chat send
-                // atomic: a staging failure aborts with NOTHING created,
-                // instead of stranding a just-minted empty chat (v0.2.12
-                // "failed to stage → empty transcript" report).
-                //
-                // Queued flow: commit the bytes to the LOCAL engine's uploads
-                // dir (fast, offline-safe) — the queued command carries the
-                // `pending://` refs and the engine delivers the bytes to a
-                // remote host afterwards, retrying until they land. Legacy
-                // flow (old engines): stage on the host device up front,
-                // bounded by a total budget so a degraded link fails the send
-                // loudly instead of grinding through silent per-chunk retries
-                // for minutes.
-                let mut content = text.clone();
-                let mut attachment_paths: Vec<String> = Vec::new();
-                let mut transfers: Vec<serde_json::Value> = Vec::new();
-                if !staged.is_empty() && queued_flow {
-                    // Local staging is disk-speed; publish progress anyway so
-                    // huge files still narrate.
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(upload_ids) {
-                        if let Err(err) = attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            None,
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
-                            return Err("Couldn't stage the attachment locally.".to_string());
-                        }
-                        transfers.push(serde_json::json!({
-                            "uploadId": upload_id,
-                            "fileName": att.name,
-                        }));
-                    }
-                    // The echo refs ARE the persisted refs — no refresh pass.
-                    attachment_paths = echo_paths.clone();
-                    content = echo_text.clone();
-                } else if !staged.is_empty() {
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(upload_ids) {
-                        match attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            host_device_id.as_deref(),
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            Ok(path) => attachment_paths.push(path),
-                            Err(err) => {
-                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    // Seed the transcript cache from local bytes so the sent
-                    // bubble's thumbnails never round-trip (seedTranscript-
-                    // Attachment in the original send path).
-                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
-                        if seed_device != *device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-                        }
-                    }
-                    let appshot_paths: HashMap<String, String> = staged
-                        .iter()
-                        .zip(&attachment_paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
-                        .collect();
-                    content = attachments::with_attachments(
-                        &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
-                        &attachment_paths,
-                    );
-                    // A normal send already has an optimistic echo: refresh it
-                    // in place with the uploaded refs so its thumbnails never
-                    // flicker. A queued message has no transcript echo at all;
-                    // its queue row is the only representation until dispatch.
-                    if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
-                            id: message_id.clone(),
-                            role: mast_doc::MessageRole::User,
-                            parts: vec![MessagePart::Text {
-                                id: "t0".into(),
-                                text: content.clone(),
-                            }],
-                            created_at,
-                            device_id: "local".into(),
-                            status: None,
-                            continuation_of: None,
-                        };
-                        let echo_chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.remove_echo(&echo_chat_id, &message_id);
-                                s.push_echo(&echo_chat_id, refreshed);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
+        // Attachments stage FIRST — before the chat row or anything
+        // else exists. Staging is chat-independent (keyed by
+        // uploadId), and ordering it first makes a new-chat send
+        // atomic: a staging failure aborts with NOTHING created,
+        // instead of stranding a just-minted empty chat (v0.2.12
+        // "failed to stage → empty transcript" report).
+        //
+        // Queued flow: commit the bytes to the LOCAL engine's uploads
+        // dir (fast, offline-safe) — the queued command carries the
+        // `pending://` refs and the engine delivers the bytes to a
+        // remote host afterwards, retrying until they land. Legacy
+        // flow (old engines): stage on the host device up front,
+        // bounded by a total budget so a degraded link fails the send
+        // loudly instead of grinding through silent per-chunk retries
+        // for minutes.
+        let mut content = text.clone();
+        let mut attachment_paths: Vec<String> = Vec::new();
+        let mut transfers: Vec<serde_json::Value> = Vec::new();
+        if !staged.is_empty() && queued_flow {
+            // Local staging is disk-speed; publish progress anyway so
+            // huge files still narrate.
+            let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+            {
+                let progress = progress.clone();
+                this.update(cx, |composer, cx| {
+                    composer.state.update(cx, |s, cx| {
+                        s.begin_upload_progress(total, progress);
+                        cx.notify();
+                    });
+                })
+                .ok();
+            }
+            for (att, upload_id) in staged.iter().zip(upload_ids) {
+                if let Err(err) = attachments::upload_attachment(
+                    &engine,
+                    cx.background_executor(),
+                    None,
+                    upload_id,
+                    att,
+                    Some(progress.clone()),
+                )
+                .await
+                {
+                    tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
+                    return Err("Couldn't stage the attachment locally.".to_string());
+                }
+                transfers.push(serde_json::json!({
+                    "uploadId": upload_id,
+                    "fileName": att.name,
+                }));
+            }
+            // The echo refs ARE the persisted refs — no refresh pass.
+            attachment_paths = echo_paths.clone();
+            content = echo_text.clone();
+        } else if !staged.is_empty() {
+            let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+            {
+                let progress = progress.clone();
+                this.update(cx, |composer, cx| {
+                    composer.state.update(cx, |s, cx| {
+                        s.begin_upload_progress(total, progress);
+                        cx.notify();
+                    });
+                })
+                .ok();
+            }
+            for (att, upload_id) in staged.iter().zip(upload_ids) {
+                match attachments::upload_attachment(
+                    &engine,
+                    cx.background_executor(),
+                    host_device_id.as_deref(),
+                    upload_id,
+                    att,
+                    Some(progress.clone()),
+                )
+                .await
+                {
+                    Ok(path) => attachment_paths.push(path),
+                    Err(err) => {
+                        tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
+                        return Err(
+                            "Couldn't upload the attachment — the device may be offline."
+                                .to_string(),
+                        );
                     }
                 }
+            }
+            // Seed the transcript cache from local bytes so the sent
+            // bubble's thumbnails never round-trip (seedTranscript-
+            // Attachment in the original send path).
+            let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
+            for (path, att) in attachment_paths.iter().zip(staged) {
+                attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                if seed_device != *device_id {
+                    attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                }
+            }
+            let appshot_paths: HashMap<String, String> = staged
+                .iter()
+                .zip(&attachment_paths)
+                .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+                .collect();
+            content = attachments::with_attachments(
+                &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
+                &attachment_paths,
+            );
+            // A normal send already has an optimistic echo: refresh it
+            // in place with the uploaded refs so its thumbnails never
+            // flicker. A queued message has no transcript echo at all;
+            // its queue row is the only representation until dispatch.
+            if should_publish_optimistic_echo(queue) {
+                let refreshed = SessionMessageEntry {
+                    id: message_id.clone(),
+                    role: mast_doc::MessageRole::User,
+                    parts: vec![MessagePart::Text {
+                        id: "t0".into(),
+                        text: content.clone(),
+                    }],
+                    created_at,
+                    device_id: "local".into(),
+                    status: None,
+                    continuation_of: None,
+                };
+                let echo_chat_id = chat_id.clone();
+                this.update(cx, |composer, cx| {
+                    composer.state.update(cx, |s, cx| {
+                        s.remove_echo(&echo_chat_id, &message_id);
+                        s.push_echo(&echo_chat_id, refreshed);
+                        cx.notify();
+                    });
+                })
+                .ok();
+            }
+        }
 
         Ok((content, attachment_paths, transfers))
     }
 
-    fn prepare_send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) -> Option<PreparedSend> {
-        if self.sending { return None; }
-        let message_id = self.retry_send_id.take().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    fn prepare_send(
+        &mut self,
+        text: String,
+        queue: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<PreparedSend> {
+        if self.sending {
+            return None;
+        }
+        let message_id = self
+            .retry_send_id
+            .take()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let failed_send = FailedSend {
-            key: self.current_key.clone(), text: text.clone(), message_id: message_id.clone(), queued: queue,
+            key: self.current_key.clone(),
+            text: text.clone(),
+            message_id: message_id.clone(),
+            queued: queue,
             attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
-            appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
-            skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
+            appshot_ids: self
+                .staged_appshots()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect(),
+            skills: self.staged_skills().to_vec(),
+            comments: self.staged_comments(cx),
             code_refs: self.state.read(cx).code_refs(&self.current_key).to_vec(),
         };
         self.failed_send = None;
@@ -809,12 +897,22 @@ impl Composer {
             taken
         });
         let typed = text.clone();
-        let mentioned_files: HashSet<_> = file_mention_links(&typed).into_iter().filter(|link| !link.is_dir).map(|link| link.path).collect();
+        let mentioned_files: HashSet<_> = file_mention_links(&typed)
+            .into_iter()
+            .filter(|link| !link.is_dir)
+            .map(|link| link.path)
+            .collect();
         let code_refs = self.state.update(cx, |state, cx| {
             let mut seen_files = HashSet::new();
-            let references = state.take_code_refs(&key).into_iter().filter(|reference| {
-                reference.reference.kind != mast_proto::CodeRefKind::File || (mentioned_files.contains(&reference.reference.location.path) && seen_files.insert(reference.reference.location.path.clone()))
-            }).collect::<Vec<_>>();
+            let references = state
+                .take_code_refs(&key)
+                .into_iter()
+                .filter(|reference| {
+                    reference.reference.kind != mast_proto::CodeRefKind::File
+                        || (mentioned_files.contains(&reference.reference.location.path)
+                            && seen_files.insert(reference.reference.location.path.clone()))
+                })
+                .collect::<Vec<_>>();
             cx.notify();
             references
         });
@@ -1035,7 +1133,15 @@ impl Composer {
         })
     }
 
-    fn publish_send_echo(&mut self, is_new: bool, queue: bool, chat_id: &String, message_id: &String, echo: SessionMessageEntry, cx: &mut Context<Self>) {
+    fn publish_send_echo(
+        &mut self,
+        is_new: bool,
+        queue: bool,
+        chat_id: &String,
+        message_id: &String,
+        echo: SessionMessageEntry,
+        cx: &mut Context<Self>,
+    ) {
         self.launching_new_chat = is_new;
         if is_new {
             cx.emit(ComposerEvent::NewThreadTransitionStarted);
@@ -1056,5 +1162,4 @@ impl Composer {
             cx.notify();
         });
     }
-
 }
