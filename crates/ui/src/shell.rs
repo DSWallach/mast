@@ -92,6 +92,7 @@ pub use navigation::{ChatPanels, SessionPanels, NavEntry, NavHistory, Route, Set
 mod outside_file_ui;
 mod overlays;
 mod pane_geometry;
+use pane_geometry::{SidebarResize, RightPaneResize, PaneResizeKind, TerminalResize, DragGhost, WidthTween, sidebar_drag_sample, sidebar_width_for_viewport};
 use pane_geometry::{stable_panel_content_width, right_panel_content_width, conversation_width, right_pane_max_width, right_pane_takeover_width};
 #[cfg(test)]
 mod perf_tests;
@@ -369,79 +370,6 @@ const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
 const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
 const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
-
-/// Drag marker for the sidebar resize handle.
-struct SidebarResize;
-/// Drag marker for the right-pane resize handle.
-struct RightPaneResize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneResizeKind {
-    Sidebar,
-    Right,
-    Files,
-    Terminal,
-}
-
-/// Resolve one pointer sample while keeping the persisted width legal. The
-/// edge is latched by the caller, so a held pointer produces one nudge rather
-/// than restarting the animation for every drag event.
-fn sidebar_drag_sample(
-    pointer_x: f32,
-    latched_edge: Option<motion::ResizeEdge>,
-    reduced_motion: bool,
-) -> motion::ResizeDragSample {
-    motion::resize_drag_sample(
-        pointer_x,
-        SIDEBAR_MIN,
-        SIDEBAR_MAX,
-        latched_edge,
-        reduced_motion,
-    )
-}
-
-/// `width` clamped to what a `viewport`-wide window can give the sidebar while
-/// the conversation keeps `CHAT_PANEL_MIN`; never below `SIDEBAR_MIN`.
-fn sidebar_width_for_viewport(width: f32, viewport: f32) -> f32 {
-    width.min((viewport - CHAT_PANEL_MIN).max(SIDEBAR_MIN))
-}
-
-/// Drag marker for the terminal-panel height handle.
-struct TerminalResize;
-
-/// Invisible drag ghost — resize drags and contained pinned-session reorders
-/// render nothing at the cursor.
-struct DragGhost;
-
-impl Render for DragGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
-/// A oneshot width tween (200ms ease-out), driven MANUALLY from render via
-/// [`Shell::eval_tween`] — never through a `with_animation` wrapper. gpui keys
-/// an animation element's start time by its full global element-id path, so a
-/// wrapper that mounts/remounts (route swap, or an ancestor animation keyed by
-/// a fresh epoch) silently REPLAYS the tween from t=0. Manual evaluation keeps
-/// the element tree's shape constant: a finished or stale tween is exactly the
-/// steady state, no matter how the tree around it remounts (round-6 §1–3).
-#[derive(Debug, Clone, Copy)]
-struct WidthTween {
-    from: f32,
-    to: f32,
-    started: std::time::Instant,
-}
-
-impl WidthTween {
-    fn new(from: f32, to: f32) -> Self {
-        Self {
-            from,
-            to,
-            started: std::time::Instant::now(),
-        }
-    }
-}
 
 fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     // Match the padded flex row's center, not the raw titlebar center.

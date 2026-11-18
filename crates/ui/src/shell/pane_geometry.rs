@@ -1,5 +1,78 @@
 use super::*;
 
+/// Drag marker for the sidebar resize handle.
+pub(super) struct SidebarResize;
+/// Drag marker for the right-pane resize handle.
+pub(super) struct RightPaneResize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneResizeKind {
+    Sidebar,
+    Right,
+    Files,
+    Terminal,
+}
+
+/// Resolve one pointer sample while keeping the persisted width legal. The
+/// edge is latched by the caller, so a held pointer produces one nudge rather
+/// than restarting the animation for every drag event.
+pub(super) fn sidebar_drag_sample(
+    pointer_x: f32,
+    latched_edge: Option<motion::ResizeEdge>,
+    reduced_motion: bool,
+) -> motion::ResizeDragSample {
+    motion::resize_drag_sample(
+        pointer_x,
+        SIDEBAR_MIN,
+        SIDEBAR_MAX,
+        latched_edge,
+        reduced_motion,
+    )
+}
+
+/// `width` clamped to what a `viewport`-wide window can give the sidebar while
+/// the conversation keeps `CHAT_PANEL_MIN`; never below `SIDEBAR_MIN`.
+pub(super) fn sidebar_width_for_viewport(width: f32, viewport: f32) -> f32 {
+    width.min((viewport - CHAT_PANEL_MIN).max(SIDEBAR_MIN))
+}
+
+/// Drag marker for the terminal-panel height handle.
+pub(super) struct TerminalResize;
+
+/// Invisible drag ghost — resize drags and contained pinned-session reorders
+/// render nothing at the cursor.
+pub(super) struct DragGhost;
+
+impl Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// A oneshot width tween (200ms ease-out), driven MANUALLY from render via
+/// [`Shell::eval_tween`] — never through a `with_animation` wrapper. gpui keys
+/// an animation element's start time by its full global element-id path, so a
+/// wrapper that mounts/remounts (route swap, or an ancestor animation keyed by
+/// a fresh epoch) silently REPLAYS the tween from t=0. Manual evaluation keeps
+/// the element tree's shape constant: a finished or stale tween is exactly the
+/// steady state, no matter how the tree around it remounts (round-6 §1–3).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WidthTween {
+    pub(super) from: f32,
+    pub(super) to: f32,
+    pub(super) started: std::time::Instant,
+}
+
+impl WidthTween {
+    pub(super) fn new(from: f32, to: f32) -> Self {
+        Self {
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
 pub(super) fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
     transition.map(|(from, to)| from.max(to)).unwrap_or(target)
 }
