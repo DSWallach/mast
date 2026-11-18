@@ -178,6 +178,7 @@ impl Changes {
         };
         div()
             .w_full()
+            .debug_selector(|| "review-suggestion-card".into())
             .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
@@ -370,6 +371,7 @@ impl Changes {
         };
         div()
             .w_full()
+            .debug_selector(|| "review-draft-card".into())
             .h(crate::typography::ui_rems(crate::comments::card_height(&comment.body)))
             .overflow_hidden()
             .flex()
@@ -1385,6 +1387,34 @@ impl ThreadIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReviewCardFixture {
+        changes: gpui::Entity<Changes>,
+        comment: crate::comments::ReviewComment,
+    }
+
+    impl gpui::Render for ReviewCardFixture {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            self.changes.update(cx, |changes, cx| changes.render_local_draft_card(&self.comment, &Theme::dark(), cx))
+        }
+    }
+
+    #[gpui::test]
+    fn draft_card_height_tracks_ui_text_size(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        for rem in [12.0, 16.0, 20.0] {
+            let (_, vcx) = cx.add_window_view(move |window, cx| {
+                window.set_rem_size(px(rem));
+                let state = cx.new(|_| super::super::AppState::new());
+                let changes = cx.new(|cx| Changes::new(state, cx));
+                ReviewCardFixture { changes, comment: crate::comments::ReviewComment::new("a", CommentSide::New, 1, "one\ntwo") }
+            });
+            vcx.run_until_parked();
+            let height = vcx.debug_bounds("review-draft-card").expect("review card").size.height;
+            let expected = crate::comments::card_height("one\ntwo") * rem / 16.0;
+            assert!((f32::from(height) - expected).abs() < 0.1);
+        }
+    }
 
     fn install_diff(changes: &mut Changes) -> String {
         use super::super::*;
