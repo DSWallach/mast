@@ -68,13 +68,13 @@ fn tracker_matches(worker: &WorkerFacts, filter: TrackerFilter) -> bool {
     }
 }
 
-fn tracker_counts(workers: &[&WorkerFacts], tickets_done: usize) -> [usize; 6] {
+fn tracker_counts(workers: &[&WorkerFacts], completed_without_chats: usize) -> [usize; 6] {
     let count = |filter| workers.iter().filter(|worker| tracker_matches(worker, filter)).count();
     let pr_count = |state: &str| workers.iter().flat_map(|worker| &worker.prs)
         .filter(|pr| pr.state.eq_ignore_ascii_case(state))
         .map(|pr| (pr.number, &pr.url)).collect::<std::collections::HashSet<_>>().len();
     [count(TrackerFilter::Working), count(TrackerFilter::NeedsYou), count(TrackerFilter::Ready),
-        pr_count("open"), pr_count("merged"), tickets_done]
+        pr_count("open"), pr_count("merged"), count(TrackerFilter::Done) + completed_without_chats]
 }
 
 fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallback: &str) -> String {
@@ -187,6 +187,7 @@ mod tracker_tests {
         assert!(tracker_matches(&worker, TrackerFilter::Done));
         let stages = worker.tracker_stages();
         assert!(stages.chat_started && stages.changes && stages.pr_open && stages.checks && stages.review && stages.merged);
+        assert_eq!(tracker_counts(&[&worker], 2)[5], 3);
     }
 
     #[test]
@@ -458,7 +459,7 @@ impl Shell {
         };
         let all_workers = facts.clone();
         let (other_chats, additional_chats) = tracker_select_rows(&mut facts, snapshot.as_deref(), chat_id);
-        let stale_chats: std::collections::HashSet<String> = facts.live().filter(|worker| worker.state == crate::team::WorkerState::Idle
+        let stale_chats: std::collections::HashSet<String> = facts.live().filter(|worker| worker.tracker_group() == crate::team::TrackerGroup::Idle
             && worker.last_active.is_some_and(|at| chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(3)))
             .map(|worker| worker.chat_id.clone()).collect();
         let mut grouped_rows = std::collections::HashMap::<_, Vec<usize>>::new();
@@ -516,8 +517,7 @@ impl Shell {
                 .map(|item| { let unassigned = without_chats.contains(item.id.as_str()); (item, unassigned) })
                 .collect::<Vec<_>>())
         }).unwrap_or_default();
-        let tickets_done = facts.live().filter(|worker| worker.tracker_group() == crate::team::TrackerGroup::Done).count()
-            + items.iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).count();
+        let tickets_done = items.iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).count();
         let not_started = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
         let completed_items = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();

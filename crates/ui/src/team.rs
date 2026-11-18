@@ -588,6 +588,26 @@ mod tests {
     }
 
     #[test]
+    fn item_pull_request_reference_advances_tracker_stage() {
+        let chats: Vec<Chat> = ["coordinator", "worker"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "fixture", "spaceId": "fixture", "archived": false, "createdAt": "2026-01-01T00:00:00Z"
+        })).unwrap()).collect();
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "fixture", "items": [
+                {"id":"root", "spaceId":"fixture", "title":"Root", "chatIds":["coordinator"], "childIds":["item"]},
+                {"id":"item", "spaceId":"fixture", "title":"Item", "parentWorkItemId":"root", "chatIds":["worker"]}
+            ], "externalReferences": [{"id":"pr", "spaceId":"fixture", "workItemId":"item", "provider":"github",
+                "referenceType":"pullRequest", "externalId":"example/project#42", "url":"https://github.com/example/project/pull/42"}]
+        })).unwrap();
+        let indicators = HashMap::new();
+        let links = HashMap::new();
+        let facts = team(&TeamInput { chat_id: "coordinator", chats: &chats, indicators: &indicators,
+            snapshot: Some(&snapshot), links: &links, now: Utc::now() });
+        assert_eq!(facts.workers[0].prs[0].number, 42);
+        assert!(facts.workers[0].tracker_stages().pr_open);
+    }
+
+    #[test]
     fn pr_chips_carry_checks_and_review() {
         let pr = WorkerPr {
             branch: None, head_sha: None, additions: Some(312), deletions: Some(48),
