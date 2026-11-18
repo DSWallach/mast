@@ -105,6 +105,29 @@ fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> 
     })
 }
 
+fn parse_linear_project(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let url_path = input.strip_prefix("https://linear.app/").or_else(|| input.strip_prefix("http://linear.app/"));
+    let (external_id, url) = if let Some(rest) = url_path {
+        let path = rest.split(['?', '#']).next().unwrap_or("");
+        let parts: Vec<_> = path.trim_end_matches('/').split('/').collect();
+        let slug = match parts.as_slice() {
+            [workspace, "project", slug, ..] if !workspace.is_empty() && !slug.is_empty() => *slug,
+            ["project", slug, ..] if !slug.is_empty() => *slug,
+            _ => return Err(AgentToolError::invalid("invalid Linear project URL")),
+        };
+        (slug.to_owned(), input.to_owned())
+    } else {
+        (input.to_owned(), format!("https://linear.app/project/{input}"))
+    };
+    if external_id.is_empty() || external_id.len() > 200
+        || !external_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        return Err(AgentToolError::invalid("linearProject must be a Linear project URL or project id"));
+    }
+    Ok(ExternalReference { provider: mast_proto::linear::LINEAR_PROVIDER,
+        reference_type: mast_proto::linear::LINEAR_PROJECT_REFERENCE, external_id, url })
+}
+
 fn parse_pull_request(input: &str) -> Result<ExternalReference, AgentToolError> {
     let input = input.trim();
     let pr = if input.starts_with("https://github.com/") || input.starts_with("http://github.com/") {
@@ -527,6 +550,7 @@ struct CreateChildArgs {
 struct LinkArgs {
     work_item_id: String,
     linear_issue: Option<String>,
+    linear_project: Option<String>,
     pull_request: Option<String>,
 }
 
@@ -1615,12 +1639,13 @@ impl AgentToolsService {
             )
             .into());
         }
-        let reference = match (args.linear_issue.as_deref(), args.pull_request.as_deref()) {
-            (Some(issue), None) => parse_linear_issue(issue)?,
-            (None, Some(pr)) => parse_pull_request(pr)?,
+        let reference = match (args.linear_issue.as_deref(), args.linear_project.as_deref(), args.pull_request.as_deref()) {
+            (Some(issue), None, None) => parse_linear_issue(issue)?,
+            (None, Some(project), None) => parse_linear_project(project)?,
+            (None, None, Some(pr)) => parse_pull_request(pr)?,
             _ => {
                 return Err(AgentToolError::invalid(
-                    "provide exactly one of linearIssue or pullRequest",
+                    "provide exactly one of linearIssue, linearProject, or pullRequest",
                 ));
             }
         };

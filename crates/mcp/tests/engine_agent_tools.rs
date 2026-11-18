@@ -271,7 +271,7 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
 
 
     let linked_id = Box::pin(check_create_linked_item(&core, &tools)).await;
-    Box::pin(check_link_work_item(&core, &tools, &linked_id)).await;
+    Box::pin(check_link_work_item(&core, &tools, &item, &linked_id)).await;
     let launched_id = Box::pin(check_item_chat_title(&core, &tools, &linked_id)).await;
     Box::pin(check_chat_reuse(&core, &tools, &linked_id, &launched_id)).await;
     Box::pin(check_reuse_without_prompt(&tools, &linked_id, &launched_id)).await;
@@ -371,16 +371,28 @@ async fn check_create_linked_item(core: &EngineCore, tools: &Tools) -> String {
     linked_id
 }
 
-async fn check_link_work_item(core: &EngineCore, tools: &Tools, linked_id: &str) {
+async fn check_link_work_item(core: &EngineCore, tools: &Tools, root_id: &str, linked_id: &str) {
     tools.call("work_outline_link", json!({"workItemId": linked_id,
         "pullRequest": "acme/repo#42", "idempotencyKey": "link-pr"})).await.unwrap();
     tools.call("work_outline_link", json!({"workItemId": linked_id,
         "linearIssue": "https://linear.app/acme/issue/ENG-456/description", "idempotencyKey": "link-linear"})).await.unwrap();
+    tools.call("work_outline_link", json!({"workItemId": root_id,
+        "linearProject": "12345678-1234-1234-1234-123456789abc", "idempotencyKey": "link-project-id"})).await.unwrap();
+    tools.call("work_outline_link", json!({"workItemId": linked_id,
+        "linearProject": "https://linear.app/example/project/harbor-123abc/overview", "idempotencyKey": "link-project-url"})).await.unwrap();
     let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
     assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "acme/repo#42" && r.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER));
     assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "ENG-456" && r.provider == mast_proto::linear::LINEAR_PROVIDER));
+    assert_eq!(snapshot.linear_project_reference(root_id).unwrap().external_id, "12345678-1234-1234-1234-123456789abc");
+    assert_eq!(snapshot.linear_project_reference(linked_id).unwrap().external_id, "harbor-123abc");
     let err = tools.call("work_outline_link", json!({"workItemId": "foreign-item", "linearIssue": "ENG-3", "idempotencyKey": "link-foreign"})).await.unwrap_err();
     assert!(err.contains("unauthorized"), "{err}");
+    let err = tools.call("work_outline_link", json!({"workItemId": "foreign-item", "linearProject": "project-id", "idempotencyKey": "project-foreign"})).await.unwrap_err();
+    assert!(err.contains("unauthorized"), "{err}");
+    let err = tools.call("work_outline_link", json!({"workItemId": linked_id, "linearProject": "project-id", "linearIssue":"ENG-1", "idempotencyKey": "project-conflict"})).await.unwrap_err();
+    assert!(err.contains("exactly one"), "{err}");
+    let err = tools.call("work_outline_link", json!({"workItemId": linked_id, "linearProject": "https://example.com/project/foo", "idempotencyKey": "project-invalid"})).await.unwrap_err();
+    assert!(err.contains("linearProject"), "{err}");
     let err = tools.call("work_outline_create_child", json!({"title": "Invalid", "linearIssue": "not an issue", "idempotencyKey": "invalid-linear"})).await.unwrap_err();
     assert!(err.contains("linearIssue"), "{err}");
 }

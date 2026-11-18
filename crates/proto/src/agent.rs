@@ -1168,6 +1168,7 @@ pub mod agent_tools {
             optional: &[
                 p("pullRequest", "GitHub PR URL or owner/repo#number"),
                 p("linearIssue", "Linear issue identifier or URL"),
+                p("linearProject", "Linear project URL or id"),
             ],
             example: r#"{"workItemId":"<item id>","linearIssue":"ENG-123","idempotencyKey":"link-issue"}"#,
         },

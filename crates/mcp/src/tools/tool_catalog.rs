@@ -235,12 +235,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::LINK,
-            description: "Attach a Linear issue or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
+            description: "Attach a Linear issue, Linear project, or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workItemId": { "type": "string" },
                     "linearIssue": { "type": "string" },
+                    "linearProject": { "type": "string", "description": "Linear project URL or id." },
                     "pullRequest": { "type": "string" },
                     "idempotencyKey": idempotency_key_schema()
                 },
