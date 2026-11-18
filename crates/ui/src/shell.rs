@@ -4887,6 +4887,10 @@ impl Shell {
                             fetched_at: Instant::now(),
                         },
                     );
+                    if this.right_pane_open(cx) && this.resolved_right_active(cx) == RightSurface::Team {
+                        let active_chat = this.active_chat.clone();
+                        this.load_tracker_health(&active_chat, cx);
+                    }
                 }
                 cx.notify();
             })

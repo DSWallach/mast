@@ -37,6 +37,14 @@ struct TrackerSourceObservation {
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64, u64)>,
     chat_scope: Option<(String, u64, Option<String>, bool)>,
+    health_key: Option<(String, String, u64, u64, u64, u64)>,
+    health_task: Option<Task<()>>,
+    health_entries: Vec<mast_engine::work_outline_health::HealthEntry>,
+    health_incomplete: bool,
+    health_expanded: bool,
+    health_targets: std::sync::Arc<Vec<(String, String)>>,
+    health_titles: std::collections::HashMap<String, String>,
+    health_link_url: Option<String>,
     facts: TeamFacts,
     all_workers: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
@@ -363,6 +371,14 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(super) fn set_tracker_health_for_test(&mut self, entries: Vec<mast_engine::work_outline_health::HealthEntry>, targets: Vec<(String, String)>) {
+        self.tracker.health_entries = entries;
+        self.tracker.health_titles = targets.iter().cloned().collect();
+        self.tracker.health_targets = std::sync::Arc::new(targets);
+        self.tracker.health_expanded = true;
+    }
+
+    #[cfg(test)]
     pub(super) fn tracker_has_item_for_test(&self, id: &str) -> bool {
         self.tracker.not_started.iter().chain(&self.tracker.completed_items).any(|item| item.id == id)
     }
@@ -451,6 +467,10 @@ impl Shell {
     }
 
     pub(super) fn refresh_tracker_source_if_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.active_chat.is_empty() && self.right_pane_open(cx) && self.resolved_right_active(cx) == RightSurface::Team {
+            let chat_id = self.active_chat.clone();
+            self.load_tracker_health(&chat_id, cx);
+        }
         let Some(previous) = self.tracker.source_observation.clone() else { return; };
         if self.active_chat != previous.chat_id || !self.right_pane_open(cx) || self.resolved_right_active(cx) != RightSurface::Team { return; }
         let state = self.state.read(cx);
@@ -476,7 +496,105 @@ impl Shell {
         }
     }
 
+    pub(super) fn load_tracker_health(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(space) = state.chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.space_id.as_deref()) else { self.clear_tracker_health(); return; };
+        let outline = state.work_outline(space);
+        let Some(snapshot) = outline.snapshot() else { self.clear_tracker_health(); return; };
+        let Some(root) = crate::chat_work_context::assigned_item(snapshot, chat_id) else { self.clear_tracker_health(); return; };
+        let account_revision = state.linear.revision(crate::linear::store::account_scope(snapshot));
+        let key = (space.to_owned(), root.to_owned(), snapshot.revision, state.board_status_revision, self.board_links_revision, account_revision);
+        if self.tracker.health_key.as_ref() == Some(&key) { return; }
+        let scoped = mast_engine::work_outline_health::subtree_items(snapshot, root);
+        let targets = scoped.iter().filter(|item| item.child_ids.is_empty()).map(|item| (item.id.clone(), item.title.clone())).collect();
+        let mut titles: std::collections::HashMap<_, _> = scoped.iter().map(|item| (item.id.clone(), item.title.clone())).collect();
+        if let Some(project) = snapshot.linear_project_reference(root) {
+            let account = crate::linear::store::account_scope(snapshot).to_owned();
+            if let Some(issues) = self.tracker.linear_projects.get(&(account, project.external_id.clone(), account_revision)) {
+                titles.extend(issues.iter().map(|issue| (format!("linear:{}", issue.identifier.to_ascii_uppercase()), issue.title.clone())));
+            }
+        }
+        let Some(engine) = state.engine().cloned() else {
+            if self.tracker.health_key.as_ref().is_some_and(|old| old.0 != key.0 || old.1 != key.1) { self.clear_tracker_health(); }
+            return;
+        };
+        if self.tracker.health_key.as_ref().is_none_or(|old| old.0 != key.0 || old.1 != key.1) {
+            self.tracker.health_entries.clear();
+            self.tracker.health_link_url = None;
+        }
+        self.tracker.health_key = Some(key.clone());
+        self.tracker.health_targets = std::sync::Arc::new(targets);
+        self.tracker.health_titles = titles;
+        self.tracker.health_task = Some(cx.spawn(async move |shell, cx| {
+            // Coalesce a burst of cached PR updates into one subtree read.
+            cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            let result = engine.client().call(mast_rpc::methods::WORK_OUTLINE_HEALTH,
+                serde_json::json!({ "spaceId": key.0.clone(), "workItemId": key.1.clone() })).await;
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.tracker.health_key.as_ref() != Some(&key) { return; }
+                match result {
+                    Ok(value) => {
+                        shell.tracker.health_entries = value.get("entries").cloned().and_then(|entries| serde_json::from_value(entries).ok()).unwrap_or_default();
+                        shell.tracker.health_incomplete = value.get("unknown").and_then(|value| value.as_object())
+                            .is_some_and(|unknown| unknown.values().any(|value| value.as_bool() == Some(true)));
+                    }
+                    Err(_) => { shell.tracker.health_entries.clear(); shell.tracker.health_incomplete = true; }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn clear_tracker_health(&mut self) {
+        self.tracker.health_key = None;
+        self.tracker.health_task = None;
+        self.tracker.health_entries.clear();
+        self.tracker.health_link_url = None;
+        self.tracker.health_targets = Default::default();
+        self.tracker.health_titles.clear();
+        self.tracker.health_incomplete = false;
+    }
+
+    fn complete_tracker_health_item(&mut self, item_id: String, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().update_work_item(mast_proto::UpdateWorkItemParams {
+            work_item_id: item_id,
+            changes: mast_proto::WorkItemChanges { status: Some(mast_proto::WorkItemStatus::Completed), ..Default::default() },
+            operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
+                shell.tracker.health_key = None;
+                let chat_id = shell.active_chat.clone();
+                shell.load_tracker_health(&chat_id, cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn link_tracker_health_pr(&mut self, item_id: String, url: String, cx: &mut Context<Self>) {
+        let Some(pr) = crate::chat_work_context::parse_pr_url(&url) else { return; };
+        let task = self.state.read(cx).work_outline_actions().create_external_reference(mast_proto::CreateWorkItemExternalReferenceParams {
+            work_item_id: item_id, provider: mast_proto::pr_review_sync::GITHUB_PROVIDER.into(),
+            reference_type: mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE.into(), external_id: pr.external_id(),
+            url, cached_title: None, operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        self.tracker.health_link_url = None;
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
+                shell.tracker.health_key = None;
+                let chat_id = shell.active_chat.clone();
+                shell.load_tracker_health(&chat_id, cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn load_tracker_project(&mut self, chat_id: &str, force: bool, cx: &mut Context<Self>) {
+        self.load_tracker_health(chat_id, cx);
         let Some((space, account, reference, revision)) = self.tracker_linear_project(chat_id, cx) else { return; };
         let key = (account.clone(), reference.external_id.clone(), revision);
         if !self.tracker.linear_loading.insert(key.clone()) { return; }
@@ -537,6 +655,9 @@ impl Shell {
                         shell.tracker.linear_projects.insert(key.clone(), issues);
                         shell.tracker.linear_errors.remove(&key);
                         shell.tracker.key = None;
+                        shell.tracker.health_key = None;
+                        let chat_id = shell.active_chat.clone();
+                        shell.load_tracker_health(&chat_id, cx);
                     }
                     Err(error) => {
                         if shell.tracker.linear_errors.len() >= 32 && !shell.tracker.linear_errors.contains_key(&key)
@@ -769,6 +890,17 @@ impl Shell {
             ..Default::default()
         }).collect();
         self.tracker.linear_projects.insert(("default".into(), "fixture-project".into(), 0), issues);
+        self.tracker.health_titles = [("fixture-item-16".into(), "Review tests".into()), ("fixture-container".into(), "Planning".into()),
+            ("fixture-item-2".into(), "Update the cache".into())].into_iter().collect();
+        self.tracker.health_targets = std::sync::Arc::new(vec![("fixture-item-2".into(), "Update the cache".into())]);
+        self.tracker.health_entries = vec![
+            mast_engine::work_outline_health::HealthEntry::SeveralLiveChats { item_id: "fixture-item-16".into(), chat_ids: vec!["fixture-worker-16".into(), "fixture-worker-17".into()] },
+            mast_engine::work_outline_health::HealthEntry::ChatOnContainer { item_id: "fixture-container".into(), chat_id: "fixture-worker-15".into() },
+            mast_engine::work_outline_health::HealthEntry::MergedPrOnOpenItem { item_id: "fixture-item-2".into(), url: "https://github.com/example/project/pull/22".into() },
+            mast_engine::work_outline_health::HealthEntry::UnlinkedPr { url: "https://github.com/example/project/pull/42".into() },
+            mast_engine::work_outline_health::HealthEntry::WorkerOnDefaultBranch { chat_id: "fixture-worker-12".into() },
+            mast_engine::work_outline_health::HealthEntry::StaleChat { chat_id: "fixture-worker-14".into() },
+        ];
         for index in 0..8 {
             use mast_engine::pr_ticket_cache::{ChatLinkStatus, ChecksStatus, DiffStat, PrStatus, TicketStatus};
             let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
@@ -802,6 +934,7 @@ impl Shell {
     #[cfg(feature = "snapshot")]
     pub(crate) fn fixture_snapshot_tracker_expanded(&mut self, cx: &mut Context<Self>) {
         self.fixture_snapshot_team(cx);
+        self.tracker.health_expanded = true;
         self.right_pane_expanded = true;
     }
     /// The selected chat's workers. Link statuses (PR checks, diff stats) come
@@ -924,6 +1057,13 @@ impl Shell {
             .map(|item| item.id.clone()).collect();
         let now = chrono::Utc::now();
         let live_chat_ids: std::collections::HashSet<_> = state.chats.iter().filter(|chat| !chat.archived).map(|chat| chat.id.as_str()).collect();
+        let mut review_ranges = std::collections::HashMap::<(String, String), Vec<&str>>::new();
+        for review in state.chats.iter().filter(|chat| !chat.archived && chat.space_id == chat_space) {
+            for range in state.chat_ref_targets(&review.id).iter().filter(|range|
+                range.kind == mast_proto::RefDiffKind::Branch && range.id.starts_with("review-")) {
+                review_ranges.entry((range.path.clone(), range.head_branch.clone())).or_default().push(&review.id);
+            }
+        }
         let lifecycle_rows: std::collections::HashMap<_, _> = facts.workers.iter().map(|worker| {
             let mut workers = vec![worker];
             workers.extend(additional_chats.get(&worker.chat_id).into_iter().flatten());
@@ -934,6 +1074,11 @@ impl Shell {
                     matches!(target, mast_proto::ReviewTarget::Branch { branch: Some(branch), .. } if chat.branch.as_deref() == Some(branch.as_str()))
                         && self.branch_review_chats.get(&format!("{}\0{}", snapshot.space_id, target.state_key()))
                             .is_some_and(|review| live_chat_ids.contains(review.as_str()))
+                }) || state.selected_execution_member(&chat.chat_id).is_some_and(|member| {
+                    member.kind != crate::work_outline::execution::MemberKind::Ref
+                        && member.branch.as_deref().zip(chat.branch.as_deref()).is_some_and(|(a, b)| a == b)
+                        && member.branch.as_ref().is_some_and(|branch| review_ranges.get(&(member.checkout_path, branch.clone()))
+                            .is_some_and(|reviews| reviews.iter().any(|review| *review != chat.chat_id.as_str())))
                 })
             }));
             (worker.chat_id.clone(), crate::team::ticket_lifecycle(&workers, completed, linear_completed, branch_review, now))
@@ -1207,6 +1352,9 @@ impl Shell {
                         cx.notify();
                     })));
             }
+            rollup = rollup.child(Self::chip(&theme, "tracker-cleanup-toggle".into(), format!("{} cleanup", self.tracker.health_entries.len()), ChipTone::Dim)
+                .debug_selector(|| "tracker-cleanup-toggle".into())
+                .cursor_pointer().on_click(cx.listener(|this, _, _, cx| { this.tracker.health_expanded = !this.tracker.health_expanded; cx.notify(); })));
             let mut settings = div().relative().child(Self::chip(&theme, "tracker-wake-settings".into(), "Wake settings".into(), ChipTone::Dim)
                 .cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                     this.tracker.wake_settings_open = !this.tracker.wake_settings_open;
@@ -1220,6 +1368,7 @@ impl Shell {
             }
             rollup = rollup.child(settings);
             col = col.child(rollup);
+            if self.tracker.health_expanded { col = col.child(self.render_tracker_health(&theme, cx)); }
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
             col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
@@ -1280,6 +1429,81 @@ impl Shell {
             }
         }
         self.panel_root("team-tab", focus, col, cx)
+    }
+
+    fn render_tracker_health(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use mast_engine::work_outline_health::HealthEntry;
+        let mut list = div().debug_selector(|| "tracker-cleanup".into()).flex().flex_col().gap(px(Theme::SPACE_SM));
+        if self.tracker.health_incomplete {
+            list = list.child(crate::components::shell_parts::tracker_metadata(theme, "Some PR, project or branch details are unavailable".into()));
+        }
+        if self.tracker.health_entries.is_empty() {
+            list = list.child(crate::components::shell_parts::tracker_metadata(theme, if self.tracker.health_incomplete { "No cleanup found in available details" } else { "No cleanup found" }.into()));
+        }
+        for (index, entry) in self.tracker.health_entries.iter().enumerate() {
+            let title = |id: &str| self.tracker.health_titles.get(id).cloned().unwrap_or_else(|| "Work item".into());
+            let chat_title = |id: &str| self.tracker.metadata.get(id).map(|value| value.0.clone()).unwrap_or_else(|| "Chat".into());
+            let mut row = div().flex().flex_wrap().items_center().gap(px(Theme::SPACE_SM));
+            match entry {
+                HealthEntry::SeveralLiveChats { item_id, chat_ids } => {
+                    row = row.child(format!("{} · {} live chats", title(item_id), chat_ids.len()));
+                    for (chat_index, chat_id) in chat_ids.iter().enumerate() {
+                        let id = chat_id.clone();
+                        row = row.child(crate::components::shell_parts::tracker_metadata(theme, chat_title(chat_id)))
+                            .child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-archive-{index}-{chat_index}"), "Archive", false)
+                                .on_click(cx.listener(move |this, _, _, cx| { this.set_worker_archived(&id, true, cx); })));
+                    }
+                }
+                HealthEntry::ChatOnContainer { item_id, chat_id } => {
+                    row = row.child(format!("{} is on container {}", chat_title(chat_id), title(item_id)));
+                    let id = chat_id.clone();
+                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-open-{index}"), "Open chat", false)
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(id.clone(), cx))));
+                }
+                HealthEntry::MergedPrOnOpenItem { item_id, .. } => {
+                    row = row.child(format!("{} · merged PR, item open", title(item_id)));
+                    let id = item_id.clone();
+                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-complete-{index}"), "Mark completed", false)
+                        .debug_selector(move || format!("cleanup-complete-{index}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.complete_tracker_health_item(id.clone(), cx))));
+                }
+                HealthEntry::UnlinkedPr { url } => {
+                    row = row.child(format!("Unlinked PR · {url}"));
+                    let selected = url.clone();
+                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-link-{index}"), "Link PR", false)
+                        .debug_selector(move || format!("cleanup-link-{index}"))
+                        .on_click(cx.listener(move |this, _, _, cx| { this.tracker.health_link_url = Some(selected.clone()); cx.notify(); })));
+                }
+                HealthEntry::WorkerOnDefaultBranch { chat_id } | HealthEntry::StaleChat { chat_id } => {
+                    let condition = if matches!(entry, HealthEntry::StaleChat { .. }) { "stale" } else { "on the default branch" };
+                    row = row.child(format!("{} · {condition}", chat_title(chat_id)));
+                    let id = chat_id.clone();
+                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-open-{index}"), "Open chat", false)
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(id.clone(), cx))));
+                }
+            }
+            list = list.child(row);
+        }
+        if let Some(url) = &self.tracker.health_link_url {
+            let targets = self.tracker.health_targets.clone();
+            let count = targets.len();
+            let url = url.clone();
+            let color = theme.text;
+            let entity = cx.entity();
+            list = list.child(crate::components::shell_parts::tracker_metadata(theme, "Choose an item for this PR".into()));
+            list = list.child(gpui::uniform_list("tracker-health-targets", count, move |range, _, app| {
+                entity.update(app, |_, cx| range.map(|index| {
+                    let (id, title) = &targets[index];
+                    let id = id.clone();
+                    let url = url.clone();
+                    div().id(SharedString::from(format!("tracker-health-target-{index}"))).h(px(28.0)).cursor_pointer()
+                        .debug_selector(move || format!("tracker-health-target-{index}"))
+                        .text_color(color).child(title.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| this.link_tracker_health_pr(id.clone(), url.clone(), cx))).into_any_element()
+                }).collect::<Vec<_>>())
+            }).h(px(count.min(7) as f32 * 28.0)).w_full());
+        }
+        list.into_any_element()
     }
 
     fn render_tracker_worker(&self, worker: &WorkerFacts, report: Option<&String>, unseen: Option<&Vec<String>>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

@@ -151,6 +151,7 @@ pub mod methods {
     /// forwardable; hosts that predate the feature answer `unknown method`,
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
+    pub const WORK_OUTLINE_HEALTH: &str = "WorkOutlineHealth";
     /// Completed Linear sync passes for one Space; current revision first.
     pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";
     /// Read-only workflow-pack export and import previews.

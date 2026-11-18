@@ -2598,6 +2598,7 @@ impl AppState {
         }
         self.chat_diff_targets = next;
         self.chat_ref_targets = next_refs;
+        self.board_status_revision = self.board_status_revision.wrapping_add(1);
         true
     }
 

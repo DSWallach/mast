@@ -78,7 +78,7 @@ pub struct HealthPullRequest {
     pub merged: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum HealthEntry {
     SeveralLiveChats { item_id: String, chat_ids: Vec<String> },
@@ -118,6 +118,76 @@ pub fn health_items(
         linear_completed: linear_completion.get(&item.id).copied(),
         chat_ids: item.chat_ids.clone(),
     }).collect()
+}
+
+/// Find a project issue identifier at a branch-name boundary.
+pub fn branch_issue(branch: &str, issues: &std::collections::HashSet<String>) -> Option<String> {
+    let upper = branch.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !bytes[start].is_ascii_alphabetic() || (start > 0 && bytes[start - 1].is_ascii_alphanumeric()) { start += 1; continue; }
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_alphanumeric() { end += 1; }
+        if end < bytes.len() && bytes[end] == b'-' {
+            let digits = end + 1;
+            end = digits;
+            while end < bytes.len() && bytes[end].is_ascii_digit() { end += 1; }
+            if end > digits && (end == bytes.len() || !bytes[end].is_ascii_alphanumeric()) && issues.contains(&upper[start..end]) {
+                return Some(upper[start..end].to_owned());
+            }
+        }
+        start = end.max(start + 1);
+    }
+    None
+}
+
+/// Fold chats matched to the same cached Linear issue into one health item.
+/// Explicit issue references take precedence over branch matches. Issues
+/// without a local item get a temporary id for the read-only result.
+pub fn reconcile_health_chats(
+    items: &mut Vec<HealthItem>,
+    chats: &mut [HealthChat],
+    item_issues: &HashMap<String, String>,
+    chat_issues: &HashMap<String, String>,
+    issues: &HashMap<String, bool>,
+) {
+    let mut issue_items = HashMap::<String, usize>::new();
+    let item_indexes: HashMap<_, _> = items.iter().enumerate().map(|(index, item)| (item.id.clone(), index)).collect();
+    let mut effective_issues = item_issues.clone();
+    for item in items.iter().filter(|item| !item.container && !item_issues.contains_key(&item.id)) {
+        if let Some(issue) = item.chat_ids.iter().filter_map(|id| chat_issues.get(id)).find(|issue| issues.contains_key(*issue)) {
+            effective_issues.insert(item.id.clone(), issue.clone());
+        }
+    }
+    for (index, item) in items.iter().enumerate().filter(|(_, item)| !item.container) {
+        if let Some(issue) = effective_issues.get(&item.id).filter(|issue| issues.contains_key(*issue)) {
+            issue_items.entry(issue.clone()).or_insert(index);
+        }
+    }
+    let mut moves = HashMap::new();
+    for chat in chats.iter_mut() {
+        let source = chat.item_id.as_ref().and_then(|id| item_indexes.get(id)).copied();
+        if source.is_some_and(|index| items[index].container) { continue; }
+        let issue = chat.item_id.as_ref().and_then(|id| effective_issues.get(id)).or_else(|| chat_issues.get(&chat.id));
+        let Some(issue) = issue.filter(|issue| issues.contains_key(*issue)) else { continue; };
+        let target = *issue_items.entry(issue.clone()).or_insert_with(|| {
+            let index = items.len();
+            items.push(HealthItem { id: format!("linear:{issue}"), container: false, completed: false,
+                linear_completed: issues.get(issue).copied(), chat_ids: Vec::new() });
+            index
+        });
+        items[target].linear_completed = issues.get(issue).copied();
+        moves.insert(chat.id.clone(), target);
+        chat.item_id = Some(items[target].id.clone());
+    }
+    for item in items.iter_mut() {
+        if !item.container { item.chat_ids.retain(|id| !moves.contains_key(id)); }
+    }
+    for (chat_id, target) in moves {
+        items[target].chat_ids.push(chat_id);
+    }
+    for item in items { item.chat_ids.sort_unstable(); }
 }
 
 /// Builds the list from a single snapshot, without IO or mutations. Inputs
@@ -279,6 +349,34 @@ mod tests {
         let container = HealthItem { id: "container".into(), container: true, completed: false, linear_completed: None, chat_ids: vec![] };
         let on_container = HealthPullRequest { url: "pr".into(), item_id: Some("container".into()), linked_to_ticket: false, open: true, merged: false };
         assert!(matches!(&check_health(&[container], &[], &[on_container])[..], [HealthEntry::UnlinkedPr { .. }]));
+    }
+
+    #[test]
+    fn chats_on_the_same_linear_issue_share_one_cleanup_entry() {
+        let item = |id: &str, chat: &str| HealthItem { id: id.into(), container: false, completed: false, linear_completed: Some(false), chat_ids: vec![chat.into()] };
+        let chat = |id: &str, item: &str| HealthChat { id: id.into(), item_id: Some(item.into()), archived: false, finished: false,
+            stale: false, has_open_pr: Some(false), on_default_branch: false, has_bound_worktree: false };
+        let mut items = vec![item("a", "one"), item("b", "two"), item("local", "three")];
+        let mut chats = vec![chat("one", "a"), chat("two", "b"), chat("three", "local")];
+        let item_issues = [("a".into(), "EX-1".into()), ("b".into(), "EX-1".into())].into_iter().collect();
+        let chat_issues = [("three".into(), "EX-1".into())].into_iter().collect();
+        let issues = [("EX-1".into(), false)].into_iter().collect();
+        reconcile_health_chats(&mut items, &mut chats, &item_issues, &chat_issues, &issues);
+        assert!(matches!(&check_health(&items, &chats, &[])[..], [HealthEntry::SeveralLiveChats { item_id, chat_ids }] if item_id == "a" && chat_ids == &["one", "three", "two"]));
+        let mut shared = vec![HealthItem { id: "shared".into(), container: false, completed: false, linear_completed: None, chat_ids: vec!["one".into(), "two".into()] }];
+        let mut workers = vec![chat("one", "shared"), chat("two", "shared")];
+        let branches = [("one".into(), "EX-1".into()), ("two".into(), "EX-2".into())].into_iter().collect();
+        let both = [("EX-1".into(), false), ("EX-2".into(), false)].into_iter().collect();
+        reconcile_health_chats(&mut shared, &mut workers, &HashMap::new(), &branches, &both);
+        assert!(matches!(&check_health(&shared, &workers, &[])[..], [HealthEntry::SeveralLiveChats { item_id, .. }] if item_id == "shared"));
+    }
+
+    #[test]
+    fn branch_issue_matches_only_known_identifiers_at_boundaries() {
+        let issues = ["LONGTEAM-123".to_owned()].into_iter().collect();
+        assert_eq!(branch_issue("feature/longteam-123-fix", &issues).as_deref(), Some("LONGTEAM-123"));
+        assert_eq!(branch_issue("feature/longteam-1234-fix", &issues), None);
+        assert_eq!(branch_issue("xlongteam-123-fix", &issues), None);
     }
 
     #[test]

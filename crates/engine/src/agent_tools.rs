@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 mod archive;
+mod health;
 
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
@@ -917,8 +918,10 @@ pub struct AgentToolsService {
     artifacts: Mutex<Option<crate::artifacts::ArtifactsService>>,
     /// Chat diff targets (`bind_chat_worktree`).
     diff_targets: Mutex<Option<crate::diff_targets::DiffTargets>>,
+    diff_sync: Mutex<Option<crate::diff_sync::CheckoutDiffSync>>,
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
+    health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
 }
@@ -940,8 +943,10 @@ impl AgentToolsService {
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
+            health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
+            diff_sync: Mutex::new(None),
         }
     }
 
@@ -958,6 +963,10 @@ impl AgentToolsService {
     /// Attach the engine's diff targets service (engine assembly).
     pub fn set_diff_targets(&self, diff_targets: crate::diff_targets::DiffTargets) {
         *lock(&self.diff_targets) = Some(diff_targets);
+    }
+
+    pub fn set_diff_sync(&self, diff_sync: crate::diff_sync::CheckoutDiffSync) {
+        *lock(&self.diff_sync) = Some(diff_sync);
     }
 
     /// The artifact service and the caller it acts for.
@@ -1140,6 +1149,7 @@ impl AgentToolsService {
             tools::READ_CURRENT => Ok(self.read_current(context)),
             tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
+            tools::HEALTH => self.health(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::LINK => self.link(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
