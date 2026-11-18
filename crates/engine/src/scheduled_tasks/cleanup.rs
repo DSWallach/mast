@@ -119,6 +119,10 @@ impl ScheduledTasks {
             .collect())
     }
 
+    fn has_active_work(&self, chat_id: &str) -> Result<bool, EngineError> {
+        Ok(self.0.sessions.turn_in_flight(chat_id) || self.0.host.has_queued_turn(chat_id)?)
+    }
+
     fn clean_up_runs_blocking(
         &self,
         mode: ScheduledRunCleanupMode,
@@ -156,8 +160,7 @@ impl ScheduledTasks {
                 || actions.contains(&chat.id)
                 || (latest.contains(chat.id.as_str())
                     && !self.should_archive_desktop_run(&desktop, chat, info))
-                || self.0.sessions.turn_in_flight(&chat.id)
-                || self.0.host.has_queued_turn(&chat.id)?
+                || self.has_active_work(&chat.id)?
             {
                 continue;
             }
@@ -208,10 +211,18 @@ impl ScheduledTasks {
             }
 
             let _guard = self.0.gate.blocking_lock();
-            if self.0.store.tasks()? == desktop.tasks
+            let mut eligible = self.0.store.tasks()? == desktop.tasks
                 && self.active_chat_ids()? == active
-                && self.0.sessions.agent_tokens().personal_assistant().get() == assistant
-                && !ids.iter().any(|id| self.0.sessions.turn_in_flight(id))
+                && self.0.sessions.agent_tokens().personal_assistant().get() == assistant;
+            if eligible {
+                for id in ids {
+                    if self.has_active_work(id)? {
+                        eligible = false;
+                        break;
+                    }
+                }
+            }
+            if eligible
                 && workspace
                     .archive_scheduled_runs(marker, result.chat_ids().map(String::as_str))?
             {
