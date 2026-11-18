@@ -25,6 +25,37 @@ Mast results contract (unattended run {run_id}). Nobody is watching this chat, s
     )
 }
 
+/// The task's results artifact on this item. The first publish fixes its
+/// title; afterwards the existing artifact (found by role, which does not
+/// depend on the task name) keeps its identity and revision history when the
+/// task is renamed.
+pub(crate) fn resolve(
+    workspace: &WorkspaceHost,
+    space_id: &str,
+    work_item_id: &str,
+    task_id: &str,
+    task_name: &str,
+) -> ScheduledRunResults {
+    let role = ScheduledRunResults::role_for(task_id);
+    workspace
+        .artifacts_of_space(space_id)
+        .into_iter()
+        .filter(|a| {
+            a.work_item_id.as_deref() == Some(work_item_id)
+                && a.role
+                    .as_deref()
+                    .is_some_and(|r| r.eq_ignore_ascii_case(&role))
+        })
+        .min_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
+        .map(|a| ScheduledRunResults {
+            artifact_id: a.id,
+            title: a.title,
+            role: role.clone(),
+            revision: None,
+        })
+        .unwrap_or_else(|| ScheduledRunResults::new(space_id, work_item_id, task_id, task_name))
+}
+
 /// The revision this run's chat published, or why there is none. Only
 /// revisions made by the run's own chat count: a user, another task or an
 /// earlier run publishing under the same title never satisfies it.

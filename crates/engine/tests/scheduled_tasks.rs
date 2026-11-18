@@ -2113,3 +2113,43 @@ async fn a_background_run_may_publish_its_results_once_and_never_as_the_plan() {
     publish("Scratch notes", "doc", "k3", false).unwrap();
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn renaming_a_task_keeps_one_results_artifact_and_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft.clone()).await;
+    let first = claim_lifecycle_run(&core, "routine", "before-rename").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let first = finished_run(&core, &first).await;
+    let original = first.results.clone().unwrap();
+
+    draft.name = "Renamed integration".into();
+    save_lifecycle_task(&core, "routine", 1, draft).await;
+    let second = claim_run_without_results(&core, "routine", "after-rename").await;
+    // The claim names the new title; launch resolves to the existing artifact.
+    assert_ne!(second.results.as_ref().unwrap().artifact_id, original.artifact_id);
+    let mut as_first = second.clone();
+    as_first.results = Some(original.clone());
+    let chat = second.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &as_first, &chat, "Run: second\nAfter the rename.");
+    assert_eq!(reply.artifact_id, original.artifact_id);
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let second = finished_run(&core, &second).await;
+    let results = second.results.unwrap();
+    assert_eq!(results.artifact_id, original.artifact_id);
+    assert_eq!(results.title, original.title);
+    assert_eq!(results.revision, Some(reply.revision));
+    assert_eq!(reply.revision, 2);
+    let artifacts = core
+        .workspace
+        .artifacts_of_space(ITEM_SPACE)
+        .into_iter()
+        .filter(|a| a.role.as_deref() == Some(original.role.as_str()))
+        .count();
+    assert_eq!(artifacts, 1);
+    core.shutdown().await;
+}

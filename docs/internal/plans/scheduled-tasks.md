@@ -159,14 +159,22 @@ without filing an action.
 
 A Background run on a work item records `results` on its `ScheduledRun` when
 the occurrence is claimed: `{artifactId, title, role, revision?}`. `title` is
-`Results: <task name>` and `role` is `scheduled-results:<hash of task id>`
-(`ScheduledRunResults::{title_for, role_for}`), so the artifact id is the usual
-`artifact_id(space, item, title, role)`. It is one artifact per task and item,
-not pinned: pinning is plan-scoped (one plan per item), so a results artifact
-would replace the item's plan. Consumers (the read path) find it by `role`, which
-survives a task rename; a rename starts a new artifact under the new title. Runs
-claimed before this contract, and Interactive runs, have no `results` and are
-never checked.
+`Results: <task name>` when the artifact is first created and `role` is
+`scheduled-results:<hash of task id>` (`ScheduledRunResults::{title_for,
+role_for}`). The artifact id is the usual `artifact_id(space, item, title,
+role)`, and the title is part of it, so identity is fixed by the first publish:
+`results::resolve` looks up the existing artifact by item and role and reuses
+its title. The claim records a provisional identity from the current task name,
+`launch` replaces it with the resolved one, and the publish guard resolves the
+same way. A rename therefore keeps one artifact and its revision history.
+There is one artifact per task and item.
+
+It is not pinned. Pinning is plan-scoped (one plan per item), so a pinned
+results artifact would replace the item's plan. It stays visible without a pin:
+the item's artifact list sorts the pinned plan first and then by last update,
+and every run updates this artifact. Consumers (the read path) find it by
+`role`, never by title. Runs claimed before this contract, and Interactive
+runs, have no `results` and are never checked.
 
 `prompt_with_contract` appends the contract to the prompt on launch. It depends
 only on the run, so a launch retried after a crash queues the same message. The
@@ -180,7 +188,9 @@ set item status.
 `artifact_publish` from a Background run chat is guarded: a title or role that
 matches only half of the identity, another task's role, `pinAsPlan`, or a second
 publish from the same chat with a different key is rejected. A retry with the
-same key replays. Other artifacts from the run are unrestricted.
+same key replays. Other artifacts from the run are unrestricted. The check
+and the record run under one lock, so two concurrent publishes from a run
+cannot both pass it.
 
 When a run is first seen `Completed`, the scheduler requires a revision whose
 author is an agent in the run's own chat. A revision from a user, another task or

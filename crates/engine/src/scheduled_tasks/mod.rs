@@ -660,7 +660,7 @@ impl ScheduledTasks {
                 return Ok(());
             }
             let launched = match model_check {
-                Ok(()) => self.launch(&r),
+                Ok(()) => self.launch(&mut r),
                 Err(e) => Err(e),
             };
             match launched {
@@ -682,8 +682,23 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    fn launch(&self, r: &ScheduledRun) -> Result<(), EngineError> {
+    fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
         self.validate(&r.snapshot)?;
+        // A rename since the first run must not start a second artifact.
+        if let (Some(results), Some(space), Some(item)) =
+            (&mut r.results, &r.snapshot.space_id, &r.snapshot.work_item_id)
+        {
+            let resolved = results::resolve(
+                &self.0.workspace,
+                space,
+                item,
+                &r.task_id,
+                &r.snapshot.name,
+            );
+            results.artifact_id = resolved.artifact_id;
+            results.title = resolved.title;
+        }
+        let r = &*r;
         let task = self.find(&r.task_id)?;
         if let Some(source) = task.import_source.as_deref() {
             if !r.snapshot.cutover_confirmed {

@@ -684,6 +684,9 @@ struct Inner {
     /// Serializes every artifact write and the watcher; holds the watcher
     /// cache keyed by stored path.
     gate: Mutex<HashMap<String, SeenFile>>,
+    /// Held from an agent publish's results-contract check through its
+    /// record, so two concurrent publishes cannot both pass the check.
+    agent_publish_serial: Mutex<()>,
     render: Arc<RenderBroker>,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
@@ -704,6 +707,7 @@ impl ArtifactsService {
                 snapshots,
                 questions: Mutex::new(HashMap::new()),
                 gate: Mutex::new(HashMap::new()),
+                agent_publish_serial: Mutex::new(()),
                 render: Arc::new(RenderBroker::default()),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
@@ -2728,6 +2732,7 @@ impl ArtifactsService {
         };
         let source = self.agent_path(caller, &args.path)?;
         let operation_id = publish_operation_id(&caller.chat_id, key);
+        let _serial = lock(&self.inner.agent_publish_serial);
         self.guard_results_publish(caller, &args, &operation_id)?;
         let reply = self.record(PublishRequest {
             space_id: caller.space_id.clone(),
@@ -2806,7 +2811,8 @@ impl ArtifactsService {
         else {
             return Ok(());
         };
-        let expected = mast_proto::ScheduledRunResults::new(
+        let expected = crate::scheduled_tasks::results::resolve(
+            self.workspace(),
             &caller.space_id,
             item,
             &info.task_id,
