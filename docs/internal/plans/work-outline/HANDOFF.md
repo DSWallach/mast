@@ -1219,6 +1219,18 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 17:05; coordinator d7779d53)
+
+- **Installed: release 113** (2a24619b4), full perf gate (soak vs 112: CPU 6.0 vs 5.8 %, footprint 533 vs 572 MB,
+  git flat; UI-only change, so the engine soak is noise). C1.5: `render_row` 456 → 121 and `render_tool_group`
+  617 → 81 lines (row content/metadata, tool-group frame/header/chips); render characterization in
+  `transcript/render_tests.rs`. **Refactor Phase C1 is complete** (slices 1–5 in 112–113).
+- First 113 soak aborted itself on load 12.4 (Docker VM); `/private/tmp/r113/soak-when-quiet.sh` pattern (wait for
+  5-min load < 8, retry on abort) got a clean run. Watch for `^RESULT:` in release logs, not `RESULT` (the scenarios
+  line contains the word).
+- Mikey is on 110 until he restarts; one restart picks up 111–113.
+- Next: perf candidates in mast-artifact:16024d9d2e87924e0e513ee5a731308e (measure first), or the next refactor phase.
+
 ## In flight (snapshot 2026-11-18 15:50; coordinator d7779d53)
 
 - **Installed: release 112** (68de4092a), full perf gate (soak vs 111: CPU 5.5 vs 5.7 %, footprint 448 vs 538 MB,
