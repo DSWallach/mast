@@ -1401,11 +1401,9 @@ impl Shell {
                         if let (Some(review), Some(drafts)) = (review, drafts) {
                             let viewed = reviewed_files_at_head(review.state, head.as_deref());
                             let _ = shell.update(cx, |shell, cx| {
-                                if shell.tracker.review_generation == generation {
-                                    if viewed > 0 || !drafts.is_empty() {
-                                        shell.tracker.review_progress.insert((target, head), (viewed, drafts.len()));
-                                        cx.notify();
-                                    }
+                                if shell.tracker.review_generation == generation && (viewed > 0 || !drafts.is_empty()) {
+                                    shell.tracker.review_progress.insert((target, head), (viewed, drafts.len()));
+                                    cx.notify();
                                 }
                             });
                         }
