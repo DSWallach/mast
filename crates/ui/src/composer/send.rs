@@ -41,44 +41,129 @@ impl Composer {
     pub(super) fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
         let Some(send) = self.prepare_send(text, queue, cx) else { return; };
         self.send_task = Some(cx.spawn(async move |this, cx| {
-            let PreparedSend {
-                engine,
-                message_id,
-                failed_send,
-                chat_id,
-                is_new,
-                plan,
-                workspace_choice,
-                resolved,
-                existing_cwd,
-                device_id,
-                host_device_id,
-                space_id,
-                space_path,
-                ordinary_staged,
-                staged_appshots,
-                staged_skills,
-                staged,
-                comments,
-                code_refs,
-                text,
-                created_at,
-                queue,
-                clean_queue_attachment_text,
-                queued_flow,
-                upload_ids,
-                echo_paths,
-                echo_text,
-                workspace_message,
-                worktree_name_source,
-                restore_text,
-                err_chat_id,
-                err_message_id,
-                #[cfg(test)]
-                fail_send_before_dispatch,
-            } = send;
             let mut dispatch_attempted = false;
-            let result: Result<Option<String>, String> = async {
+            let result = Self::dispatch_send(&send, &this, cx, &mut dispatch_attempted).await;
+            let PreparedSend { engine, queue, is_new, err_chat_id, err_message_id, failed_send, comments, code_refs, restore_text, staged_skills, ordinary_staged, staged_appshots, .. } = send;
+            if queue && let Err(error) = &result {
+                tracing::warn!(chat = %err_chat_id, %error, "queue message failed");
+            }
+            if result.is_err() && is_new && !dispatch_attempted {
+                // A failed new-chat send must not strand a just-minted empty
+                // chat in the sidebar (v0.2.12 "empty transcript" report).
+                // Staging now runs before CreateChat, so usually nothing was
+                // created — but a post-mutate failure (QueueCommand) still
+                // leaves a row. Best-effort delete; a no-op if the chat was
+                // never materialized.
+                let _ = attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::MUTATE,
+                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            }
+            this.update(cx, |composer, cx| {
+                composer.sending = false;
+                composer
+                    .state
+                    .update(cx, |s, _| s.end_upload_progress());
+                if let Ok(Some(message_id)) = &result {
+                    cx.emit(ComposerEvent::Queued {
+                        chat_id: err_chat_id.clone(),
+                        message_id: message_id.clone(),
+                    });
+                }
+                if let Err(message) = result {
+                    // Failure: red banner, echo removed, prompt back in the
+                    // draft, staged files back in the stash. A failed NEW
+                    // chat restores to the CANVAS (key "") and navigates back
+                    // there — the minted chat is gone (deleted above), so
+                    // nothing may restore under its key.
+                    let restore_key = if is_new && !dispatch_attempted {
+                        String::new()
+                    } else {
+                        err_chat_id.clone()
+                    };
+                    let mut failed_send = failed_send;
+                    failed_send.key = restore_key.clone();
+                    composer.failed_send = Some(failed_send);
+                    composer.state.update(cx, |s, cx| {
+                        s.remove_echo(&err_chat_id, &err_message_id);
+                        s.end_pending_send(&err_chat_id, &err_message_id);
+                        if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
+                            // Back to the canvas; the navigation draft-swap
+                            // loads the restored draft below.
+                            s.select_chat(None, cx);
+                        }
+                        for comment in &comments {
+                            s.add_review_comment(&restore_key, comment.clone());
+                        }
+                        for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
+                        cx.notify();
+                    });
+                    composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
+                    if !staged_skills.is_empty() {
+                        // Chips attached while the send was in flight stay;
+                        // the failed send's chips rejoin them (deduped).
+                        let slot = composer.skills.entry(restore_key.clone()).or_default();
+                        let fresh = std::mem::take(slot);
+                        for name in staged_skills.iter().chain(&fresh) {
+                            attach_skill(slot, name);
+                        }
+                    }
+                    if !ordinary_staged.is_empty() {
+                        // Merge by id (stashAttachments): files the user staged
+                        // while the send was in flight survive the hand-back —
+                        // draining the minted chat's slot too when the restore
+                        // target is the canvas.
+                        let mut merged = ordinary_staged.clone();
+                        for key in [err_chat_id.clone(), restore_key.clone()] {
+                            if let Some(slot) = composer.attachments.get_mut(&key) {
+                                let fresh: Vec<_> = slot
+                                    .drain(..)
+                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
+                                    .collect();
+                                merged.extend(fresh);
+                            }
+                        }
+                        composer.attachments.insert(restore_key.clone(), merged);
+                    }
+                    composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    async fn dispatch_send(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp, dispatch_attempted: &mut bool) -> Result<Option<String>, String> {
+        let engine = &send.engine;
+        let message_id = &send.message_id;
+        let chat_id = &send.chat_id;
+        let is_new = send.is_new;
+        let plan = &send.plan;
+        let workspace_choice = send.workspace_choice;
+        let resolved = &send.resolved;
+        let existing_cwd = send.existing_cwd.clone();
+        let device_id = &send.device_id;
+        let host_device_id = &send.host_device_id;
+        let space_id = &send.space_id;
+        let space_path = &send.space_path;
+        let staged_appshots = &send.staged_appshots;
+        let staged = &send.staged;
+        let text = &send.text;
+        let created_at = send.created_at;
+        let queue = send.queue;
+        let clean_queue_attachment_text = send.clean_queue_attachment_text;
+        let queued_flow = send.queued_flow;
+        let upload_ids = &send.upload_ids;
+        let echo_paths = &send.echo_paths;
+        let echo_text = &send.echo_text;
+        let workspace_message = &send.workspace_message;
+        let worktree_name_source = &send.worktree_name_source;
+        #[cfg(test)]
+        let fail_send_before_dispatch = send.fail_send_before_dispatch;
                 // Attachments stage FIRST — before the chat row or anything
                 // else exists. Staging is chat-independent (keyed by
                 // uploadId), and ordering it first makes a new-chat send
@@ -112,7 +197,7 @@ impl Composer {
                         })
                         .ok();
                     }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                    for (att, upload_id) in staged.iter().zip(upload_ids) {
                         if let Err(err) = attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
@@ -147,7 +232,7 @@ impl Composer {
                         })
                         .ok();
                     }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                    for (att, upload_id) in staged.iter().zip(upload_ids) {
                         match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
@@ -172,9 +257,9 @@ impl Composer {
                     // bubble's thumbnails never round-trip (seedTranscript-
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(&staged) {
+                    for (path, att) in attachment_paths.iter().zip(staged) {
                         attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
-                        if seed_device != device_id {
+                        if seed_device != *device_id {
                             attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
                         }
                     }
@@ -477,7 +562,7 @@ impl Composer {
                 }
                 // Deadline-bounded: QueueCommand is a local write (in-process
                 // or IPC), but a deferred engine handle can park forever.
-                dispatch_attempted = true;
+                *dispatch_attempted = true;
                 let queued = attachments::call_with_timeout(
                     &engine,
                     cx.background_executor(),
@@ -562,99 +647,6 @@ impl Composer {
                     .ok();
                 }
                 Ok(None)
-            }
-            .await;
-            if queue && let Err(error) = &result {
-                tracing::warn!(chat = %err_chat_id, %error, "queue message failed");
-            }
-            if result.is_err() && is_new && !dispatch_attempted {
-                // A failed new-chat send must not strand a just-minted empty
-                // chat in the sidebar (v0.2.12 "empty transcript" report).
-                // Staging now runs before CreateChat, so usually nothing was
-                // created — but a post-mutate failure (QueueCommand) still
-                // leaves a row. Best-effort delete; a no-op if the chat was
-                // never materialized.
-                let _ = attachments::call_with_timeout(
-                    &engine,
-                    cx.background_executor(),
-                    methods::MUTATE,
-                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
-                    std::time::Duration::from_secs(5),
-                )
-                .await;
-            }
-            this.update(cx, |composer, cx| {
-                composer.sending = false;
-                composer
-                    .state
-                    .update(cx, |s, _| s.end_upload_progress());
-                if let Ok(Some(message_id)) = &result {
-                    cx.emit(ComposerEvent::Queued {
-                        chat_id: err_chat_id.clone(),
-                        message_id: message_id.clone(),
-                    });
-                }
-                if let Err(message) = result {
-                    // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the stash. A failed NEW
-                    // chat restores to the CANVAS (key "") and navigates back
-                    // there — the minted chat is gone (deleted above), so
-                    // nothing may restore under its key.
-                    let restore_key = if is_new && !dispatch_attempted {
-                        String::new()
-                    } else {
-                        err_chat_id.clone()
-                    };
-                    let mut failed_send = failed_send;
-                    failed_send.key = restore_key.clone();
-                    composer.failed_send = Some(failed_send);
-                    composer.state.update(cx, |s, cx| {
-                        s.remove_echo(&err_chat_id, &err_message_id);
-                        s.end_pending_send(&err_chat_id, &err_message_id);
-                        if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
-                            // Back to the canvas; the navigation draft-swap
-                            // loads the restored draft below.
-                            s.select_chat(None, cx);
-                        }
-                        for comment in &comments {
-                            s.add_review_comment(&restore_key, comment.clone());
-                        }
-                        for reference in &code_refs { s.add_code_ref(&restore_key, reference.clone()); }
-                        cx.notify();
-                    });
-                    composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
-                    if !staged_skills.is_empty() {
-                        // Chips attached while the send was in flight stay;
-                        // the failed send's chips rejoin them (deduped).
-                        let slot = composer.skills.entry(restore_key.clone()).or_default();
-                        let fresh = std::mem::take(slot);
-                        for name in staged_skills.iter().chain(&fresh) {
-                            attach_skill(slot, name);
-                        }
-                    }
-                    if !ordinary_staged.is_empty() {
-                        // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back —
-                        // draining the minted chat's slot too when the restore
-                        // target is the canvas.
-                        let mut merged = ordinary_staged.clone();
-                        for key in [err_chat_id.clone(), restore_key.clone()] {
-                            if let Some(slot) = composer.attachments.get_mut(&key) {
-                                let fresh: Vec<_> = slot
-                                    .drain(..)
-                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
-                                    .collect();
-                                merged.extend(fresh);
-                            }
-                        }
-                        composer.attachments.insert(restore_key.clone(), merged);
-                    }
-                    composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
     }
 
     fn prepare_send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) -> Option<PreparedSend> {
