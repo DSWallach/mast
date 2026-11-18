@@ -1947,6 +1947,26 @@ impl AppState {
         }).collect()
     }
 
+    /// Build one lookup for a batch of status derivations, preserving the
+    /// first session when a malformed snapshot contains duplicate chat IDs.
+    fn sessions_by_chat(&self) -> HashMap<&str, &Session> {
+        let mut sessions = HashMap::with_capacity(self.sessions.len());
+        for session in &self.sessions {
+            #[cfg(test)]
+            crate::shell::perf_counts::SESSION_SCANS.with(|c| c.set(c.get() + 1));
+            sessions.entry(session.chat_id.as_str()).or_insert(session);
+        }
+        sessions
+    }
+
+    fn display_status_with_session(&self, chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
+        if self.send_pending(&chat.id, now) {
+            ChatIndicator::Working
+        } else {
+            display_status(chat, session, now)
+        }
+    }
+
     pub fn display_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
         if self.send_pending(&chat.id, now) {
             return ChatIndicator::Working;
@@ -1969,20 +1989,32 @@ impl AppState {
         now: DateTime<Utc>,
         include_archived: bool,
     ) -> Vec<(ChatIndicator, &Chat)> {
-        let mut rows: Vec<(ChatIndicator, &Chat)> = self
-            .chats
+        let mut rows = self.overview_chats_unsorted(now, include_archived);
+        #[cfg(test)]
+        crate::shell::perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
+        sort_active(&mut rows);
+        rows
+    }
+
+    fn overview_chats_unsorted(&self, now: DateTime<Utc>, include_archived: bool) -> Vec<(ChatIndicator, &Chat)> {
+        let sessions = self.sessions_by_chat();
+        self.chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none())
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
-                // Project-less sessions are first-class rows.
                 None => true,
                 Some(id) => self.space_row(id).is_some(),
             })
-            .map(|c| (self.display_status_for(c, now), c))
-            .collect();
-        sort_active(&mut rows);
-        rows
+            .map(|c| (self.display_status_with_session(c, sessions.get(c.id.as_str()).copied(), now), c))
+            .collect()
+    }
+
+    /// Rows for callers that apply their own sidebar sort order.
+    pub(crate) fn sidebar_chats_unsorted(&self, now: DateTime<Utc>, space_filter: Option<&str>) -> Vec<(ChatIndicator, &Chat)> {
+        self.overview_chats_unsorted(now, false).into_iter().filter(|(_, chat)| {
+            space_filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id))
+        }).collect()
     }
 
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
@@ -2004,7 +2036,11 @@ impl AppState {
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
-        self.sessions.iter().find(|s| s.chat_id == chat_id)
+        self.sessions.iter().find(|s| {
+            #[cfg(test)]
+            crate::shell::perf_counts::SESSION_SCANS.with(|c| c.set(c.get() + 1));
+            s.chat_id == chat_id
+        })
     }
 
     /// Staleness-checked status dot for a chat row. A send in flight reads as
@@ -2051,7 +2087,10 @@ impl AppState {
         use std::mem::discriminant;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.chats.len().hash(&mut h);
+        let sessions = self.sessions_by_chat();
         for chat in &self.chats {
+            #[cfg(test)]
+            crate::shell::perf_counts::FINGERPRINT_CHATS.with(|c| c.set(c.get() + 1));
             chat.id.hash(&mut h);
             chat.device_id.hash(&mut h);
             chat.title.hash(&mut h);
@@ -2079,9 +2118,7 @@ impl AppState {
                     config.model.hash(&mut h);
                     config.reasoning.map(|r| discriminant(&r)).hash(&mut h);
                     if !config.model_options.is_empty() {
-                        serde_json::Value::Object(config.model_options.clone())
-                            .to_string()
-                            .hash(&mut h);
+                        config.model_options.hash(&mut h);
                     }
                     discriminant(&config.sandbox).hash(&mut h);
                     config.auto_approve.hash(&mut h);
@@ -2104,7 +2141,7 @@ impl AppState {
             chat.linked_ticket_source
                 .map(|s| discriminant(&s))
                 .hash(&mut h);
-            discriminant(&self.display_status_for(chat, now)).hash(&mut h);
+            discriminant(&self.display_status_with_session(chat, sessions.get(chat.id.as_str()).copied(), now)).hash(&mut h);
         }
         self.spaces.len().hash(&mut h);
         for space in &self.spaces {

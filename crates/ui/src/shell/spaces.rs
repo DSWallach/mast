@@ -2583,10 +2583,12 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let mut chats: Vec<mast_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats_unsorted(Utc::now(), filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
+        #[cfg(test)]
+        perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
@@ -2737,10 +2739,12 @@ impl Shell {
         let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
+                .sidebar_chats_unsorted(now, filter.as_deref())
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
+            #[cfg(test)]
+            perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
@@ -2759,6 +2763,8 @@ impl Shell {
             .enumerate()
             .map(|(ix, id)| (id.as_str(), ix))
             .collect();
+        #[cfg(test)]
+        perf_counts::SIDEBAR_SORTS.with(|c| c.set(c.get() + 1));
         rows.sort_by_key(|row| {
             rank.get(row.chat.id.as_str())
                 .copied()
@@ -3111,7 +3117,7 @@ impl Shell {
                     )
                     .into();
                     if is_moving {
-                        self.render_chat_row(
+                        self.render_chat_row_with_chat(
                             chat.id.clone(),
                             title,
                             time_ago,
@@ -3126,12 +3132,14 @@ impl Shell {
                             None,
                             jump_label,
                             None,
+                            Some(&chat),
                             theme,
                             cx,
                         )
                     } else {
                         self.cached_chat_row(
                             ChatRowArgs {
+                                chat: chat.clone(),
                                 id: chat.id.clone(),
                                 title,
                                 time_ago,
@@ -3638,7 +3646,7 @@ impl Shell {
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
                 list = list.child(
-                    self.render_chat_row(
+                    self.render_chat_row_with_chat(
                         chat.id.clone(),
                         transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
@@ -3657,6 +3665,7 @@ impl Shell {
                         None,
                         None,
                         None,
+                        Some(&chat),
                         theme,
                         cx,
                     ),

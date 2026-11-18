@@ -1572,6 +1572,10 @@ pub(crate) mod perf_counts {
     thread_local! {
         pub(crate) static SHELL_RENDERS: Cell<u64> = const { Cell::new(0) };
         pub(crate) static CHAT_ROW_BUILDS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static CHAT_ROW_SCANS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static SESSION_SCANS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static SIDEBAR_SORTS: Cell<u64> = const { Cell::new(0) };
+        pub(crate) static FINGERPRINT_CHATS: Cell<u64> = const { Cell::new(0) };
         pub(crate) static CHAT_ROW_BY_ID: std::cell::RefCell<std::collections::HashMap<String, u64>> = std::cell::RefCell::new(Default::default());
     }
 }
@@ -1579,6 +1583,7 @@ pub(crate) mod perf_counts {
 /// Everything `render_chat_row` needs that the sidebar computes per row.
 #[derive(Clone, PartialEq)]
 struct ChatRowArgs {
+    chat: mast_proto::Chat,
     id: String,
     title: SharedString,
     time_ago: SharedString,
@@ -1598,20 +1603,29 @@ struct ChatRowArgs {
 struct ChatRowView {
     shell: gpui::WeakEntity<Shell>,
     args: ChatRowArgs,
+    hover_animation_started: Option<std::time::Instant>,
     _observation: Subscription,
 }
 
 impl Render for ChatRowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
         let args = self.args.clone();
+        if self.hover_animation_started.is_some_and(|started| {
+            !motion::reduced_motion(cx)
+                && started.elapsed() < motion::HOVER_FADE.total().mul_f32(motion::speed_scale())
+        }) {
+            window.request_animation_frame();
+        } else {
+            self.hover_animation_started = None;
+        }
         // A view root is laid out against its bounds but sizes to its content, so
         // restore the full-width stretch the row had as a direct flex child.
         let row = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            shell.render_chat_row(
+            shell.render_chat_row_with_chat(
                 args.id,
                 args.title,
                 args.time_ago,
@@ -1626,6 +1640,7 @@ impl Render for ChatRowView {
                 args.drag,
                 args.jump_label,
                 None,
+                Some(&args.chat),
                 &theme,
                 cx,
             )
@@ -1655,6 +1670,7 @@ impl Shell {
                 let view = cx.new(|cx| ChatRowView {
                     shell: shell.downgrade(),
                     args,
+                    hover_animation_started: None,
                     _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
                 });
                 self.sidebar_row_views.insert(id, view.clone());
@@ -1663,6 +1679,32 @@ impl Shell {
         };
         // Width stays auto so the row stretches like the uncached row did.
         view.cached(gpui::StyleRefinement::default().h(px(height.max(0.0)))).into_any_element()
+    }
+
+    fn update_chat_row_hover(&mut self, row_id: &str, fade_key: &str, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let row = row_id.strip_prefix("chat-").and_then(|id| self.sidebar_row_views.get(id)).cloned();
+        if let Some(row) = row {
+            motion::set_hover(fade_key, hovered, motion::reduced_motion(cx));
+            if hovered {
+                self.chat_status_hover = Some(row_id.to_string());
+            } else if self.chat_status_hover.as_deref() == Some(row_id) {
+                self.chat_status_hover = None;
+            }
+            row.update(cx, |row, cx| {
+                row.hover_animation_started = Some(std::time::Instant::now());
+                cx.notify();
+            });
+        } else {
+            motion::hover_listener(fade_key.to_owned())(&hovered, window, cx);
+            if hovered {
+                self.chat_status_hover = Some(row_id.to_string());
+            } else if self.chat_status_hover.as_deref() == Some(row_id) {
+                self.chat_status_hover = None;
+            } else {
+                return;
+            }
+            cx.notify();
+        }
     }
 
     /// Drop row views for chats that left the list; called once per sidebar pass.
@@ -7425,12 +7467,39 @@ impl Shell {
         archived: bool,
         preview: bool,
         drag: Option<SidebarSessionDrag>,
+        jump_label: Option<SharedString>,
+        search_query: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat = self.state.read(cx).chats.iter().find(|chat| chat.id == id).cloned();
+        self.render_chat_row_with_chat(id, title, time_ago, space_name, branch, change_request,
+            harness, status, selected, archived, preview, drag, jump_label, search_query,
+            chat.as_ref(), theme, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_chat_row_with_chat(
+        &self,
+        id: String,
+        title: SharedString,
+        time_ago: SharedString,
+        space_name: SharedString,
+        branch: Option<SharedString>,
+        change_request: Option<mast_proto::ChangeRequestSummary>,
+        harness: Option<mast_proto::HarnessId>,
+        status: mast_proto::ChatIndicator,
+        selected: bool,
+        archived: bool,
+        preview: bool,
+        drag: Option<SidebarSessionDrag>,
         // This row's jump combo while the hint overlay is up. It takes the
         // corner outright — above hover and above the status word — so all
         // nine chips appear together instead of leaving a hole on whichever
         // row is busy or under the pointer.
         jump_label: Option<SharedString>,
         search_query: Option<&str>,
+        chat: Option<&mast_proto::Chat>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7486,8 +7555,6 @@ impl Shell {
         };
         let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
         let identity = {
-            let state = self.state.read(cx);
-            let chat = state.chats.iter().find(|chat| chat.id == id);
             let config = chat.and_then(|chat| chat.config.as_ref());
             theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
         };
@@ -7504,16 +7571,8 @@ impl Shell {
                 .when(!preview, |el| el.cursor_pointer()
                     .on_hover({
                         let hover_id = row_id.clone();
-                        cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                    this.chat_status_hover = Some(hover_id.clone());
-                                    cx.notify();
-                                }
-                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.chat_status_hover = None;
-                                cx.notify();
-                            }
+                        cx.listener(move |this, hovered: &bool, window, cx| {
+                            this.update_chat_row_hover(&hover_id, &format!("{hover_id}-hover"), *hovered, window, cx);
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
@@ -7534,15 +7593,7 @@ impl Shell {
         }
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
-        let remote = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == id)
-            .is_some_and(|chat| {
-                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
-            });
+        let remote = chat.is_some_and(|chat| self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str()));
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -7689,19 +7740,9 @@ impl Shell {
             // hover listener per element).
             .when(!preview, |el| {
                 el.on_hover({
-                    let fade_hover = motion::hover_listener(fade_key.clone());
                     let hover_id = row_id.clone();
                     cx.listener(move |this, hovered: &bool, window, cx| {
-                        fade_hover(hovered, window, cx);
-                        if *hovered {
-                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
-                                cx.notify();
-                            }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
-                            cx.notify();
-                        }
+                        this.update_chat_row_hover(&hover_id, &fade_key, *hovered, window, cx);
                     })
                 })
                 .cursor_pointer()
