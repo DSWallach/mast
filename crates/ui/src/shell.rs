@@ -11868,9 +11868,10 @@ impl Shell {
                 10.0,
             ));
         }
-        // The empty-state picker already offers every surface. Show a single
-        // Chrome-style add-tab affordance only after at least one tab exists.
-        strip = strip.when(count > 0, |strip| strip.child(plus));
+        // The picker body already offers every surface, so the `+` hides only
+        // while the picker shows. The sticky Item/Team chips are not in
+        // `rows`, so a pane on one of them with no other tabs still needs it.
+        let show_plus = active != RightSurface::Picker;
         // Edge fades on whichever side hides tabs (flags computed above).
         // Glass: per-glyph EdgeFade scope over the chips' own opacity ramps;
         // opaque: painted gradients in the shell surface tone.
@@ -11879,7 +11880,7 @@ impl Shell {
         let region = div()
             .relative()
             .min_w_0()
-            .size_full()
+            .h_full()
             .flex()
             .items_center()
             .child(strip)
@@ -11913,14 +11914,27 @@ impl Shell {
                         )),
                 )
             });
-        if glass {
+        let region = if glass {
             crate::edge_fade::edge_faded(FADE_WIDTH, false, false, region)
                 .fade_left(fade_left)
                 .fade_right(fade_right)
                 .into_any_element()
         } else {
             region.into_any_element()
-        }
+        };
+        // The `+` sits after the scroller, not inside it: it follows the last
+        // tab, and once the tabs overflow the scroller shrinks so the `+`
+        // stays pinned in view.
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .child(div().flex().min_w_0().h_full().child(region))
+            .when(show_plus, |row| row.child(plus))
+            .into_any_element()
     }
 
     /// Toggle the changes-panel takeover (the header's expand button, t3code
@@ -16251,6 +16265,53 @@ mod right_tab_mouse_regressions {
                 "tab strip did not scroll"
             );
         });
+    }
+
+    #[gpui::test]
+    fn add_button_stays_in_view_when_tabs_overflow(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            for id in ["third", "fourth", "fifth", "sixth"] {
+                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let plus = cx
+            .debug_bounds("right-surface-add")
+            .expect("overflowing strip hid the + button");
+        assert!(plus.right() <= px(400.), "+ button fell outside the strip");
+    }
+
+    #[gpui::test]
+    fn add_button_follows_last_tab_without_overflow(cx: &mut TestAppContext) {
+        let (_shell, cx) = setup(cx);
+        let last = cx.debug_bounds("right-surface-tab-1").unwrap();
+        let plus = cx.debug_bounds("right-surface-add").unwrap();
+        assert!(plus.left() >= last.right(), "+ overlaps the last tab");
+        assert!(
+            plus.left() - last.right() <= px(8.),
+            "+ drifted away from the last tab"
+        );
+    }
+
+    #[gpui::test]
+    fn add_button_shows_on_item_tab_without_surface_tabs(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.subagent_tabs.clear();
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("right-surface-add").is_none(),
+            "the picker already offers every surface"
+        );
+        shell.update(cx, |shell, cx| shell.set_right_active(RightSurface::Item, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("right-surface-add").is_some(),
+            "Item tab with no other tabs had no + button"
+        );
     }
 
     #[gpui::test]
