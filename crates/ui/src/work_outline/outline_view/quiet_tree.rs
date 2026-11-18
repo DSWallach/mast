@@ -356,6 +356,7 @@ impl OutlineView {
         }
         let tip: SharedString = tip.into();
         let selector = format!("outline-drift-{key}");
+        let chat_id = chat.id.clone();
         let metadata = metadata_line(key, theme)
             .child(crate::components::outline_chat_indicator(
                 status,
@@ -369,6 +370,22 @@ impl OutlineView {
                 div()
                     .id(SharedString::from(format!("outline-chat-summary-{key}")))
                     .when(drift, |el| el.debug_selector(move || selector.clone()))
+                    .when(drift, |el| {
+                        el.cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(shell) =
+                                    this.shell.as_ref().and_then(gpui::WeakEntity::upgrade)
+                                {
+                                    shell.update(cx, |shell, cx| {
+                                        shell.open_instruction_compare(&chat_id, cx)
+                                    });
+                                }
+                            }))
+                    })
                     .flex_1()
                     .min_w_0()
                     .truncate()

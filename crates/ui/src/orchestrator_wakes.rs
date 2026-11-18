@@ -366,7 +366,7 @@ mod tests {
         let base = WakeSettings::default();
         let p = WakeToggle::TurnFinished.params("c", base);
         assert_eq!(p.chat_id, "c");
-        assert!(p.settings.turn_finished && p.settings.enabled && p.settings.errors);
+        assert!(!p.settings.turn_finished && p.settings.enabled && p.settings.errors);
         let p = WakeToggle::Enabled.params("c", base);
         assert!(!p.settings.enabled && p.settings.required_actions);
         let p = WakeToggle::Errors.params("c", base);

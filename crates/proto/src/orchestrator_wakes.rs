@@ -50,8 +50,8 @@ impl WakeEventKind {
 }
 
 /// Per-orchestrator-chat wake settings. Required Actions (raised and
-/// resolved), errors, worker reports, awaiting input and tool failures are on
-/// by default; turn-finished and PR events are off by default.
+/// resolved), errors, turn-finished events, worker reports, awaiting input and
+/// tool failures are on by default; PR events are off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WakeSettings {

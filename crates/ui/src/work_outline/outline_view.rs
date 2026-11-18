@@ -3931,16 +3931,14 @@ fn chat_body(
             format!("{} tool calls failed", failures.count)
         };
         let selector = format!("outline-chat-stalled-{key}");
-        let mut pill = div()
+        let mut pill = crate::components::outline_metadata_tag(
+            error_color,
+            error_color.opacity(0.15),
+            5.0,
+        )
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
             .flex_none()
-            .px(px(5.0))
-            .py(px(1.0))
-            .rounded(px(3.0))
-            .bg(error_color.opacity(0.15))
-            .text_size(crate::typography::ui_rems(9.5))
-            .text_color(error_color)
             .child(SharedString::from(label));
         if !failures.tools.is_empty() {
             let tip: SharedString = format!("Failed tools: {}", failures.tools.join(", ")).into();

@@ -3,6 +3,101 @@
 use crate::theme::Theme;
 use gpui::{Div, SharedString, Stateful, div, prelude::*, px};
 
+/// The small label shared by Overview's session cards and assistant chooser.
+pub fn overview_session_label(theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(theme.text_muted)
+}
+
+/// Primary text in an Overview session card or assistant chooser.
+pub fn overview_session_title() -> Div {
+    div().text_size(crate::typography::ui_rems(12.0))
+}
+
+/// Secondary status text beneath an Overview session title.
+pub fn overview_session_detail() -> Div {
+    div().text_size(crate::typography::ui_rems(10.5))
+}
+
+pub fn overview_heading(theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(14.0))
+        .text_color(theme.text)
+}
+
+pub fn overview_caption(theme: &Theme) -> Div {
+    div()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+}
+
+pub fn overview_attention_filter(
+    id: &'static str,
+    color: gpui::Hsla,
+    active: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .border_1()
+        .border_color(if active { color } else { color.opacity(0.3) })
+        .bg(color.opacity(if active { 0.25 } else { 0.12 }))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(color)
+}
+
+pub fn overview_group_label(theme: &Theme) -> Div {
+    div()
+        .px(px(5.0))
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_muted.opacity(0.7))
+}
+
+pub fn overview_pull_requests_button(theme: &Theme) -> Stateful<Div> {
+    let text = theme.text;
+    let button = div()
+        .id("overview-pull-requests")
+        .debug_selector(|| "overview-pull-requests".into())
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .hover(move |el| el.text_color(text));
+    super::toolbar_control(button, theme, false)
+}
+
+/// Status badge on Overview session rows.
+pub fn overview_status_badge(selector: String, color: gpui::Hsla) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(3.0))
+        .bg(color.opacity(0.15))
+        .text_size(crate::typography::ui_rems(9.5))
+        .text_color(color)
+}
+
+/// Compact metadata tag used by outline and Overview rows.
+pub fn outline_metadata_tag(color: gpui::Hsla, background: gpui::Hsla, padding: f32) -> Div {
+    div()
+        .px(px(padding))
+        .py(px(1.0))
+        .rounded(px(3.0))
+        .bg(background)
+        .text_size(crate::typography::ui_rems(9.5))
+        .text_color(color)
+}
+
 /// Primary actions in the Horizon details surface.
 pub fn outline_details_primary(theme: &Theme, label: &str) -> bool {
     super::is_horizon(theme) && matches!(label, "Start Chat" | "Save" | "Add" | "Set date")

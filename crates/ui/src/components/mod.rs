@@ -27,6 +27,7 @@ pub(crate) use outline_parts::{outline_proposal_diff, outline_revision_line};
 pub(crate) mod shell_parts;
 pub(crate) mod side_chat_parts;
 pub(crate) mod scheduled_task_parts;
+pub(crate) mod quota_parts;
 
 use crate::motion;
 use crate::theme::{Theme, hairline, ink};
