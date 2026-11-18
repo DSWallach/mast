@@ -154,7 +154,7 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     let prompt = dir.path().join("SKILL.md");
     std::fs::write(&prompt, "Read the current procedure. Do not invent it.").unwrap();
     let registry = dir.path().join("scheduled-tasks.json");
-    std::fs::write(&registry,serde_json::to_vec(&serde_json::json!({"scheduledTasks":[{"id":"briefing","enabled":true,"cronExpression":"40 4 * * 1-5","cwd":dir.path(),"filePath":prompt,"permissionMode":"auto"},{"id":"interval","enabled":true,"cronExpression":"*/30 9-17 * * 1-5","cwd":dir.path(),"filePath":prompt}]})).unwrap()).unwrap();
+    std::fs::write(&registry,serde_json::to_vec(&serde_json::json!({"scheduledTasks":[{"id":"briefing","enabled":true,"cronExpression":"40 4 * * 1-5","cwd":dir.path(),"filePath":prompt,"permissionMode":"auto"},{"id":"interval","enabled":true,"cronExpression":"*/30 9-17 * * 1-5","cwd":dir.path(),"filePath":prompt},{"id":"each-minute","enabled":true,"cronExpression":"* * * * *","cwd":dir.path(),"filePath":prompt}]})).unwrap()).unwrap();
     let original = std::fs::read(&registry).unwrap();
     let mut preview = core
         .scheduled_tasks
@@ -172,6 +172,12 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
         .position(|c| c.source.ends_with("#interval"))
         .unwrap();
     assert_eq!(preview.candidates.remove(interval).draft.grace_minutes, 30);
+    let each_minute = preview
+        .candidates
+        .iter()
+        .position(|c| c.source.ends_with("#each-minute"))
+        .unwrap();
+    assert_eq!(preview.candidates.remove(each_minute).draft.grace_minutes, 30);
     assert_eq!(preview.candidates.len(), 1);
     assert_eq!(preview.candidates[0].draft.grace_minutes, 360);
     assert!(!preview.candidates[0].draft.enabled);

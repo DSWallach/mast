@@ -6,7 +6,7 @@ mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
 use mast_proto::*;
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 const AWAITING_INPUT_LIMIT_MINUTES: i64 = 30;
 /// How often run identities are rechecked without a task change (new
@@ -18,6 +18,7 @@ pub(crate) fn fail(e: impl std::fmt::Display) -> EngineError {
 
 struct Inner {
     store: store::Store,
+    missing_sources: PathBuf,
     workspace: WorkspaceHost,
     host: DocHost,
     sessions: SessionsEngine,
@@ -39,6 +40,7 @@ impl ScheduledTasks {
     ) -> Result<Self, EngineError> {
         Ok(Self(Arc::new(Inner {
             store: store::Store::open(root)?,
+            missing_sources: root.join(crate::external_import::SCHEDULED_SOURCE_MISSING),
             workspace,
             host,
             sessions,
@@ -315,7 +317,9 @@ impl ScheduledTasks {
             .filter(|t| !t.deleted)
             .filter_map(|t| Some((t.id.clone(), import::registry_file(t.import_source.as_deref()?)?)))
             .collect();
-        let updates = identity::plan(&chats, &tasks, &task_files, self.0.workspace.device_id());
+        let updates = identity::plan(&chats, &tasks, &task_files, self.0.workspace.device_id(), |id| {
+            self.0.missing_sources.join(id).is_file()
+        });
         let written = self.0.workspace.set_chats_scheduled_task_info(&updates)?;
         *checked() = Some(now);
         if written > 0 {

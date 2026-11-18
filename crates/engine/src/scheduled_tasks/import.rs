@@ -41,7 +41,6 @@ fn registries() -> Vec<PathBuf> {
     out
 }
 
-/// Match transcript provenance to a registry definition only when unambiguous.
 /// The `filePath` of the registry row an import source (`…json#id`) names,
 /// read from that registry now. `None` when the registry or row is gone.
 pub(crate) fn registry_file(import_source: &str) -> Option<String> {
@@ -56,6 +55,7 @@ pub(crate) fn registry_file(import_source: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Match transcript provenance to a registry definition only when unambiguous.
 pub(crate) fn imported_identity(
     file: &str,
     name: &str,
@@ -146,7 +146,7 @@ pub fn preview(
             evaluator::validate(&schedule).map_err(fail)?;
             // A task that repeats within the hour only catches up its latest miss briefly.
             let sub_hourly = matches!(&schedule, TaskSchedule::Cron { expression, .. }
-                if expression.split_whitespace().next().is_some_and(|m| m.contains(['/', ',', '-'])));
+                if expression.split_whitespace().next().is_some_and(|m| m == "*" || m.contains(['/', ',', '-'])));
             let prompt = String::from_utf8(read(Path::new(file), 128 * 1024)?).map_err(fail)?;
             if prompt
                 .lines()

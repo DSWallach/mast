@@ -34,6 +34,11 @@ impl PersonalAssistantState {
         self.assistant.as_ref().is_some_and(|a| a.covers(chat, chats))
     }
 
+    pub(crate) fn coverage<'a>(&'a self, chats: &'a [Chat]) -> impl Fn(&Chat) -> bool + 'a {
+        let covers = self.assistant.as_ref().map(|a| a.coverage(chats));
+        move |chat| covers.as_ref().is_some_and(|covers| covers(chat))
+    }
+
     /// The chat the sidebar shows and opens (a task's latest run).
     pub(crate) fn current<'a>(&self, chats: &'a [Chat]) -> Option<&'a Chat> {
         self.assistant.as_ref()?.current(chats)

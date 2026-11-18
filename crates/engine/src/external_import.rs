@@ -205,6 +205,8 @@ fn file_stamp(path: &Path) -> Option<(i64, u64)> {
     Some((mtime, meta.len()))
 }
 
+pub(crate) const SCHEDULED_SOURCE_MISSING: &str = "scheduled-source-missing-v1";
+
 /// Imports external Claude Code sessions into brand-new Mast chats. Cheap to
 /// clone (holds only an `Arc<DocsStore>` + a `WorkspaceHost`, itself cheaply
 /// cloneable).
@@ -811,12 +813,11 @@ impl ExternalSessionImporter {
         Ok(repaired)
     }
 
-    /// Stamps `sourceFile` on imported runs tagged before it was recorded,
-    /// from the import cursor's transcript, so the run identity merge can
-    /// tell same-named tasks of different Claude accounts apart. Each run
-    /// is scanned once, recorded by a marker file.
+    /// Stamps `sourceFile` on runs tagged before it was recorded so identically
+    /// named tasks from different accounts stay separate. A marker records
+    /// runs whose import cursor and transcript cannot supply a source file.
     pub fn backfill_scheduled_source_files(&self) -> Result<usize, EngineError> {
-        let markers = self.store.root().join("scheduled-source-file-v1");
+        let markers = self.store.root().join(SCHEDULED_SOURCE_MISSING);
         let mut stamped = 0;
         for chat in self.workspace.read_chats()? {
             let Some(info) = chat
@@ -826,13 +827,18 @@ impl ExternalSessionImporter {
             else {
                 continue;
             };
-            if chat.device_id != self.device_id || markers.join(&chat.id).is_file() {
+            let marker = markers.join(&chat.id);
+            if chat.device_id != self.device_id || marker.is_file() {
                 continue;
             }
-            let Some(cursor) = self.read_cursor(&chat.id)? else {
-                continue;
+            let first = match self.transcript_path_for(&chat.id)? {
+                Some(path) => match File::open(path) {
+                    Ok(file) => first_raw_user_message_from_file(file),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => return Err(err.into()),
+                },
+                None => None,
             };
-            let first = first_raw_user_message(Path::new(&cursor.transcript_path));
             if let Some((_, file)) = first.as_deref().and_then(scheduled_tag) {
                 let info = mast_proto::ScheduledChat {
                     source_file: Some(file.to_owned()),
@@ -840,9 +846,10 @@ impl ExternalSessionImporter {
                 };
                 self.workspace.set_chat_scheduled_task_info(&chat.id, &info)?;
                 stamped += 1;
+            } else {
+                std::fs::create_dir_all(&markers)?;
+                std::fs::write(marker, b"")?;
             }
-            let _ = std::fs::create_dir_all(&markers);
-            let _ = std::fs::write(markers.join(&chat.id), b"");
         }
         Ok(stamped)
     }
@@ -1791,7 +1798,10 @@ fn scan_transcript_summary(path: &Path) -> Option<TranscriptSummary> {
 /// load). `None` when the file is unreadable or truly has no user line with
 /// real text.
 fn first_raw_user_message(path: &Path) -> Option<String> {
-    let file = File::open(path).ok()?;
+    first_raw_user_message_from_file(File::open(path).ok()?)
+}
+
+fn first_raw_user_message_from_file(file: File) -> Option<String> {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let Ok(line) = line else { continue };

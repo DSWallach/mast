@@ -1944,7 +1944,8 @@ mod tests {
                         let mut p = ScheduledTasksPage::new(state.clone(), cx);
                         p.target = Some("host".into());
                         state.update(cx, |s, _| {
-                            s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos","capabilities":[mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1]})).unwrap());
+                            // Show the editor against a host that predates Work item support.
+                            s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos"})).unwrap());
                             s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
                         });
                         p.edit(None, cx);

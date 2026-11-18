@@ -56,8 +56,9 @@ session. **Delete** removes the schedule while retaining its run history.
 
 The sidebar, Overview, and Work Outline show only the latest unarchived run per
 task on each device. An older run attached to a work item stays attached to it
-and is hidden from the item's chat list and count. In Overview list mode, each task has a row with its name,
-schedule, next run, and last outcome. Click the row to open the latest run or
+and is hidden from the item's chat list and count.
+In Overview list mode, each task has a row with its name, schedule, next run,
+and last outcome. Click the row to open the latest run or
 choose **History** to see past runs. Reading or replying to an older edition
 does not promote it. The task manager lists
 configured schedules. Choose **Edit** to see a task's settings, with its own
@@ -71,9 +72,10 @@ the latest edition. Task identity includes source provenance; identical display
 names do not merge unrelated tasks. Imported runs join their native task once
 the matching source is imported: the run's task name and prompt file must both
 match that source, so a same-named task from another Claude account stays apart.
-A personal assistant chosen on an imported run follows its task after the join. Deleted tasks and source tasks never imported
-into Mast appear under **Retired tasks** in Scheduled tasks; their runs stay
-readable in history and are hidden from the sidebar, Overview, and Work Outline.
+A personal assistant chosen on an imported run follows its task after the join.
+Deleted tasks and source tasks never imported into Mast appear under **Retired
+tasks** in Scheduled tasks. Their runs stay readable in history and are hidden
+from the sidebar, Overview, and Work Outline.
 
 ## Import Claude schedules
 

@@ -6226,13 +6226,14 @@ impl Shell {
         let filter = self.settings.space_filter.clone();
         let mut rows: Vec<mast_proto::Chat> = {
             let state = self.state.read(cx);
+            let covers = state.personal_assistant.coverage(&state.chats);
             state
                 .chats
                 .iter()
                 // Spawned children stay out of the Archived section too — the
                 // same top-level rule as `visible_chats`.
                 .filter(|c| c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
-                .filter(|c| !state.personal_assistant.covers(c, &state.chats))
+                .filter(|c| !covers(c))
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,

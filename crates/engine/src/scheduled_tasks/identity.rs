@@ -22,6 +22,7 @@ pub(crate) fn plan(
     tasks: &[ScheduledTask],
     task_files: &HashMap<String, String>,
     device: &str,
+    source_missing: impl Fn(&str) -> bool,
 ) -> Vec<(String, ScheduledChat)> {
     let tasks: Vec<&ScheduledTask> = tasks.iter().filter(|t| t.device_id == device).collect();
     let mut updates = Vec::new();
@@ -39,15 +40,16 @@ pub(crate) fn plan(
                     .iter()
                     .filter(|t| !t.deleted && source_name(t) == Some(info.task_name.as_str()))
                     .collect();
-                // Same-named tasks of different Claude accounts differ in
-                // their prompt file. A run whose file is not known yet waits
-                // for the backfill rather than joining or retiring.
+                // Same-named tasks of different accounts use different prompt
+                // files. Wait for backfill to record whether the file is missing.
                 let file = info.source_file.as_deref();
+                if file.is_none() && !named.is_empty() && !source_missing(&chat.id) {
+                    continue;
+                }
                 let mut claims = named.iter().filter(|t| {
                     file.is_some() && task_files.get(&t.id).map(String::as_str) == file
                 });
                 match (claims.next(), claims.next()) {
-                    _ if file.is_none() && !named.is_empty() => {}
                     (Some(task), None) => {
                         next.legacy_task_id = info
                             .legacy_task_id
@@ -154,7 +156,7 @@ mod tests {
             run("native-run", "d", "native", "Routine A", None),
             run("plain-name", "d", "zzz", "Routine A", Some("/a/routine-a.md")),
         ];
-        let updates = plan(&chats, &tasks, &files, "d");
+        let updates = plan(&chats, &tasks, &files, "d", |_| false);
         apply(&mut chats, updates);
         let legacy = chats[0].scheduled_task_info.as_ref().unwrap();
         assert_eq!(legacy.task_id, "native");
@@ -173,7 +175,7 @@ mod tests {
         assert_eq!(display.task_id, "zzz");
         assert!(display.retired);
         assert!(
-            plan(&chats, &tasks, &files, "d").is_empty(),
+            plan(&chats, &tasks, &files, "d", |_| false).is_empty(),
             "second pass writes nothing"
         );
     }
@@ -191,7 +193,7 @@ mod tests {
             run("ours", "d", "old-a", "nightly-check", Some("/account-a/nightly-check.md")),
             run("theirs", "d", "old-b", "nightly-check", Some("/account-b/nightly-check.md")),
         ];
-        let updates = plan(&chats, &tasks, &files, "d");
+        let updates = plan(&chats, &tasks, &files, "d", |_| false);
         apply(&mut chats, updates);
         let info = |i: usize| chats[i].scheduled_task_info.clone().unwrap();
         assert_eq!(info(0).task_id, "native");
@@ -204,10 +206,12 @@ mod tests {
         let tasks = vec![task("native", "d", Some("/r.json#routine-b"), false)];
         let files = files(&[("native", "/r/routine-b.md")]);
         let chats = vec![run("legacy", "d", "old", "routine-b", None)];
-        assert!(plan(&chats, &tasks, &files, "d").is_empty());
+        assert!(plan(&chats, &tasks, &files, "d", |_| false).is_empty());
+        let updates = plan(&chats, &tasks, &files, "d", |id| id == "legacy");
+        assert!(updates[0].1.retired && updates[0].1.task_id == "old");
         // Without a registry file the native task claims nothing.
         let chats = vec![run("legacy", "d", "old", "routine-b", Some("/r/routine-b.md"))];
-        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d", |_| false);
         assert!(updates[0].1.retired && updates[0].1.task_id == "old");
     }
 
@@ -219,7 +223,7 @@ mod tests {
         ];
         let files = files(&[("one", "/shared/check.md"), ("two", "/shared/check.md")]);
         let chats = vec![run("legacy", "d", "old", "nightly-check", Some("/shared/check.md"))];
-        assert!(plan(&chats, &tasks, &files, "d").is_empty());
+        assert!(plan(&chats, &tasks, &files, "d", |_| false).is_empty());
     }
 
     #[test]
@@ -227,8 +231,8 @@ mod tests {
         let tasks = vec![task("native", "a", Some("/r.json#routine-b"), false)];
         let files = files(&[("native", "/r/routine-b.md")]);
         let chats = vec![run("peer", "b", "old", "routine-b", Some("/r/routine-b.md"))];
-        assert!(plan(&chats, &tasks, &files, "a").is_empty());
-        let updates = plan(&chats, &tasks, &files, "b");
+        assert!(plan(&chats, &tasks, &files, "a", |_| false).is_empty());
+        let updates = plan(&chats, &tasks, &files, "b", |_| false);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].1.task_id, "old", "no task on b claims it");
         assert!(updates[0].1.retired);
@@ -245,14 +249,14 @@ mod tests {
             run("retired-run", "d", "legacy", "retired-routine", Some("/r/retired.md")),
             run("of-kept", "d", "kept", "Kept", None),
         ];
-        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d", |_| false);
         apply(&mut chats, updates);
         let retired = |c: &Chat| c.scheduled_task_info.as_ref().unwrap().retired;
         assert!(retired(&chats[0]) && retired(&chats[1]) && !retired(&chats[2]));
-        assert!(plan(&chats, &tasks, &HashMap::new(), "d").is_empty());
+        assert!(plan(&chats, &tasks, &HashMap::new(), "d", |_| false).is_empty());
         // Re-importing the task revives the same identity.
         tasks[0].deleted = false;
-        let updates = plan(&chats, &tasks, &HashMap::new(), "d");
+        let updates = plan(&chats, &tasks, &HashMap::new(), "d", |_| false);
         apply(&mut chats, updates);
         assert!(!retired(&chats[0]));
     }

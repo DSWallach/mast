@@ -1963,9 +1963,10 @@ impl AppState {
         now: DateTime<Utc>,
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
+        let covers = self.personal_assistant.coverage(&self.chats);
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| !self.personal_assistant.covers(chat, &self.chats))
+            .filter(|(_, chat)| !covers(chat))
             .filter(|(_, chat)| match space_filter {
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,

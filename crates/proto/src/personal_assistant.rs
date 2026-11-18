@@ -55,6 +55,12 @@ impl PersonalAssistant {
         self.covers_with(chat, || self.merged_task(chats))
     }
 
+    /// Resolve the imported task once when matching a list of chats.
+    pub fn coverage<'a>(&'a self, chats: &'a [Chat]) -> impl Fn(&Chat) -> bool + 'a {
+        let merged = self.merged_task(chats);
+        move |chat| self.covers_with(chat, || merged)
+    }
+
     fn covers_with<'a>(&self, chat: &Chat, merged: impl FnOnce() -> Option<&'a str>) -> bool {
         if chat.id == self.chat_id {
             return true;
@@ -86,13 +92,13 @@ impl PersonalAssistant {
     /// picked chat.
     pub fn current<'a>(&self, chats: &'a [Chat]) -> Option<&'a Chat> {
         if self.scheduled_task.is_some() {
-            let merged = self.merged_task(chats);
+            let covers = self.coverage(chats);
             if let Some(latest) = chats
                 .iter()
                 .filter(|c| {
                     !c.archived
                         && c.scheduled_task_info.is_some()
-                        && self.covers_with(c, || merged)
+                        && covers(c)
                 })
                 .max_by(|a, b| crate::task_chat_order(a).cmp(&crate::task_chat_order(b)))
             {
