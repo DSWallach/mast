@@ -433,6 +433,26 @@ mod tracker_tests {
     }
 
     #[test]
+    fn titled_items_join_loaded_tickets_and_keep_unmatched_ids() {
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"fixture", "items":[
+                {"id":"root", "spaceId":"fixture", "childIds":["a", "b"]},
+                {"id":"a", "spaceId":"fixture", "parentWorkItemId":"root", "chatIds":["one"]},
+                {"id":"b", "spaceId":"fixture", "parentWorkItemId":"root"}]
+        })).unwrap();
+        let item = |id: &str, title: &str| crate::board::BoardItem { id: id.into(), title: title.into(), status: crate::board::BoardStatus::Todo,
+            updated_at: 0, created_at: 0, worker: None, worker_title: None, report: None, ticket: None, request_id: None };
+        let items = vec![(item("a", "EX-1 Release notes"), false), (item("b", "EX-999 Calendar"), true)];
+        let workers = TeamFacts { workers: vec![worker("one", WorkerState::Working)] };
+        let issues = vec![mast_proto::linear::LinearIssueSummary { identifier:"EX-1".into(), title:"Release notes".into(), ..Default::default() }];
+        let (rows, _, _, empty, _) = tracker_reconcile_project(&snapshot, "root", &items, &workers, &issues);
+        assert_eq!(rows.workers.len(), 1);
+        assert_eq!(rows.workers[0].ticket.as_ref().unwrap().identifier, "EX-1");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].ticket.as_deref(), Some("EX-999"));
+    }
+
+    #[test]
     fn tracker_preserves_explicit_issue_ids_outside_the_loaded_project() {
         let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
             "spaceId":"fixture", "items":[
