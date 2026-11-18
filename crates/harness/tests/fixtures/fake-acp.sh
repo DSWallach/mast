@@ -248,6 +248,20 @@ case "$promptline" in
   fi
   ;;
 
+*scenario:steer-flood*)
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
+  read -r steerline || exit 1
+  sid=$(rid "$steerline")
+  has "$steerline" '"method":"_session/steering"' || exit 1
+  i=0
+  while [ $i -lt 150 ]; do
+    update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$i,\"}}"
+    i=$((i+1))
+  done
+  emit "{\"id\":$sid,\"result\":{\"outcome\":\"injected\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
 *scenario:steer-race*)
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
   read -r steerline || exit 1

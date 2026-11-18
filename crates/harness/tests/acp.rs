@@ -2,7 +2,6 @@
 //! `tests/fixtures/fake-acp.sh` (no real `grok` binary involved).
 
 #![cfg(unix)]
-
 #![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::PathBuf;
 use std::time::Duration;
@@ -302,6 +301,61 @@ async fn steering_extension_injects_mid_turn() {
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "steered".into()
     }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn steering_settles_while_incoming_updates_fill_the_queue() {
+    let (controls, steer, _) = controls();
+    let mut stream = harness()
+        .run(request("scenario:steer-flood"), controls)
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut steer = Some(steer);
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "first") {
+                steer
+                    .take()
+                    .unwrap()
+                    .send(SteerMessage {
+                        prompt: "redirect please".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    let done = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::Done { .. }))
+        .unwrap();
+    let steered = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::Steered { .. }))
+        .unwrap();
+    assert!(steered < done, "{events:?}");
+    let text: String = events[..done]
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        format!(
+            "first{}",
+            (0..150).map(|i| format!("{i},")).collect::<String>()
+        )
+    );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
@@ -1623,6 +1677,102 @@ fn robust_harness() -> AcpHarness {
     AcpHarness::grok().with_executable(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
     )
+}
+
+#[tokio::test]
+async fn interrupt_during_handshake_emits_one_terminal_event() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("hold-handshake"), "").unwrap();
+    let (ctl, _steer, token) = controls();
+    let mut req = request("unused");
+    req.model = None;
+    req.cwd = directory.path().display().to_string();
+    let mut stream = robust_harness().run(req, ctl).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !directory.path().join("handshake-received").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    token.cancel();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::SessionStarted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn response_followed_by_eof_drains_updates_before_terminal_event() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("response-eof");
+    req.model = None;
+    let events = run_to_end(&robust_harness(), req, ctl).await;
+    let mut text = String::new();
+    let mut terminal = false;
+    for event in &events {
+        match event {
+            AgentEvent::TextDelta { text: chunk } => {
+                assert!(!terminal);
+                text.push_str(chunk);
+            }
+            AgentEvent::Done { .. } => terminal = true,
+            _ => {}
+        }
+    }
+    assert_eq!(text, (0..40).map(|i| format!("{i},")).collect::<String>());
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn closing_consumer_during_pending_prompt_reaps_child() {
+    let (ctl, _steer, _) = controls();
+    let mut req = request("consumer-close");
+    req.model = None;
+    let adapter =
+        robust_harness().with_graces(Duration::from_millis(50), Duration::from_millis(50));
+    let mut stream = adapter.run(req, ctl).await.unwrap();
+    let pid: libc::pid_t = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match stream
+                .next()
+                .await
+                .expect("stream closed before child identified")
+                .unwrap()
+            {
+                AgentEvent::TextDelta { text } => break text.parse().unwrap(),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            // Signal zero only queries whether this child still exists.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("consumer close reaps the child");
 }
 
 #[tokio::test]

@@ -27,6 +27,10 @@ for line in sys.stdin:
         update("foreign permission rejected")
         emit({"id": pending, "result": {"stopReason": "end_turn"}})
     elif method == "initialize":
+        if os.path.exists("hold-handshake"):
+            with open("handshake-received", "w") as marker:
+                marker.write(str(os.getpid()))
+            continue
         emit({"id": ident, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     elif method == "session/new":
         for index in range(40):
@@ -42,6 +46,11 @@ for line in sys.stdin:
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
+        if prompt == "response-eof":
+            for index in range(40):
+                update(f"{index},")
+            emit({"id": ident, "result": {"stopReason": "end_turn"}})
+            sys.exit(0)
         if prompt == "steer-live":
             update("first")
             def finish_first(prompt_id=ident):
@@ -53,6 +62,9 @@ for line in sys.stdin:
             update(prompt)
         if prompt == "idle-pid":
             update(str(os.getpid()))
+        if prompt == "consumer-close":
+            update(str(os.getpid()))
+            continue
         if prompt in ("wedge", "late-settle"):
             pending = ident
             if prompt == "late-settle":
