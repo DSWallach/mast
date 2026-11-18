@@ -1,5 +1,50 @@
 use super::*;
 
+/// Sidebar resort glide (feature-inventory §1.6): 260ms
+/// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
+/// equivalent.
+pub const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
+
+/// FLIP diff for a keyed list: given the previously rendered order and the new
+/// order (key + row height), return each surviving key's paint-only start
+/// offset `old_y - new_y` (only keys whose position actually moved). `gap` is
+/// the flex gap between rows. Pure — drives the sidebar resort glide.
+pub fn resort_offsets(
+    old: &[(String, f32)],
+    new: &[(String, f32)],
+    gap: f32,
+) -> std::collections::HashMap<String, f32> {
+    let mut old_y = std::collections::HashMap::new();
+    let mut y = 0.0_f32;
+    for (key, height) in old {
+        old_y.insert(key.as_str(), y);
+        y += height + gap;
+    }
+    let mut offsets = std::collections::HashMap::new();
+    let mut y = 0.0_f32;
+    for (key, height) in new {
+        if let Some(prev) = old_y.get(key.as_str()) {
+            let dy = prev - y;
+            if dy.abs() > 0.5 {
+                offsets.insert(key.clone(), dy);
+            }
+        }
+        y += height + gap;
+    }
+    offsets
+}
+
+/// Height changes do not constitute a list reorder. In particular, sidebar
+/// disclosures animate their own height and must not also trigger FLIP offsets
+/// on every following keyed section.
+pub(super) fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|((old_key, _), (new_key, _))| old_key != new_key)
+}
+
 impl Shell {
     pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let width = self.sidebar_now();
