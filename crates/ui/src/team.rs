@@ -322,6 +322,7 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
     let mut item_prs: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut cached_prs = HashMap::new();
     for status in input.links.values() {
+        if let Some(pr) = &status.pr && let Some(url) = &pr.url { cached_prs.insert(url.as_str(), pr); }
         for link in &status.pr_links {
             if let Some(detail) = &link.detail { cached_prs.insert(link.url.as_str(), detail); }
         }
@@ -378,7 +379,9 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
                 worker.prs.push(WorkerPr::of(number, url.to_owned(), cached_prs.get(url).copied()));
             }
         }
-        if let Some(branch) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")).and_then(|pr| pr.branch.clone()) {
+        if let Some(branch) = worker.prs.iter().filter(|pr| pr.branch.is_some()).min_by_key(|pr| {
+            if pr.state.eq_ignore_ascii_case("open") { 0 } else if pr.state.eq_ignore_ascii_case("merged") { 1 } else { 2 }
+        }).and_then(|pr| pr.branch.clone()) {
             worker.branch = Some(branch);
         } else if worker.branch.as_deref().is_some_and(|branch| branch == "main" || branch == "master") {
             worker.branch = None;
@@ -576,6 +579,7 @@ mod tests {
     #[test]
     fn activity_is_the_first_line_collapsed_and_clipped() {
         assert_eq!(activity_line("  \n Running   cargo test\nmore").as_deref(), Some("Running cargo test"));
+        assert_eq!(activity_line("[project#42](https://github.com/example/project/pull/42) remains **open**").as_deref(), Some("project#42 remains open"));
         assert_eq!(activity_line("   "), None);
         let long = activity_line(&"x".repeat(300)).unwrap();
         assert_eq!(long.chars().count(), ACTIVITY_MAX_CHARS + 1);
@@ -603,7 +607,7 @@ mod tests {
             (Working, false), (Idle, false), (Done, false), (Done, true)]);
         let groups: Vec<_> = facts.workers.iter().map(WorkerFacts::tracker_group).collect();
         assert_eq!(groups, [TrackerGroup::NeedsYou, TrackerGroup::ReadyToMerge,
-            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done, TrackerGroup::ReadyToMerge]);
+            TrackerGroup::Errored, TrackerGroup::Working, TrackerGroup::Idle, TrackerGroup::Done, TrackerGroup::Done]);
         assert!(TrackerGroup::Idle < TrackerGroup::NotStarted);
         assert!(TrackerGroup::NotStarted < TrackerGroup::Done);
     }
@@ -624,6 +628,6 @@ mod tests {
         });
         worker.prs[0].state = "MERGED".into();
         assert!(worker.tracker_stages().merged);
-        assert!(!worker.tracker_stages().pr_open);
+        assert!(worker.tracker_stages().pr_open);
     }
 }

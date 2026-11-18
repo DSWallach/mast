@@ -32,6 +32,12 @@ pub(super) struct TrackerState {
     facts: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
     completed_items: Vec<crate::board::BoardItem>,
+    other_chats: Vec<WorkerFacts>,
+    additional_chats: std::collections::HashMap<String, Vec<WorkerFacts>>,
+    expanded_chats: std::collections::HashSet<String>,
+    stale_chats: std::collections::HashSet<String>,
+    other_expanded: bool,
+    stale_expanded: bool,
     counts: [usize; 6],
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
@@ -56,7 +62,7 @@ fn tracker_matches(worker: &WorkerFacts, filter: TrackerFilter) -> bool {
         TrackerFilter::Ready => worker.tracker_group() == TrackerGroup::ReadyToMerge,
         TrackerFilter::OpenPrs => worker.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("open")),
         TrackerFilter::MergedPrs => worker.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
-        TrackerFilter::Done => worker.state == WorkerState::Done && worker.ticket.is_some(),
+        TrackerFilter::Done => worker.tracker_group() == TrackerGroup::Done,
     }
 }
 
@@ -77,6 +83,15 @@ fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
     format!("{}/{}", progress.done, progress.total)
 }
 
+fn tracker_primary_pr(prs: &[WorkerPr]) -> Option<&WorkerPr> {
+    prs.iter().min_by_key(|pr| if pr.state.eq_ignore_ascii_case("open") { 0 } else if pr.state.eq_ignore_ascii_case("merged") { 1 } else if pr.state.eq_ignore_ascii_case("closed") { 2 } else { 3 })
+}
+
+fn tracker_pr_reference(pr: &WorkerPr) -> String {
+    crate::chat_work_context::parse_pr_url(&pr.url).map(|reference| format!("{}#{}", reference.repo, reference.number))
+        .unwrap_or_else(|| if pr.number > 0 { format!("#{}", pr.number) } else { pr.url.clone() })
+}
+
 fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Option<&str>) -> usize {
     state.filter(|state| head.is_some_and(|head| state.head_sha.as_deref().is_some_and(|saved| saved.eq_ignore_ascii_case(head))))
         .map_or(0, |state| state.viewed_files.len())
@@ -92,7 +107,7 @@ fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
     }
     if let Some(label) = labels.into_iter().zip(stages).filter(|(_, lit)| *lit).map(|(label, _)| label).last() {
-        track = track.child(crate::components::shell_parts::tracker_stage_label(theme, label));
+        track = track.child(crate::components::shell_parts::tracker_stage_label(theme, if stages[5] { "Done" } else { label }));
     }
     track.into_any_element()
 }
@@ -121,6 +136,23 @@ mod tracker_tests {
         assert!(tracker_matches(&first, TrackerFilter::OpenPrs));
         assert!(!tracker_matches(&first, TrackerFilter::NeedsYou));
         assert!(tracker_matches(&second, TrackerFilter::MergedPrs));
+    }
+
+    #[test]
+    fn tracker_selects_open_pr_and_preserves_unloaded_reference() {
+        let pr = |number, state: &str| WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number,
+            url: format!("https://github.com/example/project/pull/{number}"), checks: None, review: None, draft: false, state: state.into() };
+        let prs = vec![pr(1, "CLOSED"), pr(2, "MERGED"), pr(3, "OPEN"), pr(4, "")];
+        assert_eq!(tracker_primary_pr(&prs).unwrap().number, 3);
+        assert_eq!(tracker_pr_reference(&prs[3]), "project#4");
+    }
+
+    #[test]
+    fn tracker_completed_worker_matches_done_without_ticket() {
+        let worker = worker("done", WorkerState::Done);
+        assert!(tracker_matches(&worker, TrackerFilter::Done));
+        let stages = worker.tracker_stages();
+        assert!(stages.chat_started && stages.changes && stages.pr_open && stages.checks && stages.review && stages.merged);
     }
 
     #[test]
@@ -223,15 +255,16 @@ impl Shell {
         self.state.update(cx, |state, _| {
             let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
                 "Add filtering", "Verify light themes", "Inspect status facts", "Test the expanded view",
-                "Update documentation", "Check keyboard navigation", "Measure rendering", "Prepare handoff"];
+                "Update documentation", "Check keyboard navigation", "Measure rendering", "Prepare handoff",
+                "Check exports", "Improve search", "Verify sorting", "Update labels", "Review tests", "Check errors", "Document setup"];
             for (index, title) in titles.into_iter().enumerate() {
                 let id = format!("fixture-worker-{index}");
                 state.chats.push(serde_json::from_value(serde_json::json!({
                     "id": id, "deviceId": "local", "spaceId": "fixture-space",
                     "parentChatId": "fixture-chat", "title": title,
                     "branch": format!("tracker/task-{index}"), "actualModel": "example-model",
-                    "lastMessagePreview": "Reviewing the latest changes",
-                    "archived": false, "createdAt": "2026-09-08T00:00:00Z"
+                    "lastMessagePreview": "Reviewing [project#20](https://github.com/example/project/pull/20) changes",
+                    "archived": false, "createdAt": (chrono::Utc::now() - chrono::Duration::hours(if index > 14 { 100 } else { 2 })).to_rfc3339()
                 })).unwrap());
                 if index < 5 {
                     state.begin_pending_send(&id, &format!("fixture-message-{index}"), chrono::Utc::now() + chrono::Duration::hours(1));
@@ -254,6 +287,32 @@ impl Shell {
                     {"id":"fixture-done", "spaceId":"fixture-space", "title":"Complete design", "parentWorkItemId":"fixture-root", "effectiveStatus":"completed"}
                 ]
             })).unwrap();
+            snapshot.items[0].chat_ids.push("fixture-worker-18".into());
+            for (index, title) in titles.iter().enumerate().take(18) {
+                if index == 15 || index == 17 { continue; }
+                let id = format!("fixture-item-{index}");
+                let chat_ids = if index == 16 { vec![format!("fixture-worker-{index}"), "fixture-worker-17".into()] } else { vec![format!("fixture-worker-{index}")] };
+                snapshot.items[0].child_ids.push(id.clone());
+                snapshot.items.push(serde_json::from_value(serde_json::json!({
+                    "id": id, "spaceId": "fixture-space", "title": title, "parentWorkItemId": "fixture-root",
+                    "chatIds": chat_ids, "effectiveStatus": if index == 3 || index == 13 { "completed" } else { "active" }
+                })).unwrap());
+            }
+            snapshot.items[0].child_ids.push("fixture-container".into());
+            snapshot.items.push(serde_json::from_value(serde_json::json!({
+                "id": "fixture-container", "spaceId": "fixture-space", "title": "Planning", "parentWorkItemId": "fixture-root",
+                "chatIds": ["fixture-worker-15"], "childIds": ["fixture-container-child"]
+            })).unwrap());
+            snapshot.items.push(serde_json::from_value(serde_json::json!({
+                "id": "fixture-container-child", "spaceId": "fixture-space", "title": "Plan migration", "parentWorkItemId": "fixture-container"
+            })).unwrap());
+            for number in [20, 21, 44] {
+                snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+                    "id": format!("fixture-pr-{number}"), "spaceId": "fixture-space", "workItemId": "fixture-item-0",
+                    "provider": "github", "referenceType": "pullRequest", "externalId": format!("example/project#{number}"),
+                    "url": format!("https://github.com/example/project/pull/{number}")
+                })).unwrap());
+            }
             snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
                 id: "fixture-handoff".into(), space_id: "fixture-space".into(), work_item_id: "fixture-root".into(),
                 chat_id: "fixture-worker-7".into(), text: "Ready to merge: tracker/task-7".into(),
@@ -320,7 +379,7 @@ impl Shell {
         if self.tracker.key.as_ref() == Some(&key) {
             return self.tracker.facts.clone();
         }
-        let facts = {
+        let mut facts = {
             let state = self.state.read(cx);
             let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
                 return TeamFacts::default();
@@ -345,6 +404,36 @@ impl Shell {
                 now,
             })
         };
+        let mut other_chats = Vec::new();
+        let mut additional_chats = std::collections::HashMap::new();
+        if let Some(snapshot) = &snapshot {
+            let root = crate::chat_work_context::assigned_item(snapshot, chat_id);
+            let mut assignments = std::collections::HashMap::new();
+            for item in &snapshot.items {
+                for id in &item.chat_ids { assignments.insert(id.as_str(), item); }
+            }
+            facts.workers.sort_by_key(|worker| {
+                let rank = match worker.state { crate::team::WorkerState::Waiting => 0, crate::team::WorkerState::Working => 1, _ => 2 };
+                (worker.archived, rank, std::cmp::Reverse(worker.last_active))
+            });
+            let mut selected = std::collections::HashMap::<String, usize>::new();
+            let mut rows: Vec<WorkerFacts> = Vec::new();
+            for worker in facts.workers.drain(..) {
+                let Some(item) = assignments.get(worker.chat_id.as_str()) else { rows.push(worker); continue; };
+                if Some(item.id.as_str()) == root || !item.child_ids.is_empty() { other_chats.push(worker); continue; }
+                if let Some(&index) = selected.get(&item.id) {
+                    for pr in &worker.prs { if !rows[index].prs.iter().any(|existing| existing.url == pr.url) { rows[index].prs.push(pr.clone()); } }
+                    additional_chats.entry(rows[index].chat_id.clone()).or_insert_with(Vec::new).push(worker);
+                } else {
+                    selected.insert(item.id.clone(), rows.len());
+                    rows.push(worker);
+                }
+            }
+            facts.workers = rows;
+        }
+        let stale_chats = facts.live().filter(|worker| worker.state == crate::team::WorkerState::Idle
+            && worker.last_active.is_some_and(|at| chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(3)))
+            .map(|worker| worker.chat_id.clone()).collect();
         let state = self.state.read(cx);
         let mut metadata = std::collections::HashMap::new();
         for chat in &state.chats {
@@ -366,7 +455,7 @@ impl Shell {
                 if request.is_open() && !request.deduped
                     && request.effective_kind() != mast_proto::work_outline_user_actions::UserActionKind::Notice
                     && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi) {
-                    requests.entry(request.chat_id.clone()).or_insert_with(|| request.text.clone());
+                    requests.entry(request.chat_id.clone()).or_insert_with(|| crate::team::activity_line(&request.text).unwrap_or_default());
                 }
             }
         }
@@ -375,23 +464,23 @@ impl Shell {
                 && let Some(question) = session.awaiting_input.as_ref().and_then(|input| input.questions.first())
                 && !question.question.trim().is_empty()
             {
-                requests.entry(session.chat_id.clone()).or_insert_with(|| question.question.clone());
+                requests.entry(session.chat_id.clone()).or_insert_with(|| crate::team::activity_line(&question.question).unwrap_or_default());
             }
         }
         let items = snapshot.as_ref().and_then(|snapshot| {
             let root = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
             let without_chats: std::collections::HashSet<_> = snapshot.items.iter().filter(|item| item.chat_ids.is_empty()).map(|item| item.id.as_str()).collect();
+            let leaves: std::collections::HashSet<_> = snapshot.items.iter().filter(|item| item.child_ids.is_empty()).map(|item| item.id.as_str()).collect();
             let indicators = state.board_indicators(chrono::Utc::now());
             let links = self.chat_header_links.iter().filter_map(|(id, entry)| Some((id.clone(), entry.status.clone()?))).collect();
             let input = TeamInput { chat_id, chats: &state.chats, indicators: &indicators, snapshot: Some(snapshot), links: &links, now: chrono::Utc::now() };
             Some(crate::board::board(snapshot, Some(root), &input).into_iter()
-                .filter(|item| item.id != root)
+                .filter(|item| item.id != root && leaves.contains(item.id.as_str()))
                 .map(|item| { let unassigned = without_chats.contains(item.id.as_str()); (item, unassigned) })
                 .collect::<Vec<_>>())
         }).unwrap_or_default();
-        let tickets_done = items.iter().filter(|(item, _)| item.status == crate::board::BoardStatus::Done)
-            .filter_map(|(item, _)| item.worker.as_ref().and_then(|worker| worker.ticket.as_ref()).map(|ticket| ticket.identifier.as_str()).or(item.ticket.as_deref()))
-            .collect::<std::collections::HashSet<_>>().len();
+        let tickets_done = facts.live().filter(|worker| worker.tracker_group() == crate::team::TrackerGroup::Done).count()
+            + items.iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).count();
         let not_started = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
         let completed_items = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
@@ -426,6 +515,9 @@ impl Shell {
         self.tracker.facts = facts.clone();
         self.tracker.not_started = not_started;
         self.tracker.completed_items = completed_items;
+        self.tracker.other_chats = other_chats;
+        self.tracker.additional_chats = additional_chats;
+        self.tracker.stale_chats = stale_chats;
         self.tracker.counts = tracker_counts(&facts.live().collect::<Vec<_>>(), tickets_done);
         self.tracker.metadata = metadata;
         self.tracker.requests = requests;
@@ -588,13 +680,13 @@ impl Shell {
             for (group, label) in [(TrackerGroup::NeedsYou, "Needs you"), (TrackerGroup::ReadyToMerge, "Ready to merge"),
                 (TrackerGroup::Errored, "Errored"), (TrackerGroup::Working, "Working"), (TrackerGroup::Idle, "Idle"),
                 (TrackerGroup::NotStarted, "Not started"), (TrackerGroup::Done, "Done")] {
-                let matching: Vec<_> = workers.iter().copied().filter(|w| w.tracker_group() == group && tracker_matches(w, self.tracker.filter)).collect();
+                let matching: Vec<_> = workers.iter().copied().filter(|w| w.tracker_group() == group && !self.tracker.stale_chats.contains(&w.chat_id) && tracker_matches(w, self.tracker.filter)).collect();
                 let show_not_started = group == TrackerGroup::NotStarted && self.tracker.filter == TrackerFilter::All && !self.tracker.not_started.is_empty();
                 let show_completed = group == TrackerGroup::Done && matches!(self.tracker.filter, TrackerFilter::All | TrackerFilter::Done)
-                    && self.tracker.completed_items.iter().any(|item| self.tracker.filter == TrackerFilter::All || item.ticket.is_some());
+                    && !self.tracker.completed_items.is_empty();
                 if matching.is_empty() && !show_not_started && !show_completed { continue; }
                 let group_count = matching.len() + if show_not_started { self.tracker.not_started.len() } else { 0 }
-                    + if show_completed { self.tracker.completed_items.iter().filter(|item| self.tracker.filter == TrackerFilter::All || item.ticket.is_some()).count() } else { 0 };
+                    + if show_completed { self.tracker.completed_items.len() } else { 0 };
                 col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, label, group_count));
                 for worker in matching { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
                 if show_not_started {
@@ -608,15 +700,26 @@ impl Shell {
                     }
                 }
                 if show_completed {
-                    for item in self.tracker.completed_items.iter().filter(|item| self.tracker.filter != TrackerFilter::Done || item.ticket.is_some()) {
+                    for item in &self.tracker.completed_items {
                         col = col.child(crate::components::shell_parts::tracker_row(&theme, format!("tracker-item-{}", item.id))
                             .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
                                 .child(div().size(px(7.0)).rounded_full().bg(theme.success))
                                 .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
                                 .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
-                            .child(tracker_stage_track(&item.id, [false; 6], &theme)));
+                            .child(tracker_stage_track(&item.id, [true; 6], &theme)));
                     }
                 }
+            }
+            let stale: Vec<_> = workers.iter().copied().filter(|worker| self.tracker.stale_chats.contains(&worker.chat_id) && tracker_matches(worker, self.tracker.filter)).collect();
+            if !stale.is_empty() {
+                col = col.child(div().id("tracker-stale-toggle").cursor_pointer().child(format!("{} Stale ({})", if self.tracker.stale_expanded { "▾" } else { "▸" }, stale.len()))
+                    .on_click(cx.listener(|this, _, _, cx| { this.tracker.stale_expanded = !this.tracker.stale_expanded; cx.notify(); })));
+                if self.tracker.stale_expanded { for worker in stale { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
+            }
+            if !self.tracker.other_chats.is_empty() && self.tracker.filter == TrackerFilter::All {
+                col = col.child(div().id("tracker-other-toggle").cursor_pointer().child(format!("{} Other chats ({})", if self.tracker.other_expanded { "▾" } else { "▸" }, self.tracker.other_chats.len()))
+                    .on_click(cx.listener(|this, _, _, cx| { this.tracker.other_expanded = !this.tracker.other_expanded; cx.notify(); })));
+                if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
             }
             col = col.children(self.render_team_archived(&chat_id, &team, &theme, cx));
         }
@@ -650,6 +753,11 @@ impl Shell {
                 })));
         }
         header = header.child(crate::components::shell_parts::worker_title(theme, title));
+        if let Some(chats) = self.tracker.additional_chats.get(&id) {
+            let toggle_id = id.clone();
+            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer().child(format!("+{} chats", chats.len()))
+                .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); if !this.tracker.expanded_chats.remove(&toggle_id) { this.tracker.expanded_chats.insert(toggle_id.clone()); } cx.notify(); })));
+        }
         if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
             let tip = SharedString::from(format!("Unseen by the orchestrator:\n{}", unseen.join("\n")));
             header = header.child(crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
@@ -684,10 +792,13 @@ impl Shell {
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
             .child(header).child(progress).child(identity_line);
-        for (index, pr) in worker.prs.iter().enumerate() {
+        if let Some(pr) = tracker_primary_pr(&worker.prs).filter(|pr| pr.number > 0 || !pr.url.is_empty()) {
+            let index = 0;
             let url = pr.url.clone();
             let mut line = crate::components::shell_parts::tracker_pr_line(theme, format!("team-pr-{id}-{index}"))
-                .child(SharedString::from(if pr.number == 0 { "PR".into() } else { format!("#{} {}", pr.number, pr.state.to_lowercase()) }));
+                .child(crate::components::shell_parts::tracker_mono(theme, tracker_pr_reference(pr), theme.text_muted));
+            if !pr.state.is_empty() { line = line.child(SharedString::from(format!(" {}", pr.state.to_lowercase()))); }
+            if worker.prs.len() > 1 { line = line.child(SharedString::from(format!(" +{} more", worker.prs.len() - 1))); }
             if let Some(checks) = pr.checks {
                 let (label, color) = match checks {
                     mast_engine::pr_ticket_cache::ChecksStatus::Passing => ("checks passing", theme.success),
@@ -766,6 +877,14 @@ impl Shell {
         row = row.child(actions);
         if let Some(verdict) = worker.archivable.as_ref().filter(|a| a.archivable) {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
+        }
+        if self.tracker.expanded_chats.contains(&id) && let Some(chats) = self.tracker.additional_chats.get(&id) {
+            for chat in chats {
+                let chat_id = chat.chat_id.clone();
+                let title = self.tracker.metadata.get(&chat_id).map(|metadata| metadata.0.clone()).unwrap_or_else(|| chat.title.clone());
+                row = row.child(div().id(SharedString::from(format!("tracker-additional-chat-{chat_id}"))).pl(px(16.0)).cursor_pointer().child(title)
+                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_chat(chat_id.clone(), cx); })));
+            }
         }
         row.into_any_element()
     }
@@ -1214,7 +1333,7 @@ impl Shell {
                 theme,
                 "team-archive-finished",
                 format!("Archive finished ({n})"),
-                true,
+                false,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.wakes.archive_confirm.insert(ask_chat.clone());

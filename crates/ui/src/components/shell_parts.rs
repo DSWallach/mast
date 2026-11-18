@@ -1966,7 +1966,6 @@ pub(crate) fn archive_confirmation_note(theme: &Theme) -> gpui::Div {
 pub(crate) fn archive_suggestion(theme: &Theme, count: usize) -> gpui::Div {
     div()
         .debug_selector(|| "team-archive-suggest".into())
-        .flex_1()
         .min_w_0()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
