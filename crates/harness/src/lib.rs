@@ -60,10 +60,16 @@ pub enum HarnessError {
     Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// The run request carries a value the adapter refuses to pass to the
-    /// agent process. Raised before spawning.
-    #[error("invalid run request: {0}")]
-    InvalidRequest(String),
+    /// The run names an agent (the `agent` model option) this adapter cannot
+    /// run: an invalid name, no readable definition, an instruction channel
+    /// that cannot carry it, or a harness without named agents. Raised before
+    /// spawning; never run without the agent.
+    #[error("{harness:?} cannot run agent {agent:?}: {detail}")]
+    Agent {
+        harness: HarnessId,
+        agent: String,
+        detail: String,
+    },
     /// The run carries Work Outline instructions this adapter cannot deliver
     /// (`instruction_support()` is not `Supported`, or the envelope does not
     /// fit). Raised before spawning; never run without the instructions.
@@ -262,6 +268,8 @@ pub trait Harness: Send + Sync {
 }
 
 pub mod acp;
+mod agent_definition;
+pub use agent_definition::require_named_agent_support;
 pub mod agent_tools;
 pub use agent_tools::AgentToolsInjection;
 mod capabilities;

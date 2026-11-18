@@ -1972,6 +1972,37 @@ impl Harness for AcpHarness {
 }
 
 impl AcpHarness {
+    /// Antigravity's system-prompt append for a run that names an agent: the
+    /// definition's instructions, then the Work Outline envelope. `None` when
+    /// the run names no agent. Antigravity has no `--agent`, so Mast resolves
+    /// the definition itself (see [`crate::agent_definition`]).
+    async fn agent_instructions(&self, request: &RunRequest) -> Result<Option<String>, HarnessError> {
+        if self.spec.id != HarnessId::Antigravity
+            || mast_proto::agent_option(&request.model_options).is_none()
+        {
+            return Ok(None);
+        }
+        let Some(agent) =
+            crate::agent_definition::resolve_for_request(self.id(), request, None).await?
+        else {
+            return Ok(None);
+        };
+        let composed = crate::agent_definition::compose(
+            &agent,
+            request
+                .instructions
+                .as_ref()
+                .map(|delivery| delivery.envelope.rendered.as_str()),
+        );
+        crate::agent_definition::require_channel_fits(
+            self.id(),
+            &agent,
+            &self.instruction_support(),
+            &composed,
+        )?;
+        Ok(Some(composed))
+    }
+
     async fn run_with_tools(
         &self,
         request: RunRequest,
@@ -1980,6 +2011,7 @@ impl AcpHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
+        crate::require_named_agent_support(self.id(), self.capabilities(), &request)?;
         if let Some(delivery) = &request.instructions {
             let digest = mast_proto::envelope_sha256(&delivery.envelope.rendered);
             if digest != delivery.envelope.envelope_sha256 {
@@ -1990,6 +2022,7 @@ impl AcpHarness {
                 });
             }
         }
+        let agent_instructions = self.agent_instructions(&request).await?;
         let (scratch, mut child, stderr_tail) =
             self.spawn_agent(Some(&request.cwd), true, &[], request.scheduled_task.as_deref()).await?;
         let stdin = child
@@ -2011,6 +2044,7 @@ impl AcpHarness {
             controls,
             request,
             agent_tools,
+            agent_instructions,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             permission_title_is_command: self.spec.permission_title_is_command,
@@ -2053,6 +2087,8 @@ struct Session {
     controls: RunControls,
     request: RunRequest,
     agent_tools: Option<crate::AgentToolsInjection>,
+    /// Antigravity: a named agent's definition and the envelope, composed.
+    agent_instructions: Option<String>,
     harness: HarnessId,
     agent_name: &'static str,
     permission_title_is_command: bool,
@@ -3138,13 +3174,21 @@ const ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE: &str = "\
 Do not start an in-process background command or background subagent and end your turn saying you will report back when finished: this ACP transport cannot wake you when an in-process background task completes. Wait for long-running commands in the foreground, or delegate background work to a Mast worker chat with `create_chat`.\n\
 </mast_acp_constraints>\n";
 
-fn antigravity_system_prompt_append(request: &RunRequest) -> String {
-    match &request.instructions {
-        Some(delivery) if !delivery.envelope.rendered.is_empty() => {
-            if delivery.envelope.rendered.ends_with('\n') {
-                format!("{}{}", delivery.envelope.rendered, ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE)
+/// `agent_instructions` is a named agent's composed text (definition, then
+/// the envelope), which replaces the envelope alone.
+fn antigravity_system_prompt_append(request: &RunRequest, agent_instructions: Option<&str>) -> String {
+    let instructions = agent_instructions.or_else(|| {
+        request
+            .instructions
+            .as_ref()
+            .map(|delivery| delivery.envelope.rendered.as_str())
+    });
+    match instructions {
+        Some(text) if !text.is_empty() => {
+            if text.ends_with('\n') {
+                format!("{text}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
             } else {
-                format!("{}\n{}", delivery.envelope.rendered, ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE)
+                format!("{text}\n{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
             }
         }
         _ => ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE.to_owned(),
@@ -3155,6 +3199,7 @@ fn build_session_params(
     harness: HarnessId,
     request: &RunRequest,
     agent_tools: Option<&crate::AgentToolsInjection>,
+    agent_instructions: Option<&str>,
 ) -> Value {
     let mcp_servers = match agent_tools {
         Some(tools) => json!([tools.acp_mcp_server()]),
@@ -3168,7 +3213,7 @@ fn build_session_params(
         params["_meta"] = json!({
             "antigravity": {
                 "systemPrompt": {
-                    "append": antigravity_system_prompt_append(request),
+                    "append": antigravity_system_prompt_append(request, agent_instructions),
                 }
             }
         });
@@ -3189,6 +3234,7 @@ async fn run_session(session: Session) {
         controls,
         request,
         agent_tools,
+        agent_instructions,
         harness,
         agent_name,
         permission_title_is_command,
@@ -3222,7 +3268,12 @@ async fn run_session(session: Session) {
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = build_session_params(harness, &request, agent_tools.as_ref());
+        let session_params = build_session_params(
+            harness,
+            &request,
+            agent_tools.as_ref(),
+            agent_instructions.as_deref(),
+        );
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
@@ -5423,7 +5474,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let params = build_session_params(HarnessId::Antigravity, &req, Some(&tools));
+        let params = build_session_params(HarnessId::Antigravity, &req, Some(&tools), None);
         assert_eq!(params["cwd"], "/work/space");
         assert_eq!(
             params["mcpServers"],
@@ -5439,12 +5490,90 @@ mod tests {
             format!("{rendered}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
         );
 
+        let with_agent = build_session_params(
+            HarnessId::Antigravity,
+            &req,
+            None,
+            Some(&format!("Review.\n\n{rendered}")),
+        );
+        assert_eq!(
+            with_agent["_meta"]["antigravity"]["systemPrompt"]["append"],
+            format!("Review.\n\n{rendered}{ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE}")
+        );
+
         req.instructions = None;
-        let params_without_instructions = build_session_params(HarnessId::Antigravity, &req, None);
+        let params_without_instructions =
+            build_session_params(HarnessId::Antigravity, &req, None, None);
         assert_eq!(
             params_without_instructions["_meta"]["antigravity"]["systemPrompt"]["append"],
             ANTIGRAVITY_BACKGROUND_TASK_GUIDANCE
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_resolves_a_named_agent_from_claude_definitions() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".claude").join("agents")).unwrap();
+        std::fs::write(
+            repo.join(".claude").join("agents").join("pr-review.md"),
+            "---\nname: pr-review\nmodel: opus\ntools: Read, Grep\n---\n\nReview carefully.\n",
+        )
+        .unwrap();
+        let harness = AcpHarness::antigravity().with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/fake-antigravity-acp.sh"),
+        );
+        let mut req: RunRequest = serde_json::from_value(json!({
+            "prompt": "hi", "model": "gemini-4-argon", "reasoning": null,
+            "cwd": repo.to_string_lossy(), "sandbox": "workspace-write", "resume": null
+        }))
+        .unwrap();
+        assert_eq!(harness.agent_instructions(&req).await.unwrap(), None);
+        req.model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!("pr-review"));
+        assert_eq!(
+            harness.agent_instructions(&req).await.unwrap().as_deref(),
+            Some("Review carefully.\n")
+        );
+        let rendered = "<zeron_work_outline_instructions>\nX\n</zeron_work_outline_instructions>\n";
+        req.instructions = Some(mast_proto::InstructionDelivery {
+            envelope: mast_proto::InstructionEnvelope {
+                revision_id: "r1".into(),
+                revision_hash: "h1".into(),
+                envelope_version: 1,
+                envelope_sha256: mast_proto::envelope_sha256(rendered),
+                rendered: rendered.into(),
+            },
+            transition: mast_proto::InstructionTransition::Fresh,
+        });
+        assert_eq!(
+            harness.agent_instructions(&req).await.unwrap(),
+            Some(format!("Review carefully.\n\n{rendered}"))
+        );
+        req.model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!("missing"));
+        let error = harness.agent_instructions(&req).await.unwrap_err();
+        assert!(error.to_string().contains("missing.md"), "{error}");
+        assert!(!error.to_string().contains(".toml"), "{error}");
+    }
+
+    #[test]
+    fn other_acp_agents_refuse_a_named_agent() {
+        let mut req: RunRequest = serde_json::from_value(json!({
+            "prompt": "hi", "model": null, "reasoning": null,
+            "cwd": "/w", "sandbox": "workspace-write", "resume": null
+        }))
+        .unwrap();
+        req.model_options
+            .insert(mast_proto::AGENT_OPTION.into(), json!("pr-review"));
+        let hermes = AcpHarness::hermes();
+        assert!(matches!(
+            crate::require_named_agent_support(hermes.id(), hermes.capabilities(), &req),
+            Err(HarnessError::Agent { .. })
+        ));
     }
 
     #[test]

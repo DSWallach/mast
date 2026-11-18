@@ -711,17 +711,10 @@ impl Harness for ClaudeHarness {
 }
 
 /// Refuse a run whose `agent` option is not a plain agent name, rather than
-/// run without the agent the user picked.
+/// run without the agent the user picked. Claude Code resolves the
+/// definition itself.
 fn check_agent_option(request: &RunRequest) -> Result<(), HarnessError> {
-    match mast_proto::agent_option(&request.model_options) {
-        Some(agent) if !mast_proto::is_valid_agent_name(agent) => {
-            Err(HarnessError::InvalidRequest(format!(
-                "Claude Code agent name {agent:?} must be 1-{} letters, digits, '_', '.', ':' or '-'",
-                mast_proto::AGENT_NAME_MAX_LEN
-            )))
-        }
-        _ => Ok(()),
-    }
+    crate::agent_definition::request_agent(HarnessId::ClaudeCode, request).map(|_| ())
 }
 
 impl ClaudeHarness {
@@ -1502,7 +1495,7 @@ mod tests {
                 .model_options
                 .insert(mast_proto::AGENT_OPTION.into(), json!(bad));
             assert!(
-                matches!(check_agent_option(&request), Err(HarnessError::InvalidRequest(_))),
+                matches!(check_agent_option(&request), Err(HarnessError::Agent { .. })),
                 "{bad}"
             );
             let args = argv(&harness, &request);

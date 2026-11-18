@@ -36,6 +36,8 @@ pub struct HarnessCapabilities {
     pub account_homes: bool,
     /// A read-only sandbox can be enforced.
     pub read_only: bool,
+    /// Runs can start as a named agent (the `agent` model option).
+    pub named_agents: bool,
 }
 
 impl HarnessCapabilities {
@@ -49,6 +51,7 @@ impl HarnessCapabilities {
         titles: false,
         account_homes: false,
         read_only: false,
+        named_agents: false,
     };
 }
 
@@ -61,6 +64,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         titles: true,
         account_homes: true,
         read_only: true,
+        named_agents: true,
     };
     const ACP: HarnessCapabilities = HarnessCapabilities {
         steering: SteeringMode::TurnBoundary,
@@ -70,6 +74,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         titles: false,
         account_homes: false,
         read_only: false,
+        named_agents: false,
     };
     match id {
         // Steers inject mid-turn (stdin / `turn/steer`); Done is the CLI's own
@@ -77,9 +82,16 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         HarnessId::ClaudeCode | HarnessId::Codex => NATIVE,
         // No mid-turn injection, so steers queue for the next turn. Done is the
         // SDK run's result / opencode's `session.status{idle}`, every turn.
-        HarnessId::Cursor | HarnessId::Opencode => HarnessCapabilities {
+        HarnessId::Cursor => HarnessCapabilities {
             turn_end: TurnEnd::Deterministic,
             agent_tools: false,
+            ..ACP
+        },
+        // opencode starts its sessions as one of its own agents.
+        HarnessId::Opencode => HarnessCapabilities {
+            turn_end: TurnEnd::Deterministic,
+            agent_tools: false,
+            named_agents: true,
             ..ACP
         },
         // `session/prompt` owns the turn until its response, so prompted turns
@@ -87,8 +99,10 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
         // watchdog. No agent advertises a `_session/steering` extension.
         HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Pi => ACP,
         // Instructions ride the system prompt; the CLI probe still decides.
+        // A named agent's definition rides the same channel.
         HarnessId::Antigravity => HarnessCapabilities {
             instructions: true,
+            named_agents: true,
             ..ACP
         },
         HarnessId::Mock => HarnessCapabilities {
@@ -96,6 +110,7 @@ pub fn capabilities(id: HarnessId) -> HarnessCapabilities {
             agent_tools: false,
             instructions: false,
             account_homes: false,
+            named_agents: false,
             ..NATIVE
         },
     }
@@ -114,7 +129,7 @@ mod tests {
             .map(|&id| {
                 let c = capabilities(id);
                 format!(
-                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={}",
+                    "{id:?}: {:?} {:?} tools={} instructions={} titles={} homes={} read_only={} agents={}",
                     c.steering,
                     c.turn_end,
                     yes(c.agent_tools),
@@ -122,22 +137,23 @@ mod tests {
                     yes(c.titles),
                     yes(c.account_homes),
                     yes(c.read_only),
+                    yes(c.named_agents),
                 )
             })
             .collect();
         assert_eq!(
             rows,
             [
-                "ClaudeCode: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
-                "Codex: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes",
-                "Cursor: TurnBoundary Deterministic tools=- instructions=- titles=- homes=- read_only=-",
-                "Devin: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Grok: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Hermes: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Pi: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=-",
-                "Opencode: TurnBoundary Deterministic tools=- instructions=- titles=- homes=- read_only=-",
-                "Antigravity: TurnBoundary PromptedOnly tools=yes instructions=yes titles=- homes=- read_only=-",
-                "Mock: StepBoundary Watchdog tools=- instructions=- titles=yes homes=- read_only=yes",
+                "ClaudeCode: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes agents=yes",
+                "Codex: StepBoundary Deterministic tools=yes instructions=yes titles=yes homes=yes read_only=yes agents=yes",
+                "Cursor: TurnBoundary Deterministic tools=- instructions=- titles=- homes=- read_only=- agents=-",
+                "Devin: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- agents=-",
+                "Grok: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- agents=-",
+                "Hermes: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- agents=-",
+                "Pi: TurnBoundary PromptedOnly tools=yes instructions=- titles=- homes=- read_only=- agents=-",
+                "Opencode: TurnBoundary Deterministic tools=- instructions=- titles=- homes=- read_only=- agents=yes",
+                "Antigravity: TurnBoundary PromptedOnly tools=yes instructions=yes titles=- homes=- read_only=- agents=yes",
+                "Mock: StepBoundary Watchdog tools=- instructions=- titles=yes homes=- read_only=yes agents=-",
             ]
         );
     }
