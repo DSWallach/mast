@@ -227,7 +227,9 @@ pub fn outline_first_use_button(id: &'static str, primary: bool, theme: &Theme) 
         .border_color(theme.border)
         .cursor_pointer()
         .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(!(primary && theme.ui_style.layout == crate::ui_style::UiLayout::Guided), |el| {
+            el.hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        })
         .when(
             primary && theme.ui_style.layout == crate::ui_style::UiLayout::Guided,
             |el| {
@@ -260,7 +262,7 @@ pub fn outline_start_chat_button(id: SharedString, theme: &Theme) -> Stateful<Di
             10.0 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(!guided, |el| el.hover(|el| el.bg(theme.element_hover).text_color(theme.text)))
         .when(guided, |el| {
             el.h(px(32.0))
                 .px(px(8.0))
