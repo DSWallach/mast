@@ -263,25 +263,7 @@ impl Composer {
             status: None,
             continuation_of: None,
         };
-        self.launching_new_chat = is_new;
-        if is_new {
-            cx.emit(ComposerEvent::NewThreadTransitionStarted);
-        }
-        // A queued message is not in the transcript yet — the queue panel is
-        // its echo, and it gets a real bubble when the host sends it.
-        self.state.update(cx, |s, cx| {
-            if is_new {
-                s.select_chat(Some(chat_id.clone()), cx);
-            }
-            if should_publish_optimistic_echo(queue) {
-                s.push_echo(&chat_id, echo);
-                // Working overlay until the host executes the queued command —
-                // without it a remote send flashed Completed (and could ring
-                // the done-chime) in the queue→drain→sync gap.
-                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
-            }
-            cx.notify();
-        });
+        self.publish_send_echo(is_new, queue, &chat_id, &message_id, echo, cx);
         if let Some(choice) = workspace_choice {
             use crate::workspace_chip::{WorkspaceChoice, WorkspaceOutcome};
             let initial = match choice {
@@ -908,6 +890,28 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    fn publish_send_echo(&mut self, is_new: bool, queue: bool, chat_id: &String, message_id: &String, echo: SessionMessageEntry, cx: &mut Context<Self>) {
+        self.launching_new_chat = is_new;
+        if is_new {
+            cx.emit(ComposerEvent::NewThreadTransitionStarted);
+        }
+        // A queued message is not in the transcript yet — the queue panel is
+        // its echo, and it gets a real bubble when the host sends it.
+        self.state.update(cx, |s, cx| {
+            if is_new {
+                s.select_chat(Some(chat_id.clone()), cx);
+            }
+            if should_publish_optimistic_echo(queue) {
+                s.push_echo(&chat_id, echo);
+                // Working overlay until the host executes the queued command —
+                // without it a remote send flashed Completed (and could ring
+                // the done-chime) in the queue→drain→sync gap.
+                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+            }
+            cx.notify();
+        });
     }
 
 }
