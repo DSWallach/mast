@@ -135,3 +135,44 @@ fn row_replacement_and_insertion_update_layout(cx: &mut gpui::TestAppContext) {
         });
     });
 }
+
+#[gpui::test]
+fn same_source_identity_and_context_changes_notify(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, transcript, observer) = cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = perf_bench::long_chat(1);
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id":"chat", "deviceId":"local", "archived":false,
+                "createdAt":"2026-09-08T00:00:00Z", "cwd":"/workspace/a",
+                "config":{"harness":"claude-code", "model":"opus", "reasoning":null, "sandbox":"workspace-write"}
+            })).unwrap());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, cx| transcript.sync(cx));
+        let observer = cx.new(|cx| {
+            cx.observe(&transcript, |count: &mut usize, _, _| *count += 1).detach();
+            0usize
+        });
+        (state, transcript, observer)
+    });
+    cx.update(|cx| {
+        let source = transcript.read(cx).last_source.clone();
+        let generation = transcript.read(cx).code_ref_generation;
+        state.update(cx, |state, _| {
+            state.chats[0].cwd = Some("/workspace/b".into());
+            state.chats[0].config.as_mut().unwrap().model = Some("other".into());
+        });
+        transcript.update(cx, |transcript, cx| transcript.sync(cx));
+        assert_eq!(transcript.read(cx).last_source, source);
+        assert_ne!(transcript.read(cx).code_ref_generation, generation);
+        assert_eq!(transcript.read(cx).last_identity.as_ref().unwrap().1.as_deref(), Some("other"));
+    });
+    cx.update(|cx| assert!(*observer.read(cx) > 0));
+}
