@@ -353,7 +353,7 @@ async fn steering_settles_while_incoming_updates_fill_the_queue() {
         text,
         format!(
             "first{}",
-            (0..150).map(|i| format!("{i},")).collect::<String>()
+            (0..400).map(|i| format!("{i},")).collect::<String>()
         )
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);

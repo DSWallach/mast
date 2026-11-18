@@ -271,7 +271,7 @@ case "$promptline" in
   sid=$(rid "$steerline")
   has "$steerline" '"method":"_session/steering"' || exit 1
   i=0
-  while [ $i -lt 150 ]; do
+  while [ $i -lt 400 ]; do
     update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$i,\"}}"
     i=$((i+1))
   done
