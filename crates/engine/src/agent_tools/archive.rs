@@ -89,6 +89,8 @@ impl AgentToolsService {
     /// not schedule PR refreshes or git probes.
     pub(crate) fn auto_archive_workers(&self, now: chrono::DateTime<Utc>) -> Result<usize, String> {
         let chats = self.workspace.read_chats().map_err(|e| e.to_string())?;
+        let sessions_by_chat: HashMap<String, chrono::DateTime<Utc>> = self.workspace.read_sessions().map_err(|e| e.to_string())?
+            .into_iter().map(|session| (session.chat_id, session.updated_at)).collect();
         let cache = lock(&self.pr_ticket_cache).clone();
         let mut archived = 0;
         let mut candidates = 0;
@@ -102,7 +104,9 @@ impl AgentToolsService {
             let open_items: HashSet<&str> = snapshot.user_action_requests.iter()
                 .filter(|request| request.is_open()).map(|request| request.work_item_id.as_str()).collect();
             for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()) && chat.parent_chat_id.is_some()) {
-                if now.signed_duration_since(chat.last_message_at.unwrap_or(chat.created_at)) <= chrono::Duration::days(i64::from(days)) { continue; }
+                let last_activity = chat.last_message_at.unwrap_or(chat.created_at)
+                    .max(sessions_by_chat.get(&chat.id).copied().unwrap_or(chat.created_at));
+                if now.signed_duration_since(last_activity) <= chrono::Duration::days(i64::from(days)) { continue; }
                 let Some(item_id) = assignments.get(chat.id.as_str()) else { continue; };
                 if open_items.contains(item_id) { continue; }
                 let links = self.workspace.chat_pr_links(&chat.id).map_err(|e| e.to_string())?;
@@ -122,6 +126,7 @@ impl AgentToolsService {
                 };
                 let states = owned_pr_states(&links, |url| cache.as_ref().and_then(|cache| cache.cached_pr_state(url)));
                 let live = sessions.as_ref().and_then(|sessions| sessions.session_status(&chat.id));
+                if live.as_ref().is_some_and(|session| now.signed_duration_since(session.updated_at) <= chrono::Duration::days(i64::from(days))) { continue; }
                 let indicator = match live.as_ref().map(|session| session.status) {
                     Some(mast_proto::SessionStatus::Working) => ChatIndicator::Working,
                     Some(mast_proto::SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
@@ -338,7 +343,7 @@ mod tests {
         let mutate = |m: WorkOutlineMutation| workspace.work_outline_mutate(&m, &actor, &[]).unwrap();
         let now = Utc::now();
         let mut request_item = String::new();
-        for name in ["eligible", "recent", "request", "working", "awaiting"] {
+        for name in ["eligible", "recent", "request", "working", "awaiting", "recently-idle"] {
             let item = mutate(WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
                 space_id: "space".into(), parent_work_item_id: None, placement: Default::default(), title: name.into(),
                 description: None, status: Some(WorkItemStatus::Completed), operation_id: format!("item-{name}"),
@@ -348,7 +353,7 @@ mod tests {
                 chat_id: name.into(), work_item_id: item.clone(), operation_id: format!("assign-{name}"),
             }));
             let age = if name == "recent" { 2 } else { 4 };
-            workspace.set_chat_activity(name, Some((now - chrono::Duration::days(age)).timestamp_millis()), None).unwrap();
+            workspace.set_chat_activity(name, Some((now - chrono::Duration::days(age)).timestamp_millis()), Some((now - chrono::Duration::days(10)).timestamp_millis())).unwrap();
             if name == "request" { request_item = item; }
         }
         mutate(WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
@@ -368,6 +373,7 @@ mod tests {
             std::sync::Arc::new(crate::HarnessRegistry::new()));
         sessions.set_test_status("working", mast_proto::SessionStatus::Working);
         sessions.set_test_status("awaiting", mast_proto::SessionStatus::AwaitingInput);
+        sessions.set_test_status("recently-idle", mast_proto::SessionStatus::Idle);
         service.set_sessions(sessions.clone());
         let dispatch = sessions.lock_dispatch("eligible").await;
         assert_eq!(service.auto_archive_workers(now).unwrap(), 0);
@@ -378,6 +384,7 @@ mod tests {
         assert!(!workspace.chat("request").unwrap().unwrap().archived);
         assert!(!workspace.chat("working").unwrap().unwrap().archived);
         assert!(!workspace.chat("awaiting").unwrap().unwrap().archived);
+        assert!(!workspace.chat("recently-idle").unwrap().unwrap().archived);
     }
 
     #[test]

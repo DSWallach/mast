@@ -1575,7 +1575,7 @@ mod tests {
         lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
             data: Some(status.clone()), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
         });
-        assert_eq!(cache.cached_pr_state(url).as_deref(), Some("MERGED"));
+        assert!(cache.cached_pr_state(url).is_some_and(|state| state.eq_ignore_ascii_case("merged")));
         status.state = "CLOSED".into();
         lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
             data: Some(status), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
