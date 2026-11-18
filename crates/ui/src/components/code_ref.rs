@@ -125,6 +125,7 @@ impl gpui::Render for ReferenceCard {
         div().w(px(Theme::SPACE_LG * 30.0)).max_h(px(Theme::SPACE_LG * 18.0))
             .overflow_hidden().p(px(Theme::SPACE_MD)).rounded(px(Theme::SPACE_SM))
             .border_1().border_color(theme.border).bg(theme.surface_raised).text_color(theme.text)
+            .when(super::is_horizon(theme), |card| card.bg(theme.bg).border_color(gpui::transparent_black()))
             .child(div().flex().gap(px(Theme::SPACE_SM)).text_color(theme.text_muted).child(self.label.clone())
                 .children(match self.resolution {
                     Some(crate::code_ref::Resolution::Moved(range)) => Some(moved_reference_badge(theme, range)),
