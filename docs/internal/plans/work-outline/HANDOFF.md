@@ -1219,6 +1219,25 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-17 22:30; coordinator 544369c6)
+
+- **Installed: release 106** (a34b03500), full perf gate. Soak vs 105: CPU 4.5 vs 5.0 %, footprint 474 vs 524 MB,
+  git/min 102 vs 114. Contents: linear-accounts (named Keychain accounts, per-Space `linearAccountId`),
+  tracker-cleanup (one row per leaf item, stages from item PR refs, Other chats/Stale groups, clean PR/activity
+  lines), orchestrator-guardrails + fixes (create_chat reuses a live chat on the item unless `newChat: true`;
+  `linearIssue` on create_child; `work_outline_link` for PRs/issues scoped to own subtree; ticket-based default chat
+  titles; replay fingerprint uses parsed inputs), diff-sync-attach (attach timing spans under `diff_sync::attach`,
+  recent-activity-first watch setup with FIFO turns, `is_attached(cwd)`).
+- Measured: 50-checkout watch attach settles in ~49 s; watch() p50 0.96 s / p95 6.7 s (FSEvents startup), queue wait
+  p50 35 s behind the 2-permit gate. Next build: one shared batched FSEvents stream (needs a native wrapper; notify 7
+  restarts its stream per added path). Report: mast-artifact:a492f187664f12d92ebedacb3b85fb37.
+- Release-test env: `diff_sync_*` binaries now run one at a time (nextest `fsevents-heavy` group, 5-min limit);
+  in parallel they saturated fseventsd. Release tests passed with that.
+- **Building:** lifecycle Tracker (item 865a0a53, design approved, pinned plan mast-artifact:28df5ed9b3db8d1127e8495ce2604552):
+  six derived stages, Linear project (completed included, per-Space account) or local work-item tickets, grouped
+  view, cleanup list + `work_outline_health` MCP tool, `work_outline_link` linearProject + "Link Linear project".
+- Open for Mikey: instruction proposal "Keeping the Tracker clean"; ui-preview approval rule.
+
 ## In flight (snapshot 2026-11-17 18:00; coordinator 544369c6)
 
 - **Installed: release 105** (9a07243be; = 104 + changes-polish, code-ref-moved-state, tracker-review-and-data
