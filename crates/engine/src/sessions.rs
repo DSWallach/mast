@@ -3729,9 +3729,25 @@ async fn drive_run(
         if idle_since.is_some()
             && matches!(&event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
         {
-            // Closing a parked child ends its process. The completed turn
-            // already has a journal outcome and has no stream to finalize.
-            break SessionStatus::Idle;
+            // Closing a parked child ends its process. Keep a completed
+            // journal terminal, but still settle a watchdog park or a later
+            // journal event so restart recovery sees a closed journal.
+            let journal = inner.journal.clone();
+            let journal_chat = chat_id.clone();
+            let completed = tokio::task::spawn_blocking(move || {
+                journal
+                    .find_rev(&journal_chat, |_, event| {
+                        Some(matches!(event, AgentEvent::Done {
+                            status: DoneStatus::Completed, ..
+                        }))
+                    })
+                    .is_ok_and(|result| result == Some(true))
+            })
+            .await
+            .unwrap_or(false);
+            if completed {
+                break SessionStatus::Idle;
+            }
         }
         let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
