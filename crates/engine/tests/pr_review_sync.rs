@@ -1326,6 +1326,3 @@ async fn diff_review_rpc_clears_closed_pr_and_rejects_stale_marks() {
         .is_err()
     );
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

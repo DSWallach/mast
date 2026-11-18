@@ -26,6 +26,7 @@ use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
+mod quiet_tree;
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
@@ -483,6 +484,7 @@ pub(crate) struct OutlineView {
     details_key: Option<String>,
     /// Chat shown in the Overview's chat panel (row highlight).
     panel_chat: Option<String>,
+    pinned_chats: HashSet<String>,
     /// Owner of the drift confirmation and the revision comparison.
     shell: Option<WeakEntity<Shell>>,
     /// The latest direct restructuring (keyboard, palette, drop).
@@ -507,9 +509,10 @@ pub(crate) struct OutlineView {
     hidden_spaces: std::collections::BTreeSet<String>,
     /// "Hidden Spaces (N)" is on: hidden Spaces show as dimmed roots.
     show_hidden_spaces: bool,
-    /// Fold a single-chat item's Chat into its row (on in the app).
+    /// Legacy compact presentation for the full Overview; sidebar rows stay separate.
     compact_single_chat: bool,
-    single_click_opens: bool,
+    sidebar: bool,
+    sidebar_metadata: quiet_tree::SidebarMetadata,
     _editor_events: Subscription,
     /// Focus gained / lost diagnostics (registered on first render, which
     /// has the window).
@@ -568,12 +571,14 @@ impl OutlineView {
             move_toast_seq: 0,
             templates: Default::default(),
             compact_single_chat: crate::settings::current(cx).compact_single_chat,
-            single_click_opens: false,
+            sidebar: false,
+            sidebar_metadata: Default::default(),
             log_busy: false,
             skip_log: false,
             glyph_press: false,
             details_key: None,
             panel_chat: None,
+            pinned_chats: HashSet::new(),
             shell: None,
             attempt: None,
             queued_restructure: VecDeque::new(),
@@ -602,8 +607,13 @@ impl OutlineView {
     // Inputs and model
     // ----------------------------------------------------------------------
 
-    pub(crate) fn set_single_click_opens(&mut self, value: bool) {
-        self.single_click_opens = value;
+    pub(crate) fn set_sidebar(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.sidebar != value {
+            self.sidebar = value;
+            self.sidebar_metadata = quiet_tree::SidebarMetadata::new(&self.inputs);
+            self.reflatten();
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_compact_single_chat(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -620,6 +630,9 @@ impl OutlineView {
         self.inputs = inputs;
         self.retire_shown_optimistic();
         self.overlay_optimistic();
+        if self.sidebar {
+            self.sidebar_metadata = quiet_tree::SidebarMetadata::new(&self.inputs);
+        }
         self.reflatten();
         cx.notify();
     }
@@ -756,6 +769,13 @@ impl OutlineView {
         self.optimistic.len()
     }
 
+    pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
+        if self.pinned_chats != pins {
+            self.pinned_chats = pins;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_highlights(
         &mut self,
         details_key: Option<String>,
@@ -793,7 +813,7 @@ impl OutlineView {
     fn flatten_inputs(&self, collapsed: &HashSet<String>) -> OutlineModel {
         let options = OutlineOptions {
             show_hidden_spaces: self.show_hidden_spaces,
-            compact_single_chat: self.compact_single_chat,
+            compact_single_chat: self.compact_single_chat && !self.sidebar,
             ..self.inputs.options.clone()
         };
         model::flatten(
@@ -2526,6 +2546,30 @@ impl OutlineView {
         }
     }
 
+    fn rendered_row_height(
+        &self,
+        compact: bool,
+        tokens: crate::ui_style::StyleTokens,
+        cx: &App,
+    ) -> f32 {
+        Self::row_height(compact, tokens)
+            * if self.sidebar {
+                2.0 * (crate::typography::effective_rem_px(cx) / 16.0).max(1.0)
+            } else {
+                1.0
+            }
+    }
+
+    fn sidebar_title_offset(&self, cx: &App) -> f32 {
+        if self.sidebar {
+            (quiet_tree::METADATA_LINE_HEIGHT * crate::typography::effective_rem_px(cx) / 16.0
+                + quiet_tree::LINE_GAP)
+                / 2.0
+        } else {
+            0.0
+        }
+    }
+
     fn render_rows(
         &mut self,
         range: Range<usize>,
@@ -2551,7 +2595,8 @@ impl OutlineView {
                 let depth = depth_at(list_ix).unwrap_or(0);
                 let previous = list_ix.checked_sub(1).and_then(depth_at).unwrap_or(0);
                 let next = depth_at(list_ix + 1).unwrap_or(0);
-                let horizon = crate::components::outline_uses_rounded_nesting(&theme);
+                let horizon =
+                    !self.sidebar && crate::components::outline_uses_rounded_nesting(&theme);
                 let (key, row) = match create {
                     Some((slot, editor_depth)) if list_ix == slot => (
                         "editor".to_owned(),
@@ -2672,14 +2717,40 @@ impl OutlineView {
         div()
             .id("outline-row-editor")
             .debug_selector(|| "outline-row-editor".into())
-            .h(px(Self::row_height(compact, theme.ui_style.tokens)))
+            .h(px(self.rendered_row_height(
+                compact,
+                theme.ui_style.tokens,
+                cx,
+            )))
             .w_full()
             .flex()
             .items_center()
             .pl(px(Self::indent(depth) + 16.0))
             .pr(px(8.0))
-            .child(self.editor_box(submitting, theme, cx))
+            .child(self.editor_body(submitting, theme, cx))
             .into_any_element()
+    }
+
+    fn editor_body(&self, submitting: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let editor = self.editor_box(submitting, theme, cx);
+        if self.sidebar {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(quiet_tree::LINE_GAP))
+                .child(editor)
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child("Enter to save · Esc to cancel"),
+                )
+                .into_any_element()
+        } else {
+            editor
+        }
     }
 
     fn editor_box(&self, submitting: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2803,6 +2874,20 @@ impl OutlineView {
             || row
                 .open_chat()
                 .is_some_and(|chat| self.panel_chat.as_deref() == Some(chat.chat.id.as_str()));
+        let pinned_chat = row
+            .open_chat()
+            .filter(|chat| !chat.dangling && self.pinned_chats.contains(&chat.chat.id));
+        let pinned = pinned_chat.is_some();
+        let pin_mark = pinned_chat.map(|chat| {
+            let selector = format!("outline-pinned-chat-{}", chat.chat.id);
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .flex_none()
+                .text_color(if selected { theme.text } else { theme.accent })
+                .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
+                .hint("Pinned", HintKey::None)
+        });
         let renaming = matches!(
             self.editing.as_ref().map(|edit| &edit.kind),
             Some(EditKind::Rename { key: k, .. }) if *k == key
@@ -2832,6 +2917,28 @@ impl OutlineView {
             crate::components::outline_disclosure_space().into_any_element()
         };
         let body: AnyElement = match &row.kind {
+            OutlineRowKind::Space {
+                label,
+                space_id,
+                hidden: false,
+            } if self.sidebar => self.quiet_group_body(
+                &key,
+                label,
+                self.quiet_space_summary(space_id, row.child_count),
+                theme.text,
+                theme,
+            ),
+            OutlineRowKind::Unassociated { label, .. } if self.sidebar => {
+                let summary = quiet_tree::entries_label(row.child_count);
+                self.quiet_group_body(&key, label, summary, theme.text_muted, theme)
+            }
+            OutlineRowKind::Notice { text, tone, .. } if self.sidebar => self.quiet_group_body(
+                &key,
+                text,
+                String::new(),
+                quiet_tree::notice_color(*tone, theme),
+                theme,
+            ),
             OutlineRowKind::Space {
                 label,
                 space_id,
@@ -2989,10 +3096,16 @@ impl OutlineView {
                 })
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
+            OutlineRowKind::Item(item) if self.sidebar && !renaming => {
+                self.quiet_item_body(&key, item, theme, cx)
+            }
+            OutlineRowKind::Chat(chat) if self.sidebar => {
+                self.quiet_chat_body(&key, chat, theme, cx)
+            }
             OutlineRowKind::Item(item) => {
                 if renaming {
                     let submitting = self.editing.as_ref().is_some_and(|edit| edit.submitting);
-                    self.editor_box(submitting, theme, cx)
+                    self.editor_body(submitting, theme, cx)
                 } else {
                     let proposals = (item.pending_proposals > 0).then(|| {
                         self.proposals_chip(
@@ -3069,6 +3182,7 @@ impl OutlineView {
             .item()
             .filter(|item| {
                 selected
+                    && !self.sidebar
                     && !renaming
                     && !item.archived
                     && crate::components::outline_row_extras(theme)
@@ -3135,8 +3249,8 @@ impl OutlineView {
         let flash = self.move_flash_overlay(&key, theme);
         crate::components::outline_row(
             SharedString::from(format!("outline-row-{key}")),
-            Self::row_height(compact, theme.ui_style.tokens),
-            if crate::components::outline_uses_rounded_nesting(&theme) {
+            self.rendered_row_height(compact, theme.ui_style.tokens, cx),
+            if !self.sidebar && crate::components::outline_uses_rounded_nesting(&theme) {
                 8.0
             } else {
                 Self::indent(row.depth)
@@ -3145,6 +3259,9 @@ impl OutlineView {
         )
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
+        })
+        .when(pinned && !(selected || in_group), |el| {
+            el.bg(theme.accent_wash)
         })
         .when((selected || in_group) && focused, |el| {
             el.bg(theme.element_active)
@@ -3264,9 +3381,12 @@ impl OutlineView {
                 this.clear_multi(cx);
                 let moved = this.selected.as_deref() != Some(click_key.as_str());
                 this.select(&click_key, cx);
-                let opens_details = event.click_count() >= 2 || this.single_click_opens;
+                if this.sidebar && event.click_count() > 1 {
+                    return;
+                }
+                let opens_details = event.click_count() >= 2 || this.sidebar;
                 if opens_details {
-                    if this.single_click_opens
+                    if this.sidebar
                         && event.click_count() < 2
                         && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling)
                     {
@@ -3292,10 +3412,18 @@ impl OutlineView {
         )
         .children(flash)
         .children(guides.filter(|_| {
-            !crate::components::outline_uses_rounded_nesting(theme)
-                && crate::components::outline_row_extras(theme)
+            self.sidebar
+                || (!crate::components::outline_uses_rounded_nesting(theme)
+                    && crate::components::outline_row_extras(theme))
         }))
-        .child(disclosure)
+        .child(
+            div()
+                .flex_none()
+                .relative()
+                .top(px(-self.sidebar_title_offset(cx)))
+                .child(disclosure),
+        )
+        .children(pin_mark)
         .child(body)
         .children(start_chat.filter(|_| crate::components::outline_row_extras(theme)))
         .children(drop_line)

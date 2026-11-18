@@ -245,7 +245,6 @@ pub(crate) struct RequiredActionsList {
     /// One operation id per request, reused across retries of the same note.
     ops: HashMap<String, OperationSlot>,
     in_flight: HashSet<String>,
-    resolution_via: HashMap<String, String>,
     /// Reply & resolve intents by request id (kept until the resolve lands).
     pub(crate) replies: HashMap<String, ReplyIntent>,
     /// Requests answered by Reply & resolve here, newest last.
@@ -330,7 +329,6 @@ impl RequiredActionsList {
             history_open: false,
             ops: HashMap::new(),
             in_flight: HashSet::new(),
-            resolution_via: HashMap::new(),
             replies: HashMap::new(),
             replied: Vec::new(),
             reply_notice: false,
@@ -358,7 +356,7 @@ impl RequiredActionsList {
         cx.notify();
     }
 
-    pub(crate) fn external_decision(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, via: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn external_decision(&mut self, request_id: String, decision: crate::menu_bar::RequestDecision, cx: &mut Context<Self>) {
         use crate::menu_bar::RequestDecision;
         use mast_proto::work_outline_user_actions::UserActionKind;
         let Some(row) = self.open_row(&request_id) else { return; };
@@ -368,7 +366,6 @@ impl RequiredActionsList {
             RequestDecision::Choose(id) => row.kind == UserActionKind::Choose && row.options.iter().any(|option| &option.id == id),
         };
         if !valid { return; }
-        self.resolution_via.insert(request_id.clone(), via.into());
         match decision {
             RequestDecision::Approve => self.decide(request_id, "approved".into(), String::new(), cx),
             RequestDecision::Decline => self.decide(request_id, "declined".into(), String::new(), cx),
@@ -855,7 +852,7 @@ impl RequiredActionsList {
             .resolve_user_action_request(ResolveUserActionRequestParams {
                 outcome,
                 values,
-                via: Some(self.resolution_via.get(&request_id).cloned().unwrap_or_else(|| "card".into())),
+                via: Some("card".into()),
                 user_action_request_id: request_id.clone(),
                 note,
                 answer: None,
@@ -869,7 +866,6 @@ impl RequiredActionsList {
                 this.in_flight.remove(&request_id);
                 match result {
                     Ok(_) => {
-                        this.resolution_via.remove(&request_id);
                         this.ops.remove(&request_id);
                         this.replies.remove(&request_id);
                         if let Some(replied) = replied {

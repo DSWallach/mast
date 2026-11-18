@@ -2,13 +2,14 @@ use super::*;
 
 // Aggregates replace request observations, including child-role observations.
 // Legacy counts are only used when a turn has no richer measurements.
-const FILTER:&str="FROM measurements m JOIN turns t ON t.id=m.turn_id
+pub(super) const FILTER:&str="FROM measurements m JOIN turns t ON t.id=m.turn_id LEFT JOIN usage_agents a ON a.turn_id=m.turn_id AND a.source=m.source AND a.kind='measurement'
     WHERE m.scope!='resumeBaseline' AND (?1 IS NULL OR m.model=?1) AND (?2 IS NULL OR t.at>=?2)
     AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4)
+    AND (?5 IS NULL OR COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type')=?5)
     AND (m.scope!='legacy' OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND x.scope NOT IN ('legacy','resumeBaseline')))
     AND (m.scope IN ('turn','turnIncludingChildren','legacy') OR NOT EXISTS(SELECT 1 FROM measurements x WHERE x.turn_id=m.turn_id AND (x.scope='turnIncludingChildren' OR x.model=m.model) AND x.scope IN ('turn','turnIncludingChildren')))";
 
-fn selection(kind: TokenKind) -> (&'static str, &'static str) {
+pub(super) fn selection(kind: TokenKind) -> (&'static str, &'static str) {
     match kind {
         TokenKind::All => ("m.input+m.output", "1"),
         TokenKind::Input => ("m.input", "1"),
@@ -44,8 +45,12 @@ impl TokenUsage {
         let mut result=TokenUsageSnapshot{updated_at:crate::now_ms(),coverage:vec![
             "Recorded on this device since rollout. Earlier history is not included.".into(),
             "Provider counts and observed payload bytes are separate. Bytes are not billed tokens.".into(),
+            "Tools, instruction diagnostics and context occupancy use whole-turn selection when filtering by agent type; Efficiency candidates and provider totals use observation-level attribution.".into(),
+            "Agent CLIs started inside shell tools are not independently metered. Their model token usage may be absent from this ledger.".into(),
             "Tool schemas, hidden prompts, repeated request inclusion, exact rule token costs and causal savings are unavailable unless the harness exposes them.".into(),
             "Claude role totals combine main and subagent usage; a precise Claude subagent split is unavailable. First results after Claude resume establish a baseline and use only observed current-process requests, so those turns may be incomplete. Claude per-model cumulative results are differenced within a harness process and include children. Request observations may be partial until a result arrives. Other harnesses may report input/output only.".into(),
+            "Agent types use explicit launch origins and provider spawn metadata. Older records remain Unknown agent type. Claude child request observations are a partial breakdown and must not be added to parent totals.".into(),
+            "Repeated calls, empty results and repeated instruction deliveries are investigation candidates. They can be necessary; observed bytes are not token savings.".into(),
             "Showing at most 200 groups per diagnostic category and the latest 50 context snapshots. Narrow the filters to inspect other observations.".into(),
         ],..Default::default()};
         let failures = self
@@ -67,7 +72,7 @@ impl TokenUsage {
             .map_err(fail)?
             .collect::<Result<_, _>>()
             .map_err(fail)?;
-        (result.total,result.runs,result.unknown_breakdown)=db.query_row(&format!("SELECT COALESCE(SUM({selected}),0),COUNT(DISTINCT t.id),COALESCE(SUM(CASE WHEN {known} THEN 0 ELSE 1 END),0) {FILTER}"),params![q.model,q.since,q.until,q.activity],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(fail)?;
+        (result.total,result.runs,result.unknown_breakdown)=db.query_row(&format!("SELECT COALESCE(SUM({selected}),0),COUNT(DISTINCT t.id),COALESCE(SUM(CASE WHEN {known} THEN 0 ELSE 1 END),0) {FILTER}"),params![q.model,q.since,q.until,q.activity,q.agent_type],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(fail)?;
         for (column, groups, order) in [
             ("t.activity", &mut result.activities, "2 DESC,1"),
             ("m.role", &mut result.roles, "2 DESC,1"),
@@ -75,18 +80,21 @@ impl TokenUsage {
         ] {
             let mut statement=db.prepare(&format!("SELECT {column},COALESCE(SUM({selected}),0),COUNT(DISTINCT t.id) {FILTER} GROUP BY {column} ORDER BY {order}")).map_err(fail)?;
             *groups = statement
-                .query_map(params![q.model, q.since, q.until, q.activity], |r| {
-                    Ok(UsageGroup {
-                        label: r.get(0)?,
-                        tokens: r.get(1)?,
-                        runs: r.get(2)?,
-                    })
-                })
+                .query_map(
+                    params![q.model, q.since, q.until, q.activity, q.agent_type],
+                    |r| {
+                        Ok(UsageGroup {
+                            label: r.get(0)?,
+                            tokens: r.get(1)?,
+                            runs: r.get(2)?,
+                        })
+                    },
+                )
                 .map_err(fail)?
                 .collect::<Result<_, _>>()
                 .map_err(fail)?;
         }
-        let mut details=db.prepare(&format!("SELECT t.id,t.chat,m.model,t.activity,m.role,t.at,t.status,t.configuration,SUM({selected}),t.context {FILTER} GROUP BY t.id,m.model,m.role ORDER BY t.at DESC,t.id,m.model,m.role LIMIT 51 OFFSET ?5")).map_err(fail)?;
+        let mut details=db.prepare(&format!("SELECT t.id,t.chat,m.model,t.activity,m.role,t.at,t.status,t.configuration,SUM({selected}),t.context,COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type') {FILTER} GROUP BY t.id,m.model,m.role,11 ORDER BY t.at DESC,t.id,m.model,m.role,11 LIMIT 51 OFFSET ?6")).map_err(fail)?;
         result.details = details
             .query_map(
                 params![
@@ -94,6 +102,7 @@ impl TokenUsage {
                     q.since,
                     q.until,
                     q.activity,
+                    q.agent_type,
                     q.offset.min(i64::MAX as usize) as i64
                 ],
                 |r| {
@@ -103,6 +112,7 @@ impl TokenUsage {
                         model: r.get(2)?,
                         activity: r.get(3)?,
                         role: r.get(4)?,
+                        agent_type: r.get(10)?,
                         at: r.get(5)?,
                         status: r.get(6)?,
                         configuration: r.get(7)?,
@@ -116,62 +126,77 @@ impl TokenUsage {
             .map_err(fail)?;
         result.has_more = result.details.len() > 50;
         result.details.truncate(50);
-        let mut configurations=db.prepare(&format!("SELECT t.configuration,m.model,t.activity,COALESCE(SUM({selected}),0),COUNT(DISTINCT CASE WHEN t.status='completed' THEN t.id END),COUNT(DISTINCT CASE WHEN t.status IN ('failed','cancelled') THEN t.id END),COUNT(DISTINCT CASE WHEN t.status='partial' THEN t.id END),COALESCE(SUM(CASE WHEN t.status='completed' THEN {selected} ELSE 0 END),0),COUNT(DISTINCT t.id) {FILTER} GROUP BY t.configuration,m.model,t.activity ORDER BY 4 DESC LIMIT 200")).map_err(fail)?;
+        let mut configurations=db.prepare(&format!("SELECT t.configuration,m.model,t.activity,COALESCE(SUM({selected}),0),COUNT(DISTINCT CASE WHEN t.status='completed' THEN t.id END),COUNT(DISTINCT CASE WHEN t.status IN ('failed','cancelled') THEN t.id END),COUNT(DISTINCT CASE WHEN t.status='partial' THEN t.id END),COALESCE(SUM(CASE WHEN t.status='completed' THEN {selected} ELSE 0 END),0),COUNT(DISTINCT t.id),COALESCE(a.agent_type,CASE WHEN m.role='subagent' THEN NULL ELSE json_extract(t.context,'$.agentType') END,'Unknown agent type'),json_extract(t.context,'$.workItemId'),json_extract(t.context,'$.spaceId'),COALESCE(SUM(CASE WHEN t.status IN ('failed','cancelled') THEN {selected} ELSE 0 END),0),json_extract(t.context,'$.buildRevision') {FILTER} GROUP BY t.configuration,m.model,t.activity,10,11,12,14 ORDER BY 4 DESC LIMIT 200")).map_err(fail)?;
         result.configurations = configurations
-            .query_map(params![q.model, q.since, q.until, q.activity], |r| {
-                Ok(ConfigurationUsage {
-                    fingerprint: r.get(0)?,
-                    model: r.get(1)?,
-                    activity: r.get(2)?,
-                    tokens: r.get(3)?,
-                    completed: r.get(4)?,
-                    failed: r.get(5)?,
-                    partial: r.get(6)?,
-                    completed_tokens: r.get(7)?,
-                    runs: r.get(8)?,
-                })
-            })
+            .query_map(
+                params![q.model, q.since, q.until, q.activity, q.agent_type],
+                |r| {
+                    Ok(ConfigurationUsage {
+                        fingerprint: r.get(0)?,
+                        model: r.get(1)?,
+                        activity: r.get(2)?,
+                        tokens: r.get(3)?,
+                        completed: r.get(4)?,
+                        failed: r.get(5)?,
+                        partial: r.get(6)?,
+                        completed_tokens: r.get(7)?,
+                        runs: r.get(8)?,
+                        agent_type: r.get(9)?,
+                        work_item_id: r.get(10)?,
+                        space_id: r.get(11)?,
+                        failed_tokens: r.get(12)?,
+                        build_revision: r.get(13)?,
+                    })
+                },
+            )
             .map_err(fail)?
             .collect::<Result<_, _>>()
             .map_err(fail)?;
         // A mixed-model turn contributes each diagnostic once, not once/model.
         let mut diagnostics=db.prepare("WITH grouped AS (
             SELECT d.category,d.label,d.revision,d.channel,d.stage,d.method,CASE WHEN d.stage='availableOnDisk' THEN MAX(d.bytes) ELSE SUM(d.bytes) END AS bytes,COUNT(*) AS observations,SUM(COALESCE(d.is_error,0)) AS errors,MIN(t.chat) AS example_chat_id,COUNT(d.signature)-COUNT(DISTINCT d.signature) AS repeated,SUM(COALESCE(d.elapsed_ms,0)) AS elapsed_ms
-            FROM diagnostics d JOIN turns t ON t.id=d.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) GROUP BY d.category,d.label,d.revision,d.channel,d.stage,d.method
+            FROM diagnostics d JOIN turns t ON t.id=d.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) AND (?5 IS NULL OR json_extract(t.context,'$.agentType')=?5 OR EXISTS(SELECT 1 FROM usage_agents agent WHERE agent.turn_id=t.id AND agent.agent_type=?5)) GROUP BY d.category,d.label,d.revision,d.channel,d.stage,d.method
             ) SELECT category,label,revision,channel,stage,method,bytes,observations,errors,example_chat_id,repeated,elapsed_ms FROM (SELECT grouped.*,ROW_NUMBER() OVER(PARTITION BY category ORDER BY bytes DESC,label) AS rank FROM grouped) WHERE rank<=200 ORDER BY bytes DESC,category,label").map_err(fail)?;
         result.diagnostics = diagnostics
-            .query_map(params![q.model, q.since, q.until, q.activity], |r| {
-                Ok(DiagnosticGroup {
-                    category: r.get(0)?,
-                    label: r.get(1)?,
-                    revision: r.get(2)?,
-                    channel: r.get(3)?,
-                    stage: r.get(4)?,
-                    method: r.get(5)?,
-                    bytes: r.get(6)?,
-                    observations: r.get(7)?,
-                    errors: r.get(8)?,
-                    example_chat_id: r.get(9)?,
-                    repeated: r.get(10)?,
-                    elapsed_ms: r.get(11)?,
-                })
-            })
+            .query_map(
+                params![q.model, q.since, q.until, q.activity, q.agent_type],
+                |r| {
+                    Ok(DiagnosticGroup {
+                        category: r.get(0)?,
+                        label: r.get(1)?,
+                        revision: r.get(2)?,
+                        channel: r.get(3)?,
+                        stage: r.get(4)?,
+                        method: r.get(5)?,
+                        bytes: r.get(6)?,
+                        observations: r.get(7)?,
+                        errors: r.get(8)?,
+                        example_chat_id: r.get(9)?,
+                        repeated: r.get(10)?,
+                        elapsed_ms: r.get(11)?,
+                    })
+                },
+            )
             .map_err(fail)?
             .collect::<Result<_, _>>()
             .map_err(fail)?;
-        let mut samples=db.prepare("SELECT s.at,s.tokens,s.window,s.role FROM context_samples s JOIN turns t ON t.id=s.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) ORDER BY s.at DESC LIMIT 50").map_err(fail)?;
+        let mut samples=db.prepare("SELECT s.at,s.tokens,s.window,s.role FROM context_samples s JOIN turns t ON t.id=s.turn_id WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM measurements m WHERE m.turn_id=t.id AND m.model=?1 AND m.scope!='resumeBaseline')) AND (?2 IS NULL OR t.at>=?2) AND (?3 IS NULL OR t.at<?3) AND (?4 IS NULL OR t.activity=?4) AND (?5 IS NULL OR json_extract(t.context,'$.agentType')=?5 OR EXISTS(SELECT 1 FROM usage_agents agent WHERE agent.turn_id=t.id AND agent.agent_type=?5)) ORDER BY s.at DESC LIMIT 50").map_err(fail)?;
         result.context_samples = samples
-            .query_map(params![q.model, q.since, q.until, q.activity], |r| {
-                Ok(UsageContextSample {
-                    at: r.get(0)?,
-                    tokens: r.get(1)?,
-                    window: r.get(2)?,
-                    role: r.get(3)?,
-                })
-            })
+            .query_map(
+                params![q.model, q.since, q.until, q.activity, q.agent_type],
+                |r| {
+                    Ok(UsageContextSample {
+                        at: r.get(0)?,
+                        tokens: r.get(1)?,
+                        window: r.get(2)?,
+                        role: r.get(3)?,
+                    })
+                },
+            )
             .map_err(fail)?
             .collect::<Result<_, _>>()
             .map_err(fail)?;
+        super::insights::populate(&db, q, selected, known, &mut result)?;
         Ok(result)
     }
 }

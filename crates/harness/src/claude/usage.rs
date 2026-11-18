@@ -4,6 +4,7 @@ use super::wire::Frame;
 
 #[derive(Default)]
 pub(super) struct UsageTracker {
+    fingerprints: crate::usage_fingerprint::UsageFingerprint,
     needs_resume_baseline: bool,
     previous: std::collections::BTreeMap<String, TokenCounts>,
     results: std::collections::VecDeque<String>,
@@ -30,7 +31,7 @@ impl UsageTracker {
         if baseline_only {
             self.needs_resume_baseline = false;
         }
-        let mut events = observe(frame);
+        let mut events = observe_with_fingerprints(frame, Some(&self.fingerprints));
         if matches!(frame, Frame::Result(_)) {
             for event in &mut events {
                 if let AgentEvent::UsageMeasurement { measurement } = event {
@@ -79,7 +80,15 @@ use mast_proto::{
 };
 use serde_json::Value;
 
+#[cfg(test)]
 pub(super) fn observe(frame: &Frame) -> Vec<AgentEvent> {
+    observe_with_fingerprints(frame, None)
+}
+
+fn observe_with_fingerprints(
+    frame: &Frame,
+    fingerprints: Option<&crate::usage_fingerprint::UsageFingerprint>,
+) -> Vec<AgentEvent> {
     let mut out = Vec::new();
     match frame {
         Frame::Result(f) => {
@@ -162,6 +171,7 @@ pub(super) fn observe(frame: &Frame) -> Vec<AgentEvent> {
                         label,
                         channel: Some(channel.into()),
                         bytes: b.input.to_string().len() as u64,
+                        signature: fingerprints.map(|key| key.of(&b.input)),
                         stage: "harnessCall".into(),
                         method: "bytesOnly".into(),
                         ..Default::default()
@@ -171,17 +181,25 @@ pub(super) fn observe(frame: &Frame) -> Vec<AgentEvent> {
         }
         Frame::User(f) => {
             for b in f.message.blocks().filter(|b| b.kind == "tool_result") {
-                let bytes = if let Some(text) = b.content.as_str() {
-                    text.len()
+                let (bytes, signature) = if let Some(key) = fingerprints {
+                    let (bytes, signature) = key.measure(&b.content);
+                    (bytes, Some(signature))
                 } else {
-                    b.content.to_string().len()
+                    (
+                        b.content
+                            .as_str()
+                            .map_or_else(|| b.content.to_string().len(), str::len)
+                            as u64,
+                        None,
+                    )
                 };
                 out.push(AgentEvent::UsageDiagnostic {
                     diagnostic: UsageDiagnostic {
                         id: b.tool_use_id,
                         category: "toolResult".into(),
                         label: "Tool result".into(),
-                        bytes: bytes as u64,
+                        bytes,
+                        signature,
                         stage: "harnessResponse".into(),
                         method: "bytesOnly".into(),
                         is_error: b.is_error,
@@ -209,6 +227,39 @@ pub(super) fn observe(frame: &Frame) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_results_have_private_capture_local_signatures_including_empty_results() {
+        let frame = super::super::wire::parse_frame(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"private result"}]}}"#).unwrap();
+        let mut tracker = UsageTracker::default();
+        let first = tracker.observe(&frame);
+        let second = tracker.observe(&frame);
+        let AgentEvent::UsageDiagnostic { diagnostic: a } = &first[0] else {
+            panic!()
+        };
+        let AgentEvent::UsageDiagnostic { diagnostic: b } = &second[0] else {
+            panic!()
+        };
+        assert_eq!(a.signature, b.signature);
+        assert!(a.signature.is_some());
+        assert!(
+            !serde_json::to_string(&first)
+                .unwrap()
+                .contains("private result")
+        );
+        let independent = UsageTracker::default().observe(&frame);
+        let AgentEvent::UsageDiagnostic { diagnostic: c } = &independent[0] else {
+            panic!()
+        };
+        assert_ne!(a.signature, c.signature);
+        let empty = super::super::wire::parse_frame(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"empty","content":""}]}}"#).unwrap();
+        let empty = tracker.observe(&empty);
+        let AgentEvent::UsageDiagnostic { diagnostic } = &empty[0] else {
+            panic!()
+        };
+        assert_eq!(diagnostic.bytes, 0);
+        assert!(diagnostic.signature.is_some());
+    }
     #[test]
     fn result_includes_cache_once_and_keeps_actual_models() {
         let frame = super::super::wire::parse_frame(r#"{"type":"result","modelUsage":{"small":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":100,"cacheCreationInputTokens":5},"large":{"inputTokens":2,"outputTokens":3}}}"#).unwrap();

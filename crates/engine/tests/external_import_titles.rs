@@ -273,6 +273,3 @@ async fn priority_chain_registry_beats_ai_title_beats_first_message() {
         }
     }
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

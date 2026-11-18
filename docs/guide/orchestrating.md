@@ -26,9 +26,9 @@ Workers can report back to their coordinator. They can also raise a Required Act
 
 The merge step belongs to one chat. Say so in the instructions on the coordinator's item.
 
-## Hand off a coordinator
+## Hand off to a new chat
 
-When a coordinator has live workers, choose **Hand off to new chat…** from its chat menu or header overflow. Review the prefilled summary and worker list, choose whether to archive the source, and confirm. Mast selects the successor, transfers active workers and queued wakes, and links the old chat to the successor. The successor starts on the same item with the summary, workers and open requests.
+From any active chat, choose **Hand off to new chat…** from its chat menu or header overflow. Review the prefilled summary and worker list, choose whether to archive the source, and confirm. Mast selects the successor, transfers active workers and queued wakes, and links the old chat to the successor. The successor starts on the same item with the summary, a reference to the source conversation, workers and open requests. Solo chats can hand off without workers. For remote chats, update Mast on the hosting device if handoff support is unavailable. The successor can read its recorded predecessors even after you archive them. A chat without an item gets one automatically. The successor keeps the source's working directory or worktree, session settings and managed account when the harness stays the same.
 
 ## Archive finished workers
 

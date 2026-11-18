@@ -476,7 +476,34 @@ impl WorkItemLaunchService {
         wakes: &crate::orchestrator_wakes::OrchestratorWakes,
         source: &str,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
-        self.launch_chat_for_work_item(p, Some((wakes, source))).await
+        let source_chat = self
+            .workspace
+            .chat(source)
+            .map_err(engine_error)?
+            .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
+        let mut successor = p.clone();
+        let configuration = match self
+            .workspace
+            .checked_chat_execution_binding(source)
+            .map_err(engine_error)?
+        {
+            Some(binding) => binding.resolved.configuration,
+            None => mast_proto::ExecutionConfiguration::implicit(
+                self.sessions
+                    .resolve_cwd(source, source_chat.cwd.as_deref().unwrap_or("~"))
+                    .map_err(engine_error)?,
+            ),
+        };
+        successor.execution_override = Some(ExecutionOverride { configuration });
+        successor.parent_chat_id = source_chat.parent_chat_id;
+        let harness = successor
+            .config
+            .as_ref()
+            .map(|config| config.harness)
+            .unwrap_or_else(|| self.doc_host.harness_for(source));
+        successor.account_id = self.sessions.chat_account_pin(source, harness);
+        self.launch_chat_for_work_item(&successor, Some((wakes, source)))
+            .await
     }
 
     async fn launch_chat_for_work_item(
@@ -662,6 +689,7 @@ impl WorkItemLaunchService {
 
         if let Some((wakes, source)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
+            request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
                 .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let sessions = self.workspace.read_sessions().map_err(engine_error)?;

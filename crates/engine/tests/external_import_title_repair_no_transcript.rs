@@ -89,6 +89,3 @@ async fn repair_marks_a_harness_session_chat_with_no_findable_transcript_and_doe
         }
     }
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

@@ -6,7 +6,11 @@ It holds the instructions its Chats inherit, the folders and repositories they
 run in, and the questions agents have asked you. Chats stay the main working
 surface. Overview is the persistent left column, with the Work Outline as its
 default presentation. Choose Sessions for the session list and its grouping
-controls. A Chat never needs a work item.
+controls. New Chats automatically get a work item unless they already belong
+under one. Children and side chats reuse their source's item. Chats created
+without a folder live in the host device's Personal Space and keep their own
+scratch directory. Older unassigned Chats gain an item when you hand them off
+or next run them.
 
 | Concept | What it is |
 | --- | --- |
@@ -87,8 +91,8 @@ inline editor, a picker, the search field, or any other text input.
 | First / last row | `Home` / `End` | `Home` / `End` |
 | Collapse / expand | `←` / `→` | `←` / `→` |
 | Previous / next sibling (skips subtrees) | `⌥↑` / `⌥↓` | `Alt+↑` / `Alt+↓` |
-| Open (Work Item Details; a compact single-Chat row opens its Chat) | `↩` | `Enter` |
-| Open Work Item Details on any item row, compact or not (a compact row's status glyph does the same on click) | `⌘I` | `Ctrl+I` |
+| Open the selected item or Chat | `↩` | `Enter` |
+| Open Work Item Details on an item row | `⌘I` | `Ctrl+I` |
 | Start a Chat in the selected work item (on a Chat row: in the Chat's work item; on a PR review item: review its PR, see [PR review sync](#pr-review-sync)) | `⌘↩` | `Ctrl+Enter` |
 | Rename (a work item in place; a Chat row opens the rename dialog) | `F2` or `R` | `F2` or `R` |
 | New sibling / new child | `N` / `⇧N` | `N` / `Shift+N` |
@@ -115,7 +119,7 @@ ignore it. The **Archive Chat** and **Archive…** menu entries show the key.
 
 `⌘F` (`Ctrl+F`) focuses Overview's search when navigation has focus, selecting
 the existing query. Search and the repository/attention filters apply to the
-Outline and shortcut collections. The fixed current-chat entry stays reachable.
+Outline. The fixed current-chat entry stays reachable.
 The file editor's own Find still wins inside a file; typing in the Chat composer
 keeps its existing Find behavior. In the search field, `Esc` clears a non-empty
 query, then returns to the tree; `↩` or `↓` selects and focuses the first result.
@@ -274,8 +278,8 @@ A single-Space Outline has no Space rows, so none of this applies there.
   places it after. Projects you have never moved, including new ones, follow
   the ones you arranged, in alphabetical order.
 - **Hide.** Choose **Hide from Outline** in a Space row's menu. The Space
-  and its Chats disappear from the Outline only. The Sessions presentation and shortcut collections
-  still show them. While any Space is hidden, the Outline toolbar shows
+  and its Chats disappear from the Outline only. The Sessions presentation
+  still shows them. While any Space is hidden, the Outline toolbar shows
   **Hidden projects (N)**. Click it to list hidden projects as dimmed rows, and
   click **Unhide** on a row (or choose **Unhide** in its menu) to bring it back.
 - **Rename Space…** opens the same rename dialog as the sidebar's Space menu.

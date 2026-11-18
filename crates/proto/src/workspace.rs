@@ -36,6 +36,8 @@ pub mod capabilities {
     /// launcher and start a review Chat). Clients forward a PR review start
     /// only to devices that advertise it.
     pub const TOKEN_USAGE_V1:&str="token-usage-v1";
+    /// Agent-type filters and efficiency diagnostics on the token-usage RPC.
+    pub const TOKEN_USAGE_INSIGHTS_V1: &str = "token-usage-insights-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
     /// The host stores a scheduled task's `workItemId`, attaches each run to
     /// that item and delivers its instructions. Clients offer the Work item
@@ -59,6 +61,8 @@ pub mod capabilities {
     /// seeds their first run from the main chat, and serves
     /// `AbsorbSideChat`.
     pub const SIDE_CHAT_V1: &str = "side-chat-v1";
+    /// The host supports solo chat handoff and automatic work-item ownership.
+    pub const CHAT_HANDOFF_V1: &str = "chat-handoff-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -84,10 +88,12 @@ pub mod capabilities {
         PR_REVIEW_LAUNCH_V1,
         SCHEDULED_TASK_WORK_ITEM_V1,
         TOKEN_USAGE_V1,
+        TOKEN_USAGE_INSIGHTS_V1,
         LINEAR_V1,
         PR_REVIEW_SYNC_V1,
         ARTIFACTS_V1,
         SIDE_CHAT_V1,
+        CHAT_HANDOFF_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -205,6 +211,7 @@ mod tests {
                     "work-outline-launch-v1",
                     "pr-review-launch-v1",
                     "token-usage-v1",
+                    "token-usage-insights-v1",
                     "linear-v1",
                     "pr-review-sync-v1",
                     "artifacts-v1",

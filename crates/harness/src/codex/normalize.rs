@@ -684,6 +684,9 @@ fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
 }
 
 impl ChildStream {
+    pub(super) fn tool_diagnostics(&self, method: &str, item: &Value) -> Vec<AgentEvent> {
+        self.usage.tool_diagnostics(method, item)
+    }
     pub(super) fn map(&mut self, child: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
         if method == "thread/tokenUsage/updated" { return self.usage.observe(params).into_iter().collect(); }
         if method == "turn/started" {

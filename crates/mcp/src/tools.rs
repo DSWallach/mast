@@ -178,7 +178,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project. The personal assistant chat reads every chat in every Space.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project. Recorded handoff predecessors in that scope remain readable after archiving. The personal assistant chat reads every chat in every Space.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -2099,12 +2099,16 @@ impl Tools {
                     .and_then(|c| c.parent_chat_id.clone())
             })
             .flatten();
+        let mut handoff_sources: Vec<String> = Vec::new();
         let project_chats: Vec<String> = if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
             self.zeron
                 .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
                 .await
                 .ok()
-                .and_then(|v| serde_json::from_value(v["chatIds"].clone()).ok())
+                .and_then(|v| {
+                    handoff_sources = serde_json::from_value(v["handoffSourceChatIds"].clone()).unwrap_or_default();
+                    serde_json::from_value(v["chatIds"].clone()).ok()
+                })
                 .unwrap_or_default()
         } else if reach == Reach::ArchiveScope {
             self.archive_info(&[])
@@ -2126,6 +2130,9 @@ impl Tools {
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
                         && parent.as_deref() == Some(c.id.as_str()))
                     || (!c.archived && project_chats.contains(&c.id))
+                    || (reach == Reach::ReadScope
+                        && c.space_id.as_deref() == Some(origin.space_id.as_str())
+                        && handoff_sources.contains(&c.id))
             })
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
@@ -2502,6 +2509,7 @@ mod tests {
         working: bool,
         /// Chats the engine says sit inside the agent's project scope.
         project_chats: Vec<&'static str>,
+        handoff_sources: Vec<&'static str>,
         /// The engine's finished-worker verdicts for the agent's archive scope.
         archive_info: Vec<(&'static str, Value)>,
         pending_questions: Option<Value>,
@@ -2661,7 +2669,7 @@ mod tests {
                         }));
                     }
                     if params["tool"] == agent_tool_names::PROJECT_SCOPE_CHATS {
-                        return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats })));
+                        return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats, "handoffSourceChatIds": self.handoff_sources })));
                     }
                     if params["tool"] == agent_tool_names::CHAT_ARCHIVE_INFO {
                         let ids = params["arguments"]["chatIds"].as_array().cloned().unwrap_or_default();
@@ -3168,6 +3176,52 @@ mod tests {
         let world = Arc::new(World { beta_parent: Some("chat-alpha-1"), alpha_archived: true, ..World::default() });
         let error = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Done"})).await.unwrap_err();
         assert!(error.contains("no chat matches"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn handoff_predecessors_remain_readable_after_archiving() {
+        let world = Arc::new(World {
+            alpha_archived: true,
+            handoff_sources: vec!["chat-alpha-1"],
+            ..World::default()
+        });
+        let successor = tools(world, Some(BETA_TOKEN));
+        let read = successor
+            .call("read_chat", json!({"chat":"chat-alpha-1"}))
+            .await
+            .unwrap();
+        assert_eq!(read["returned"], 2);
+        for name in [
+            "get_chat",
+            "send_message",
+            "wait_for_turn",
+            "interrupt_chat",
+        ] {
+            assert!(
+                successor
+                    .call(
+                        name,
+                        json!({"chat":"chat-alpha-1", "text":"Hello", "timeout_secs":1})
+                    )
+                    .await
+                    .is_err(),
+                "{name}"
+            );
+        }
+        let unrelated = tools(
+            Arc::new(World {
+                alpha_archived: true,
+                project_chats: vec!["chat-alpha-1"],
+                ..World::default()
+            }),
+            Some(BETA_TOKEN),
+        );
+        assert!(
+            unrelated
+                .call("read_chat", json!({"chat":"chat-alpha-1"}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

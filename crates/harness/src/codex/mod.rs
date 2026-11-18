@@ -1368,7 +1368,7 @@ async fn run_session(session: Session) {
                             Phase::Completed
                         };
                         let item = params.get("item").unwrap_or(&Value::Null);
-                        for event in usage::tool_diagnostics(&method, item) {
+                        for event in usage_tracker.tool_diagnostics(&method, item) {
                             if !send(&event_tx,event).await { break 'main; }
                         }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {

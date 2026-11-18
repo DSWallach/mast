@@ -4,6 +4,8 @@ use crate::{popover, settings::widgets, state::AppState, theme::Theme};
 use gpui::{Context, Entity, EventEmitter, SharedString, Task, Window, div, prelude::*};
 use mast_proto::token_usage::*;
 
+mod efficiency;
+
 #[derive(Clone)]
 pub struct OpenUsageChat(pub String);
 pub struct TokenUsagePage {
@@ -50,8 +52,94 @@ impl TokenUsagePage {
             },
         ];
         page.snapshot = Some(TokenUsageSnapshot {
+            insights_available: true,
             total: 938000,
             runs: 32,
+            available_agent_types: vec![
+                "main".into(),
+                "pr-review".into(),
+                "worker".into(),
+                "explorer".into(),
+                "title-generator".into(),
+            ],
+            agent_types: vec![
+                AgentUsageGroup {
+                    unknown_breakdown: 0,
+                    agent_type: "worker".into(),
+                    role: "main + subagents".into(),
+                    tokens: 720000,
+                    turns: 12,
+                    observations: 12,
+                    example_chat_id: "example".into(),
+                },
+                AgentUsageGroup {
+                    unknown_breakdown: 0,
+                    agent_type: "pr-review".into(),
+                    role: "main".into(),
+                    tokens: 210000,
+                    turns: 4,
+                    observations: 4,
+                    example_chat_id: "example".into(),
+                },
+                AgentUsageGroup {
+                    unknown_breakdown: 0,
+                    agent_type: "title-generator".into(),
+                    role: "main".into(),
+                    tokens: 8000,
+                    turns: 16,
+                    observations: 16,
+                    example_chat_id: "example".into(),
+                },
+            ],
+            observed_agents: vec![AgentUsageGroup {
+                unknown_breakdown: 0,
+                agent_type: "explorer".into(),
+                role: "subagent".into(),
+                tokens: 12000,
+                turns: 3,
+                observations: 8,
+                example_chat_id: "example".into(),
+            }],
+            efficiency: EfficiencySummary {
+                completed: 26,
+                failed: 4,
+                cancelled: 1,
+                partial: 1,
+                completed_tokens: 760000,
+                failed_tokens: 150000,
+                partial_tokens: 28000,
+            },
+            insights: vec![
+                EfficiencyInsight {
+                    category: "retainedToolResult".into(),
+                    label: "github/search".into(),
+                    channel: Some("mcp".into()),
+                    stage: "retainedTranscript".into(),
+                    agent_type: "worker".into(),
+                    occurrences: 14,
+                    repeated: 8,
+                    bytes: 82400,
+                    repeated_bytes: 47000,
+                    example_chat_id: "example".into(),
+                    example_turn_id: "run".into(),
+                    example_at: now,
+                    ..Default::default()
+                },
+                EfficiencyInsight {
+                    category: "instruction".into(),
+                    label: "Repository instructions".into(),
+                    stage: "submittedToHarness".into(),
+                    agent_type: "pr-review".into(),
+                    occurrences: 12,
+                    repeated: 11,
+                    bytes: 78000,
+                    repeated_bytes: 71500,
+                    example_chat_id: "example".into(),
+                    example_turn_id: "run".into(),
+                    example_at: now,
+                    ..Default::default()
+                },
+            ],
             models: vec!["large-model".into(), "small-model".into()],
             activities: groups.clone(),
             roles: vec![UsageGroup {
@@ -70,6 +158,7 @@ impl TokenUsagePage {
                 model: "large-model".into(),
                 activity: "PR review".into(),
                 role: "main + subagents".into(),
+                agent_type: "pr-review".into(),
                 at: now,
                 tokens: 52000,
                 status: "completed".into(),
@@ -114,6 +203,40 @@ impl TokenUsagePage {
             coverage: vec![
                 "Example fixture. Provider counts and diagnostic bytes are separate.".into(),
             ],
+            configurations: vec![
+                ConfigurationUsage {
+                    fingerprint: "config-before".into(),
+                    model: "large-model".into(),
+                    activity: "PR review".into(),
+                    agent_type: "pr-review".into(),
+                    work_item_id: Some("change-review".into()),
+                    space_id: Some("workspace".into()),
+                    tokens: 160000,
+                    completed: 2,
+                    failed: 1,
+                    partial: 0,
+                    completed_tokens: 100000,
+                    failed_tokens: 60000,
+                    build_revision: Some("aaa111bbb222".into()),
+                    runs: 3,
+                },
+                ConfigurationUsage {
+                    fingerprint: "config-after".into(),
+                    model: "large-model".into(),
+                    activity: "PR review".into(),
+                    agent_type: "pr-review".into(),
+                    work_item_id: Some("change-review".into()),
+                    space_id: Some("workspace".into()),
+                    tokens: 50000,
+                    completed: 1,
+                    failed: 0,
+                    partial: 0,
+                    completed_tokens: 50000,
+                    failed_tokens: 0,
+                    build_revision: Some("ccc333ddd444".into()),
+                    runs: 1,
+                },
+            ],
             recording_since: Some(now - 7 * 86400000),
             updated_at: now,
             ..Default::default()
@@ -152,7 +275,13 @@ impl TokenUsagePage {
                     .devices
                     .iter()
                     .find(|d| &d.id == target)
-                    .is_some_and(|d| !d.supports(mast_proto::capabilities::TOKEN_USAGE_V1))
+                    .is_some_and(|d| {
+                        !d.supports(if self.query.agent_type.is_some() {
+                            mast_proto::capabilities::TOKEN_USAGE_INSIGHTS_V1
+                        } else {
+                            mast_proto::capabilities::TOKEN_USAGE_V1
+                        })
+                    })
             {
                 self.error = Some("Update Mast on this device to view token usage.".into());
                 self.loading = false;
@@ -199,6 +328,13 @@ impl TokenUsagePage {
         self.loading = false;
         match result {
             Ok(snapshot) => {
+                if self.query.agent_type.is_some() && !snapshot.insights_available {
+                    self.error =
+                        Some("Update Mast on the selected device to a build with agent-type monitoring before using this filter.".into());
+                    self.snapshot = None;
+                    cx.notify();
+                    return;
+                }
                 self.snapshot = Some(snapshot);
                 self.error = None;
             }
@@ -226,7 +362,9 @@ impl popover::ScrollRailHost for TokenUsagePage {
     }
 }
 fn choice(theme: &Theme, id: String, label: String, selected: bool) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
     crate::components::settings_autosave_choice(theme, SharedString::from(id), selected)
+        .debug_selector(move || selector.clone())
         .child(label)
 }
 fn rows(theme: &Theme, groups: &[UsageGroup], total: u64) -> gpui::Div {
@@ -378,6 +516,30 @@ impl Render for TokenUsagePage {
                     }))
                 })),
         );
+        let mut agents = vec![None];
+        if let Some(snapshot) = &self.snapshot {
+            agents.extend(snapshot.available_agent_types.iter().cloned().map(Some));
+        }
+        if self.query.agent_type.is_some() && !agents.contains(&self.query.agent_type) {
+            agents.push(self.query.agent_type.clone());
+        }
+        content =
+            content
+                .child(widgets::field_label(&theme, "Agent type"))
+                .child(div().flex().flex_wrap().gap_2().children(
+                    agents.into_iter().enumerate().map(|(i, agent)| {
+                        choice(
+                            &theme,
+                            format!("usage-agent-filter-{i}"),
+                            agent.clone().unwrap_or_else(|| "All agent types".into()),
+                            self.query.agent_type == agent,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.query.agent_type = agent.clone();
+                            this.reset(cx);
+                        }))
+                    }),
+                ));
         content = content
             .child(widgets::field_label(&theme, "Token type"))
             .child(div().flex().flex_wrap().gap_2().children(
@@ -405,6 +567,7 @@ impl Render for TokenUsagePage {
                         "Tools",
                         "Instructions & rules",
                         "Trends & comparisons",
+                        "Efficiency",
                     ]
                     .into_iter()
                     .enumerate()
@@ -435,7 +598,7 @@ impl Render for TokenUsagePage {
         if let Some(snapshot) = &self.snapshot {
             content = content.child(widgets::section_card(&theme).child(
                 widgets::card_row(&theme, true).child(format!(
-                    "{} tokens · {} recorded runs",
+                    "{} tokens · {} recorded turns",
                     snapshot.total, snapshot.runs
                 )),
             ));
@@ -447,6 +610,7 @@ impl Render for TokenUsagePage {
             }
             match self.tab {
                 0 => {
+                    content = content.child(self.agent_breakdown(snapshot, &theme, cx));
                     content = content.child(widgets::field_label(
                         &theme,
                         "Activities · most tokens first",
@@ -499,9 +663,10 @@ impl Render for TokenUsagePage {
                                         .child(widgets::page_subtitle(
                                             &theme,
                                             format!(
-                                                "{} · {} · {}",
+                                                "{} · {} · {} · {}",
                                                 format_time(run.at),
                                                 run.status,
+                                                run.agent_type,
                                                 run.role
                                             ),
                                         )),
@@ -564,6 +729,9 @@ impl Render for TokenUsagePage {
                         content=content.child(widgets::card_row(&theme,i==0).id(SharedString::from(format!("usage-diagnostic-{i}"))).cursor_pointer().child(div().flex_1().min_w_0().child(format!("{} · {}",d.channel.as_deref().unwrap_or("instructions"),d.label)).child(widgets::page_subtitle(&theme,format!("{} · {} · {} observations · {} errors · {} repeats · {} ms",d.category,d.stage,d.observations,d.errors,d.repeated,d.elapsed_ms))).when_some(d.revision.clone(),|div,r|div.child(widgets::page_subtitle(&theme,format!("Revision {}",&r[..r.len().min(12)]))))).child(format!("{} bytes →",d.bytes)).on_click(cx.listener(move|_,_,_,cx|cx.emit(OpenUsageChat(chat.clone())))));
                     }
                 }
+                4 => {
+                    content = content.child(self.efficiency_view(snapshot, &theme, cx));
+                }
                 _ => {
                     content = content
                         .child(widgets::field_label(&theme, "Daily usage · UTC"))
@@ -598,11 +766,11 @@ impl Render for TokenUsagePage {
                             "No completed samples".into()
                         } else {
                             format!(
-                                "{} tokens per completed run",
-                                cohort.completed_tokens / cohort.completed
+                                "{} total tokens per completed turn, including failed and partial attempts",
+                                cohort.tokens / cohort.completed
                             )
                         };
-                        content=content.child(widgets::card_row(&theme,i==0).child(div().flex_1().min_w_0().child(format!("{} · {}",cohort.model,cohort.activity)).child(widgets::page_subtitle(&theme,format!("{} · {} completed · {} failed/cancelled · {} partial",average,cohort.completed,cohort.failed,cohort.partial))).child(widgets::page_subtitle(&theme,format!("Configuration {}",cohort.fingerprint)))).child(format!("{} tokens",cohort.tokens)));
+                        content=content.child(widgets::card_row(&theme,i==0).child(div().flex_1().min_w_0().child(format!("{} · {} · {}",cohort.model,cohort.activity,cohort.agent_type)).child(widgets::page_subtitle(&theme,format!("{} · {} completed · {} failed/cancelled · {} partial",average,cohort.completed,cohort.failed,cohort.partial))).child(widgets::page_subtitle(&theme,format!("Configuration {} · Build {} · Space {} · Work item {} · {} failed/cancelled tokens",cohort.fingerprint.chars().take(12).collect::<String>(),build_label(cohort.build_revision.as_deref()),cohort.space_id.as_deref().unwrap_or("unknown"),cohort.work_item_id.as_deref().unwrap_or("not attached"),cohort.failed_tokens)))).child(format!("{} tokens",cohort.tokens)));
                     }
                     for (i, run) in snapshot.details.iter().enumerate() {
                         content = content.child(
@@ -664,6 +832,16 @@ impl Render for TokenUsagePage {
             .children(rail)
     }
 }
+fn build_label(revision: Option<&str>) -> String {
+    let Some(revision) = revision else {
+        return "unrecorded".into();
+    };
+    let (commit, suffix) = revision
+        .strip_suffix("-dirty")
+        .map_or((revision, ""), |commit| (commit, " (uncommitted)"));
+    format!("{}{suffix}", commit.chars().take(12).collect::<String>())
+}
+
 fn format_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
@@ -674,6 +852,103 @@ fn format_time(ms: i64) -> String {
 mod tests {
     use super::*;
     use gpui::AppContext as _;
+
+    #[gpui::test]
+    fn old_engine_responses_cannot_silently_ignore_agent_filters(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| TokenUsagePage::new(state, cx));
+        page.update(cx, |page, cx| {
+            page.query.agent_type = Some("pr-review".into());
+            page.apply_result(
+                page.generation,
+                Ok(TokenUsageSnapshot {
+                    total: 999,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(page.snapshot.is_none());
+            assert!(page.error.as_deref().unwrap().contains("Update Mast"));
+        });
+    }
+
+    #[gpui::test]
+    fn agent_filter_resets_paging_and_efficiency_examples_open_their_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let (page, vcx) = cx.add_window_view(|_, cx| {
+            let mut page = TokenUsagePage::new(state, cx);
+            page.error = None;
+            page.polling = false;
+            page.query.model = Some("model".into());
+            page.query.token_kind = TokenKind::Output;
+            page.query.offset = 50;
+            page.snapshot = Some(TokenUsageSnapshot {
+                insights_available: true,
+                available_agent_types: vec!["pr-review".into()],
+                agent_types: vec![AgentUsageGroup {
+                    unknown_breakdown: 0,
+                    agent_type: "pr-review".into(),
+                    tokens: 20,
+                    turns: 1,
+                    role: "main".into(),
+                    ..Default::default()
+                }],
+                total: 20,
+                runs: 1,
+                insights: vec![EfficiencyInsight {
+                    category: "toolCall".into(),
+                    label: "cargo".into(),
+                    agent_type: "pr-review".into(),
+                    repeated: 2,
+                    example_chat_id: "review-chat".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            page
+        });
+        let messages = vcx.new(|cx| {
+            cx.subscribe(
+                &page,
+                |messages: &mut Vec<String>, _, event: &OpenUsageChat, _| {
+                    messages.push(event.0.clone())
+                },
+            )
+            .detach();
+            Vec::<String>::new()
+        });
+        vcx.simulate_resize(gpui::size(gpui::px(640.0), gpui::px(1400.0)));
+        vcx.run_until_parked();
+        let tab = vcx
+            .debug_bounds("usage-tab-4")
+            .expect("efficiency tab")
+            .center();
+        vcx.simulate_click(tab, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let example = vcx
+            .debug_bounds("usage-efficiency-insight-0")
+            .expect("repetition example")
+            .center();
+        vcx.simulate_click(example, gpui::Modifiers::default());
+        messages.read_with(vcx, |messages, _| assert_eq!(messages, &["review-chat"]));
+        let filter = vcx
+            .debug_bounds("usage-agent-filter-1")
+            .expect("agent filter")
+            .center();
+        vcx.simulate_click(filter, gpui::Modifiers::default());
+        page.read_with(vcx, |page, _| {
+            assert_eq!(page.query.agent_type.as_deref(), Some("pr-review"));
+            assert_eq!(page.query.offset, 0);
+            assert_eq!(page.query.model.as_deref(), Some("model"));
+            assert_eq!(page.query.token_kind, TokenKind::Output);
+        });
+    }
     #[gpui::test]
     fn filter_resets_and_stale_responses_preserve_the_current_view(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new());

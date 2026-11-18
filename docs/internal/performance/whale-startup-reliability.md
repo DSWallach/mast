@@ -75,7 +75,7 @@ emits its Vitest shutdown-state diagnostic; the focused checkpoint run is clean.
 
 ```sh
 cargo test -p mast-sync -p mast-rpc --features mast-sync/mock-server
-cargo test -p mast-engine --lib --test session_publication --test restart_resume --test local_profiles --test codex_subagents
+cargo nextest run -p mast-engine -E 'kind(lib) | (binary(engine) & test(/^(session_publication|restart_resume|local_profiles|codex_subagents)::/))'
 cargo test -p mast-update
 cargo test -p mast-ui --lib -- --test-threads=1
 npm --prefix edge run typecheck
