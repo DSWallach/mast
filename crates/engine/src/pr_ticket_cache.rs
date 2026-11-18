@@ -419,19 +419,23 @@ impl PrTicketCache {
         }
     }
 
-    fn queue_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) {
-        if observations.is_empty() { return; }
+    fn select_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) -> Vec<crate::pr_merged_wakes::CompletionObservation> {
+        if observations.is_empty() { return Vec::new(); }
         let mut scan = lock(&self.inner.completion_scan);
         let start = scan.1 % observations.len();
         let count = observations.len().min(COMPLETION_SCAN_LIMIT);
         scan.1 = (start + count) % observations.len();
-        drop(scan);
+        (0..count).map(|index| observations[(start + index) % observations.len()].clone()).collect()
+    }
+
+    fn queue_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) {
         let cache = lock(&self.inner.pr_cache);
         let mut pending = lock(&self.inner.pending_pr);
-        for index in 0..count {
-            let key = match &observations[(start + index) % observations.len()] {
+        for observation in observations {
+            let key = match observation {
                 crate::pr_merged_wakes::CompletionObservation::Url(url) => PrKey::Url(url.clone()),
                 crate::pr_merged_wakes::CompletionObservation::Branch(cwd, branch) => PrKey::Branch { cwd: cwd.clone(), branch: branch.clone() },
+                crate::pr_merged_wakes::CompletionObservation::BranchUnknown(..) => continue,
             };
             if pending.len() < 512 && !cache.get(&key).is_some_and(Entry::fresh_pr) { pending.insert(key); }
         }
@@ -796,7 +800,11 @@ impl PrTicketCache {
         if scan_due {
             let wakes = lock(&self.inner.merged_wakes).clone();
             if let Some(wakes) = wakes {
-                match tokio::task::spawn_blocking(move || wakes.completion_observations()).await {
+                let cache = self.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let observations = wakes.completion_observations()?;
+                    Ok::<_, String>(wakes.resolve_completion_observations(cache.select_completion_observations(&observations)))
+                }).await {
                     Ok(Ok(observations)) => self.queue_completion_observations(&observations),
                     Ok(Err(error)) => tracing::warn!(%error, "failed to collect merged PR observations"),
                     Err(error) => tracing::warn!(%error, "merged PR observation collection panicked"),
@@ -1613,11 +1621,11 @@ mod tests {
         assert!(COMPLETION_SCAN_INTERVAL >= Duration::from_secs(60));
         let cache = PrTicketCache::new();
         let observations: Vec<_> = (0..20).map(|n| CompletionObservation::Url(format!("https://github.com/acme/repo/pull/{n}"))).collect();
-        cache.queue_completion_observations(&observations);
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
         let first = lock(&cache.inner.pending_pr).clone();
         assert_eq!(first.len(), COMPLETION_SCAN_LIMIT);
         lock(&cache.inner.pending_pr).clear();
-        cache.queue_completion_observations(&observations);
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
         let second = lock(&cache.inner.pending_pr).clone();
         assert_eq!(second.len(), COMPLETION_SCAN_LIMIT);
         assert_eq!(first.union(&second).count(), observations.len());

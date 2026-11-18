@@ -69,6 +69,7 @@ pub(crate) struct PrMergedWakes {
 pub(crate) enum CompletionObservation {
     Url(String),
     Branch(PathBuf, String),
+    BranchUnknown(PathBuf, String),
 }
 
 fn save(path: &Path, observations: &Observations) -> std::io::Result<()> {
@@ -114,14 +115,31 @@ impl PrMergedWakes {
                 .map(|a| a.chat_id.as_str()).collect();
             for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str())
                 && chat.parent_chat_id.is_some() && assigned.contains(chat.id.as_str())) {
-                if let (Some(cwd), Some(branch)) = (chat.cwd.as_deref(), chat.branch.as_deref())
-                    && !cwd.is_empty() && !branch.is_empty()
+                if let Some(cwd) = chat.cwd.as_deref().filter(|cwd| !cwd.is_empty())
                     && !crate::repos::is_automatic_access_blocked(Path::new(cwd)) {
+                    if let Some(branch) = chat.branch.as_deref().filter(|branch| !branch.is_empty()) {
                         keys.insert(CompletionObservation::Branch(PathBuf::from(cwd), branch.to_owned()));
+                    } else {
+                        keys.insert(CompletionObservation::BranchUnknown(PathBuf::from(cwd), chat.id.clone()));
                     }
+                }
             }
         }
         Ok(keys.into_iter().collect())
+    }
+
+    /// Resolve only the already-budgeted unknown branches, then preserve any
+    /// branch or checkout the user changed concurrently.
+    pub(crate) fn resolve_completion_observations(&self, keys: Vec<CompletionObservation>) -> Vec<CompletionObservation> {
+        keys.into_iter().filter_map(|key| match key {
+            CompletionObservation::BranchUnknown(cwd, chat_id) => {
+                let branch = crate::repos::checkout_branch_from_fs(&cwd)?;
+                let cwd_text = cwd.to_str()?;
+                if !self.workspace.set_chat_branch_if_cwd_matches(&chat_id, cwd_text, &branch).ok()? { return None; }
+                Some(CompletionObservation::Branch(cwd, branch))
+            }
+            other => Some(other),
+        }).collect()
     }
     pub(crate) fn new(path: PathBuf, workspace: WorkspaceHost, wakes: OrchestratorWakes) -> Self {
         let observations = std::fs::read(&path)
@@ -558,6 +576,14 @@ mod tests {
             space_id: "branch-space".into(), field: None, worker_worktrees: false,
             merged_pr_completion: Some(mast_proto::work_outline::MergedPrCompletion::Ask), archive_workers_after_days: None, operation_id: "branch-setting".into(),
         }));
+        let legacy_path = directory.path().join("legacy");
+        std::fs::create_dir_all(legacy_path.join(".git/objects")).unwrap();
+        std::fs::write(legacy_path.join(".git/HEAD"), "ref: refs/heads/legacy-worker\n").unwrap();
+        workspace.create_chat_with_parent("legacy-worker", Some("branch-space"), Some("device"), None,
+            Some(legacy_path.to_string_lossy().into_owned()), Some("branch-parent".into())).unwrap();
+        mutate(mast_proto::WorkOutlineMutation::AssignChatToWorkItem(mast_proto::AssignChatToWorkItemParams {
+            chat_id: "legacy-worker".into(), work_item_id: unrelated_item.clone(), operation_id: "legacy-assign".into(),
+        }));
         let sessions = SessionsEngine::new(
             "device".into(),
             Arc::new(RunJournal::open(directory.path().join("journal")).unwrap()),
@@ -594,6 +620,10 @@ mod tests {
         assert!(observations.contains(&CompletionObservation::Url(url.into())));
         assert!(!observations.contains(&CompletionObservation::Url("https://github.com/acme/repo/pull/43".into())));
         assert!(observations.contains(&CompletionObservation::Branch(PathBuf::from("/tmp/branch-space"), "feature/a".into())));
+        let legacy = CompletionObservation::BranchUnknown(legacy_path.clone(), "legacy-worker".into());
+        assert!(observations.contains(&legacy));
+        assert_eq!(tracker.resolve_completion_observations(vec![legacy]), vec![CompletionObservation::Branch(legacy_path, "legacy-worker".into())]);
+        assert_eq!(workspace.chat("legacy-worker").unwrap().unwrap().branch.as_deref(), Some("legacy-worker"));
         let mut status = PrStatus {
             additions: None, deletions: None,
             merged_at: None,

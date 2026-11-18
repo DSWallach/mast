@@ -2141,6 +2141,13 @@ impl WorkspaceHost {
         })?)
     }
 
+    pub(crate) fn set_chat_branch_if_cwd_matches(&self, chat_id: &str, cwd: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.as_deref().is_some_and(|value| !value.is_empty()) || chat.cwd.as_deref() != Some(cwd)) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
     pub fn set_chat_source_context(
         &self,
         chat_id: &str,
