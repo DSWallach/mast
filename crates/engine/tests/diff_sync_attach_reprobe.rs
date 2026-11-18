@@ -40,6 +40,7 @@ async fn first_sync_after_attach_skips_the_reprobe() {
     // Attach takes ~1-2 s per checkout here (FSEvents registration); hold the
     // first sync long enough that every probe is taken after attach.
     CheckoutDiffSync::set_initial_sync_attach_wait_for_test(Duration::from_secs(600));
+    let pause = CheckoutDiffSync::pause_watch_setups_for_test().await;
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("data")).unwrap();
     let core = EngineCore::assemble(
@@ -67,6 +68,7 @@ async fn first_sync_after_attach_skips_the_reprobe() {
     }
     let before = git_spawn_count();
     core.diff_sync.reconcile_now().await;
+    drop(pause);
     wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == N
     })
