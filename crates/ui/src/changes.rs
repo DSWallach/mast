@@ -4766,23 +4766,19 @@ impl Changes {
                 let comment_path = file_diff.path.clone();
                 div().relative().child(hunk_header_row(&hunk_diff.header, symbol, &theme))
                     .when_some(comment_anchor, |row, (side, line)| row.child(
-                        div().id(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")))
-                            .absolute().right(px(210.0)).top(px(2.0)).cursor_pointer()
-                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Comment")
+                        crate::components::button(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")), "Comment", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                            .absolute().right(px(210.0)).top(px(Theme::SPACE_XS / 2.0))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_draft(comment_path.clone(), side, line, window, cx)))))
                     .when(show_reference, |row| row.child(
-                        div().id(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")))
-                            .absolute().right(px(100.0)).top(px(2.0)).cursor_pointer()
-                            .when(true, |el| crate::components::hunk_action(el, &theme)).child("Add hunk to chat")
+                        crate::components::button(SharedString::from(format!("changes-hunk-chat-{file}-{hunk}")), "Add hunk to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                            .absolute().right(px(100.0)).top(px(Theme::SPACE_XS / 2.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
-                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(div().id(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")))
-                        .absolute().right(px(8.0)).top(px(2.0)).cursor_pointer()
-                        .text_size(px(10.0)).text_color(theme.text_muted)
-                        .when(true, |el| crate::components::hunk_action(el, &theme))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))
-                        .child(label)))
+                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(
+                        crate::components::button(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")), label, crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
+                        .absolute().right(px(Theme::SPACE_SM)).top(px(Theme::SPACE_XS / 2.0))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))))
                     .into_any_element()
             },
             DiffRow::Line {

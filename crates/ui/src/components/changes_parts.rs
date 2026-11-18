@@ -28,17 +28,6 @@ pub(crate) fn hunk_label(header: &str, symbol: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn hunk_action<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
-    element
-        .text_size(crate::typography::ui_rems(11.0))
-        .px(px(Theme::SPACE_SM))
-        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(6.0)))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .text_color(theme.text)
-}
-
 pub(crate) fn review_draft_label<T: Styled + FluentBuilder>(element: T, theme: &Theme) -> T {
     element.px(px(Theme::SPACE_SM)).rounded(px(theme.ui_style.tokens.chip_radius.unwrap_or(6.0)))
         .bg(theme.warning.opacity(0.12)).text_color(theme.warning)
