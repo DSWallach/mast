@@ -552,13 +552,4 @@ impl Transcript {
 
     // ---- rendering ----
 
-    /// The working loader, INSIDE the conversation flow: appended under the
-    /// last row while the run is live (moved out of the shell's status strip
-    /// — user request), so it reads as part of the streaming reply and
-    /// scrolls away with it. The spinner drives this entity's frames, which
-    /// keeps the elapsed timer ticking through delta-quiet tool runs.
-    /// The failed-send retry (trailer affordance): re-kick every delivery
-    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
-    /// and restart the grace clock so the trailer returns to Sending/Queued
-    /// while the retry runs.
 }

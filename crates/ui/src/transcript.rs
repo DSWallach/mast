@@ -4038,6 +4038,11 @@ impl Transcript {
         });
     }
 
+    /// Reserve the reply's space below a locally-sent prompt — EVERY send,
+    /// not just the first (a steer or a post-turn send used to collapse the
+    /// previous reservation and drop the messages back down — user report).
+    /// [`Self::step_own_turn`] sizes the reservation and eases the prompt to
+    /// its top inset. Replacing a previous anchor starts a new glide.
     pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
@@ -5196,6 +5201,9 @@ impl Transcript {
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
+    /// Expand/collapse one long user bubble. Heights come from the text's
+    /// passive paint cache, never from transcript state, so this changes
+    /// render-local fold state only and does not rebuild or splice rows.
     fn toggle_user_fold(
         &mut self,
         row_id: SharedString,
@@ -5552,6 +5560,15 @@ impl Transcript {
     /// collapsing the bubble to min-content width (one character per line).
     /// A plain height clip preserves the original bubble width calculation and
     /// never feeds measured layout back into the virtualized list.
+    /// The working loader, INSIDE the conversation flow: appended under the
+    /// last row while the run is live (moved out of the shell's status strip
+    /// — user request), so it reads as part of the streaming reply and
+    /// scrolls away with it. The spinner drives this entity's frames, which
+    /// keeps the elapsed timer ticking through delta-quiet tool runs.
+    /// The failed-send retry (trailer affordance): re-kick every delivery
+    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
+    /// and restart the grace clock so the trailer returns to Sending/Queued
+    /// while the retry runs.
     fn retry_send(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.chat_id.clone() else {
             return;

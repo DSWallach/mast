@@ -111,9 +111,4 @@ impl Transcript {
         self.schedule_selection_scroll(cx);
     }
 
-    /// Reserve the reply's space below a locally-sent prompt — EVERY send,
-    /// not just the first (a steer or a post-turn send used to collapse the
-    /// previous reservation and drop the messages back down — user report).
-    /// [`Self::step_own_turn`] sizes the reservation and eases the prompt to
-    /// its top inset. Replacing a previous anchor starts a new glide.
 }

@@ -104,7 +104,4 @@ impl Transcript {
         self.blob_details.insert(blob_ref, BlobFetch::Loading(task));
     }
 
-    /// Expand/collapse one long user bubble. Heights come from the text's
-    /// passive paint cache, never from transcript state, so this changes
-    /// render-local fold state only and does not rebuild or splice rows.
 }
