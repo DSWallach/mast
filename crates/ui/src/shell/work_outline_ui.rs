@@ -1516,12 +1516,33 @@ impl Shell {
                 .into_any_element()
             }
         };
-        // Start Chat's PR mode has no prompt box: focus rests on this wrapper,
-        // so its Enter / Tab keys are handled here (the card's own handler
-        // only sees keys from inside it).
+        // The wrapper handles default confirmation actions when it owns focus.
+        // Start Chat's PR mode also handles Enter and Tab here.
         let card = div()
             .track_focus(&self.work_outline_modal_focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                let default_available = match this.work_outline_modal.as_ref() {
+                    Some(WorkOutlineModal::Confirm(dialog)) => Some(!dialog.destructive),
+                    Some(WorkOutlineModal::Drift(_)) => Some(true),
+                    Some(WorkOutlineModal::Archive(dialog)) => Some(dialog.policy().is_some()),
+                    _ => None,
+                };
+                if event.keystroke.key == "enter"
+                    && !event.is_held
+                    && !modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && this.work_outline_modal_focus.is_focused(window)
+                    && default_available.is_some()
+                {
+                    if default_available == Some(true) {
+                        this.resolve_work_outline_modal(true, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 this.start_chat_tab(event, window, cx)
             }))
             .child(card)
@@ -1832,6 +1853,112 @@ mod tests {
     }
 
     #[gpui::test]
+    fn enter_accepts_confirmation_once(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        shell.update(cx, |shell, cx| {
+            let mut request = confirm_request(decisions.clone());
+            request.destructive = false;
+            shell.open_work_outline_confirm(request, cx)
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(*decisions.borrow(), [true]);
+    }
+
+    #[gpui::test]
+    fn enter_does_not_accept_destructive_confirmation(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        shell.update(cx, |shell, cx| {
+            shell.open_work_outline_confirm(confirm_request(decisions.clone()), cx)
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(decisions.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn modified_enter_does_not_accept_confirmation(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        shell.update(cx, |shell, cx| {
+            let mut request = confirm_request(decisions.clone());
+            request.destructive = false;
+            shell.open_work_outline_confirm(request, cx)
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert!(decisions.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn enter_with_another_focus_does_not_accept_confirmation(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        shell.update(cx, |shell, cx| {
+            let mut request = confirm_request(decisions.clone());
+            request.destructive = false;
+            shell.open_work_outline_confirm(request, cx)
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        shell.update_in(cx, |shell, window, cx| {
+            window.focus(&shell.composer.focus_handle(cx), cx);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(decisions.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn enter_accepts_drift_confirmation(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = decisions.clone();
+        shell.update(cx, |shell, cx| {
+            shell.open_work_outline_drift_confirm(
+                WorkOutlineDriftRequest {
+                    title: "Move?".into(),
+                    confirm_label: "Move".into(),
+                    impact: DriftImpact {
+                        chat_ids: vec!["c1".into()],
+                        item_ids: vec![],
+                    },
+                    on_decision: Box::new(move |ok, _, _| sink.borrow_mut().push(ok)),
+                },
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(*decisions.borrow(), [true]);
+    }
+
+    #[gpui::test]
     fn a_newer_modal_supersedes_the_open_one_with_a_cancel(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (shell, cx) = test_shell(cx, dir.path());
@@ -1873,6 +2000,9 @@ mod tests {
             cx.debug_bounds("work-outline-archive-confirm").is_none(),
             "no confirm target without an explicit choice"
         );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(decisions.borrow().is_empty());
         let center = cx
             .debug_bounds("work-outline-move-descendants")
             .unwrap()
@@ -1893,6 +2023,36 @@ mod tests {
             [Some(DescendantArchivePolicy::MoveDescendants {
                 destination_parent_work_item_id: None
             })]
+        );
+    }
+
+    #[gpui::test]
+    fn enter_accepts_archive_without_descendants(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, dir.path());
+        let decisions: std::rc::Rc<std::cell::RefCell<Vec<Option<DescendantArchivePolicy>>>> =
+            Default::default();
+        let sink = decisions.clone();
+        shell.update(cx, |shell, cx| {
+            shell.open_work_outline_archive_confirm(
+                WorkOutlineArchiveRequest {
+                    item_title: "Item".into(),
+                    descendant_count: 0,
+                    parents: parents(),
+                    on_decision: Box::new(move |policy, _, _| sink.borrow_mut().push(policy)),
+                },
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            *decisions.borrow(),
+            [Some(DescendantArchivePolicy::ArchiveDescendants)]
         );
     }
 
