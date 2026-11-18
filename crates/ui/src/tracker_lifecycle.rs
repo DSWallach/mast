@@ -111,7 +111,7 @@ pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
     let stage = if pr.merged || (facts.item_completed && !(facts.linear_completed && pr.open)) {
         LifecycleStage::Done
     } else if pr.open {
-        if pr.approved && !pr.changes_requested && pr.checks_passing {
+        if !facts.linear_completed && pr.approved && !pr.changes_requested && pr.checks_passing {
             LifecycleStage::ReadyToMerge
         } else {
             LifecycleStage::PrReview
@@ -181,6 +181,10 @@ mod tests {
         facts.pull_request.changes_requested = false;
         facts.pull_request.checks_passing = false;
         assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::PrReview);
+        facts.pull_request.checks_passing = true;
+        assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::PrReview);
+        facts.linear_completed = false;
+        assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::ReadyToMerge);
         facts.pull_request.merged = true;
         facts.has_item = true;
         facts.linear_completed = false;

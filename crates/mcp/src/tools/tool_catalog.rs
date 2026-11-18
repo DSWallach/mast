@@ -219,7 +219,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::HEALTH,
-            description: "Read-only cleanup checks for your work item or a descendant. Results use cached PR and Linear facts; unknown facts are reported separately.",
+            description: "Read-only cleanup checks for your work item or a descendant. Results use cached Linear and PR facts; missing PR details are queued through the existing throttled cache and unknown facts are reported separately.",
             input_schema: json!({ "type": "object", "properties": {
                 "workItemId": { "type": "string", "description": "Your item or a descendant; defaults to your item." }
             }}),

@@ -152,6 +152,7 @@ pub mod methods {
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
     pub const WORK_OUTLINE_HEALTH: &str = "WorkOutlineHealth";
+    pub const WATCH_TRACKER_PR_CACHE: &str = "WatchTrackerPrCache";
     /// Completed Linear sync passes for one Space; current revision first.
     pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";
     /// Read-only workflow-pack export and import previews.

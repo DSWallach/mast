@@ -302,6 +302,7 @@ struct Inner {
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
     ticket_cache: Mutex<HashMap<TicketKey, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
+    pr_revision: tokio::sync::watch::Sender<u64>,
     pending_ticket: Mutex<HashSet<TicketKey>>,
     linear_ticket_revisions: Mutex<HashMap<Option<String>, u64>>,
     /// Keyed by cwd — a local, no-throttling-concern lookup (unlike
@@ -352,6 +353,22 @@ impl PrTicketCache {
             .map(|entry| entry.data.clone())
     }
 
+    /// Read a cached item PR, scheduling the existing throttled sweep on a
+    /// miss. Invalid URLs and a full pending queue are left unknown.
+    pub fn request_pr_url(&self, url: &str) -> Option<Option<PrStatus>> {
+        let canonical = crate::work_outline_pr_links::pull_request_from_url(url)?.url;
+        if let Some(result) = self.peek_pr_url(url) { return Some(result); }
+        if let Some(result) = self.peek_pr_url(&canonical) { return Some(result); }
+        let mut pending = lock(&self.inner.pending_pr);
+        if pending.len() < 512 { pending.insert(PrKey::Url(canonical)); }
+        None
+    }
+
+    /// Changes after a batch of PR cache results is stored by the existing sweep.
+    pub fn watch_pr_revision(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.pr_revision.subscribe()
+    }
+
     /// Read an already cached branch lookup without scheduling git or network
     /// work. `checkout` selects the same namespace used for checkout targets.
     pub fn peek_pr_branch(&self, cwd: &str, branch: &str, checkout: bool) -> Option<Option<PrStatus>> {
@@ -366,12 +383,14 @@ impl PrTicketCache {
 
     pub fn new() -> Self {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
+        let (pr_revision, _) = tokio::sync::watch::channel(0);
         Self {
             inner: Arc::new(Inner {
                 merged_wakes: Mutex::new(None),
                 pr_cache: Mutex::new(HashMap::new()),
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
+                pr_revision,
                 pending_ticket: Mutex::new(HashSet::new()),
                 linear_ticket_revisions: Mutex::new(HashMap::new()),
                 diff_stat_cache: Mutex::new(HashMap::new()),
@@ -744,6 +763,7 @@ impl PrTicketCache {
             }
             take
         };
+        let mut pr_results = Vec::with_capacity(pr_keys.len());
         for key in pr_keys {
             let inner = self.inner.clone();
             let key2 = key.clone();
@@ -766,14 +786,9 @@ impl PrTicketCache {
                     wakes.observe(url, status).await;
                 }
             }
-            lock(&inner.pr_cache).insert(
-                key,
-                Entry {
-                    data,
-                    fetched_at: Instant::now(),
-                },
-            );
+            pr_results.push((key, data));
         }
+        self.publish_pr_results(pr_results);
 
         let ticket_ids: Vec<TicketKey> = {
             let mut pending = lock(&self.inner.pending_ticket);
@@ -832,6 +847,14 @@ impl PrTicketCache {
             self.sweep_review_requested_list().await;
         }
         self.sweep_one_my_pr_detail().await;
+    }
+
+    fn publish_pr_results(&self, results: Vec<(PrKey, Option<PrStatus>)>) {
+        if results.is_empty() { return; }
+        let mut cache = lock(&self.inner.pr_cache);
+        for (key, data) in results { cache.insert(key, Entry { data, fetched_at: Instant::now() }); }
+        drop(cache);
+        self.inner.pr_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     /// Refresh the "my open PRs" list if stale. Own TTL/cadence, separate
@@ -1649,6 +1672,36 @@ mod tests {
         assert!(matches!(cache.peek_pr_branch("/repo", "feature", true), Some(None)));
         assert!(cache.peek_pr_branch("/repo", "feature", false).is_none());
         assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn requesting_an_item_pr_only_queues_valid_uncached_urls() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/1";
+        assert!(cache.request_pr_url("not a PR").is_none());
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+        assert!(cache.request_pr_url(url).is_none());
+        assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
+        lock(&cache.inner.pending_pr).clear();
+        assert!(cache.request_pr_url("--unexpected=github.com/example/repo/pull/1").is_none());
+        assert!(lock(&cache.inner.pending_pr).contains(&PrKey::Url(url.into())));
+        lock(&cache.inner.pending_pr).clear();
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry { data: None, fetched_at: Instant::now() });
+        assert!(matches!(cache.request_pr_url(url), Some(None)));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pr_cache_watch_emits_after_a_completed_batch() {
+        let cache = PrTicketCache::new();
+        let mut revisions = cache.watch_pr_revision();
+        let url = "https://github.com/example/repo/pull/1";
+        cache.publish_pr_results(vec![(PrKey::Url(url.into()), None)]);
+        revisions.changed().await.unwrap();
+        assert_eq!(*revisions.borrow_and_update(), 1);
+        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        cache.publish_pr_results(Vec::new());
+        assert!(!revisions.has_changed().unwrap());
     }
 
     #[test]

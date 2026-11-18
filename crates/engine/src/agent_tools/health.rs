@@ -113,14 +113,20 @@ impl AgentToolsService {
         let target_views: HashMap<_, _> = target_views.iter().map(|view| (view.chat_id.as_str(), view)).collect();
         let mut unknown_prs = false;
         let mut prs = Vec::new();
+        let mut item_prs = HashMap::<String, Vec<crate::pr_ticket_cache::PrStatus>>::new();
         for reference in snapshot.external_references.iter().filter(|reference|
             scoped_ids.contains(reference.work_item_id.as_str())
                 && reference.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER
                 && reference.reference_type == mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE) {
-            match cache.as_ref().and_then(|cache| cache.peek_pr_url(&reference.url)) {
-                Some(Some(detail)) => prs.push(HealthPullRequest { url: reference.url.clone(), item_id: Some(reference.work_item_id.clone()),
-                    linked_to_ticket: unknown_linear || detail.branch.as_deref().is_some_and(|branch| branch_issue(branch, &ticket_ids).is_some()),
-                    open: detail.state.eq_ignore_ascii_case("open"), merged: detail.state.eq_ignore_ascii_case("merged") }),
+            match cache.as_ref().and_then(|cache| cache.request_pr_url(&reference.url)) {
+                Some(Some(detail)) => {
+                    let mut item_detail = detail.clone();
+                    if item_detail.url.is_none() { item_detail.url = Some(reference.url.clone()); }
+                    item_prs.entry(reference.work_item_id.clone()).or_default().push(item_detail);
+                    prs.push(HealthPullRequest { url: reference.url.clone(), item_id: Some(reference.work_item_id.clone()),
+                        linked_to_ticket: unknown_linear || detail.branch.as_deref().is_some_and(|branch| branch_issue(branch, &ticket_ids).is_some()),
+                        open: detail.state.eq_ignore_ascii_case("open"), merged: detail.state.eq_ignore_ascii_case("merged") });
+                },
                 Some(None) => {},
                 None => unknown_prs = true,
             }
@@ -243,7 +249,7 @@ impl AgentToolsService {
             reconcile_health_chats(&mut items, &mut facts, &item_issues, &chat_issues, &linear_states);
         }
         let entries = check_health(&items, &facts, &prs);
-        Ok(json!({ "workItemId": root, "entries": entries,
+        Ok(json!({ "workItemId": root, "entries": entries, "itemPrs": item_prs,
             "unknown": { "pullRequests": unknown_prs, "defaultBranch": default_branch.is_none(),
                 "linearCompletion": unknown_linear } }))
     }

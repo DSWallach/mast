@@ -2694,6 +2694,9 @@ impl RpcService for EngineRpc {
                     .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
                 RpcReply::value(&result)
             }
+            methods::WATCH_TRACKER_PR_CACHE => {
+                Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
+            }
             methods::WATCH_LINEAR_SYNC => {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 if self.workspace.space(&p.space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {

@@ -1206,6 +1206,40 @@ fn tracker_lists_unassigned_descendants_without_workers(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn tracker_does_not_call_an_unloaded_pr_not_started(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"pending-pr", "spaceId":"s1", "workItemId":"w-api-auth", "provider":"github",
+            "referenceType":"pullRequest", "externalId":"example/project#57", "url":"https://github.com/example/project/pull/57"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+    assert!(has(vcx, "tracker-pr-pending"));
+}
+
+#[gpui::test]
+fn tracker_places_an_unassigned_item_with_a_pr_in_its_pr_stage(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"known-pr", "spaceId":"s1", "workItemId":"w-api-auth", "provider":"github",
+            "referenceType":"pullRequest", "externalId":"Example/Project#57", "url":"https://github.com/Example/Project/pull/57"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        let pr = serde_json::from_value(serde_json::json!({ "number": 57, "url":"https://github.com/example/project/pull/57",
+            "state":"OPEN", "isDraft":false, "reviewDecision":"APPROVED", "reviewers":[], "checks":"passing",
+            "mergeable":"mergeable", "hasReviewerRequested":false })).unwrap();
+        shell.set_tracker_item_prs_for_test("w-api-auth", vec![pr]);
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-w-api-auth"));
+    assert!(has(vcx, "tracker-stage-Ready to merge-true"));
+}
+
+#[gpui::test]
 fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 1);
