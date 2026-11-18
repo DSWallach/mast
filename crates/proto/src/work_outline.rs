@@ -2361,6 +2361,7 @@ mod tests {
                     "state": "danglingWorkItem"
                 }],
                 "unassociatedChatIds": ["chat-2"],
+                "hiddenRunChatIds": ["chat-2"],
                 "externalReferences": [{
                     "id": "ref-1",
                     "spaceId": "space-1",

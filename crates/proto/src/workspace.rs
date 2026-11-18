@@ -210,12 +210,14 @@ mod tests {
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
                     "pr-review-launch-v1",
+                    "scheduled-task-work-item-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",
                     "linear-v1",
                     "pr-review-sync-v1",
                     "artifacts-v1",
-                    "side-chat-v1"
+                    "side-chat-v1",
+                    "chat-handoff-v1"
                 ],
             })
         );
