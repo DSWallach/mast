@@ -102,13 +102,17 @@ impl AppState {
     /// Make `chat_id` the personal assistant (replacing any other). The row
     /// moves at once; the reply is the truth.
     pub(crate) fn set_personal_assistant(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) {
-            self.personal_assistant.assistant = Some(PersonalAssistant::for_chat(
-                chat,
-                chrono::Utc::now().timestamp_millis(),
-            ));
-            cx.notify();
+        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
+            return;
+        };
+        if chat.is_background_task_run() {
+            return;
         }
+        self.personal_assistant.assistant = Some(PersonalAssistant::for_chat(
+            chat,
+            chrono::Utc::now().timestamp_millis(),
+        ));
+        cx.notify();
         self.call_personal_assistant(
             methods::SET_PERSONAL_ASSISTANT,
             serde_json::json!({ "chatId": chat_id }),

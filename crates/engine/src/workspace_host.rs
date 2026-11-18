@@ -239,11 +239,10 @@ pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
 }
 
-#[derive(Default)]
-struct NewChatMetadata {
-    parent_chat_id: Option<String>,
-    scheduled: Option<mast_proto::ScheduledChat>,
-    archived: bool,
+enum ChatOrigin {
+    Parent(String),
+    Scheduled(mast_proto::ScheduledChat),
+    ArchivedExternal(mast_proto::ScheduledChat),
 }
 
 impl WorkspaceHost {
@@ -1829,9 +1828,33 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_row(
-            chat_id, space_id, device_id, config, cwd,
-            NewChatMetadata { parent_chat_id, ..Default::default() },
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            parent_chat_id.map(ChatOrigin::Parent),
+        )
+    }
+
+    /// Publish scheduled provenance with the chat so a background run is
+    /// hidden even before its work-item assignment arrives.
+    pub(crate) fn create_scheduled_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        config: ChatConfig,
+        cwd: String,
+        task: mast_proto::ScheduledChat,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            space_id,
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::Scheduled(task)),
         )
     }
 
@@ -1841,25 +1864,42 @@ impl WorkspaceHost {
         space_id: &str,
         config: ChatConfig,
         cwd: String,
-        scheduled: Option<mast_proto::ScheduledChat>,
+        task: mast_proto::ScheduledChat,
     ) -> Result<(), EngineError> {
-        self.create_chat_row(
-            chat_id, Some(space_id), Some(self.device_id()), Some(config), Some(cwd),
-            NewChatMetadata { scheduled, archived: true, ..Default::default() },
+        self.create_chat_with_origin(
+            chat_id,
+            Some(space_id),
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::ArchivedExternal(task)),
         )
     }
 
-    fn create_chat_row(
+    fn create_chat_with_origin(
         &self,
         chat_id: &str,
         space_id: Option<&str>,
         device_id: Option<&str>,
         config: Option<ChatConfig>,
         cwd: Option<String>,
-        metadata: NewChatMetadata,
+        origin: Option<ChatOrigin>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
-            return Ok(()); // idempotent: optimistic client retries never duplicate
+            // Older launchers could stop after creating the chat but before
+            // recording its provenance. Complete that step on recovery.
+            if let Some(ChatOrigin::Scheduled(task)) = &origin {
+                self.mutate(|doc| {
+                    if doc
+                        .chat(chat_id)?
+                        .is_some_and(|chat| chat.scheduled_task_info.is_none())
+                    {
+                        doc.set_chat_scheduled_task_info(chat_id, task)?;
+                    }
+                    Ok::<(), mast_doc::DocError>(())
+                })?;
+            }
+            return Ok(());
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -1877,12 +1917,18 @@ impl WorkspaceHost {
                 ));
             }
         };
+        let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
+        let (parent_chat_id, scheduled_task_info) = match origin {
+            Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
+            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
+            _ => (None, None),
+        };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
-                archived: metadata.archived,
+                archived,
                 cwd: Some(cwd.unwrap_or_else(|| {
                     space
                         .as_ref()
@@ -1904,11 +1950,13 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 actual_model: None,
-                scheduled_task: metadata.scheduled.as_ref().map(|task| task.task_name.clone()),
-                scheduled_task_info: metadata.scheduled,
+                scheduled_task: scheduled_task_info
+                    .as_ref()
+                    .map(|task| task.task_name.clone()),
+                scheduled_task_info,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: metadata.parent_chat_id.filter(|p| !p.trim().is_empty()),
+                parent_chat_id,
                 side_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
@@ -3591,6 +3639,52 @@ mod tests {
         host.create_chat("c1", None, Some("test-device"), None, None)
             .unwrap();
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn scheduled_chat_creation_recovers_missing_metadata_once() {
+        let (dir, host) = linkable_test_host();
+        let original = host.chat("c1").unwrap().unwrap();
+        assert!(original.scheduled_task_info.is_none());
+        let config = mast_proto::ChatConfig {
+            harness: mast_proto::HarnessId::Mock,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            approval_rules: false,
+        };
+        let task = mast_proto::ScheduledChat {
+            task_id: "daily".into(),
+            task_name: "Daily".into(),
+            run_id: "occurrence".into(),
+            output: mast_proto::ScheduledTaskOutput::Background,
+            ..Default::default()
+        };
+        let create = |task| {
+            host.create_scheduled_chat(
+                "c1",
+                None,
+                config.clone(),
+                dir.path().to_string_lossy().into_owned(),
+                task,
+            )
+            .unwrap();
+        };
+
+        create(task.clone());
+        let recovered = host.chat("c1").unwrap().unwrap();
+        assert_eq!(recovered.created_at, original.created_at);
+        assert_eq!(recovered.scheduled_task.as_deref(), Some("Daily"));
+        assert_eq!(recovered.scheduled_task_info.as_ref(), Some(&task));
+        let row = host.registry_row(mast_doc::KIND_CHATS, "c1").unwrap();
+
+        create(mast_proto::ScheduledChat {
+            task_name: "Changed task name".into(),
+            ..task
+        });
+        assert_eq!(host.registry_row(mast_doc::KIND_CHATS, "c1"), Some(row));
     }
 
     #[tokio::test]

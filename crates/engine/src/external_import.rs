@@ -293,9 +293,6 @@ impl ExternalSessionImporter {
         let scheduled = scheduled_metadata(
             &parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy(),
         );
-        let archived = desktop_runs.is_some_and(|desktop| {
-            scheduled.as_ref().is_some_and(|info| desktop.should_archive(&self.device_id, info))
-        });
         let config = ChatConfig {
             approval_rules: false,
             harness: HarnessId::ClaudeCode,
@@ -305,9 +302,11 @@ impl ExternalSessionImporter {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: false,
         };
-        if archived {
+        if let Some(task) = scheduled.as_ref().filter(|info| {
+            desktop_runs.is_some_and(|desktop| desktop.should_archive(&self.device_id, info))
+        }) {
             self.workspace.create_archived_external_chat(
-                chat_id, &space_id, config, cwd.clone(), scheduled,
+                chat_id, &space_id, config, cwd.clone(), task.clone(),
             )?;
         } else {
             self.workspace.create_chat(

@@ -139,7 +139,7 @@ impl ScheduledTasks {
         desktop.project_identities(&mut chats, workspace.device_id(), |id| {
             self.0.missing_sources.join(id).is_file()
         });
-        let latest = latest_task_chat_ids_including_retired(&chats);
+        let latest = latest_task_chat_ids_for_cleanup(&chats);
         let pins = workspace.sidebar_preferences_snapshot().pinned_session_ids;
         let assistant = self.0.sessions.agent_tokens().personal_assistant().get();
         let covers = assistant

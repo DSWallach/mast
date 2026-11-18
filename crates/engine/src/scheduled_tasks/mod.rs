@@ -68,9 +68,25 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
+        self.request_from_client(request, true).await
+    }
+
+    pub(crate) async fn request_from_client(
+        &self,
+        request: ScheduledTasksRequest,
+        output_provided: bool,
+    ) -> Result<ScheduledTasksSnapshot, EngineError> {
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
-        let input = serde_json::to_string(&request).map_err(fail)?;
+        let mut input = serde_json::to_string(&request).map_err(fail)?;
+        // Preserve legacy operation inputs. Explicit Interactive on an
+        // updated client can change a mode that a legacy save would preserve.
+        if output_provided
+            && matches!(&request, ScheduledTasksRequest::Save { draft, .. }
+                if draft.output == ScheduledTaskOutput::Interactive)
+        {
+            input.push_str("\noutput=interactive");
+        }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
             ..Default::default()
@@ -124,15 +140,11 @@ impl ScheduledTasks {
             ScheduledTasksRequest::Save {
                 id,
                 expected_revision,
-                draft,
+                mut draft,
                 operation_id,
             } => {
                 if id.is_empty() || id.len() > 128 {
                     return Err(fail("Task ID must be 1–128 bytes"));
-                }
-                self.validate(&draft)?;
-                if draft.enabled {
-                    self.validate_model(&draft).await?;
                 }
                 let old = self.0.store.tasks()?.into_iter().find(|t| t.id == id);
                 if old
@@ -144,7 +156,14 @@ impl ScheduledTasks {
                     ));
                 }
 
+                // An older client omits output on edits and pause/enable.
+                // Keep the stored mode until a client explicitly changes it.
+                if !output_provided && let Some(task) = &old {
+                    draft.output = task.draft.output;
+                }
+                self.validate(&draft)?;
                 if draft.enabled {
+                    self.validate_model(&draft).await?;
                     if let Some(source) = old.as_ref().and_then(|t| t.import_source.as_deref()) {
                         if !draft.cutover_confirmed {
                             return Err(fail(
@@ -345,6 +364,9 @@ impl ScheduledTasks {
             .ok_or_else(|| fail("Task not found on this device"))
     }
     fn validate(&self, d: &ScheduledTaskDraft) -> Result<(), EngineError> {
+        if d.output == ScheduledTaskOutput::Background && d.work_item_id.is_none() {
+            return Err(fail("Background tasks require a work item"));
+        }
         if d.name.trim().is_empty()
             || d.name.chars().count() > 120
             || d.prompt.trim().is_empty()

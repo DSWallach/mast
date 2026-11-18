@@ -15,11 +15,19 @@ Choose an **Agent** from the same enabled, installed agents offered in your
 sessions, then choose its **Model**, **Thinking level**, and **Context window**.
 Available thinking and context choices depend on the model.
 Changing models preserves compatible choices and clears unsupported ones.
-Choose a **Work item** within the selected Space to attach each run to that item
-and deliver its inherited instructions. Changing the Space clears the work item.
-The field appears only when the execution device supports task-to-item
-attachment; update an older execution device to use it. A run whose agent cannot
-receive the item's instructions fails before it creates a session.
+Choose an **Output** mode.
+
+- **Background** is the default for new tasks. Choose a **Work item** in the
+  selected Space. Open the transcript from **Run history** in Scheduled tasks
+  or from the work item's hidden runs. Background runs stay out of the sidebar
+  and Overview, and cannot act as the personal assistant.
+- **Interactive** shows the latest run in the sidebar and Overview. You can
+  optionally attach runs to a work item. Existing tasks start in this mode.
+
+Attached runs receive the work item's inherited instructions. Changing the Space
+clears the work item. A run whose agent cannot receive the item's instructions
+fails before it creates a session. Older execution devices offer Interactive
+output. Update the execution device to use Background.
 Each run captures its configuration, so editing a task changes future editions.
 You can change the model or switch agents, including Claude Code to Codex, after
 a task has run. Past editions retain their original agent and model.
@@ -54,10 +62,10 @@ session. **Delete** removes the schedule while retaining its run history.
 
 ## Read editions
 
-The sidebar, Overview, and Work Outline show only the latest unarchived run per
-task on each device. An older run attached to a work item stays attached to it
-and is hidden from the item's chat list and count.
-In Overview list mode, each task has a row with its name, schedule, next run,
+The sidebar and Overview show the latest unarchived run per task on each device
+when it is Interactive. Background and older runs stay attached to their work
+item and appear through its hidden-run control.
+In Overview list mode, each visible task has a row with its name, schedule, next run,
 and last outcome. Click the row to open the latest run or
 choose **History** to see past runs. Reading or replying to an older edition
 does not promote it. The task manager lists

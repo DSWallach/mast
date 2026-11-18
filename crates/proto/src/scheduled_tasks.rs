@@ -21,6 +21,31 @@ pub struct ScheduledChat {
     /// views hide it, the Scheduled tasks page still lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
+    /// Captured from the task's run snapshot when the chat is created.
+    #[serde(default, skip_serializing_if = "ScheduledTaskOutput::is_interactive")]
+    pub output: ScheduledTaskOutput,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduledTaskOutput {
+    #[default]
+    Interactive,
+    Background,
+}
+
+impl ScheduledTaskOutput {
+    fn is_interactive(&self) -> bool {
+        *self == Self::Interactive
+    }
+}
+
+impl crate::Chat {
+    pub fn is_background_task_run(&self) -> bool {
+        self.scheduled_task_info
+            .as_ref()
+            .is_some_and(|task| task.output == ScheduledTaskOutput::Background)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +79,9 @@ pub struct ScheduledTaskDraft {
     /// Work Outline item each run is attached to; runs inherit its instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_id: Option<String>,
+    // Keep the legacy wire shape for interactive tasks and their replay keys.
+    #[serde(default, skip_serializing_if = "ScheduledTaskOutput::is_interactive")]
+    pub output: ScheduledTaskOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,21 +247,26 @@ pub enum ScheduledTasksRequest {
 }
 
 /// Default sidebar/overview projection; activity on an older run never promotes it.
-/// Retired runs have no latest run at all.
+/// Retired tasks and latest runs with background output have no default row.
 pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
-    latest_task_chat_ids_with_retired(chats, false)
+    latest_task_chats(chats, false)
+        .filter(|chat| !chat.is_background_task_run())
+        .map(|chat| chat.id.as_str())
+        .collect()
 }
 
-/// The same grouping and ordering for cleanup, where a retired task also has
-/// a newest edition unless a separate rule makes that edition eligible.
-pub fn latest_task_chat_ids_including_retired(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
-    latest_task_chat_ids_with_retired(chats, true)
+/// The same grouping and ordering for cleanup, where the newest edition is
+/// protected regardless of output mode unless a separate rule makes it eligible.
+pub fn latest_task_chat_ids_for_cleanup(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
+    latest_task_chats(chats, true)
+        .map(|chat| chat.id.as_str())
+        .collect()
 }
 
-fn latest_task_chat_ids_with_retired(
+fn latest_task_chats(
     chats: &[crate::Chat],
     include_retired: bool,
-) -> std::collections::HashSet<&str> {
+) -> impl Iterator<Item = &crate::Chat> {
     let mut latest = std::collections::HashMap::new();
     for chat in chats.iter().filter(|c| !c.archived) {
         let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| include_retired || !t.retired) else {
@@ -245,11 +278,11 @@ fn latest_task_chat_ids_with_retired(
             *previous = chat;
         }
     }
-    latest.into_values().map(|c| c.id.as_str()).collect()
+    latest.into_values()
 }
 
-/// Scheduled runs that no default view lists as a loose chat: every run that
-/// is not its task's latest, and every retired run. Run history still reaches them.
+/// Runs omitted from default views, including background and retired runs.
+/// Run history still reaches them.
 pub fn hidden_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
     let latest = latest_task_chat_ids(chats);
     chats
@@ -335,6 +368,68 @@ mod tests {
                 .retired
         );
     }
+    #[test]
+    fn draft_output_defaults_to_interactive_and_uses_the_output_key() {
+        let legacy = serde_json::json!({
+            "name": "Briefing",
+            "prompt": "Summarize changes",
+            "cwd": "/work",
+            "config": {"harness": "codex", "sandbox": "workspace-write"},
+            "schedule": {"type": "once", "at": 10},
+            "graceMinutes": 5,
+            "workItemId": "item",
+        });
+        let mut draft: ScheduledTaskDraft = serde_json::from_value(legacy).unwrap();
+        assert_eq!(draft.output, ScheduledTaskOutput::Interactive);
+        let interactive = serde_json::to_value(&draft).unwrap();
+        assert!(interactive.get("output").is_none());
+        assert_eq!(
+            serde_json::from_value::<ScheduledTaskDraft>(interactive).unwrap(),
+            draft
+        );
+
+        draft.output = ScheduledTaskOutput::Background;
+        let background = serde_json::to_value(&draft).unwrap();
+        assert_eq!(background["output"], "background");
+        assert_eq!(
+            serde_json::from_value::<ScheduledTaskDraft>(background).unwrap(),
+            draft
+        );
+    }
+
+    #[test]
+    fn background_runs_are_hidden_without_reviving_superseded_runs() {
+        let mut background_new = chat("background-new", "d", "one", 30);
+        let mut background_old = chat("background-old", "d", "two", 10);
+        for run in [&mut background_new, &mut background_old] {
+            run.scheduled_task_info.as_mut().unwrap().output = ScheduledTaskOutput::Background;
+            let info = serde_json::to_value(run.scheduled_task_info.as_ref().unwrap()).unwrap();
+            assert_eq!(info["output"], "background");
+        }
+        let chats = [
+            chat("interactive-old", "d", "one", 20),
+            background_new,
+            background_old,
+            chat("interactive-new", "d", "two", 20),
+        ];
+        assert_eq!(
+            latest_task_chat_ids(&chats),
+            std::collections::HashSet::from(["interactive-new"])
+        );
+        assert_eq!(
+            latest_task_chat_ids_for_cleanup(&chats),
+            std::collections::HashSet::from(["background-new", "interactive-new"])
+        );
+        assert_eq!(
+            hidden_task_chat_ids(&chats),
+            std::collections::HashSet::from([
+                "interactive-old",
+                "background-new",
+                "background-old"
+            ])
+        );
+    }
+
     #[test]
     fn stable_ties() {
         let chats = vec![chat("a", "d", "t", 10), chat("b", "d", "t", 10)];
