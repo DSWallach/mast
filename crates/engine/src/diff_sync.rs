@@ -180,6 +180,8 @@ struct CheckoutEntry {
     handled_kicks: AtomicU64,
     /// Set once the fs watchers are attached (or setup was abandoned).
     watch_attached: AtomicBool,
+    /// Debug-only measurement of the post-attachment kick.
+    attach_timing: Mutex<Option<(std::time::Instant, u64)>>,
     /// Keeps the recursive fs watchers alive; dropped on entry close. Filled
     /// asynchronously — watcher setup (budget walk + FSEvents registration) can
     /// block for seconds, so [`add_entry`] does it off the runtime and attaches
@@ -1146,6 +1148,7 @@ fn watch_setup_gate() -> &'static Arc<tokio::sync::Semaphore> {
 
 /// Runs blocking `work` on the blocking pool once `gate` has a free permit, so
 /// queued setups wait as cheap async tasks rather than parked threads.
+#[cfg(test)]
 async fn run_gated_blocking<F>(gate: Arc<tokio::sync::Semaphore>, work: F)
 where
     F: FnOnce() + Send + 'static,
@@ -1175,6 +1178,16 @@ fn exceeds_watch_budget(root: &Path) -> bool {
     }
     let exceeds = walk_exceeds_watch_budget(root);
     lock(budget_cache()).insert(root.to_path_buf(), exceeds);
+    exceeds
+}
+
+fn timed_watch_budget(identity: &CheckoutIdentity, path: &Path) -> bool {
+    let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    let exceeds = exceeds_watch_budget(path);
+    if let Some(start) = start {
+        tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %path.display(), stage = "budget", elapsed_us = start.elapsed().as_micros() as u64, skipped = exceeds);
+    }
     exceeds
 }
 
@@ -1239,7 +1252,7 @@ fn walk_exceeds_watch_budget(root: &Path) -> bool {
 /// watch doesn't already cover it.
 fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
     let mut targets = Vec::new();
-    let root_fits = !exceeds_watch_budget(&identity.root);
+    let root_fits = !timed_watch_budget(identity, &identity.root);
     if root_fits {
         targets.push(identity.root.clone());
     } else {
@@ -1247,7 +1260,7 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
             "diff-sync: tree too large to watch live; watching the git dir, edits ride the repair tick");
     }
     let git_covered = root_fits && identity.git_dir.starts_with(&identity.root);
-    if !git_covered && !exceeds_watch_budget(&identity.git_dir) {
+    if !git_covered && !timed_watch_budget(identity, &identity.git_dir) {
         targets.push(identity.git_dir.clone());
     }
     targets
@@ -1270,6 +1283,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         kick_tx: kick_tx.clone(),
         handled_kicks: AtomicU64::new(0),
         watch_attached: AtomicBool::new(false),
+        attach_timing: Mutex::new(None),
         watchers: Mutex::new(Vec::new()),
         probe: Mutex::new(None),
         repair_kick: AtomicBool::new(false),
@@ -1323,7 +1337,15 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
     // At most MAX_CONCURRENT_WATCH_SETUPS run at once (startup builds one per
     // checkout).
     let weak = Arc::downgrade(&entry);
-    tokio::spawn(run_gated_blocking(watch_setup_gate().clone(), move || {
+    let enqueued = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    let checkout = enqueued.map(|_| entry.identity.root.clone());
+    tokio::spawn(async move {
+        let Ok(_permit) = watch_setup_gate().clone().acquire_owned().await else { return };
+        if let (Some(start), Some(checkout)) = (enqueued, checkout) {
+            tracing::debug!(target: "diff_sync::attach", checkout = %checkout.display(), stage = "permit", elapsed_us = start.elapsed().as_micros() as u64);
+        }
+        let _ = tokio::task::spawn_blocking(move || {
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
@@ -1331,14 +1353,24 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         *lock(&entry.watchers) = watchers;
         entry.fully_watched.store(fully_watched, Ordering::SeqCst);
         entry.watch_attached.store(true, Ordering::SeqCst);
+        // Hold the timing lock through the send so the entry task cannot finish
+        // the kick before its measurement is recorded.
+        let mut timing = enqueued.map(|_| lock(&entry.attach_timing));
+        let attach_time = enqueued.map(|_| std::time::Instant::now());
         if !entry.initial_kicked.swap(true, Ordering::SeqCst) {
             // First sync, probed after attach: nothing to close.
             kick_tx.send();
         } else if !entry.probed_after_attach.load(Ordering::SeqCst) {
             entry.repair_kick.store(true, Ordering::Relaxed);
             kick_tx.send();
+        } else {
+            return;
         }
-    }));
+        if let (Some(timing), Some(start)) = (timing.as_mut(), attach_time) {
+            **timing = Some((start, kick_tx.sent.load(Ordering::SeqCst)));
+        }
+        }).await;
+    });
 }
 
 /// Recursive watchers on the worktree root (budget permitting) and the git
@@ -1351,12 +1383,15 @@ fn build_watchers(
 ) -> (Vec<crate::watch_budget::Watcher>, bool) {
     let mut watchers = Vec::new();
     let targets = watch_targets(identity);
+    let target_count = targets.len();
     // Fully watched: the working tree root itself has a live watcher.
     let mut root_watched = false;
     for target in targets {
         let is_root = target == identity.root;
         let tx = kick_tx.clone();
         let git_dir = identity.git_dir.clone();
+        let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+            .then(std::time::Instant::now);
         let watcher =
             crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
                 if event.as_ref().is_ok_and(|event| {
@@ -1365,9 +1400,18 @@ fn build_watchers(
                     tx.send();
                 }
             });
+        if let Some(start) = start {
+            tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %target.display(), stage = "watcher_new", elapsed_us = start.elapsed().as_micros() as u64, success = watcher.is_some());
+        }
         match watcher {
             Some(mut watcher) => {
-                match watcher.watch(&target, notify::RecursiveMode::Recursive) {
+                let start = tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG)
+                    .then(std::time::Instant::now);
+                let result = watcher.watch(&target, notify::RecursiveMode::Recursive);
+                if let Some(start) = start {
+                    tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), path = %target.display(), stage = "watch", elapsed_us = start.elapsed().as_micros() as u64, success = result.is_ok());
+                }
+                match result {
                     Ok(()) => {
                         root_watched |= is_root;
                         watchers.push(watcher)
@@ -1380,6 +1424,7 @@ fn build_watchers(
             None => tracing::debug!("diff-sync: watcher unavailable; using repair polling"),
         }
     }
+    tracing::debug!(target: "diff_sync::attach", checkout = %identity.root.display(), stage = "coverage", successful = watchers.len(), failed = target_count - watchers.len(), root_watched);
     (watchers, root_watched)
 }
 
@@ -1471,6 +1516,14 @@ async fn entry_task(
             _ = sync_entry(&inner, &entry) => {}
         }
         entry.handled_kicks.fetch_max(seen, Ordering::SeqCst);
+        if tracing::enabled!(target: "diff_sync::attach", tracing::Level::DEBUG) {
+            let mut timing = lock(&entry.attach_timing);
+            if timing.as_ref().is_some_and(|(_, kick)| seen >= *kick)
+                && let Some((start, _)) = timing.take()
+            {
+                tracing::debug!(target: "diff_sync::attach", checkout = %entry.identity.root.display(), stage = "handled", elapsed_us = start.elapsed().as_micros() as u64);
+            }
+        }
     }
 }
 
