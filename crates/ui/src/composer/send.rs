@@ -38,6 +38,11 @@ struct PreparedSend {
 }
 
 impl Composer {
+    /// Queue a Run doc command with an optimistic echo — or, with the agent
+    /// busy, park the message on the chat's pending queue instead. New chats
+    /// thread the picked config in: worktree creation (when the isolated toggle
+    /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
+    /// reasoning / options on the Run request itself (§1.7).
     pub(super) fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
         let Some(send) = self.prepare_send(text, queue, cx) else {
             return;

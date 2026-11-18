@@ -1385,11 +1385,6 @@ impl Composer {
         }
     }
 
-    /// Queue a Run doc command with an optimistic echo — or, with the agent
-    /// busy, park the message on the chat's pending queue instead. New chats
-    /// thread the picked config in: worktree creation (when the isolated toggle
-    /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
-    /// reasoning / options on the Run request itself (§1.7).
     fn restore_failed_text(&mut self, key: &str, text: &str, error: &str, cx: &mut Context<Self>) {
         self.failure = Some(error.to_owned().into());
         self.failure_key = Some(key.to_owned());
