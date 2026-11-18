@@ -162,18 +162,12 @@ impl super::FilesSurface {
     ) -> gpui::Div {
         crate::components::code_ref::selection_action_bar(theme, top, left)
             .child(
-                div()
-                    .id("add-selection-to-chat")
-                    .cursor_pointer()
-                    .child("Add to chat")
+                crate::components::button("add-selection-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.add_selected_code_to_chat(cx))),
             )
             .child(
-                div()
-                    .id("copy-selection-ref")
-                    .cursor_pointer()
-                    .child("Copy ref")
+                crate::components::button("copy-selection-ref", "Copy ref", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.copy_selected_reference(cx))),
             )
