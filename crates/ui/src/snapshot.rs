@@ -302,6 +302,7 @@ pub fn space_settings_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Re
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
         state.spaces = vec![serde_json::from_value(serde_json::json!({"id":"s1","deviceId":"local","path":"/fixture/project","name":"Project","createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
+        state.linear.accounts = Some(Vec::new());
         state.set_work_outline_for_test(snapshot.clone());
         state
     });
