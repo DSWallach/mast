@@ -671,7 +671,7 @@ impl Tools {
                 let (status, _) = status_of(session.as_ref());
                 let recent = chrono::Utc::now() - chat.last_message_at.unwrap_or(chat.created_at)
                     <= chrono::Duration::days(3);
-                if !(status == "working" || status == "awaitingInput" || (status == "idle" && recent)) {
+                if !(status.starts_with("working") || status == "awaitingInput" || (status == "idle" && recent)) {
                     return None;
                 }
                 let mode = match status.as_str() {

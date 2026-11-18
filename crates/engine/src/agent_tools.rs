@@ -70,10 +70,12 @@ fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> 
     let input = input.trim();
     let identifier = if let Some(rest) = input.strip_prefix("https://linear.app/") {
         let parts: Vec<_> = rest.split('/').collect();
-        if parts.len() < 3 || parts[1] != "issue" {
-            return Err(AgentToolError::invalid("invalid Linear issue URL"));
-        }
-        parts[2].split(['?', '#']).next().unwrap_or("")
+        let identifier = match parts.as_slice() {
+            ["issue", identifier, ..] => *identifier,
+            [workspace, "issue", identifier, ..] if !workspace.is_empty() => *identifier,
+            _ => return Err(AgentToolError::invalid("invalid Linear issue URL")),
+        };
+        identifier.split(['?', '#']).next().unwrap_or("")
     } else {
         input
     };
@@ -3024,6 +3026,14 @@ fn child_run_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_outline_linear_issue_urls_and_identifiers_parse() {
+        for value in ["ENG-123", "https://linear.app/issue/ENG-123", "https://linear.app/acme/issue/ENG-123/title"] {
+            assert_eq!(parse_linear_issue(value).unwrap().external_id, "ENG-123");
+        }
+        assert!(parse_linear_issue("https://example.com/issue/ENG-123").is_err());
+    }
 
     #[test]
     fn identifiers_require_unique_prefixes() {
