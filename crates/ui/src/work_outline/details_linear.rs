@@ -105,7 +105,7 @@ impl WorkItemDetails {
                         let mut settings = settings.clone(); settings.archive_workers_after_days = Some(value); this.save_worker_automation(settings, WorkerAutomationField::ArchiveWorkers, cx);
                     }})));
             }
-            archive = archive.child(crate::components::outline_execution_line(format!("After {days} days").into(), 11.0, theme.text, theme));
+            archive = archive.child(crate::components::outline_execution_line(format!("After {days} days"), 11.0, theme.text, theme));
         }
         section.child(archive).child(crate::components::outline_execution_line("Archive eligible idle worker chats after the selected delay.".into(), 11.0, theme.text_faint, theme)).into_any_element()
     }
