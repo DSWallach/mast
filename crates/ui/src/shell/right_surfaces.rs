@@ -1359,6 +1359,10 @@ impl Shell {
         cx.notify();
     }
 
+    /// Right pane — the surface host (t3code RightPanelTabs): hidden by
+    /// default, drag-resizable. Content is the ACTIVE surface — the Diff
+    /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
+    /// an embedded terminal, or the surface picker when no tabs exist.
     pub(super) fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("side_panel");
