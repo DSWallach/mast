@@ -1603,6 +1603,7 @@ struct ChatRowArgs {
 struct ChatRowView {
     shell: gpui::WeakEntity<Shell>,
     args: ChatRowArgs,
+    hover_animation_started: Option<std::time::Instant>,
     _observation: Subscription,
 }
 
@@ -1612,12 +1613,13 @@ impl Render for ChatRowView {
             return div().into_any_element();
         };
         let args = self.args.clone();
-        let row_id = format!("chat-{}", args.id);
-        let hover_key = format!("{row_id}-hover");
-        let hover = motion::hover_t(&hover_key);
-        let hovered = shell.read(cx).chat_status_hover.as_deref() == Some(row_id.as_str());
-        if (hovered && hover < 1.0) || (!hovered && hover > 0.0) {
+        if self.hover_animation_started.is_some_and(|started| {
+            !motion::reduced_motion(cx)
+                && started.elapsed() < motion::HOVER_FADE.total().mul_f32(motion::speed_scale())
+        }) {
             window.request_animation_frame();
+        } else {
+            self.hover_animation_started = None;
         }
         // A view root is laid out against its bounds but sizes to its content, so
         // restore the full-width stretch the row had as a direct flex child.
@@ -1668,6 +1670,7 @@ impl Shell {
                 let view = cx.new(|cx| ChatRowView {
                     shell: shell.downgrade(),
                     args,
+                    hover_animation_started: None,
                     _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
                 });
                 self.sidebar_row_views.insert(id, view.clone());
@@ -1687,7 +1690,10 @@ impl Shell {
             } else if self.chat_status_hover.as_deref() == Some(row_id) {
                 self.chat_status_hover = None;
             }
-            row.update(cx, |_, cx| cx.notify());
+            row.update(cx, |row, cx| {
+                row.hover_animation_started = Some(std::time::Instant::now());
+                cx.notify();
+            });
         } else {
             motion::hover_listener(fade_key.to_owned())(&hovered, window, cx);
             if hovered {
