@@ -3586,6 +3586,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_chat_creation_recovers_missing_metadata_once() {
+        let (dir, host) = linkable_test_host();
+        let original = host.chat("c1").unwrap().unwrap();
+        assert!(original.scheduled_task_info.is_none());
+        let config = mast_proto::ChatConfig {
+            harness: mast_proto::HarnessId::Mock,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            approval_rules: false,
+        };
+        let task = mast_proto::ScheduledChat {
+            task_id: "daily".into(),
+            task_name: "Daily".into(),
+            run_id: "occurrence".into(),
+            output: mast_proto::ScheduledTaskOutput::Background,
+            ..Default::default()
+        };
+        let create = |task| {
+            host.create_scheduled_chat(
+                "c1",
+                None,
+                config.clone(),
+                dir.path().to_string_lossy().into_owned(),
+                task,
+            )
+            .unwrap();
+        };
+
+        create(task.clone());
+        let recovered = host.chat("c1").unwrap().unwrap();
+        assert_eq!(recovered.created_at, original.created_at);
+        assert_eq!(recovered.scheduled_task.as_deref(), Some("Daily"));
+        assert_eq!(recovered.scheduled_task_info.as_ref(), Some(&task));
+        let row = host.registry_row(mast_doc::KIND_CHATS, "c1").unwrap();
+
+        create(mast_proto::ScheduledChat {
+            task_name: "Changed task name".into(),
+            ..task
+        });
+        assert_eq!(host.registry_row(mast_doc::KIND_CHATS, "c1"), Some(row));
+    }
+
+    #[tokio::test]
     async fn branch_review_marks_are_inherited_once() {
         let (_dir, host) = linkable_test_host();
         let mut branch = mast_proto::DiffReviewState {
