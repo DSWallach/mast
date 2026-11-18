@@ -24,7 +24,9 @@ pub(crate) struct LifecycleFacts {
     pub has_chat: bool,
     pub branch_review: bool,
     pub ready_request: bool,
+    pub has_item: bool,
     pub item_completed: bool,
+    pub has_linear_ticket: bool,
     pub linear_completed: bool,
     pub pull_request: PullRequestFacts,
     pub needs_answer: bool,
@@ -45,8 +47,8 @@ pub(crate) struct ChatFacts {
 pub(crate) fn derive_ticket_lifecycle(
     chats: &[ChatFacts],
     pull_requests: &[PullRequestFacts],
-    item_completed: bool,
-    linear_completed: bool,
+    item_completed: Option<bool>,
+    linear_completed: Option<bool>,
 ) -> LifecycleRow {
     let merged = pull_requests.iter().any(|pr| pr.merged);
     let open = pull_requests.iter().any(|pr| pr.open);
@@ -58,8 +60,10 @@ pub(crate) fn derive_ticket_lifecycle(
         has_chat: !chats.is_empty(),
         branch_review: chats.iter().any(|chat| chat.branch_review),
         ready_request: chats.iter().any(|chat| chat.ready_request),
-        item_completed,
-        linear_completed,
+        has_item: item_completed.is_some(),
+        item_completed: item_completed.unwrap_or(false),
+        has_linear_ticket: linear_completed.is_some(),
+        linear_completed: linear_completed.unwrap_or(false),
         pull_request: PullRequestFacts {
             open,
             merged,
@@ -107,7 +111,8 @@ pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
         stage,
         needs_you: facts.needs_answer || facts.ready_request || (pr.open && pr.changes_requested),
         stale: facts.has_chat && facts.idle_over_three_days && !pr.open && stage != LifecycleStage::Done,
-        merged_with_open_ticket: pr.merged && !facts.item_completed && !facts.linear_completed,
+        merged_with_open_ticket: pr.merged && ((facts.has_item && !facts.item_completed)
+            || (facts.has_linear_ticket && !facts.linear_completed)),
         linear_completed_with_open_pr: facts.linear_completed && pr.open && !pr.merged,
     }
 }
@@ -151,6 +156,7 @@ mod tests {
         facts.pull_request.checks_passing = false;
         assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::PrReview);
         facts.pull_request.merged = true;
+        facts.has_item = true;
         facts.linear_completed = false;
         assert!(derive_lifecycle(facts).merged_with_open_ticket);
     }
@@ -175,21 +181,23 @@ mod tests {
             ChatFacts { needs_answer: true, ..Default::default() }];
         let mut prs = [PullRequestFacts { open: true, approved: true, ..Default::default() },
             PullRequestFacts { open: true, checks_passing: true, ..Default::default() }];
-        let row = derive_ticket_lifecycle(&chats, &prs, false, false);
+        let row = derive_ticket_lifecycle(&chats, &prs, None, None);
         assert_eq!(row.stage, LifecycleStage::PrReview);
         assert!(row.needs_you);
         assert!(!row.stale);
         prs[0].checks_passing = true;
-        assert_eq!(derive_ticket_lifecycle(&chats, &prs, false, false).stage, LifecycleStage::ReadyToMerge);
+        assert_eq!(derive_ticket_lifecycle(&chats, &prs, None, None).stage, LifecycleStage::ReadyToMerge);
         prs[1].merged = true;
-        assert_eq!(derive_ticket_lifecycle(&chats, &prs, false, false).stage, LifecycleStage::Done);
+        assert_eq!(derive_ticket_lifecycle(&chats, &prs, None, None).stage, LifecycleStage::Done);
+        assert!(derive_ticket_lifecycle(&chats, &prs, Some(false), Some(true)).merged_with_open_ticket);
+        assert!(!derive_ticket_lifecycle(&chats, &prs, Some(true), None).merged_with_open_ticket);
     }
 
     #[test]
     fn branch_review_and_reopened_items_follow_current_facts() {
         let chats = [ChatFacts { branch_review: true, ..Default::default() }];
-        assert_eq!(derive_ticket_lifecycle(&chats, &[], false, false).stage, LifecycleStage::CodeReview);
-        assert_eq!(derive_ticket_lifecycle(&[], &[], true, false).stage, LifecycleStage::Done);
-        assert_eq!(derive_ticket_lifecycle(&[], &[], false, false).stage, LifecycleStage::NotStarted);
+        assert_eq!(derive_ticket_lifecycle(&chats, &[], None, None).stage, LifecycleStage::CodeReview);
+        assert_eq!(derive_ticket_lifecycle(&[], &[], Some(true), None).stage, LifecycleStage::Done);
+        assert_eq!(derive_ticket_lifecycle(&[], &[], Some(false), None).stage, LifecycleStage::NotStarted);
     }
 }
