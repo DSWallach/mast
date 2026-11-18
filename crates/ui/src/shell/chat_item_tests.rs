@@ -1324,6 +1324,9 @@ fn tracker_cleanup_completes_an_item_and_links_a_pr(cx: &mut TestAppContext) {
         ], vec![("fixture-item-0".into(), "Example ticket".into())]);
     });
     draw(vcx);
+    assert!(!has(vcx, "tracker-cleanup"));
+    click_selector(vcx, "tracker-cleanup-toggle");
+    draw(vcx);
     assert!(has(vcx, "tracker-cleanup"));
     click_selector(vcx, "cleanup-complete-0");
     vcx.run_until_parked();

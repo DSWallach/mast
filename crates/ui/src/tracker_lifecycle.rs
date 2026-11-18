@@ -103,12 +103,13 @@ pub(crate) struct LifecycleRow {
     pub stale: bool,
     pub merged_with_open_ticket: bool,
     pub linear_completed_with_open_pr: bool,
+    pub item_completed_with_open_pr: bool,
     pub linear_completed_without_pr: bool,
 }
 
 pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
     let pr = facts.pull_request;
-    let stage = if pr.merged || (facts.item_completed && !(facts.linear_completed && pr.open)) {
+    let stage = if pr.merged {
         LifecycleStage::Done
     } else if pr.open {
         if !facts.linear_completed && pr.approved && !pr.changes_requested && pr.checks_passing {
@@ -116,7 +117,7 @@ pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
         } else {
             LifecycleStage::PrReview
         }
-    } else if facts.linear_completed {
+    } else if facts.item_completed || facts.linear_completed {
         LifecycleStage::Done
     } else if facts.ready_request || facts.branch_review {
         LifecycleStage::CodeReview
@@ -132,6 +133,7 @@ pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
         merged_with_open_ticket: pr.merged && ((facts.has_item && !facts.item_completed)
             || (facts.has_linear_ticket && !facts.linear_completed)),
         linear_completed_with_open_pr: facts.linear_completed && pr.open && !pr.merged,
+        item_completed_with_open_pr: facts.item_completed && pr.open && !pr.merged,
         linear_completed_without_pr: facts.linear_completed && !pr.open && !pr.merged && !facts.item_completed,
     }
 }
@@ -169,7 +171,14 @@ mod tests {
         facts.item_completed = true;
         assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::PrReview);
         facts.linear_completed = false;
-        assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::Done);
+        let row = derive_lifecycle(facts);
+        assert_eq!(row.stage, LifecycleStage::PrReview);
+        assert!(row.item_completed_with_open_pr);
+        facts.pull_request.approved = true;
+        facts.pull_request.checks_passing = true;
+        assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::ReadyToMerge);
+        facts.pull_request.approved = false;
+        facts.pull_request.checks_passing = false;
         facts.linear_completed = true;
         facts.item_completed = false;
         facts.pull_request.approved = true;
