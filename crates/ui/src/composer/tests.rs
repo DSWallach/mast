@@ -536,6 +536,127 @@ fn inputs_release_focus_on_click_away(cx: &mut gpui::TestAppContext) {
     .unwrap();
 }
 
+fn stage_validation_draft(composer: &mut Composer, cx: &mut Context<Composer>) {
+    let key = composer.current_key.clone();
+    composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+    composer.skills.insert(key.clone(), vec!["review".into()]);
+    composer.attachments.insert(key.clone(), vec![attachments::stage_png_bytes("image.png".into(), vec![1, 2, 3])]);
+    composer.appshots.insert(key.clone(), vec![crate::appshots::tests::shot()]);
+    composer.state.update(cx, |state, _| {
+        state.add_review_comment(&key, crate::comments::ReviewComment::file("file.rs", 1, "comment"));
+        state.add_code_ref(&key, crate::code_ref::StagedCodeRef {
+            id: "reference".into(),
+            reference: mast_proto::CodeRef {
+                version: 1,
+                location: mast_proto::CodeRefLocation { repo_id: "repo".into(), worktree_id: None, repo_root: None, path: "file.rs".into() },
+                kind: mast_proto::CodeRefKind::Lines,
+                range: Some(mast_proto::CodeRefRange { start_line: 1, end_line: 2 }),
+                symbol: None,
+                at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: "hash".into() },
+            },
+            snippet: "source".into(),
+        });
+    });
+}
+
+fn assert_validation_draft(composer: &Composer, cx: &App) {
+    assert_eq!(composer.input.read(cx).text(), "draft text");
+    assert_eq!(composer.staged_skills(), &["review"]);
+    assert_eq!(composer.staged().len(), 1);
+    assert_eq!(composer.staged_appshots().len(), 1);
+    assert_eq!(composer.state.read(cx).review_comments(&composer.current_key).len(), 1);
+    assert_eq!(composer.state.read(cx).code_refs(&composer.current_key).len(), 1);
+    assert!(!composer.sending);
+}
+
+#[gpui::test]
+fn send_without_engine_retains_draft_material(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let composer = cx.new(|cx| Composer::new(state, cx));
+    composer.update(cx, |composer, cx| {
+        composer.current_key = "draft".into();
+        stage_validation_draft(composer, cx);
+        composer.send("draft text".into(), false, cx);
+        assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+        assert_validation_draft(composer, cx);
+    });
+}
+
+#[gpui::test]
+fn unsupported_queue_retains_draft_material(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(
+            mast_rpc::RpcClient::new(out, inbound),
+        ));
+        state.selected_chat = Some("chat".into());
+    });
+    let composer = cx.new(|cx| Composer::new(state, cx));
+    composer.update(cx, |composer, cx| {
+        composer.current_key = "chat".into();
+        stage_validation_draft(composer, cx);
+        composer.send("draft text".into(), true, cx);
+        assert!(composer.failure.as_deref().unwrap().contains("Update the chat's engine"));
+        assert_validation_draft(composer, cx);
+    });
+    cx.run_until_parked();
+    while let Ok(frame) = requests.try_recv() {
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_ne!(frame["method"], methods::QUEUE_MESSAGE);
+        assert_ne!(frame["method"], methods::QUEUE_COMMAND);
+    }
+}
+
+#[gpui::test]
+fn attachment_failure_precedes_chat_creation_and_restores_canvas(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| state.set_test_engine(
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)),
+    ));
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, cx| {
+        composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+        composer.attachments.insert(String::new(), vec![attachments::stage_png_bytes("image.png".into(), vec![1, 2, 3])]);
+        composer.send("draft text".into(), false, cx);
+    });
+    let mut operations = Vec::new();
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let method = frame["method"].as_str().unwrap_or_default();
+            if method == methods::UPLOAD_CHUNK || method == methods::UPLOAD_COMMIT || method == methods::MUTATE {
+                operations.push((method.to_string(), frame["params"]["op"].as_str().map(str::to_string)));
+                let reply = if method == methods::UPLOAD_COMMIT {
+                    serde_json::json!({"id": frame["id"], "err": "commit failed"})
+                } else {
+                    serde_json::json!({"id": frame["id"], "ok": {}})
+                };
+                replies.try_send(reply.to_string()).unwrap();
+            }
+        }
+        if composer.read_with(cx, |composer, _| composer.failure.is_some()) { break; }
+    }
+    composer.read_with(cx, |composer, cx| {
+        assert!(composer.failure.is_some());
+        assert_eq!(composer.input.read(cx).text(), "draft text");
+        assert_eq!(composer.staged().len(), 1);
+        assert!(composer.state.read(cx).selected_chat.is_none());
+    });
+    assert!(operations.iter().any(|(method, _)| method == methods::UPLOAD_COMMIT));
+    assert!(operations.iter().any(|(_, op)| op.as_deref() == Some("deleteChat")));
+    assert!(!operations.iter().any(|(_, op)| op.as_deref() == Some("createChat")));
+}
+
 #[gpui::test]
 fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
