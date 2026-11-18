@@ -80,9 +80,10 @@ pub async fn sync_space(
     if !snapshot.available || !snapshot.space_settings.linear_enabled {
         return Err(LinearError::disabled_for_space());
     }
+    let account_changes = linear;
     let linear = linear.for_account(snapshot.space_settings.linear_account_id.as_deref());
     // The linked Linear item's children (no call without a destination).
-    let assigned = super::assigned::sync(&linear, work_outline, &snapshot, space_id, force).await?;
+    let assigned = super::assigned::sync(&linear, account_changes, work_outline, &snapshot, space_id, force).await?;
     // Item -> identifier for every live issue-linked item.
     let linked: Vec<(String, String)> = snapshot
         .items
@@ -132,6 +133,8 @@ pub async fn sync_space(
             changes,
             operation_id: uuid::Uuid::new_v4().to_string(),
         });
+        let _guard = account_changes.lock_account_changes().await;
+        if !account_matches(work_outline, &snapshot, space_id) { break; }
         let service = work_outline.clone();
         let result = tokio::task::spawn_blocking(move || {
             let actor = service.system_actor();
@@ -157,6 +160,8 @@ pub async fn sync_space(
             &snapshot,
             space_id,
             &resolved,
+            account_changes,
+            work_outline,
             |identifier| {
                 let linear = &linear;
                 async move { linear.issue_attachments(&identifier, force).await }
@@ -165,6 +170,12 @@ pub async fn sync_space(
         .await?;
     }
     Ok(updated)
+}
+
+pub(crate) fn account_matches(service: &WorkOutlineService, snapshot: &WorkOutlineSnapshot, space_id: &str) -> bool {
+    let current = service.snapshot(space_id);
+    current.available && current.space_settings.linear_enabled
+        && current.space_settings.linear_account_id == snapshot.space_settings.linear_account_id
 }
 
 /// Sync every Linear-enabled Space of this device's replica (no network
