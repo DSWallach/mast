@@ -125,20 +125,16 @@ impl Overview {
                     .justify_between()
                     .gap(px(8.0))
                     .child(
-                        div()
+                        crate::components::overview_session_label(theme)
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
                             .child(label),
                     )
                     .child(
-                        div()
+                        crate::components::overview_session_label(theme)
                             .id(SharedString::from(format!("{id}-full")))
                             .debug_selector(move || format!("{id}-full"))
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
                             .hover(|el| el.text_color(theme.accent))
                             .child("Open full chat ↗")
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -158,21 +154,19 @@ impl Overview {
                     .gap(px(6.0))
                     .child(indicator)
                     .child(
-                        div()
+                        crate::components::overview_session_title()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_color(theme.text)
-                            .text_size(crate::typography::ui_rems(12.0))
                             .child(SharedString::from(crate::transcript::single_line(
                                 chat.title.as_deref().unwrap_or("New session"),
                             ))),
                     ),
             )
             .child(
-                div()
+                crate::components::overview_session_detail()
                     .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
                     .text_color(color)
                     .child(SharedString::from(detail.join(" · "))),
             )
@@ -214,7 +208,7 @@ impl Overview {
     }
 
     fn render_assistant_chooser(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let trigger = div()
+        let trigger = crate::components::overview_session_label(theme)
             .id("overview-choose-assistant")
             .debug_selector(|| "overview-choose-assistant".into())
             .when(!self.in_sidebar, |el| el.flex_1())
@@ -229,14 +223,11 @@ impl Overview {
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(10.0))
-            .text_color(theme.text_muted)
             .cursor_pointer()
             .hover(|el| el.bg(theme.element_hover))
             .child("Personal assistant")
             .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
+                crate::components::overview_session_title()
                     .text_color(theme.accent)
                     .child("Choose assistant…"),
             )

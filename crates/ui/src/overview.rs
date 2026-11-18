@@ -3360,19 +3360,13 @@ impl Overview {
             let badge_id = SharedString::from(debug_id.clone());
             row = row.child(
                 link_source_hover(
-                    div()
+                    crate::components::outline_metadata_tag(color, color.opacity(0.15), 6.0)
                         .id(badge_id)
                         .debug_selector(move || debug_id.clone())
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(px(3.0))
-                        .px(px(6.0))
-                        .py(px(1.0))
-                        .rounded(px(3.0))
-                        .bg(color.opacity(0.15))
-                        .text_size(crate::typography::ui_rems(9.5))
-                        .text_color(color),
+                        .gap(px(3.0)),
                     LinkKind::Pr,
                     pr_source,
                 )
@@ -3388,19 +3382,13 @@ impl Overview {
             let badge_id = SharedString::from(debug_id.clone());
             row = row.child(
                 link_source_hover(
-                    div()
+                    crate::components::outline_metadata_tag(theme.text_muted, theme.element_hover, 6.0)
                         .id(badge_id)
                         .debug_selector(move || debug_id.clone())
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(px(3.0))
-                        .px(px(6.0))
-                        .py(px(1.0))
-                        .rounded(px(3.0))
-                        .bg(theme.element_hover)
-                        .text_size(crate::typography::ui_rems(9.5))
-                        .text_color(theme.text_muted),
+                        .gap(px(3.0)),
                     LinkKind::Ticket,
                     ticket_source,
                 )
@@ -4309,13 +4297,7 @@ impl Overview {
         };
         let text = |value: String| SharedString::from(value).into_any_element();
         let chip = |text: String, color: gpui::Hsla, bg: gpui::Hsla| {
-            div()
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded(px(3.0))
-                .bg(bg)
-                .text_size(crate::typography::ui_rems(9.5))
-                .text_color(color)
+            crate::components::outline_metadata_tag(color, bg, 6.0)
                 .child(SharedString::from(text))
         };
         // `renderChips`/`renderToolChips`: an empty list renders a single
@@ -5636,16 +5618,7 @@ impl Overview {
             )
             .color;
             let selector = format!("overview-row-needs-input-{chat_id}");
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded(px(3.0))
-                .bg(color.opacity(0.15))
-                .text_size(crate::typography::ui_rems(9.5))
-                .text_color(color)
+            crate::components::overview_status_badge(selector, color)
                 .child("Needs input")
         });
         let stalled_pill = if let Some(failures) = &row.tool_failures {
@@ -5660,16 +5633,7 @@ impl Overview {
                 format!("{} tool calls failed", failures.count)
             };
             let selector = format!("overview-row-tool-failures-{chat_id}");
-            let mut pill = div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .flex_none()
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded(px(3.0))
-                .bg(color.opacity(0.15))
-                .text_size(crate::typography::ui_rems(9.5))
-                .text_color(color)
+            let mut pill = crate::components::overview_status_badge(selector, color)
                 .child(SharedString::from(label));
             if !failures.tools.is_empty() {
                 let tip: SharedString =
@@ -5685,16 +5649,7 @@ impl Overview {
             .color;
             let selector = format!("overview-row-stalled-{chat_id}");
             Some(
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .flex_none()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(color.opacity(0.15))
-                    .text_size(crate::typography::ui_rems(9.5))
-                    .text_color(color)
+                crate::components::overview_status_badge(selector, color)
                     .child("Stalled"),
             )
         } else {
