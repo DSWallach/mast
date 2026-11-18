@@ -726,6 +726,8 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    #[cfg(debug_assertions)]
+    paused_drain_tx: watch::Sender<u64>,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -774,6 +776,13 @@ impl ChatDocHandle {
     pub async fn test_queue_drain_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.drain_lock.lock().await
     }
+    /// Observe a drain decision that retained a paused queue.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_paused_drain_observer(&self) -> watch::Receiver<u64> {
+        self.paused_drain_tx.subscribe()
+    }
+
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -1705,6 +1714,8 @@ impl DocHost {
             rejected_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            #[cfg(debug_assertions)]
+            paused_drain_tx: watch::channel(0).0,
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
@@ -3777,6 +3788,8 @@ impl DocHost {
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
         if handle.queue_paused.load(Ordering::Acquire) {
+            #[cfg(debug_assertions)]
+            handle.paused_drain_tx.send_modify(|count| *count = count.wrapping_add(1));
             return;
         }
         loop {

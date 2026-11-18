@@ -405,10 +405,14 @@ async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
 
     let (after_harness, after_prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
     let after = assemble_at(&data_dir, after_harness);
-    // Materializing the persisted chat starts its background drain task. Give
-    // that task time to prove the restored row stays frozen.
-    assert_eq!(queue_texts(&after), vec!["after restart"]);
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Observe a drain reaching the paused decision, even if startup already ran.
+    let handle = after.doc_host.open(CHAT).unwrap();
+    let mut paused_drain = handle.test_paused_drain_observer();
+    after.doc_host.drain_queue(&handle).await;
+    tokio::time::timeout(Duration::from_secs(30), paused_drain.changed())
+        .await
+        .expect("paused drain decision timed out")
+        .expect("paused drain observer closed");
     assert!(
         !after_prompts.lock().unwrap().iter().any(|prompt| prompt == "after restart"),
         "startup must not dispatch the recovered queue row"
