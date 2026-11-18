@@ -64,10 +64,8 @@ status-level = "retry"
 default-filter = '''
 not (
     test(~capture_source_context_reads_the_dispatch_checkout)
-  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
-  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
   | test(~mutations_stay_fast_on_a_large_local_registry)
   | test(~workspace_file_surface_proxies_over_the_relay)
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
@@ -99,10 +97,8 @@ fail-fast = false
 status-level = "retry"
 default-filter = '''
     test(~capture_source_context_reads_the_dispatch_checkout)
-  | test(~local_opening_tail_arrives_before_full_mirror_and_keeps_all_history)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
-  | test(~restart_restores_the_queue_frozen_until_an_explicit_send)
   | test(~mutations_stay_fast_on_a_large_local_registry)
   | test(~workspace_file_surface_proxies_over_the_relay)
   | test(~blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates)
