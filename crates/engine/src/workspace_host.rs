@@ -1946,6 +1946,25 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// Recheck the registry row and outline under the same lock as an
+    /// automatic archive, so a newly opened request cannot be missed.
+    pub(crate) fn archive_chat_if(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        predicate: impl FnOnce(&mast_proto::Chat, &mast_proto::WorkOutlineSnapshot) -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let synced = self.registry_synced();
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else { return Ok(false); };
+            if chat.space_id.as_deref() != Some(space_id) { return Ok(false); }
+            let snapshot = doc.work_outline_snapshot(space_id, synced);
+            if !predicate(&chat, &snapshot) { return Ok(false); }
+            doc.set_chat_archived(chat_id, true)
+        })?)
+    }
+
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.

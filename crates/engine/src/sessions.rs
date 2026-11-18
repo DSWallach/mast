@@ -934,6 +934,14 @@ impl SessionsEngine {
         dispatch_lock.lock_owned().await
     }
 
+    /// Skip an automatic archive while a dispatch is in progress; holding
+    /// this guard also prevents a new dispatch from starting during it.
+    pub(crate) fn try_lock_dispatch(&self, chat_id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.try_lock_owned().ok()
+    }
+
     pub(crate) fn dispatch_with_guard<'a>(
         &'a self, chat_id: &'a str, harness_id: HarnessId, request: RunRequest,
         message_id: Option<String>, _guard: &'a tokio::sync::OwnedMutexGuard<()>,
@@ -989,6 +997,14 @@ impl SessionsEngine {
         retry_error: Option<String>,
         force_fresh: bool,
     ) -> Result<String, EngineError> {
+        // An automatic archive and a dispatch share the dispatch guard. A
+        // send can have checked the archive flag before that guard was
+        // acquired, so recheck here before any run can become active.
+        if let Some(workspace) = self.inner.workspace()
+            && workspace.chat(chat_id)?.is_some_and(|chat| chat.archived)
+        {
+            workspace.set_chat_archived(chat_id, false)?;
+        }
         let user_retry = retry_error.is_some();
         if let Some(error_id) = retry_error {
             let entries = self.doc_handle(chat_id)?.doc().read_entries()?;

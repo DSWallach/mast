@@ -639,6 +639,25 @@ impl EngineCore {
         ));
         if !soak {
             pr_ticket_cache.spawn_sweep_loop();
+            let service = Arc::new(agent_tools::AgentToolsService::new(
+                sessions.agent_tokens(), workspace.clone(),
+                Arc::new(work_outline::WorkOutlineService::new(workspace.clone())), Some(doc_host.clone()),
+            ));
+            service.set_sessions(sessions.clone());
+            service.set_pr_ticket_cache(pr_ticket_cache.clone());
+            tokio::spawn(async move {
+                let period = std::time::Duration::from_secs(24 * 60 * 60);
+                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                loop {
+                    interval.tick().await;
+                    let service = service.clone();
+                    match tokio::task::spawn_blocking(move || service.auto_archive_workers(chrono::Utc::now())).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => tracing::warn!(%error, "worker archive sweep failed"),
+                        Err(error) => tracing::warn!(%error, "worker archive sweep panicked"),
+                    }
+                }
+            });
         }
         Ok(Self {
             sessions,
