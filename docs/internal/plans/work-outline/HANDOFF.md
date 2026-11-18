@@ -1219,6 +1219,17 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 07:40; coordinator 544369c6, overnight run)
+
+- **Installed: release 109** (2053cec30), full perf gate (soak vs 108 equal: CPU 5.1 vs 5.0 %, footprint 620 vs 614 MB,
+  git identical). Contents: proven pure-move splits of shell.rs (12,770 → 4,156), rpc.rs (forwarding policy and
+  transcript streams moved; new `every_rpc_method_has_a_route_and_consistent_forwarding_policy` test),
+  changes.rs (7,532 → 2,338) and transcript.rs (9,111 → 4,803, 14 modules).
+- Merged for 110: composer.rs (8,979 → 3,204) and overview.rs (7,017 → 2,041) splits.
+- **Release runs need a quiet machine:** compiles saturate fseventsd and the diff_sync_* tests time out. Pause worker
+  cargo before release tests and soaks. Release 109 also hit a rare `orchestrator_wakes
+  discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive` flake (item d01e2493, fix queued).
+
 ## In flight (snapshot 2026-11-18 morning; coordinator 544369c6, overnight run)
 
 - **Installed: release 108** (62f242389), full perf gate. Soak vs 107: CPU 4.9 vs 5.1 %, footprint 468 vs 586 MB,
