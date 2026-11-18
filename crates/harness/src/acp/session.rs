@@ -43,6 +43,7 @@ struct AcpSessionState {
     starve_deadline: Option<tokio::time::Instant>,
     done_after_interrupt: bool,
     steering_open: bool,
+    cancel_flush_deadline: Option<tokio::time::Instant>,
 }
 
 impl AcpSessionState {
@@ -500,6 +501,31 @@ impl AcpSessionState {
             }
             // No live turn to inject into: boundary delivery.
             self.queued_steers.push_back(next_text);
+        }
+        LoopControl::Continue
+    }
+
+    async fn flush_cancel(&mut self) -> LoopControl {
+        self.cancel_flush_deadline = None;
+        if self.turn.is_none()
+            && let Some(text) = self.queued_steers.pop_front()
+        {
+            let (prev, next) = rotate(&mut self.assistant_message_id);
+            if !send(
+                &self.event_tx,
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                },
+            )
+            .await
+            {
+                return LoopControl::Stop;
+            }
+            self.begin_prompt(text);
+        } else if self.turn.is_none() && !self.steering_open {
+            // Mailbox closed while the flush waited: nothing left.
+            return LoopControl::Stop;
         }
         LoopControl::Continue
     }
@@ -1081,7 +1107,7 @@ pub(super) async fn run_session(session: Session) {
     // remain for the notification race a client cannot see coming.
     const BUSY_RECENT: Duration = Duration::from_secs(3);
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
-    let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
+    let cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
     let mut state = AcpSessionState {
         prompt_seq,
@@ -1106,6 +1132,7 @@ pub(super) async fn run_session(session: Session) {
         starve_deadline,
         done_after_interrupt,
         steering_open,
+        cancel_flush_deadline,
         child_exit: None,
         exit_drain_deadline: None,
         escalation_deadline: None,
@@ -1146,27 +1173,9 @@ pub(super) async fn run_session(session: Session) {
             // drain window; the queued steer becomes a fresh prompt on a
             // now-idle agent.
             _ = tokio::time::sleep_until(
-                cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if cancel_flush_deadline.is_some() && !state.interrupted => {
-                cancel_flush_deadline = None;
-                if state.turn.is_none()
-                    && let Some(text) = state.queued_steers.pop_front()
-                {
-                    let (prev, next) = rotate(&mut state.assistant_message_id);
-                    if !send(
-                        &state.event_tx,
-                        AgentEvent::Steered {
-                            assistant_message_id: Some(prev),
-                            next_assistant_message_id: Some(next),
-                        },
-                    )
-                    .await
-                    {
-                        break 'main;
-                    }
-                    state.begin_prompt(text);
-                } else if state.turn.is_none() && !state.steering_open {
-                    // Mailbox closed while the flush waited: nothing left.
+                state.cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if state.cancel_flush_deadline.is_some() && !state.interrupted => {
+                if state.flush_cancel().await == LoopControl::Stop {
                     break 'main;
                 }
             },
@@ -1236,7 +1245,7 @@ pub(super) async fn run_session(session: Session) {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if state.turn.is_none() && cancel_flush_deadline.is_some() {
+                    if state.turn.is_none() && state.cancel_flush_deadline.is_some() {
                         // A busy-session cancel is already in flight: this
                         // steer lines up behind it and dispatches at flush.
                         state.queued_steers.push_back(text);
@@ -1257,7 +1266,7 @@ pub(super) async fn run_session(session: Session) {
                             Some(json!({ "sessionId": state.session_id })),
                         );
                         state.queued_steers.push_back(text);
-                        cancel_flush_deadline =
+                        state.cancel_flush_deadline =
                             Some(tokio::time::Instant::now() + CANCEL_FLUSH);
                     } else if state.turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
