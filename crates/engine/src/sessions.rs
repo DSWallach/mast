@@ -687,12 +687,26 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
     ) -> Result<Option<DoneStatus>, EngineError> {
-        Ok(self.inner.journal.find_rev(chat_id, |_, event| {
-            Some(match event {
-                AgentEvent::Done { status, .. } => Some(status),
-                _ => None,
-            })
-        })?.flatten())
+        let mut outcome = None;
+        self.inner.journal.find_rev(chat_id, |_, event| {
+            if outcome == Some(DoneStatus::Interrupted) {
+                // Shutdown may close a warm child immediately after its
+                // successful turn. A second Done with no intervening turn
+                // events records teardown of the parked child.
+                if matches!(event, AgentEvent::Done { status: DoneStatus::Completed, .. }) {
+                    outcome = Some(DoneStatus::Completed);
+                }
+                return Some(());
+            }
+            if let AgentEvent::Done { status, .. } = event {
+                outcome = Some(status);
+                if status == DoneStatus::Interrupted {
+                    return None;
+                }
+            }
+            Some(())
+        })?;
+        Ok(outcome)
     }
 
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
