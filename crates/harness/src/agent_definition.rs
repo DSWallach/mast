@@ -125,6 +125,21 @@ fn repo_root(cwd: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// A Claude Code definition under `root` (a checkout or the home folder).
+pub(crate) fn claude_definition_path(root: &Path, name: &str) -> PathBuf {
+    root.join(".claude").join("agents").join(format!("{name}.md"))
+}
+
+/// A Codex definition under `dir` (a Codex home or a project's Codex folder).
+fn codex_definition_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join("agents").join(format!("{name}.toml"))
+}
+
+/// A checkout's project-level Codex folder.
+fn project_codex_dir(repo: &Path) -> PathBuf {
+    repo.join(".codex")
+}
+
 /// Where `harness` looks for `name`, in order.
 fn candidates(
     harness: HarnessId,
@@ -133,21 +148,11 @@ fn candidates(
     home: Option<&Path>,
     codex_dir: Option<&Path>,
 ) -> Vec<(PathBuf, Format)> {
-    let claude = |root: &Path| {
-        (
-            root.join(".claude").join("agents").join(format!("{name}.md")),
-            Format::ClaudeMarkdown,
-        )
-    };
-    let codex = |dir: &Path| {
-        (
-            dir.join("agents").join(format!("{name}.toml")),
-            Format::CodexToml,
-        )
-    };
+    let claude = |root: &Path| (claude_definition_path(root, name), Format::ClaudeMarkdown);
+    let codex = |dir: &Path| (codex_definition_path(dir, name), Format::CodexToml);
     let mut out = Vec::new();
     if harness == HarnessId::Codex {
-        out.extend(repo.map(|repo| codex(&repo.join(".codex"))));
+        out.extend(repo.map(|repo| codex(&project_codex_dir(repo))));
         out.extend(repo.map(claude));
         out.extend(codex_dir.map(codex));
         out.extend(home.map(claude));
@@ -324,22 +329,22 @@ mod tests {
         _root: tempfile::TempDir,
         repo: PathBuf,
         home: PathBuf,
-        codex: PathBuf,
+        user_codex_dir: PathBuf,
     }
 
     fn dirs() -> Dirs {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         let home = root.path().join("home");
-        let codex = home.join("codex-home");
-        for dir in [&repo, &home, &codex] {
+        let user_codex_dir = home.join("codex-home");
+        for dir in [&repo, &home, &user_codex_dir] {
             std::fs::create_dir_all(dir).unwrap();
         }
         Dirs {
             _root: root,
             repo,
             home,
-            codex,
+            user_codex_dir,
         }
     }
 
@@ -349,11 +354,11 @@ mod tests {
     }
 
     fn claude_md(root: &Path) -> PathBuf {
-        root.join(".claude").join("agents").join("pr-review.md")
+        claude_definition_path(root, "pr-review")
     }
 
     fn codex_toml(dir: &Path) -> PathBuf {
-        dir.join("agents").join("pr-review.toml")
+        codex_definition_path(dir, "pr-review")
     }
 
     fn found(harness: HarnessId, d: &Dirs) -> Result<AgentDefinition, HarnessError> {
@@ -362,7 +367,7 @@ mod tests {
             "pr-review",
             Some(&d.repo),
             Some(&d.home),
-            Some(&d.codex),
+            Some(&d.user_codex_dir),
         )
     }
 
@@ -386,7 +391,7 @@ mod tests {
             found(HarnessId::Codex, &d).unwrap().instructions,
             "Review as user claude."
         );
-        write(&codex_toml(&d.codex), &toml_def("user codex"));
+        write(&codex_toml(&d.user_codex_dir), &toml_def("user codex"));
         assert_eq!(
             found(HarnessId::Codex, &d).unwrap().instructions,
             "Review as user codex."
@@ -396,16 +401,16 @@ mod tests {
             found(HarnessId::Codex, &d).unwrap().instructions,
             "Review as project claude."
         );
-        write(&codex_toml(&d.repo.join(".codex")), &toml_def("project codex"));
+        write(&codex_toml(&project_codex_dir(&d.repo)), &toml_def("project codex"));
         let definition = found(HarnessId::Codex, &d).unwrap();
         assert_eq!(definition.instructions, "Review as project codex.");
-        assert_eq!(definition.path, codex_toml(&d.repo.join(".codex")));
+        assert_eq!(definition.path, codex_toml(&project_codex_dir(&d.repo)));
     }
 
     #[test]
     fn antigravity_reads_only_claude_definitions_project_first() {
         let d = dirs();
-        write(&codex_toml(&d.repo.join(".codex")), &toml_def("codex"));
+        write(&codex_toml(&project_codex_dir(&d.repo)), &toml_def("codex"));
         write(&claude_md(&d.home), &md("user"));
         assert_eq!(
             found(HarnessId::Antigravity, &d).unwrap().instructions,
@@ -424,9 +429,9 @@ mod tests {
         let error = found(HarnessId::Codex, &d).unwrap_err().to_string();
         assert!(error.contains("\"pr-review\""), "{error}");
         for path in [
-            codex_toml(&d.repo.join(".codex")),
+            codex_toml(&project_codex_dir(&d.repo)),
             claude_md(&d.repo),
-            codex_toml(&d.codex),
+            codex_toml(&d.user_codex_dir),
             claude_md(&d.home),
         ] {
             assert!(error.contains(&path.display().to_string()), "{error}");
@@ -454,9 +459,9 @@ mod tests {
             "developer_instructions = \"  \"\n",
             "not toml = = =",
         ] {
-            write(&codex_toml(&d.codex), bad);
+            write(&codex_toml(&d.user_codex_dir), bad);
             let error = found(HarnessId::Codex, &d).unwrap_err().to_string();
-            assert!(error.contains(&codex_toml(&d.codex).display().to_string()), "{error}");
+            assert!(error.contains(&codex_toml(&d.user_codex_dir).display().to_string()), "{error}");
         }
     }
 

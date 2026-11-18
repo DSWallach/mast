@@ -5516,9 +5516,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::create_dir_all(repo.join(".claude").join("agents")).unwrap();
+        let definition = crate::agent_definition::claude_definition_path(&repo, "pr-review");
+        std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
         std::fs::write(
-            repo.join(".claude").join("agents").join("pr-review.md"),
+            &definition,
             "---\nname: pr-review\nmodel: opus\ntools: Read, Grep\n---\n\nReview carefully.\n",
         )
         .unwrap();

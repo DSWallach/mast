@@ -2424,12 +2424,9 @@ mod tests {
         );
 
         // A project definition wins over the user's.
-        std::fs::create_dir_all(repo.join(".claude").join("agents")).unwrap();
-        std::fs::write(
-            repo.join(".claude").join("agents").join("pr-review.md"),
-            "---\nname: pr-review\n---\nProject review.\n",
-        )
-        .unwrap();
+        let project = crate::agent_definition::claude_definition_path(&repo, "pr-review");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, "---\nname: pr-review\n---\nProject review.\n").unwrap();
         assert_eq!(
             harness.agent_instructions(&request).await.unwrap().as_deref(),
             Some("Project review.\n")
