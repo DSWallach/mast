@@ -247,11 +247,17 @@ fn tool_group_clicks_toggle_group_and_detail(cx: &mut gpui::TestAppContext) {
     });
     let state = cx.new(|_| AppState::new());
     let transcript = cx.new(|cx| Transcript::new(state, cx));
+    transcript.update(cx, |this, cx| {
+        let detail = Arc::new(ToolDetail::Output { lines: vec!["output".into()], truncated_by: 0 });
+        this.blob_details.insert("diff".into(), BlobFetch::Ready(detail.clone()));
+        this.blob_details.insert("output".into(), BlobFetch::Ready(detail));
+        this.spawn_blob_fetch("diff".into(), cx);
+    });
     let tools = Arc::new(vec![ToolItem {
         part_id: "call".into(), call: ToolCall::Exec { command: "pwd".into() },
         is_error: false, resolved: true,
         detail: Some(Arc::new(ToolDetail::Output { lines: vec!["output".into()], truncated_by: 0 })),
-        invocation: None, output_ref: None, output_bytes: None, diff_ref: None,
+        invocation: None, output_ref: Some("output".into()), output_bytes: None, diff_ref: Some("diff".into()),
         subagent_ref: None, subagent_status: None, subagent_tail: None, is_thought: false,
     }]);
     let (_, vcx) = cx.add_window_view(|_, _| ToolGroupFixture { transcript: transcript.clone(), tools });
@@ -265,6 +271,9 @@ fn tool_group_clicks_toggle_group_and_detail(cx: &mut gpui::TestAppContext) {
     transcript.read_with(vcx, |this, _| assert_eq!(this.folds["group"].open, Some(true)));
     click(vcx, TOOL_GROUP_HEADER_HEIGHT + CHIPS_TOP_PAD + TOOL_TREE_ROW_HEIGHT / 2.0);
     transcript.read_with(vcx, |this, _| assert_eq!(this.tool_details["group#d0"].open, Some(true)));
+    let detail = ToolDetail::Output { lines: vec!["output".into()], truncated_by: 0 };
+    click(vcx, TOOL_GROUP_HEADER_HEIGHT + CHIPS_TOP_PAD + TOOL_TREE_ROW_HEIGHT + DETAIL_SEPARATOR + detail_height(&detail) + BLOB_AFFORDANCE_HEIGHT / 2.0);
+    transcript.read_with(vcx, |this, _| assert!(this.blob_fetch_order["output"] > this.blob_fetch_order["diff"]));
     click(vcx, TOOL_GROUP_HEADER_HEIGHT / 2.0);
     transcript.read_with(vcx, |this, _| {
         assert_eq!(this.folds["group"].open, Some(false));
