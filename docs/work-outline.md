@@ -441,15 +441,8 @@ Linear. While it is off, a Space shows no Linear UI, makes no Linear calls,
 and keeps pasted Linear URLs as plain links. Nothing is added to the Outline
 automatically: items and links come only from the actions below.
 
-- **Connect.** In **Settings → Linear**, paste a Linear personal API key and
-  click **Save**. Mast checks the key with Linear before storing it in this
-  Mac's Keychain, then shows **Connected as \<name\>**. The key is never shown
-  again or given to agents. **Disconnect** removes the stored key. If Linear
-  rejects the key later, Mast deletes it and asks you to reconnect.
-- **Turn it on.** Open the Space-root details (**Instructions** on the
-  Space row) and switch on **Linear**. Without a key, **Connect Linear…** opens
-  Settings → Linear. The first time you paste a Linear URL in a Space with
-  Linear off, Mast offers **Enable** once.
+- **Connect.** In **Settings → Linear**, add a named account with a personal API key. Mast validates the key and stores it in the Mac's Keychain. You can add multiple accounts; an existing key is the Default account.
+- **Turn it on.** Open the Space-root details (**Instructions** on the Space row), switch on **Linear**, and select the account for that Space. Without a key, **Connect Linear…** opens Settings → Linear. The first time you paste a Linear URL in a Space with Linear off, Mast offers **Enable** once.
 - **Linear panel.** Press `⌥⌘L` (`Ctrl+Shift+E` on Windows and Linux;
   rebind **Toggle Inbox column** in Settings → Shortcuts), click **Inbox** in
   the Outline toolbar, run **Toggle Inbox Column** from the command palette, or
@@ -705,8 +698,7 @@ not touch projects made from it, and editing a project does not touch its bluepr
   project, gets the worker destination and links the blueprint. Instructions the blueprint has for
   nodes that already exist are not written; the link then records "not reviewed" so **Review
   changes…** can apply them. Chats stay where they are. The whole conversion is ONE undo step.
-  Basedash and Kit Line in Cofactr are meant to be migrated this way when you are ready; nothing
-  runs automatically.
+  Nothing runs automatically.
 
 ## Limitations
 

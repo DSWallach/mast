@@ -1,5 +1,11 @@
 # Review PR launcher
 
+## Changes and references
+
+The **Tour / Free diff** control switches between a walkthrough and the full diff. Hunk headers show the enclosing function when available. Click a gap control to reveal more context; Option-click expands the whole gap. Review threads appear as cards.
+
+**Add to chat** attaches a code reference from a selection or hunk. Chips show moved or changed badges and a hover card. Opening a reference shows the pinned snippet; **Show diff vs current** compares it with the current file. Moved references offer reanchoring.
+
 ## Local drafts and review threads
 
 In a branch or PR review, add a draft from a diff line. Drafts are stored
@@ -16,9 +22,7 @@ local until accepted, edited, or dismissed; accepting creates a local draft.
 Existing GitHub review threads are fetched on demand and shown read-only.
 No draft, suggestion, or thread action posts to GitHub.
 
-Mast can check out someone's pull request and start a review Chat the same
-way the Cofactr workspace's `tools/cursor-claude-launcher/launch.sh` does
-(the GitHub overlay's **Claude ▾ → code-review / fix-ci** menu).
+Mast can check out a pull request and start a review chat.
 
 ## Entry points
 
@@ -86,7 +90,7 @@ Steps, on the device that owns the Space:
    its submodules (`.gitmodules`, up to three levels), matched by the raw
    `remote.origin.url` (https, ssh, and scp spellings), never by folder name.
    Main checkouts beat linked worktrees, then the outermost folder wins, so
-   the Cofactr workspace superproject beats a Space opened on `flagship/`.
+   an outer workspace beats a Space opened on a nested repository.
    When no local Space matches, the engine asks each other device that owns
    Spaces and advertises `pr-review-launch-v1`.
 2. **PR.** `gh pr view <n> --repo <owner>/<name> --json
@@ -100,8 +104,7 @@ Steps, on the device that owns the Space:
       origin/<b>`). `<root>` is the first line of
       `<space>/.devcontainer/.current-worktrees-root`, else
       `$WORKSPACE_WORKTREES_DIR` (the engine's environment), else
-      `<space>/.worktrees`. An existing path is refused with launch.sh's
-      message.
+      `<space>/.worktrees`. An existing path is refused.
 5. **Behind.** `git rev-list --count HEAD..origin/<b>` in the chosen checkout.
 6. **Chat.** Created at the Space root with the
    caller's agent config (the UI sends the composer's new-chat agent; the
@@ -112,7 +115,7 @@ Steps, on the device that owns the Space:
    marks the chat as a launcher-created review chat; there is no separate
    classification.
 
-The prompts are launch.sh's, verbatim:
+The prompts are:
 
 - code-review: ``/code-review <url> — someone else's PR; review it as a
   reviewer. Its branch `<b>` is checked out at <location>; review the PR's
@@ -134,8 +137,7 @@ worktree `<path>` (`/workspace/.worktrees/<dir>` in the devcontainer)`` (under
 `<space>/.worktrees` or the worktrees root), ``the canonical checkout
 `<path>` `` (elsewhere inside the Space), or `` `<path>` ``, followed by `, N
 commit(s) behind origin/<b> — pull before you start` when behind. Mast adds
-the devcontainer note only when the Space has a `.devcontainer` folder
-(Cofactr always does).
+the devcontainer note only when the Space has a `.devcontainer` folder.
 
 Nothing is posted to GitHub.
 
