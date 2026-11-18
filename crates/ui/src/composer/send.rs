@@ -142,14 +142,9 @@ impl Composer {
         let engine = &send.engine;
         let message_id = &send.message_id;
         let chat_id = &send.chat_id;
-        let is_new = send.is_new;
-        let plan = &send.plan;
         let workspace_choice = send.workspace_choice;
         let resolved = &send.resolved;
-        let existing_cwd = send.existing_cwd.clone();
-        let device_id = &send.device_id;
         let host_device_id = &send.host_device_id;
-        let space_id = &send.space_id;
         let space_path = &send.space_path;
         let staged_appshots = &send.staged_appshots;
         let staged = &send.staged;
@@ -162,127 +157,7 @@ impl Composer {
         let fail_send_before_dispatch = send.fail_send_before_dispatch;
         let (content, attachment_paths, transfers) = Self::stage_send_attachments(send, this, cx).await?;
 
-                // Resolve the working directory: existing chats keep theirs;
-                // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
-                // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree created off the
-                // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
-                let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
-                } else {
-                    existing_cwd
-                }
-                .unwrap_or_else(|| ".".to_string());
-                let mut worktree_cwd: Option<String> = None;
-                // Fresh-worktree plans ride the QUEUED Run command (a
-                // WorktreeSpec the HOST materializes at drain time) instead of
-                // a blocking CreateWorktree relay RPC here: the RPC had no
-                // timeout, so a lost relay frame wedged the send on "Sending…"
-                // forever while the session ran remotely anyway (2026-08-18).
-                let mut run_worktree: Option<mast_proto::WorktreeSpec> = None;
-                // The picked ref rides createChat so the session footer names
-                // it from the first frame (it read "Select ref" until the
-                // host's diff reconciler got around to stamping the branch).
-                let mut chat_branch: Option<String> = None;
-                if is_new && space_path.is_some() {
-                    match &plan {
-                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
-                            cwd = path.clone();
-                            worktree_cwd = Some(path.clone());
-                            chat_branch = Some(branch.clone());
-                        }
-                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
-                            // Footer shows the base until the host stamps the
-                            // actual zeron/<name> branch post-creation. cwd
-                            // stays the repo folder — an old host that doesn't
-                            // know the spec degrades to the main checkout
-                            // instead of failing the run.
-                            chat_branch = base.clone();
-                            if let Some(repo_path) = &space_path {
-                                // A remote repo's branch list loads over the
-                                // relay — on a bad link it may never arrive
-                                // and the picker has no base. That must NOT
-                                // silently drop the isolation the user picked
-                                // (2026-08-19: "New worktree" ran in the main
-                                // checkout): default to HEAD, which git — any
-                                // host version — resolves as the repo's
-                                // current checkout state.
-                                let base =
-                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
-                                run_worktree = Some(mast_proto::WorktreeSpec {
-                                    repo_path: repo_path.clone(),
-                                    base,
-                                    space_id: space_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Best-effort Mutate createChat with the picked config: the
-                // engine resolves device + cwd from the PROJECT row when one
-                // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
-                if is_new {
-                    let mut mutate = serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat_id,
-                    });
-                    if let Some(object) = mutate.as_object_mut() {
-                        match &space_id {
-                            Some(space_id) => {
-                                object.insert(
-                                    "spaceId".into(),
-                                    serde_json::Value::String(space_id.clone()),
-                                );
-                            }
-                            None => {
-                                object.insert(
-                                    "deviceId".into(),
-                                    serde_json::Value::String(device_id.clone()),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(object) = mutate.as_object_mut() {
-                        if let Some(worktree_cwd) = &worktree_cwd {
-                            object.insert(
-                                "cwd".into(),
-                                serde_json::Value::String(worktree_cwd.clone()),
-                            );
-                        }
-                        if let Some(branch) = &chat_branch {
-                            object.insert(
-                                "branch".into(),
-                                serde_json::Value::String(branch.clone()),
-                            );
-                        }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
-                        }
-                    }
-                    if let Err(err) = attachments::call_with_timeout(
-                        &engine,
-                        cx.background_executor(),
-                        methods::MUTATE,
-                        mutate,
-                        std::time::Duration::from_secs(30),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
-                    }
-                }
+        let (mut cwd, run_worktree) = Self::create_send_chat(send, cx).await;
 
                 // Worktree chip pre-dispatch step (new chats only; after
                 // createChat so the engine has a row to stamp the worktree
@@ -508,6 +383,141 @@ impl Composer {
                     .ok();
                 }
                 Ok(None)
+    }
+
+    async fn create_send_chat(send: &PreparedSend, cx: &mut gpui::AsyncApp) -> (String, Option<mast_proto::WorktreeSpec>) {
+        let engine = &send.engine;
+        let chat_id = &send.chat_id;
+        let is_new = send.is_new;
+        let plan = &send.plan;
+        let resolved = &send.resolved;
+        let existing_cwd = send.existing_cwd.clone();
+        let device_id = &send.device_id;
+        let space_id = &send.space_id;
+        let space_path = &send.space_path;
+                // Resolve the working directory: existing chats keep theirs;
+                // new chats run per the checkout plan (t3code env-mode): the
+                // space's folder as-is, an EXISTING worktree of the picked ref
+                // (a plain cwd override — multiple sessions share one
+                // worktree), or a fresh isolated worktree created off the
+                // picked base ref (CreateWorktree on send, targeted at the
+                // space's device; the RPC relay-forwards).
+                let mut cwd = if is_new {
+                    // Project-less sessions run from the host's home dir —
+                    // "~" is expanded on the host when the run spawns.
+                    space_path.clone().or_else(|| Some("~".to_string()))
+                } else {
+                    existing_cwd
+                }
+                .unwrap_or_else(|| ".".to_string());
+                let mut worktree_cwd: Option<String> = None;
+                // Fresh-worktree plans ride the QUEUED Run command (a
+                // WorktreeSpec the HOST materializes at drain time) instead of
+                // a blocking CreateWorktree relay RPC here: the RPC had no
+                // timeout, so a lost relay frame wedged the send on "Sending…"
+                // forever while the session ran remotely anyway (2026-08-18).
+                let mut run_worktree: Option<mast_proto::WorktreeSpec> = None;
+                // The picked ref rides createChat so the session footer names
+                // it from the first frame (it read "Select ref" until the
+                // host's diff reconciler got around to stamping the branch).
+                let mut chat_branch: Option<String> = None;
+                if is_new && space_path.is_some() {
+                    match &plan {
+                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
+                            chat_branch = branch.clone();
+                        }
+                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
+                            cwd = path.clone();
+                            worktree_cwd = Some(path.clone());
+                            chat_branch = Some(branch.clone());
+                        }
+                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
+                            // Footer shows the base until the host stamps the
+                            // actual zeron/<name> branch post-creation. cwd
+                            // stays the repo folder — an old host that doesn't
+                            // know the spec degrades to the main checkout
+                            // instead of failing the run.
+                            chat_branch = base.clone();
+                            if let Some(repo_path) = &space_path {
+                                // A remote repo's branch list loads over the
+                                // relay — on a bad link it may never arrive
+                                // and the picker has no base. That must NOT
+                                // silently drop the isolation the user picked
+                                // (2026-08-19: "New worktree" ran in the main
+                                // checkout): default to HEAD, which git — any
+                                // host version — resolves as the repo's
+                                // current checkout state.
+                                let base =
+                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
+                                run_worktree = Some(mast_proto::WorktreeSpec {
+                                    repo_path: repo_path.clone(),
+                                    base,
+                                    space_id: space_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Best-effort Mutate createChat with the picked config: the
+                // engine resolves device + cwd from the PROJECT row when one
+                // is picked; project-less chats name the host device outright
+                // (idempotent; the doc host would materialize the chat on
+                // first command anyway, so failures are non-fatal).
+                if is_new {
+                    let mut mutate = serde_json::json!({
+                        "op": "createChat",
+                        "chatId": chat_id,
+                    });
+                    if let Some(object) = mutate.as_object_mut() {
+                        match &space_id {
+                            Some(space_id) => {
+                                object.insert(
+                                    "spaceId".into(),
+                                    serde_json::Value::String(space_id.clone()),
+                                );
+                            }
+                            None => {
+                                object.insert(
+                                    "deviceId".into(),
+                                    serde_json::Value::String(device_id.clone()),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(object) = mutate.as_object_mut() {
+                        if let Some(worktree_cwd) = &worktree_cwd {
+                            object.insert(
+                                "cwd".into(),
+                                serde_json::Value::String(worktree_cwd.clone()),
+                            );
+                        }
+                        if let Some(branch) = &chat_branch {
+                            object.insert(
+                                "branch".into(),
+                                serde_json::Value::String(branch.clone()),
+                            );
+                        }
+                        if let Some(config) = resolved.chat_config()
+                            && let Ok(config) = serde_json::to_value(&config)
+                        {
+                            object.insert("config".into(), config);
+                        }
+                    }
+                    if let Err(err) = attachments::call_with_timeout(
+                        &engine,
+                        cx.background_executor(),
+                        methods::MUTATE,
+                        mutate,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                    }
+                }
+
+        (cwd, run_worktree)
     }
 
     async fn stage_send_attachments(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp) -> Result<(String, Vec<String>, Vec<serde_json::Value>), String> {
