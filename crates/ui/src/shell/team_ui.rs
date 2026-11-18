@@ -708,6 +708,7 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
+            col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
             for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
                 LifecycleStage::Building, LifecycleStage::NotStarted, LifecycleStage::Done] {
                 let label = group.label();
@@ -752,7 +753,6 @@ impl Shell {
                     .on_click(cx.listener(|this, _, _, cx| { this.tracker.other_expanded = !this.tracker.other_expanded; cx.notify(); })));
                 if self.tracker.other_expanded { for worker in &self.tracker.other_chats { col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); } }
             }
-            col = col.children(self.render_team_archived(&chat_id, &all_workers, &theme, cx));
         }
         self.panel_root("team-tab", focus, col, cx)
     }
