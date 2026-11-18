@@ -593,5 +593,4 @@ impl Changes {
         self.sync(cx);
     }
 
-    /// Reconcile parsed content with the currently-active diff.
 }

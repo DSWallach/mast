@@ -2376,6 +2376,7 @@ impl Changes {
     /// Refresh only this surface's owning chat from the registry. A global
     /// selection change is intentionally irrelevant. Returns true when the
     /// authoritative worktree target changed.
+    /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
         {
