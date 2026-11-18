@@ -1807,7 +1807,8 @@ impl Shell {
         header = header.child(crate::components::shell_parts::worker_title(theme, title));
         if let Some(chats) = self.tracker.additional_chats.get(&id) {
             let toggle_id = id.clone();
-            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer().child(format!("{} chats", chats.len() + 1))
+            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer()
+                .child(crate::components::shell_parts::tracker_metadata(theme, format!("{} chats", chats.len() + 1)))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); if !this.tracker.expanded_chats.remove(&toggle_id) { this.tracker.expanded_chats.insert(toggle_id.clone()); } cx.notify(); })));
         }
         if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
