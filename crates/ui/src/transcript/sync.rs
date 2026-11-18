@@ -26,118 +26,8 @@ impl Transcript {
         let attached = self.attach_transcript(selected, replay);
 
         let rows = self.build_sync_rows(cx);
-        let SyncDiff { baseline_changed, rows_diff } =
-            self.reconcile_replay_and_tools(&rows, attached, replay, cx);
-        let SyncRows { new_rows, tail_streaming, .. } = rows;
-
-        // Capture this before the row splice changes the list's measured end.
-        // When the user is truly live-following, retaining the end anchor
-        // keeps the in-flow working trailer at the same viewport position as
-        // transcript lines grow above it. Nothing about the trailer's layout
-        // or coordinates changes.
-        let live_following =
-            should_anchor_live_stream(self.pinned, self.distance_from_bottom(), tail_streaming);
-        let was_empty = self.rows.is_empty();
-        let old_last = self.rows.len().checked_sub(1);
-        match rows_diff {
-            None => {
-                self.rows = new_rows;
-                self.rows_generation = self.rows_generation.wrapping_add(1);
-                self.refresh_protected_attachments(cx);
-                self.reconcile_own_turn_prompt();
-                // Replay readiness is independent of row content: an empty
-                // reset (or one identical to optimistic rows) still resolves
-                // or retires the pending viewport.
-                if self.restore_pending_viewport(replay) {
-                    cx.notify();
-                }
-                self.promote_materialized_queued_turn(attached, cx);
-                return;
-            }
-            Some((old_range, count)) => {
-                // Any replaced row's cached flatten results are stale — and
-                // because live replies splice only the rows whose content hash
-                // changed (the tail), this is O(changed rows) per commit, never
-                // O(reply).
-                for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
-                }
-                if old_range.len() == count {
-                    // In-place content change, same row count — notably the
-                    // live→complete flip, where EVERY row of the streamed
-                    // message changes version (streaming bit, tool auto_open,
-                    // timestamp bit) with identical ids. `splice` would reset
-                    // those items to hint-less Unmeasured (heights read 0
-                    // until the next paint) and, when the viewport-top item is
-                    // inside the range, clobber the scroll anchor to the range
-                    // start — the end-of-turn up/down jump the spring then has
-                    // to walk back. `remeasure_items` keeps old sizes as hints
-                    // and holds the anchor across the remeasure.
-                    self.list.remeasure_items(old_range);
-                } else {
-                    self.list.splice(old_range, count);
-                }
-                self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
-            }
-        }
-        self.rows = new_rows;
-        self.rows_generation = self.rows_generation.wrapping_add(1);
-        if old_last != self.rows.len().checked_sub(1) {
-            if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
-                // Bottom chrome moves to the new tail too.
-                self.list.remeasure_items(ix..ix + 1);
-            }
-            if was_empty && self.own_turn.is_some() && !self.rows.is_empty() {
-                // There was no concrete row to materialize at send time.
-                // Start the echo at the bottom edge before adding its runway.
-                self.list.scroll_to(ListOffset {
-                    item_ix: 0,
-                    offset_in_item: -self.list.viewport_bounds().size.height,
-                });
-            }
-        }
-        self.refresh_protected_attachments(cx);
-        self.reconcile_own_turn_prompt();
-        self.restore_pending_viewport(replay);
-        self.promote_materialized_queued_turn(attached, cx);
-        if self.land_end_pending && !self.rows.is_empty() {
-            // First content for an unpinned override tab: land at the end.
-            // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
-            // next layout materializes) — a pixel scroll off `max_offset`
-            // would land short here, since the freshly-spliced rows are
-            // still unmeasured. Short content clamps back to the top under
-            // Top alignment, so "end" and "top" coincide there.
-            self.land_end_pending = false;
-            self.list.scroll_to_end();
-        }
-        if self.own_turn.is_some() {
-            self.own_turn_kick = true;
-        }
-        if self.pinned {
-            if live_following || baseline_changed {
-                self.list.scroll_to_end();
-                self.spring.reset();
-                self.spring_last_tick = None;
-                self.spring_settled_at = None;
-                self.spring_kick = false;
-                self.last_scroll_distance = 0.0;
-            } else {
-                if motion::reduced_motion(cx) || was_empty {
-                    // First fill (chat open) lands at the bottom instantly
-                    // (mugen initialScroll:'bottom'); reduced motion snaps.
-                    self.list.scroll_to_end();
-                } else if self.is_glued() {
-                    // A glued offset (`None` / anchored past the end) makes
-                    // the upcoming layout hard-snap to the new end — the
-                    // per-commit stutter. Materialize a pixel anchor a hair
-                    // above the bottom so layout holds position and the
-                    // spring glides the growth.
-                    self.list.scroll_by(px(-0.75));
-                }
-                self.spring_kick = true;
-            }
-        }
-        cx.notify();
+        let diff = self.reconcile_replay_and_tools(&rows, attached, replay, cx);
+        self.apply_sync_rows(rows, diff, attached, replay, cx);
     }
 
     fn sync_source(&mut self, cx: &mut Context<Self>) -> Option<SyncSource> {
@@ -609,6 +499,125 @@ impl Transcript {
             .retain(|id, _| active_markdown.contains(id));
 
         SyncDiff { baseline_changed, rows_diff }
+    }
+    fn apply_sync_rows(
+        &mut self,
+        rows: SyncRows,
+        diff: SyncDiff,
+        attached: bool,
+        replay: TranscriptReplayState,
+        cx: &mut Context<Self>,
+    ) {
+        let SyncRows { new_rows, tail_streaming, .. } = rows;
+        let SyncDiff { baseline_changed, rows_diff } = diff;
+        // Capture this before the row splice changes the list's measured end.
+        // When the user is truly live-following, retaining the end anchor
+        // keeps the in-flow working trailer at the same viewport position as
+        // transcript lines grow above it. Nothing about the trailer's layout
+        // or coordinates changes.
+        let live_following =
+            should_anchor_live_stream(self.pinned, self.distance_from_bottom(), tail_streaming);
+        let was_empty = self.rows.is_empty();
+        let old_last = self.rows.len().checked_sub(1);
+        match rows_diff {
+            None => {
+                self.rows = new_rows;
+                self.rows_generation = self.rows_generation.wrapping_add(1);
+                self.refresh_protected_attachments(cx);
+                self.reconcile_own_turn_prompt();
+                // Replay readiness is independent of row content: an empty
+                // reset (or one identical to optimistic rows) still resolves
+                // or retires the pending viewport.
+                if self.restore_pending_viewport(replay) {
+                    cx.notify();
+                }
+                self.promote_materialized_queued_turn(attached, cx);
+                return;
+            }
+            Some((old_range, count)) => {
+                // Any replaced row's cached flatten results are stale — and
+                // because live replies splice only the rows whose content hash
+                // changed (the tail), this is O(changed rows) per commit, never
+                // O(reply).
+                for row in &self.rows[old_range.clone()] {
+                    self.render_cache.borrow_mut().invalidate_row(&row.id);
+                }
+                if old_range.len() == count {
+                    // In-place content change, same row count — notably the
+                    // live→complete flip, where EVERY row of the streamed
+                    // message changes version (streaming bit, tool auto_open,
+                    // timestamp bit) with identical ids. `splice` would reset
+                    // those items to hint-less Unmeasured (heights read 0
+                    // until the next paint) and, when the viewport-top item is
+                    // inside the range, clobber the scroll anchor to the range
+                    // start — the end-of-turn up/down jump the spring then has
+                    // to walk back. `remeasure_items` keeps old sizes as hints
+                    // and holds the anchor across the remeasure.
+                    self.list.remeasure_items(old_range);
+                } else {
+                    self.list.splice(old_range, count);
+                }
+                self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
+            }
+        }
+        self.rows = new_rows;
+        self.rows_generation = self.rows_generation.wrapping_add(1);
+        if old_last != self.rows.len().checked_sub(1) {
+            if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
+                // Bottom chrome moves to the new tail too.
+                self.list.remeasure_items(ix..ix + 1);
+            }
+            if was_empty && self.own_turn.is_some() && !self.rows.is_empty() {
+                // There was no concrete row to materialize at send time.
+                // Start the echo at the bottom edge before adding its runway.
+                self.list.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: -self.list.viewport_bounds().size.height,
+                });
+            }
+        }
+        self.refresh_protected_attachments(cx);
+        self.reconcile_own_turn_prompt();
+        self.restore_pending_viewport(replay);
+        self.promote_materialized_queued_turn(attached, cx);
+        if self.land_end_pending && !self.rows.is_empty() {
+            // First content for an unpinned override tab: land at the end.
+            // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
+            // next layout materializes) — a pixel scroll off `max_offset`
+            // would land short here, since the freshly-spliced rows are
+            // still unmeasured. Short content clamps back to the top under
+            // Top alignment, so "end" and "top" coincide there.
+            self.land_end_pending = false;
+            self.list.scroll_to_end();
+        }
+        if self.own_turn.is_some() {
+            self.own_turn_kick = true;
+        }
+        if self.pinned {
+            if live_following || baseline_changed {
+                self.list.scroll_to_end();
+                self.spring.reset();
+                self.spring_last_tick = None;
+                self.spring_settled_at = None;
+                self.spring_kick = false;
+                self.last_scroll_distance = 0.0;
+            } else {
+                if motion::reduced_motion(cx) || was_empty {
+                    // First fill (chat open) lands at the bottom instantly
+                    // (mugen initialScroll:'bottom'); reduced motion snaps.
+                    self.list.scroll_to_end();
+                } else if self.is_glued() {
+                    // A glued offset (`None` / anchored past the end) makes
+                    // the upcoming layout hard-snap to the new end — the
+                    // per-commit stutter. Materialize a pixel anchor a hair
+                    // above the bottom so layout holds position and the
+                    // spring glides the growth.
+                    self.list.scroll_by(px(-0.75));
+                }
+                self.spring_kick = true;
+            }
+        }
+        cx.notify();
     }
 
 }
