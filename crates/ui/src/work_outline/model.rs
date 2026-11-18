@@ -1148,11 +1148,7 @@ pub(crate) mod tests {
     #[test]
     fn pinned_chat_from_hidden_archived_item_sorts_first_when_unassociated() {
         let (spaces, mut chats) = archived_synced_pr_spaces();
-        chats
-            .iter_mut()
-            .find(|c| c.id == CHAT_LOOSE_A)
-            .unwrap()
-            .activity = 100;
+        chats.iter_mut().find(|c| c.id == CHAT_LOOSE_A).unwrap().activity = 100;
         let options = OutlineOptions {
             pinned_chats: [CHAT_PR.to_string()].into_iter().collect(),
             ..opts()
