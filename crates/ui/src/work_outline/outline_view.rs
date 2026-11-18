@@ -453,7 +453,7 @@ pub(crate) struct OutlineView {
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
     worker_rollup_revisions: Vec<(String, u64)>,
-    worker_rollup_chats: Vec<OutlineChat>,
+    worker_rollup_chats: Vec<worker_rollup::WorkerInput>,
     worker_rollups: std::collections::HashMap<(String, String), worker_rollup::WorkerRollup>,
     /// PR link index per Space, rebuilt only when the Space's snapshot changes.
     pr_links: pr_sync_outline::PrLinkCache,
@@ -622,7 +622,8 @@ impl OutlineView {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
         let revisions: Vec<_> = inputs.spaces.iter().filter_map(|space| space.load.snapshot().map(|snapshot| (space.id.clone(), snapshot.revision))).collect();
-        if revisions != self.worker_rollup_revisions || inputs.chats != self.worker_rollup_chats {
+        let worker_chats: Vec<_> = inputs.chats.iter().map(worker_rollup::WorkerInput::from).collect();
+        if revisions != self.worker_rollup_revisions || worker_chats != self.worker_rollup_chats {
             self.worker_rollups.clear();
             for space in &inputs.spaces {
                 if let Some(snapshot) = space.load.snapshot() {
@@ -632,7 +633,7 @@ impl OutlineView {
                 }
             }
             self.worker_rollup_revisions = revisions;
-            self.worker_rollup_chats = inputs.chats.clone();
+            self.worker_rollup_chats = worker_chats;
         }
         self.inputs = inputs;
         self.retire_shown_optimistic();
@@ -2973,13 +2974,7 @@ impl OutlineView {
                     let worker_chip = self.worker_rollups.get(&(item.space_id.clone(), item.item_id.clone())).filter(|rollup| rollup.live > 0).cloned().map(|rollup| {
                         let space_id = item.space_id.clone();
                         let item_id = item.item_id.clone();
-                        let selector = format!("outline-workers-{key}");
-                        div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
-                            .flex_none().flex().items_center().gap(px(4.0)).px(px(5.0))
-                            .rounded(px(4.0)).bg(theme.element_hover).cursor_pointer()
-                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
-                            .when(rollup.needs_you, |el| el.child(div().size(px(5.0)).rounded_full().bg(theme.warning)))
-                            .child(format!("{} worker{}", rollup.live, if rollup.live == 1 { "" } else { "s" }))
+                        crate::components::outline_worker_chip(SharedString::from(format!("outline-workers-{key}")), rollup.live, rollup.needs_you, theme)
                             .hint("Open Tracker or work item details", HintKey::None)
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| {

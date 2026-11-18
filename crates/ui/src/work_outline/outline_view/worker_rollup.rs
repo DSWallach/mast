@@ -5,6 +5,22 @@ use mast_proto::{ChatIndicator, WorkOutlineSnapshot};
 use mast_proto::work_outline_user_actions::{UserActionKind, UserActionPriority};
 use super::super::model::OutlineChat;
 
+/// Chat fields that affect the rollup; activity and titles do not invalidate it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorkerInput {
+    id: String,
+    space_id: Option<String>,
+    parent_chat_id: Option<String>,
+    status: ChatIndicator,
+    archived: bool,
+}
+
+impl From<&OutlineChat> for WorkerInput {
+    fn from(chat: &OutlineChat) -> Self {
+        Self { id: chat.id.clone(), space_id: chat.space_id.clone(), parent_chat_id: chat.parent_chat_id.clone(), status: chat.status, archived: chat.archived }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct WorkerRollup {
     pub live: usize,
