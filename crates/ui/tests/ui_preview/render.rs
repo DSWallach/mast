@@ -176,7 +176,7 @@ pub fn render(
     let theme_id = theme_id.to_owned();
     super::snapshot(
         name,
-        size(px(super::preview_width() as f32), px(900.)),
+        size(px(super::preview_width() as f32), px(if screen == "space-settings" { 2400. } else { 900. })),
         style,
         layout,
         appearance,
@@ -189,6 +189,7 @@ pub fn render(
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
+                "space-settings" => mast_ui::snapshot::space_settings_fixture(data_dir.clone(), cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "tracker-expanded" => mast_ui::snapshot::tracker_expanded_fixture(data_dir, cx).into(),

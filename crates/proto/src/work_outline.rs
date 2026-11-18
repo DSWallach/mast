@@ -455,6 +455,18 @@ impl WorkItemView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkOutlineSpaceSettings {
+    /// Start new workers on an isolated worktree (default off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_worktrees: bool,
+    /// Action to take when a linked pull request merges (default off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    /// When the current completion mode was enabled, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_pr_completion_since: Option<i64>,
+    /// Archive eligible worker chats after this many days; absent disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_workers_after_days: Option<u32>,
     /// Resolve handoff requests when their pull request merges (default on).
     #[serde(
         default = "default_resolve_merged_handoffs",
@@ -482,6 +494,13 @@ pub struct WorkOutlineSpaceSettings {
     /// Command approval rules. Missing settings never enable approvals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_rules: Vec<ApprovalRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MergedPrCompletion {
+    Ask,
+    Automatic,
 }
 
 /// A user-configured command approval rule. Evaluation must fail closed.
@@ -566,6 +585,10 @@ fn is_true(value: &bool) -> bool {
 impl Default for WorkOutlineSpaceSettings {
     fn default() -> Self {
         Self {
+            worker_worktrees: false,
+            merged_pr_completion: None,
+            merged_pr_completion_since: None,
+            archive_workers_after_days: None,
             resolve_merged_handoffs: true,
             linear_enabled: false,
             linear_account_id: None,
@@ -1224,6 +1247,9 @@ pub struct WorkItemChanges {
     /// Ignored for other statuses; agents may never set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_open_requests: bool,
+    /// Resolve only the specified merged-PR completion request while completing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_request_id: Option<String>,
     /// PR review sync: replace the item's `externalSyncState` record. Only
     /// the system actor (the engine's sync) may set it; a user or agent
     /// change carrying it is `unauthorized`.
@@ -1482,6 +1508,31 @@ pub struct SetResolveMergedHandoffsParams {
     pub operation_id: String,
 }
 
+/// Configure the opt-in worker automations for one Space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkerAutomationParams {
+    pub space_id: String,
+    /// When present, update only this field, leaving other settings intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<WorkerAutomationField>,
+    #[serde(default)]
+    pub worker_worktrees: bool,
+    #[serde(default)]
+    pub merged_pr_completion: Option<MergedPrCompletion>,
+    #[serde(default)]
+    pub archive_workers_after_days: Option<u32>,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkerAutomationField {
+    Worktrees,
+    MergedPrCompletion,
+    ArchiveWorkers,
+}
+
 /// `createWorkItemFromLinear` (Linear integration): create a work item for a
 /// Linear issue and its `linear`/`issue` external reference in ONE batch.
 /// Title = [`crate::linear::linear_item_title`] (`"ENG-123 · title"`),
@@ -1587,6 +1638,7 @@ pub enum WorkOutlineMutation {
     SetSpaceLinearEnabled(SetSpaceLinearEnabledParams),
     SetSpaceLinearAccount(SetSpaceLinearAccountParams),
     SetResolveMergedHandoffs(SetResolveMergedHandoffsParams),
+    SetWorkerAutomation(SetWorkerAutomationParams),
     CreateWorkItemFromLinear(CreateWorkItemFromLinearParams),
     LinkLinearProject(LinkLinearProjectParams),
     // ── PR review sync ──
@@ -1635,6 +1687,7 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(p) => &p.operation_id,
             Self::SetSpaceLinearAccount(p) => &p.operation_id,
             Self::SetResolveMergedHandoffs(p) => &p.operation_id,
+            Self::SetWorkerAutomation(p) => &p.operation_id,
             Self::CreateWorkItemFromLinear(p) => &p.operation_id,
             Self::LinkLinearProject(p) => &p.operation_id,
             Self::SetPrReviewSyncDestination(p) => &p.operation_id,
@@ -1680,6 +1733,7 @@ impl WorkOutlineMutation {
             Self::SetSpaceLinearEnabled(_) => "setSpaceLinearEnabled",
             Self::SetSpaceLinearAccount(_) => "setSpaceLinearAccount",
             Self::SetResolveMergedHandoffs(_) => "setResolveMergedHandoffs",
+            Self::SetWorkerAutomation(_) => "setWorkerAutomation",
             Self::CreateWorkItemFromLinear(_) => "createWorkItemFromLinear",
             Self::LinkLinearProject(_) => "linkLinearProject",
             Self::SetPrReviewSyncDestination(_) => "setPrReviewSyncDestination",

@@ -47,6 +47,9 @@ const DIFF_STAT_TTL: Duration = Duration::from_secs(25);
 const NEGATIVE_PR_TTL: Duration = Duration::from_secs(600);
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(20);
+/// Opted-in completion observations are discovered at most once per three minutes.
+const COMPLETION_SCAN_INTERVAL: Duration = Duration::from_secs(180);
+const COMPLETION_SCAN_LIMIT: usize = 12;
 /// Pending keys drained per sweep tick, per kind (PR, ticket, diff-stat) —
 /// matches the reference's `PR_KEYS_PER_SWEEP`/`TICKET_IDS_PER_SWEEP = 3`.
 const KEYS_PER_SWEEP: usize = 3;
@@ -299,6 +302,7 @@ enum TicketKey {
 
 struct Inner {
     merged_wakes: Mutex<Option<crate::pr_merged_wakes::PrMergedWakes>>,
+    completion_scan: Mutex<(Option<Instant>, usize)>,
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
     ticket_cache: Mutex<HashMap<TicketKey, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
@@ -343,6 +347,14 @@ pub struct PrTicketCache {
 }
 
 impl PrTicketCache {
+    /// Read a cached PR state without scheduling a refresh or a git probe.
+    pub(crate) fn cached_pr_state(&self, url: &str) -> Option<String> {
+        lock(&self.inner.pr_cache).get(&PrKey::Url(url.to_owned()))
+            // A merged PR cannot reopen; closed and open states still need a
+            // fresh observation before they influence an archive decision.
+            .filter(|entry| entry.fresh_pr() || entry.data.as_ref().is_some_and(|status| status.state.eq_ignore_ascii_case("merged")))
+            .and_then(|entry| entry.data.as_ref().map(|status| status.state.clone()))
+    }
     /// Read a fresh durable-link result without scheduling any work. The outer
     /// option is absent when the result is unknown; the inner option is absent
     /// when a lookup completed and found no PR.
@@ -387,6 +399,7 @@ impl PrTicketCache {
         Self {
             inner: Arc::new(Inner {
                 merged_wakes: Mutex::new(None),
+                completion_scan: Mutex::new((None, 0)),
                 pr_cache: Mutex::new(HashMap::new()),
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
@@ -403,6 +416,28 @@ impl PrTicketCache {
                 review_prs_failed_at: Mutex::new(None),
                 linear: Mutex::new(None),
             }),
+        }
+    }
+
+    fn select_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) -> Vec<crate::pr_merged_wakes::CompletionObservation> {
+        if observations.is_empty() { return Vec::new(); }
+        let mut scan = lock(&self.inner.completion_scan);
+        let start = scan.1 % observations.len();
+        let count = observations.len().min(COMPLETION_SCAN_LIMIT);
+        scan.1 = (start + count) % observations.len();
+        (0..count).map(|index| observations[(start + index) % observations.len()].clone()).collect()
+    }
+
+    fn queue_completion_observations(&self, observations: &[crate::pr_merged_wakes::CompletionObservation]) {
+        let cache = lock(&self.inner.pr_cache);
+        let mut pending = lock(&self.inner.pending_pr);
+        for observation in observations {
+            let key = match observation {
+                crate::pr_merged_wakes::CompletionObservation::Url(url) => PrKey::Url(url.clone()),
+                crate::pr_merged_wakes::CompletionObservation::Branch(cwd, branch) => PrKey::Branch { cwd: cwd.clone(), branch: branch.clone() },
+                crate::pr_merged_wakes::CompletionObservation::BranchUnknown(..) => continue,
+            };
+            if pending.len() < 512 && !cache.get(&key).is_some_and(Entry::fresh_pr) { pending.insert(key); }
         }
     }
 
@@ -755,6 +790,27 @@ impl PrTicketCache {
     }
 
     async fn sweep_once(&self) {
+        let scan_due = {
+            let mut scan = lock(&self.inner.completion_scan);
+            if scan.0.is_none_or(|last| last.elapsed() >= COMPLETION_SCAN_INTERVAL) {
+                scan.0 = Some(Instant::now());
+                true
+            } else { false }
+        };
+        if scan_due {
+            let wakes = lock(&self.inner.merged_wakes).clone();
+            if let Some(wakes) = wakes {
+                let cache = self.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let observations = wakes.completion_observations()?;
+                    Ok::<_, String>(wakes.resolve_completion_observations(cache.select_completion_observations(&observations)))
+                }).await {
+                    Ok(Ok(observations)) => self.queue_completion_observations(&observations),
+                    Ok(Err(error)) => tracing::warn!(%error, "failed to collect merged PR observations"),
+                    Err(error) => tracing::warn!(%error, "merged PR observation collection panicked"),
+                }
+            }
+        }
         let pr_keys: Vec<PrKey> = {
             let mut pending = lock(&self.inner.pending_pr);
             let take: Vec<PrKey> = pending.iter().take(KEYS_PER_SWEEP).cloned().collect();
@@ -783,7 +839,11 @@ impl PrTicketCache {
                     PrKey::Branch { .. } | PrKey::CheckoutBranch { .. } => status.url.as_deref(),
                 };
                 if let Some(url) = url {
-                    wakes.observe(url, status).await;
+                    let checkout = match &key {
+                        PrKey::Branch { cwd, branch } | PrKey::CheckoutBranch { cwd, branch } => Some((cwd.as_path(), branch.as_str())),
+                        PrKey::Url(_) => None,
+                    };
+                    wakes.observe_with_checkout(url, status, checkout).await;
                 }
             }
             pr_results.push((key, data));
@@ -1553,6 +1613,39 @@ mod tests {
         );
         cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
         assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
+    }
+
+    #[test]
+    fn completion_observation_queue_is_bounded_and_rotates() {
+        use crate::pr_merged_wakes::CompletionObservation;
+        assert!(COMPLETION_SCAN_INTERVAL >= Duration::from_secs(60));
+        let cache = PrTicketCache::new();
+        let observations: Vec<_> = (0..20).map(|n| CompletionObservation::Url(format!("https://github.com/acme/repo/pull/{n}"))).collect();
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
+        let first = lock(&cache.inner.pending_pr).clone();
+        assert_eq!(first.len(), COMPLETION_SCAN_LIMIT);
+        lock(&cache.inner.pending_pr).clear();
+        cache.queue_completion_observations(&cache.select_completion_observations(&observations));
+        let second = lock(&cache.inner.pending_pr).clone();
+        assert_eq!(second.len(), COMPLETION_SCAN_LIMIT);
+        assert_eq!(first.union(&second).count(), observations.len());
+    }
+
+    #[test]
+    fn archive_cache_uses_stale_merged_but_not_stale_closed_prs() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/acme/repo/pull/1";
+        let mut status = pr_json_to_status(&serde_json::json!({"number": 1, "state": "MERGED"}));
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status.clone()), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert!(cache.cached_pr_state(url).is_some_and(|state| state.eq_ignore_ascii_case("merged")));
+        status.state = "CLOSED".into();
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert_eq!(cache.cached_pr_state(url), None);
+        assert!(lock(&cache.inner.pending_pr).is_empty());
     }
 
     #[test]

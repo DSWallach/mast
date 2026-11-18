@@ -51,6 +51,65 @@ pub(crate) struct LinearDetailsState {
 }
 
 impl WorkItemDetails {
+    fn save_worker_automation(&mut self, settings: mast_proto::work_outline::WorkOutlineSpaceSettings, field: mast_proto::work_outline::WorkerAutomationField, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().mutate(
+            mast_proto::WorkOutlineMutation::SetWorkerAutomation(mast_proto::work_outline::SetWorkerAutomationParams {
+                space_id: self.space_id.clone(), field: Some(field), worker_worktrees: settings.worker_worktrees,
+                merged_pr_completion: settings.merged_pr_completion,
+                archive_workers_after_days: settings.archive_workers_after_days,
+                operation_id: new_operation_id(),
+            })
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| { if let Err(error) = result { this.error = Some(error.message); } cx.notify(); }).ok();
+        }).detach();
+    }
+
+    pub(super) fn render_worker_automation(&mut self, snapshot: &WorkOutlineSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use mast_proto::work_outline::{MergedPrCompletion, WorkerAutomationField};
+        let settings = snapshot.space_settings.clone();
+        let enabled = settings.worker_worktrees;
+        let mut section = crate::components::outline_section("worker-automation", theme)
+            .child(crate::components::outline_detail_heading("Worker automations", theme))
+            .child(crate::components::outline_detail_row(theme)
+                .child(crate::components::outline_execution_line("Start workers in their own worktree".into(), 11.0, theme.text, theme))
+                .child(crate::components::toggle_switch(theme, enabled).id("worker-worktrees-toggle")
+                    .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                        let mut settings = settings.clone(); settings.worker_worktrees = !enabled; this.save_worker_automation(settings, WorkerAutomationField::Worktrees, cx);
+                    }}))))
+            .child(crate::components::outline_execution_line("Create a branch and worktree for a worker when its item has no execution setup.".into(), 11.0, theme.text_faint, theme))
+            .child(crate::components::outline_execution_line("When a linked PR merges".into(), 11.0, theme.text, theme));
+        let mut modes = crate::components::outline_detail_row(theme).flex_wrap().gap(px(6.0));
+        for (label, mode) in [("Off", None), ("Ask", Some(MergedPrCompletion::Ask)), ("Automatic", Some(MergedPrCompletion::Automatic))] {
+            let selected = settings.merged_pr_completion == mode;
+            modes = modes.child(div().id(SharedString::from(format!("worker-merge-{label}")))
+                .cursor_pointer().px(px(8.0)).py(px(4.0)).border_1().border_color(theme.border)
+                .text_color(theme.text).child(if selected { format!("✓ {label}") } else { label.to_owned() })
+                .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                    let mut settings = settings.clone(); settings.merged_pr_completion = mode; this.save_worker_automation(settings, WorkerAutomationField::MergedPrCompletion, cx);
+                }})));
+        }
+        section = section.child(modes).child(crate::components::outline_execution_line("Ask to mark the item done, or complete it automatically.".into(), 11.0, theme.text_faint, theme));
+        let archive_days = settings.archive_workers_after_days;
+        let mut archive = crate::components::outline_detail_row(theme)
+            .child(crate::components::outline_execution_line("Archive finished workers".into(), 11.0, theme.text, theme))
+            .child(crate::components::toggle_switch(theme, archive_days.is_some()).id("worker-archive-toggle")
+                .on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                    let mut settings = settings.clone(); settings.archive_workers_after_days = if archive_days.is_some() { None } else { Some(3) }; this.save_worker_automation(settings, WorkerAutomationField::ArchiveWorkers, cx);
+                }})));
+        if let Some(days) = archive_days {
+            for (label, value) in [("−", days.saturating_sub(1).max(1)), ("+", days.saturating_add(1))] {
+                archive = archive.child(div().id(SharedString::from(format!("worker-archive-{label}"))).cursor_pointer()
+                    .px(px(8.0)).child(label).on_click(cx.listener({ let settings = settings.clone(); move |this, _, _, cx| {
+                        let mut settings = settings.clone(); settings.archive_workers_after_days = Some(value); this.save_worker_automation(settings, WorkerAutomationField::ArchiveWorkers, cx);
+                    }})));
+            }
+            archive = archive.child(crate::components::outline_execution_line(format!("After {days} days").into(), 11.0, theme.text, theme));
+        }
+        section.child(archive).child(crate::components::outline_execution_line("Archive eligible idle worker chats after the selected delay.".into(), 11.0, theme.text_faint, theme)).into_any_element()
+    }
+
     fn linear_enabled(&self) -> bool {
         crate::linear::space_enabled(self.snapshot.as_deref())
     }

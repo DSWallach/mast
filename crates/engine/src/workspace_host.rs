@@ -971,6 +971,26 @@ impl WorkspaceHost {
         self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
     }
 
+    /// Pin an automatically created checkout only if the item still has no
+    /// configuration. The check and write share the registry lock.
+    pub(crate) fn configure_worker_execution_if_absent(
+        &self,
+        params: &mast_proto::ConfigureExecutionParams,
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<bool, mast_proto::WorkOutlineError> {
+        self.mutate(|doc| {
+            if doc.row_state(mast_doc::registry::work_outline::KIND_EXECUTION_CONFIGURATIONS, &params.scope.row_id()) == mast_doc::RowState::Live {
+                return Ok(false);
+            }
+            doc.apply_work_outline_mutation(
+                &mast_proto::WorkOutlineMutation::ConfigureExecution(params.clone()),
+                actor,
+                Utc::now().timestamp_millis(),
+            )?;
+            Ok(true)
+        })
+    }
+
     /// Apply a prepared pack under one registry lock after validating it on a
     /// private copy. If a live write unexpectedly fails, compensate in reverse
     /// order while still holding the lock and report any compensation failures.
@@ -1926,6 +1946,25 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// Recheck the registry row and outline under the same lock as an
+    /// automatic archive, so a newly opened request cannot be missed.
+    pub(crate) fn archive_chat_if(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        predicate: impl FnOnce(&mast_proto::Chat, &mast_proto::WorkOutlineSnapshot) -> bool,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        let synced = self.registry_synced();
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else { return Ok(false); };
+            if chat.space_id.as_deref() != Some(space_id) { return Ok(false); }
+            let snapshot = doc.work_outline_snapshot(space_id, synced);
+            if !predicate(&chat, &snapshot) { return Ok(false); }
+            doc.set_chat_archived(chat_id, true)
+        })?)
+    }
+
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.
@@ -2093,6 +2132,20 @@ impl WorkspaceHost {
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
     pub fn set_chat_branch(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
+    }
+
+    pub(crate) fn set_chat_branch_if_absent(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.is_some()) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
+    pub(crate) fn set_chat_branch_if_cwd_matches(&self, chat_id: &str, cwd: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.as_deref().is_some_and(|value| !value.is_empty()) || chat.cwd.as_deref() != Some(cwd)) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
     }
 
     pub fn set_chat_source_context(

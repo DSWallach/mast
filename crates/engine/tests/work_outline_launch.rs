@@ -98,6 +98,62 @@ async fn rig() -> Rig {
     rig_with(InstructionMockHarness::default(), true).await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
+    let rig = rig().await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"parent",
+        "spaceId":SPACE, "deviceId":DEVICE})).await.unwrap();
+    let mut off = params(&rig, "worker-off", "off");
+    off.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &off).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
+        "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
+    let configured = rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem", "spaceId":SPACE,
+        "title":"Configured", "operationId":"configured-item"})).await.unwrap();
+    let configured_id = configured["workItemId"].as_str().unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"configureExecution",
+        "scope":{"type":"workItem", "workItemId":configured_id},
+        "configuration":{"executionRoot":rig.repo.to_string_lossy(), "bindings":[], "schema":1},
+        "operationId":"configure-item"})).await.unwrap();
+    let mut explicit = params(&rig, "worker-configured", "configured");
+    explicit.work_item_id = configured_id.into();
+    explicit.parent_chat_id = Some("parent".into());
+    let existing = launch(&rig, &explicit).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&existing.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/configured").exists());
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    git(&rig.repo, &["checkout", "-b", "local-work"]);
+    git(&rig.repo, &["branch", "-D", "main"]);
+    git(&rig.repo, &["branch", "launch-me"]);
+    let occupied = rig.repo.join(".worktrees/workspace/launch-me-2");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("keep"), "untouched").unwrap();
+    let mut on = params(&rig, "worker-on", "on");
+    on.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &on).await.unwrap();
+    let path = rig.repo.join(".worktrees/workspace/launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().branch.as_deref(), Some("launch-me-3"));
+    assert!(matches!(rig.core.workspace.chat_execution_binding(&reply.chat_id).unwrap().resolved.source_scope,
+        mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { ref work_item_id } if work_item_id == &rig.item));
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), git(&rig.repo, &["rev-parse", "refs/remotes/origin/main"]));
+    assert_eq!(std::fs::read_to_string(occupied.join("keep")).unwrap(), "untouched");
+    assert_eq!(launch(&rig, &on).await.unwrap().chat_id, reply.chat_id);
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
+    assert!(snapshot.execution_configurations.iter().any(|config| config.work_item_id.as_deref() == Some(&rig.item)
+        && config.configuration.as_ref().is_some_and(|config| config.execution_root == path.to_string_lossy())));
+    // Once an item has a setup, a later worker reuses it rather than creating another worktree.
+    let mut again = params(&rig, "worker-again", "again");
+    again.parent_chat_id = Some("parent".into());
+    let reply = launch(&rig, &again).await.unwrap();
+    assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
+    assert!(!rig.repo.join(".worktrees/workspace/launch-me-4").exists());
+    rig.core.shutdown().await;
+}
+
 /// A rig whose mock declares `mock`'s support; `instructions` adds one
 /// Space-root instruction (so every item has effective instructions).
 async fn rig_with(mock: InstructionMockHarness, instructions: bool) -> Rig {
