@@ -36,6 +36,14 @@ pub(crate) fn reconcile_tickets(
         issues.insert(key, rows.len());
         rows.push(TicketSourceRow { issue_identifier: Some(identifier.clone()), item_ids: Vec::new(), chat_ids: Vec::new() });
     }
+    // Explicit references are tickets even when the bounded project page did
+    // not include them; add them before matching any chat branch names.
+    for identifier in items.iter().filter_map(|item| item.issue_identifier.as_ref()) {
+        let key = identifier.to_ascii_uppercase();
+        if issues.contains_key(&key) { continue; }
+        issues.insert(key, rows.len());
+        rows.push(TicketSourceRow { issue_identifier: Some(identifier.clone()), item_ids: Vec::new(), chat_ids: Vec::new() });
+    }
     let branch_matches: HashMap<_, _> = branch_chats.iter().filter_map(|chat|
         branch_issue(&chat.branch, &issues).map(|index| (chat.chat_id.as_str(), index))).collect();
     let mut assigned_chats = HashSet::new();
@@ -43,8 +51,10 @@ pub(crate) fn reconcile_tickets(
         let index = item.issue_identifier.as_ref().and_then(|id| issues.get(&id.to_ascii_uppercase()).copied())
             .or_else(|| item.issue_identifier.is_none().then(|| item.chat_ids.iter().find_map(|id| branch_matches.get(id.as_str()).copied())).flatten())
             .unwrap_or_else(|| {
-                rows.push(TicketSourceRow { issue_identifier: None, item_ids: Vec::new(), chat_ids: Vec::new() });
-                rows.len() - 1
+                let index = rows.len();
+                rows.push(TicketSourceRow { issue_identifier: item.issue_identifier.clone(), item_ids: Vec::new(), chat_ids: Vec::new() });
+                if let Some(id) = &item.issue_identifier { issues.insert(id.to_ascii_uppercase(), index); }
+                index
             });
         rows[index].item_ids.push(item.item_id.clone());
         for chat_id in &item.chat_ids {
@@ -107,7 +117,7 @@ mod tests {
         assert_eq!(rows[1].item_ids, ["d"]);
         assert_eq!(rows[1].chat_ids, ["four", "three"]);
         assert_eq!(rows[2].item_ids, ["c"]);
-        assert!(rows[2].issue_identifier.is_none());
+        assert_eq!(rows[2].issue_identifier.as_deref(), Some("OTHER-1"));
     }
 
     #[test]
@@ -116,5 +126,17 @@ mod tests {
             chat_ids: vec!["worker".into()] }], &[]);
         assert_eq!(rows[0].item_ids, ["item"]);
         assert_eq!(rows[0].chat_ids, ["worker"]);
+    }
+
+    #[test]
+    fn explicit_issues_outside_the_loaded_project_keep_their_identity_and_merge() {
+        let items = vec![LocalTicket { item_id: "a".into(), issue_identifier: Some("OTHER-900".into()), chat_ids: vec!["one".into()] },
+            LocalTicket { item_id: "b".into(), issue_identifier: Some("other-900".into()), chat_ids: vec!["two".into()] }];
+        let chats = [BranchChat { chat_id: "three".into(), branch: "other-900-work".into() }];
+        let rows = reconcile_tickets(&["ENG-1".into()], &items, &chats);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].issue_identifier.as_deref(), Some("OTHER-900"));
+        assert_eq!(rows[1].item_ids, ["a", "b"]);
+        assert_eq!(rows[1].chat_ids, ["one", "two", "three"]);
     }
 }

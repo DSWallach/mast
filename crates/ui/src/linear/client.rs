@@ -317,6 +317,15 @@ impl WorkOutlineActions {
         )
     }
 
+    pub(crate) fn linear_project_issue_page(
+        &self, space_id: &str, account_id: &str, project_id: &str, read: ListRead,
+    ) -> LinearTask<mast_proto::linear::LinearProjectIssuePage> {
+        self.linear_call(methods::LINEAR_PROJECT_ISSUE_PAGE, LinearProjectIssuesParams {
+            space_id: Some(space_id.to_owned()), expected_account_id: Some(account_id.to_owned()),
+            project_id: project_id.to_owned(), include_completed: true, force: read.force(), cached_only: read.stored_only(),
+        })
+    }
+
     pub(crate) fn linear_project_detail(
         &self,
         space_id: &str,

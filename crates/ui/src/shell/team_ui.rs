@@ -49,8 +49,8 @@ pub(super) struct TrackerState {
     health_completed: std::collections::HashSet<String>,
     health_issue_urls: std::collections::HashMap<String, String>,
     health_link_url: Option<String>,
-    facts: TeamFacts,
-    all_workers: TeamFacts,
+    facts: std::sync::Arc<TeamFacts>,
+    all_workers: std::sync::Arc<TeamFacts>,
     not_started: Vec<crate::board::BoardItem>,
     completed_items: Vec<crate::board::BoardItem>,
     unassigned_groups: std::collections::HashMap<(TrackerFilter, LifecycleStage), Vec<crate::board::BoardItem>>,
@@ -65,6 +65,7 @@ pub(super) struct TrackerState {
     stale_rows: std::collections::HashMap<TrackerFilter, Vec<usize>>,
     lifecycle_rows: std::collections::HashMap<String, LifecycleRow>,
     linear_projects: std::collections::HashMap<(String, String, u64), Vec<mast_proto::linear::LinearIssueSummary>>,
+    linear_more: std::collections::HashMap<(String, String, u64), bool>,
     linear_loading: std::collections::HashSet<(String, String, u64)>,
     linear_errors: std::collections::HashMap<(String, String, u64), crate::linear::client::LinearUiError>,
     linear_sync_task: Option<Task<()>>,
@@ -215,6 +216,11 @@ fn tracker_reconcile_project(
             if let Some(issue) = issue {
                 primary.ticket = Some(crate::chat_metadata::HeaderTicket { identifier: issue.identifier.clone(), title: Some(issue.title.clone()),
                     url: Some(issue.url.clone()), state: Some(issue.state.name.clone()) });
+            } else if let Some(identifier) = &row.issue_identifier {
+                let reference = row.item_ids.iter().find_map(|id| references.get(id.as_str()).copied());
+                primary.ticket = Some(crate::chat_metadata::HeaderTicket { identifier: identifier.clone(),
+                    title: reference.and_then(|reference| reference.cached_title.clone()),
+                    url: reference.map(|reference| reference.url.clone()).filter(|url| !url.is_empty()), state: None });
             } else {
                 primary.ticket = None;
             }
@@ -234,7 +240,7 @@ fn tracker_reconcile_project(
                 item.ticket = Some(issue.identifier.clone());
                 if issue.state.state_type.is_closed() { item.status = crate::board::BoardStatus::Done; }
             } else {
-                item.ticket = None;
+                item.ticket = row.issue_identifier.clone();
             }
             if row.item_ids.iter().any(|id| item_map.get(id.as_str()).is_some_and(|item| item.status == crate::board::BoardStatus::Done)) {
                 item.status = crate::board::BoardStatus::Done;
@@ -376,6 +382,27 @@ mod tracker_tests {
     }
 
     #[test]
+    fn tracker_preserves_explicit_issue_ids_outside_the_loaded_project() {
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"fixture", "items":[
+                {"id":"root", "spaceId":"fixture", "childIds":["a", "b"]},
+                {"id":"a", "spaceId":"fixture", "parentWorkItemId":"root", "chatIds":["one"]},
+                {"id":"b", "spaceId":"fixture", "parentWorkItemId":"root"}],
+            "externalReferences":[
+                {"id":"r1", "spaceId":"fixture", "workItemId":"a", "provider":"linear", "referenceType":"issue", "externalId":"OUT-1"},
+                {"id":"r2", "spaceId":"fixture", "workItemId":"b", "provider":"linear", "referenceType":"issue", "externalId":"OUT-2"}]
+        })).unwrap();
+        let item = |id: &str| crate::board::BoardItem { id: id.into(), title: id.into(), status: crate::board::BoardStatus::Todo,
+            updated_at: 0, created_at: 0, worker: None, worker_title: None, report: None, ticket: None, request_id: None };
+        let items = vec![(item("a"), false), (item("b"), true)];
+        let workers = TeamFacts { workers: vec![worker("one", WorkerState::Working)] };
+        let issues = vec![mast_proto::linear::LinearIssueSummary { identifier:"EX-1".into(), ..Default::default() }];
+        let (rows, _, _, empty, _) = tracker_reconcile_project(&snapshot, "root", &items, &workers, &issues);
+        assert_eq!(rows.workers[0].ticket.as_ref().unwrap().identifier, "OUT-1");
+        assert!(empty.iter().any(|item| item.id == "b" && item.ticket.as_deref() == Some("OUT-2")));
+    }
+
+    #[test]
     fn tracker_headline_uses_ticket_title_or_work_item() {
         let mut ticket = crate::chat_metadata::HeaderTicket { identifier: "ENG-42".into(), title: Some("Review changes".into()), ..Default::default() };
         assert_eq!(tracker_headline(Some(&ticket), "Work item"), "Review changes");
@@ -403,6 +430,22 @@ impl Shell {
     pub(super) fn set_tracker_project_for_test(&mut self, account: &str, project: &str, issues: Vec<mast_proto::linear::LinearIssueSummary>) {
         self.tracker.linear_projects.insert((account.into(), project.into(), 0), issues);
         self.tracker.key = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_tracker_project_more_for_test(&mut self, account: &str, project: &str, more: bool) {
+        self.tracker.linear_more.insert((account.into(), project.into(), 0), more);
+        self.tracker.key = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn tracker_source_notice_for_test(&self) -> Option<&str> {
+        self.tracker.source_notice.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn tracker_all_workers_for_test(&self) -> std::sync::Arc<TeamFacts> {
+        self.tracker.all_workers.clone()
     }
 
     #[cfg(test)]
@@ -689,11 +732,12 @@ impl Shell {
                 }).ok();
             }
             let project = crate::linear::project_links::resolved_project_id(&reference, projects.as_deref());
-            let stored = needs_stored.then(|| actions.linear_project_issue_list(&space, &account, &project, true, crate::linear::client::ListRead::Stored));
-            let task = actions.linear_project_issue_list(&space, &account, &project, true, read);
-            if let Some(stored) = stored && let Ok(issues) = stored.await {
+            let stored = needs_stored.then(|| actions.linear_project_issue_page(&space, &account, &project, crate::linear::client::ListRead::Stored));
+            let task = actions.linear_project_issue_page(&space, &account, &project, read);
+            if let Some(stored) = stored && let Ok(page) = stored.await {
                 shell.update(cx, |shell, cx| {
-                    shell.tracker.linear_projects.entry(key.clone()).or_insert(issues);
+                    shell.tracker.linear_more.entry(key.clone()).or_insert(page.has_more);
+                    shell.tracker.linear_projects.entry(key.clone()).or_insert(page.issues);
                     shell.tracker.key = None;
                     cx.notify();
                 }).ok();
@@ -702,10 +746,11 @@ impl Shell {
             shell.update(cx, |shell, cx| {
                 shell.tracker.linear_loading.remove(&key);
                 match result {
-                    Ok(issues) => {
+                    Ok(page) => {
                         if shell.tracker.linear_projects.len() >= 32 && !shell.tracker.linear_projects.contains_key(&key)
-                            && let Some(evicted) = shell.tracker.linear_projects.keys().next().cloned() { shell.tracker.linear_projects.remove(&evicted); }
-                        shell.tracker.linear_projects.insert(key.clone(), issues);
+                            && let Some(evicted) = shell.tracker.linear_projects.keys().next().cloned() { shell.tracker.linear_projects.remove(&evicted); shell.tracker.linear_more.remove(&evicted); }
+                        shell.tracker.linear_more.insert(key.clone(), page.has_more);
+                        shell.tracker.linear_projects.insert(key.clone(), page.issues);
                         shell.tracker.linear_errors.remove(&key);
                         shell.tracker.key = None;
                         shell.tracker.health_key = None;
@@ -1026,7 +1071,7 @@ impl Shell {
     /// The selected chat's workers. Link statuses (PR checks, diff stats) come
     /// from the header-link cache; missing ones are requested and the tab
     /// repaints when they land.
-    pub(super) fn team_facts(&mut self, chat_id: &str, cx: &mut Context<Self>) -> TeamFacts {
+    pub(super) fn team_facts(&mut self, chat_id: &str, cx: &mut Context<Self>) -> std::sync::Arc<TeamFacts> {
         let state = self.state.read(cx);
         if self.tracker.chat_scope.as_ref().is_none_or(|(id, revision, _, _)| id != chat_id || *revision != state.board_status_revision) {
             let chat = state.chats.iter().find(|chat| chat.id == chat_id);
@@ -1044,7 +1089,7 @@ impl Shell {
         let mut facts = {
             let state = self.state.read(cx);
             let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
-                return TeamFacts::default();
+                return std::sync::Arc::new(TeamFacts::default());
             };
             let now = chrono::Utc::now();
             let indicators = state.board_indicators(now);
@@ -1276,8 +1321,9 @@ impl Shell {
         let generation = self.tracker.review_generation;
         self.tracker.review_task = None;
         self.tracker.key = Some(key);
+        let facts = std::sync::Arc::new(facts);
         self.tracker.facts = facts.clone();
-        self.tracker.all_workers = all_workers;
+        self.tracker.all_workers = std::sync::Arc::new(all_workers);
         self.tracker.not_started = not_started;
         self.tracker.completed_items = completed_items;
         self.tracker.unassigned_groups = unassigned_groups;
@@ -1309,11 +1355,22 @@ impl Shell {
                     + self.tracker.unassigned_groups.iter().filter(|((filter, _), _)| *filter == TrackerFilter::All)
                         .flat_map(|(_, items)| items).filter(|item| item.ticket.is_none()).count()
                     + self.tracker.unassigned_pending.iter().filter(|item| item.ticket.is_none()).count();
-                format!("{name} · {} tickets, plus {local} local", issues.len())
+                let outside = |id: &str| !issue_states.contains_key(&id.to_ascii_uppercase());
+                let linked = facts.live().filter(|worker| worker.ticket.as_ref().is_some_and(|ticket| outside(&ticket.identifier))).count()
+                    + self.tracker.unassigned_groups.iter().filter(|((filter, _), _)| *filter == TrackerFilter::All)
+                        .flat_map(|(_, items)| items).chain(self.tracker.unassigned_pending.iter())
+                        .filter(|item| item.ticket.as_deref().is_some_and(outside)).count();
+                let suffix = if linked == 0 { String::new() } else { format!(", {linked} linked outside this page") };
+                format!("{name} · {} tickets, plus {local} local{suffix}", issues.len())
             })
         }).unwrap_or_else(|| "Local tickets".into());
         self.tracker.source_notice = project.as_ref().and_then(|(key, _)| self.tracker.linear_errors.get(key).map(|error| error.message.clone())
             .or_else(|| self.tracker.linear_loading.contains(key).then(|| "Loading Linear tickets…".into())));
+        if let Some((key, _)) = &project && self.tracker.linear_more.get(key) == Some(&true) {
+            let shown = self.tracker.linear_projects.get(key).map_or(0, Vec::len);
+            let more = format!("Showing {shown} Linear tickets; more not loaded.");
+            self.tracker.source_notice = Some(self.tracker.source_notice.take().map_or(more.clone(), |notice| format!("{notice} {more}")));
+        }
         self.tracker.grouped_rows = grouped_rows;
         self.tracker.stale_rows = stale_rows;
         self.tracker.counts = counts;

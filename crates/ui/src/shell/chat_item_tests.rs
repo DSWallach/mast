@@ -1156,6 +1156,26 @@ fn tracker_does_not_rebuild_on_unchanged_frames(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_reuses_large_fact_sheets_across_unchanged_renders(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 200);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    let (first, all, rebuilds) = shell.update(vcx, |shell, cx| {
+        let first = shell.team_facts(CHAT_API, cx);
+        (first, shell.tracker_all_workers_for_test(), shell.tracker.rebuilds)
+    });
+    for _ in 0..5 {
+        shell.update(vcx, |shell, cx| {
+            let _ = shell.render_team_tab_chip(cx);
+            let _ = shell.render_team_tab(cx);
+            assert!(std::sync::Arc::ptr_eq(&first, &shell.team_facts(CHAT_API, cx)));
+            assert!(std::sync::Arc::ptr_eq(&all, &shell.tracker_all_workers_for_test()));
+            assert_eq!(shell.tracker.rebuilds, rebuilds);
+        });
+    }
+}
+
+#[gpui::test]
 fn tracker_updates_coordinator_archive_notice_after_chat_revision(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 1);
@@ -1284,6 +1304,23 @@ fn tracker_shows_cached_linear_issues_and_local_items_together(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn tracker_discloses_a_truncated_project(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
+        snapshot.space_settings.linear_enabled = true;
+        snapshot.external_references.push(serde_json::from_value(serde_json::json!({
+            "id":"project-ref", "spaceId":"s1", "workItemId":API, "provider":"linear", "referenceType":"project", "externalId":"project"
+        })).unwrap());
+    });
+    shell.update(vcx, |shell, cx| {
+        let issues = (0..250).map(|index| mast_proto::linear::LinearIssueSummary { identifier: format!("EX-{index}"), ..Default::default() }).collect();
+        shell.set_tracker_project_for_test("default", "project", issues);
+        shell.set_tracker_project_more_for_test("default", "project", true);
+        shell.team_facts(CHAT_API, cx);
+        assert_eq!(shell.tracker_source_notice_for_test(), Some("Showing 250 Linear tickets; more not loaded."));
+    });
+}
+
+#[gpui::test]
 fn tracker_discards_project_cache_after_account_credentials_change(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |snapshot| {
         snapshot.space_settings.linear_enabled = true;
@@ -1394,14 +1431,14 @@ fn tracker_resolves_a_project_url_before_loading_issues(cx: &mut TestAppContext)
                 recorded.lock().unwrap().push((method.to_owned(), params.clone()));
                 Ok(if method == "LinearMyProjects" {
                     serde_json::json!([{ "id":"12345678-1234-1234-1234-123456789abc", "name":"Harbor", "url":"https://linear.app/example/project/harbor-123abc" }])
-                } else { serde_json::json!([]) })
+                } else { serde_json::json!({"issues": [], "hasMore": false}) })
             })));
         });
         shell.open_team_tab(cx);
     });
     vcx.run_until_parked();
     let calls = calls.lock().unwrap();
-    let project = calls.iter().find(|(method, params)| method == "LinearProjectIssues" && params["cachedOnly"] != true).unwrap();
+    let project = calls.iter().find(|(method, params)| method == "LinearProjectIssuePage" && params["cachedOnly"] != true).unwrap();
     assert_eq!(project.1["projectId"], "12345678-1234-1234-1234-123456789abc");
     assert_eq!(project.1["expectedAccountId"], "account-two");
     assert_eq!(project.1["includeCompleted"], true);
@@ -1416,7 +1453,7 @@ fn tracker_loads_a_project_linked_while_it_is_open(cx: &mut TestAppContext) {
         shell.state.update(cx, |state, _| {
             state.work_outline_actions_override = Some(crate::work_outline::WorkOutlineActions::scripted(std::sync::Arc::new(move |method, params| {
                 recorded.lock().unwrap().push((method.to_owned(), params.clone()));
-                Ok(serde_json::json!([]))
+                Ok(serde_json::json!({"issues": [], "hasMore": false}))
             })));
         });
         shell.open_team_tab(cx);
@@ -1433,7 +1470,7 @@ fn tracker_loads_a_project_linked_while_it_is_open(cx: &mut TestAppContext) {
     });
     vcx.run_until_parked();
     let calls = calls.lock().unwrap();
-    assert!(calls.iter().any(|(method, params)| method == "LinearProjectIssues" && params["includeCompleted"] == true));
+    assert!(calls.iter().any(|(method, params)| method == "LinearProjectIssuePage" && params["includeCompleted"] == true));
 }
 
 #[gpui::test]
