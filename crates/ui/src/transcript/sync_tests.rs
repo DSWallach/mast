@@ -51,3 +51,43 @@ fn tail_update_limits_tool_scan_to_changed_rows(cx: &mut gpui::TestAppContext) {
         assert!(visits < row_count / 4, "visited {visits} rows of {row_count}");
     });
 }
+
+#[gpui::test]
+fn pending_viewport_restores_with_and_without_row_diff(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = perf_bench::long_chat(2);
+            state.transcript_revision += 1;
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, cx| transcript.sync(cx));
+        for change_rows in [false, true] {
+            transcript.update(cx, |transcript, _| {
+                transcript.pending_viewport = SavedViewport::capture(
+                    &transcript.rows, ListOffset::default(), false, 420.0, None,
+                );
+                assert!(transcript.pending_viewport.is_some());
+            });
+            state.update(cx, |state, _| {
+                if change_rows {
+                    state.transcript.push(perf_bench::long_chat(1).remove(0));
+                }
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |transcript, cx| {
+                let layout_revision = transcript.viewport_layout_revision;
+                transcript.sync(cx);
+                assert!(transcript.pending_viewport.is_none());
+                assert_eq!(transcript.viewport_layout_revision != layout_revision, change_rows);
+                assert_eq!(transcript.last_scroll_distance, 420.0);
+            });
+        }
+    });
+}
