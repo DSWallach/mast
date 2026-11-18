@@ -29,6 +29,7 @@ mod move_toast;
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
+mod worker_rollup;
 
 use super::hints::{HintKey, WithHint};
 use super::instructions::{self, OutlineChange};
@@ -148,6 +149,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum OutlineEvent {
     /// Open the Chat's transcript.
     OpenChat(String),
+    OpenTracker(String),
     /// The user moved the selection to another row (arrow keys, Home / End,
     /// sibling jumps, a click). The Overview previews a Chat row in its chat
     /// panel without taking focus. Programmatic selection never sends it.
@@ -450,6 +452,9 @@ pub(crate) struct OutlineView {
     picker_focus: FocusHandle,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
+    worker_rollup_revisions: Vec<(String, u64)>,
+    worker_rollup_chats: Vec<OutlineChat>,
+    worker_rollups: std::collections::HashMap<(String, String), worker_rollup::WorkerRollup>,
     /// PR link index per Space, rebuilt only when the Space's snapshot changes.
     pr_links: pr_sync_outline::PrLinkCache,
     model: OutlineModel,
@@ -552,6 +557,9 @@ impl OutlineView {
             picker_focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
+            worker_rollup_revisions: Vec::new(),
+            worker_rollup_chats: Vec::new(),
+            worker_rollups: Default::default(),
             pr_links: Default::default(),
             model: OutlineModel::default(),
             collapsed: HashSet::new(),
@@ -613,6 +621,19 @@ impl OutlineView {
     pub(crate) fn set_inputs(&mut self, inputs: OutlineInputs, cx: &mut Context<Self>) {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
+        let revisions: Vec<_> = inputs.spaces.iter().filter_map(|space| space.load.snapshot().map(|snapshot| (space.id.clone(), snapshot.revision))).collect();
+        if revisions != self.worker_rollup_revisions || inputs.chats != self.worker_rollup_chats {
+            self.worker_rollups.clear();
+            for space in &inputs.spaces {
+                if let Some(snapshot) = space.load.snapshot() {
+                    for (item_id, rollup) in worker_rollup::build(snapshot, &inputs.chats) {
+                        self.worker_rollups.insert((space.id.clone(), item_id), rollup);
+                    }
+                }
+            }
+            self.worker_rollup_revisions = revisions;
+            self.worker_rollup_chats = inputs.chats.clone();
+        }
         self.inputs = inputs;
         self.retire_shown_optimistic();
         self.overlay_optimistic();
@@ -2949,6 +2970,28 @@ impl OutlineView {
                         )
                     });
                     let artifacts = self.artifact_count_chip(&key, item, theme, cx);
+                    let worker_chip = self.worker_rollups.get(&(item.space_id.clone(), item.item_id.clone())).filter(|rollup| rollup.live > 0).cloned().map(|rollup| {
+                        let space_id = item.space_id.clone();
+                        let item_id = item.item_id.clone();
+                        let selector = format!("outline-workers-{key}");
+                        div().id(SharedString::from(selector.clone())).debug_selector(move || selector.clone())
+                            .flex_none().flex().items_center().gap(px(4.0)).px(px(5.0))
+                            .rounded(px(4.0)).bg(theme.element_hover).cursor_pointer()
+                            .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
+                            .when(rollup.needs_you, |el| el.child(div().size(px(5.0)).rounded_full().bg(theme.warning)))
+                            .child(format!("{} worker{}", rollup.live, if rollup.live == 1 { "" } else { "s" }))
+                            .hint("Open Tracker or work item details", HintKey::None)
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if this.is_editing() { return; }
+                                if let Some(chat_id) = &rollup.coordinator {
+                                    cx.emit(OutlineEvent::OpenTracker(chat_id.clone()));
+                                } else {
+                                    this.open_item_details(space_id.clone(), item_id.clone(), cx);
+                                }
+                            })).into_any_element()
+                    });
                     // Rough widths of the chips that share the row with the
                     // PR icon cluster (they size to their content).
                     let other_width = if item.pending_proposals > 0 {
@@ -2999,6 +3042,7 @@ impl OutlineView {
                             external.chips,
                         ),
                         external.pr_slots,
+                        worker_chip,
                         theme,
                     )
                 }
@@ -3379,6 +3423,7 @@ fn item_body(
     open_details: Option<GlyphHandlers>,
     proposals: Option<AnyElement>,
     pr_slots: Option<AnyElement>,
+    worker_chip: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
     let pr_slots = pr_slots.filter(|_| crate::components::outline_row_extras(theme));
@@ -3463,6 +3508,7 @@ fn item_body(
             ))
         })
         .children(proposals)
+        .children(worker_chip)
         .when_some(
             item.template_changed.filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
             |el, (from, to)| {

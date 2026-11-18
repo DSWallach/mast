@@ -1717,6 +1717,9 @@ impl Overview {
                 this.outline_preview = None;
                 this.leave_work_item_details(DetailsExit::OpenChat(chat_id.clone()), cx);
             }
+            OutlineEvent::OpenTracker(chat_id) => {
+                this.leave_work_item_details(DetailsExit::OpenTracker(chat_id.clone()), cx);
+            }
             OutlineEvent::SelectionMoved => this.schedule_outline_preview(cx),
             OutlineEvent::RenameChat(chat_id) => {
                 if let Some(shell) = this.shell.upgrade() {
@@ -6192,6 +6195,12 @@ impl Overview {
                 });
                 self.open_chat_panel(chat_id, cx);
             }
+            DetailsExit::OpenTracker(chat_id) => {
+                self.close_work_item_details(cx);
+                if let Some(shell) = self.shell.upgrade() {
+                    cx.defer(move |cx| shell.update(cx, |shell, cx| shell.open_outline_tracker(chat_id, cx)));
+                }
+            }
             DetailsExit::OpenItem { space_id, item_id } => {
                 self.replace_work_item_details(space_id, item_id, cx)
             }
@@ -6965,6 +6974,7 @@ pub(crate) struct OutlineChatReturn {
 enum DetailsExit {
     Close,
     OpenChat(String),
+    OpenTracker(String),
     OpenItem { space_id: String, item_id: String },
 }
 
