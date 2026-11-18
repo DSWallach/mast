@@ -976,6 +976,12 @@ impl Tools {
             Box::pin(self.reusable_chat(origin, item, &harnesses)).await?
         } else { None };
 
+        if work_item_id.is_some() && candidate.is_none()
+            && args.prompt.as_deref().is_none_or(|p| p.trim().is_empty())
+        {
+            anyhow::bail!("workItemId needs a prompt when starting a new chat");
+        }
+
         let (chat_id, replayed) = match (origin, agent_key.as_deref()) {
             (Some(origin), Some(key)) => {
                 // Bind the key to these inputs first: a retry that changed its

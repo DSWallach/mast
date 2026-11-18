@@ -1438,6 +1438,10 @@ async fn agent_create_chat_with_a_work_item_launches_through_the_engine() {
         let err = tools.call("create_chat", args).await.unwrap_err();
         assert!(err.contains(expect), "{err}");
     }
+    let corrected = tools.call("create_chat", json!({
+        "idempotencyKey": "bad", "workItemId": "item-leaf", "prompt": "proceed"
+    })).await.unwrap();
+    assert_eq!(corrected["workItemId"], "item-leaf");
 
     // A terminal (no token) cannot verify the item is its own.
     let terminal = super::tests::tools(world, None);
