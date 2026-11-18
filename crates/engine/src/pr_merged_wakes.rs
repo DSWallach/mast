@@ -205,7 +205,9 @@ impl PrMergedWakes {
             if allowed_spaces.is_some_and(|allowed| !allowed.contains(&space.id)) { continue; }
             let snapshot = mast_doc::materialize_work_outline(&space.id, &self.workspace.work_outline_inputs(&space.id));
             let Some(mode) = snapshot.space_settings.merged_pr_completion else { continue; };
-            if first_merge_at.is_some_and(|at| snapshot.space_settings.merged_pr_completion_since.is_none_or(|since| at < since)) { continue; }
+            // GitHub's merge timestamp can have second precision while the
+            // setting uses milliseconds; allow the remainder of that second.
+            if first_merge_at.is_some_and(|at| snapshot.space_settings.merged_pr_completion_since.is_none_or(|since| at.saturating_add(999) < since)) { continue; }
             enabled_spaces.insert(space.id.clone());
             let mut items = HashSet::new();
             let mut branch_items = HashSet::new();
