@@ -36,6 +36,7 @@ struct TrackerSourceObservation {
 #[derive(Default)]
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64, u64)>,
+    chat_scope: Option<(String, u64, Option<String>, bool)>,
     facts: TeamFacts,
     all_workers: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
@@ -808,7 +809,12 @@ impl Shell {
     /// repaints when they land.
     pub(super) fn team_facts(&mut self, chat_id: &str, cx: &mut Context<Self>) -> TeamFacts {
         let state = self.state.read(cx);
-        let chat_space = state.chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.space_id.clone());
+        if self.tracker.chat_scope.as_ref().is_none_or(|(id, revision, _, _)| id != chat_id || *revision != state.board_status_revision) {
+            let chat = state.chats.iter().find(|chat| chat.id == chat_id);
+            self.tracker.chat_scope = Some((chat_id.to_owned(), state.board_status_revision,
+                chat.and_then(|chat| chat.space_id.clone()), chat.is_some_and(|chat| chat.archived)));
+        }
+        let chat_space = self.tracker.chat_scope.as_ref().and_then(|(_, _, space, _)| space.clone());
         let snapshot = chat_space.as_deref().and_then(|id| state.work_outline(id).snapshot().cloned());
         let account_revision = snapshot.as_deref().map(|snapshot| state.linear.revision(crate::linear::store::account_scope(snapshot))).unwrap_or_default();
         let key = (chat_id.to_owned(), snapshot.as_ref().map(|s| s.revision),
@@ -1169,13 +1175,7 @@ impl Shell {
         if let Some(notice) = &self.tracker.source_notice {
             col = col.child(crate::components::shell_parts::tracker_metadata(&theme, notice.clone()));
         }
-        if self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .any(|chat| chat.id == chat_id && chat.archived)
-        {
+        if self.tracker.chat_scope.as_ref().is_some_and(|(_, _, _, archived)| *archived) {
             col = col.child(
                 crate::components::shell_parts::team_notice(&theme, "team-coordinator-archived", "Coordinator archived — hand off or unarchive"),
             );

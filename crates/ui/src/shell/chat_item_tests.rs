@@ -1156,6 +1156,25 @@ fn tracker_does_not_rebuild_on_unchanged_frames(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tracker_updates_coordinator_archive_notice_after_chat_revision(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    assert!(!has(vcx, "team-coordinator-archived"));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let mut chats = state.chats.clone();
+            chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().archived = true;
+            state.apply_chats(chats);
+        });
+        cx.notify();
+    });
+    draw(vcx);
+    assert!(has(vcx, "team-coordinator-archived"));
+}
+
+#[gpui::test]
 fn tracker_filters_workers_by_rollup(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 4);
