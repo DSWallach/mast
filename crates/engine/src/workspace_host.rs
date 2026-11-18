@@ -1118,6 +1118,10 @@ impl WorkspaceHost {
         self.inner.store.is_processed(key).unwrap_or(false)
     }
 
+    pub fn ledger_find_prefix(&self, prefix: &str) -> Result<Option<String>, EngineError> {
+        Ok(self.inner.store.processed_command_with_prefix(prefix)?)
+    }
+
     /// Claim `key` in the durable processed-command ledger now (its own
     /// SQLite write, not deferred to the next snapshot). `true` when this
     /// call inserted it. Used by the Work Outline launch workflow, whose

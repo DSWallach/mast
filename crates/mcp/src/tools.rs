@@ -184,6 +184,8 @@ struct CreateChatArgs {
     idempotency_key: Option<String>,
     #[serde(alias = "workItemId")]
     work_item_id: Option<String>,
+    #[serde(default, alias = "newChat")]
+    new_chat: bool,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -221,6 +223,8 @@ struct SendArgs {
     #[serde(default)]
     wait: bool,
     timeout_secs: Option<u64>,
+    #[serde(skip)]
+    operation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -393,7 +397,7 @@ impl Tools {
     /// With a token, every call (reads included) first re-authenticates it:
     /// once the Run that received it ends, nothing works.
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
-        self.call_with_content(name, args)
+        Box::pin(self.call_with_content(name, args))
             .await
             .map(|(value, _)| value)
     }
@@ -413,7 +417,7 @@ impl Tools {
                 .map_err(|e| e.to_string())?;
             return Ok(render_check_content(value));
         }
-        self.call_value(name, args)
+        Box::pin(self.call_value(name, args))
             .await
             .map(|value| (value, Vec::new()))
     }
@@ -424,7 +428,7 @@ impl Tools {
     /// theirs engine-side).
     async fn call_value(&self, name: &str, args: Value) -> Result<Value, String> {
         let args = agent_tools::normalize_arguments(name, &args);
-        self.call_normalized(name, args).await.map_err(|error| {
+        Box::pin(self.call_normalized(name, args)).await.map_err(|error| {
             let argument_error = error.starts_with("invalid arguments")
                 || error.contains("idempotencyKey is required");
             if matches!(name, "create_chat" | "respond_to_input") && argument_error {
@@ -454,7 +458,7 @@ impl Tools {
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(origin, parse(args)?).await,
             "get_chat" => self.get_chat(origin, parse(args)?).await,
-            "create_chat" => self.create_chat(origin, parse(args)?).await,
+            "create_chat" => Box::pin(self.create_chat(origin, parse(args)?)).await,
             "read_chat" => self.read_chat(origin, parse(args)?).await,
             "send_message" => self.send_message(origin, parse(args)?).await,
             "report_to_parent" => self.report_to_parent(origin, parse(args)?).await,
@@ -647,6 +651,70 @@ impl Tools {
         summary["pendingInput"] = last_pending_input(&rendered).unwrap_or(Value::Null);
         summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
         Ok(summary)
+    }
+
+    async fn reusable_chat(
+        &self,
+        origin: &AgentOrigin,
+        item: &str,
+        harnesses: &[HarnessInfo],
+    ) -> anyhow::Result<Option<(Chat, String)>> {
+        let outline = self.zeron.agent_tool(agent_tool_names::READ_SUBTREE,
+            json!({"workItemId": item, "maxDepth": 0, "includeCompleted": true, "includeLaunchChatIds": true})).await?;
+        let ids: std::collections::HashSet<&str> = outline["launchChatIds"]
+            .as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
+        Ok(chats.into_iter()
+            .filter(|chat| !chat.archived && chat.id != origin.chat_id && ids.contains(chat.id.as_str()))
+            .filter_map(|chat| {
+                let session = session_for(&sessions, &chat);
+                let (status, _) = status_of(session.as_ref());
+                let recent = chrono::Utc::now() - chat.last_message_at.unwrap_or(chat.created_at)
+                    <= chrono::Duration::days(3);
+                if !(status == "working" || status == "awaitingInput" || (status == "idle" && recent)) {
+                    return None;
+                }
+                let mode = match status.as_str() {
+                    "working" if harnesses.iter().find(|h| Some(h.id) == chat.config.as_ref().map(|c| c.harness))
+                        .is_some_and(HarnessInfo::steers_mid_turn) => "steer",
+                    "working" => "queue",
+                    "awaitingInput" => "awaitingInput",
+                    _ => "run",
+                };
+                Some((chat, mode.to_owned()))
+            })
+            .max_by_key(|(chat, _)| chat.last_message_at.unwrap_or(chat.created_at)))
+    }
+
+    async fn reuse_chat(
+        &self,
+        origin: &AgentOrigin,
+        claim: &Value,
+        work_item_id: Option<&str>,
+        args: &CreateChatArgs,
+        operation_id: String,
+    ) -> anyhow::Result<Value> {
+        let existing_id = claim["reuseChatId"].as_str().expect("claimed chat id");
+        let chat = self.reach_chat(Some(origin), existing_id, Reach::MessageScope).await?;
+        let sessions = self.zeron.sessions().await?;
+        let (status, _) = status_of(session_for(&sessions, &chat).as_ref());
+        let mut result = json!({"chatId": chat.id, "status": status, "workItemId": work_item_id,
+            "reusedExisting": true, "replayed": claim["replayed"]});
+        if let Some(prompt) = args.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            let mode = claim["deliveryMode"].as_str().unwrap_or("run");
+            if mode == "awaitingInput" {
+                anyhow::bail!("chat is waiting for an answer; use respond_to_input");
+            }
+            let sent = Box::pin(self.send_message(Some(origin), SendArgs {
+                chat: existing_id.to_owned(), text: prompt.to_owned(), mode: Some(mode.to_owned()),
+                wait: args.wait, timeout_secs: args.timeout_secs, operation_id: Some(operation_id),
+            })).await?;
+            result["sent"] = sent["sent"].clone();
+            if args.wait {
+                result["turn"] = sent["turn"].clone();
+            }
+        }
+        Ok(result)
     }
 
     async fn create_chat(
@@ -874,9 +942,6 @@ impl Tools {
             if origin.is_none() {
                 anyhow::bail!("workItemId is only available inside a Mast chat");
             }
-            if args.prompt.as_deref().is_none_or(|p| p.trim().is_empty()) {
-                anyhow::bail!("workItemId needs a prompt: the child is started with it");
-            }
             if cwd.is_some() || args.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
                 anyhow::bail!(
                     "cwd and branch cannot be set with workItemId: the child runs where the \
@@ -907,6 +972,10 @@ impl Tools {
             (None, parent) => parent,
         };
 
+        let candidate = if !args.new_chat && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
+            Box::pin(self.reusable_chat(origin, item, &harnesses)).await?
+        } else { None };
+
         let (chat_id, replayed) = match (origin, agent_key.as_deref()) {
             (Some(origin), Some(key)) => {
                 // Bind the key to these inputs first: a retry that changed its
@@ -927,15 +996,21 @@ impl Tools {
                     // existed still replay.
                     inputs["workItemId"] = json!(item);
                 }
+                if args.new_chat { inputs["newChat"] = json!(true); }
                 let inputs_hash =
                     mast_proto::derive_id(&inputs.to_string(), "mcp-create-chat-inputs");
-                self.zeron
+                let claim = self.zeron
                     .agent_tool(
                         agent_tool_names::CLAIM_CHILD_CHAT,
-                        json!({ "idempotencyKey": key, "inputsHash": inputs_hash }),
+                        json!({ "idempotencyKey": key, "inputsHash": inputs_hash,
+                            "reuseChatId": candidate.as_ref().map(|c| &c.0.id),
+                            "deliveryMode": candidate.as_ref().map(|c| &c.1) }),
                     )
                     .await?;
                 let operation_id = agent_tools::operation_id(&origin.chat_id, key);
+                if claim["reuseChatId"].is_string() {
+                    return Box::pin(self.reuse_chat(origin, &claim, work_item_id.as_deref(), &args, operation_id)).await;
+                }
                 let chat_id = mast_proto::derive_id(&operation_id, mast_proto::roles::CHAT);
                 let existing = self
                     .zeron
@@ -952,6 +1027,9 @@ impl Tools {
             }
             _ => (uuid::Uuid::new_v4().to_string(), false),
         };
+        if work_item_id.is_some() && args.prompt.as_deref().is_none_or(|p| p.trim().is_empty()) {
+            anyhow::bail!("workItemId needs a prompt when starting a new chat");
+        }
         // For a work item the engine starts the child through the launch
         // workflow (Chat, assignment, execution binding, effective
         // instructions, first Turn), after checking the item is the
@@ -1103,7 +1181,7 @@ impl Tools {
                     })
                 }
                 None => {
-                    self.deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
+                    self.deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run", None)
                         .await?
                 }
             };
@@ -1240,7 +1318,7 @@ impl Tools {
             "title": chat.title,
         });
         result["sent"] = self
-            .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
+            .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode, args.operation_id.as_deref())
             .await?;
         if args.wait {
             result["turn"] = self
@@ -1529,6 +1607,7 @@ impl Tools {
         session: Option<&Session>,
         text: String,
         mode: &str,
+        operation_id: Option<&str>,
     ) -> anyhow::Result<Value> {
         let harness = chat
             .config
@@ -1565,7 +1644,23 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
-        let id = match chosen {
+        let message_id = operation_id.map(|op| mast_proto::derive_id(op, mast_proto::roles::MESSAGE));
+        let command_id = operation_id.map(|op| mast_proto::derive_id(op, mast_proto::roles::COMMAND));
+        let id = if let (Some(message_id), Some(command_id)) = (message_id, command_id) {
+            match chosen {
+                "run" | "steer" => {
+                    let command = if chosen == "run" {
+                        SessionCommandPayload::Run { request: run_request(chat, space, harness, text), message_id }
+                    } else { SessionCommandPayload::Steer { prompt: text, message_id: Some(message_id) } };
+                    self.zeron.call(methods::QUEUE_COMMAND, json!({"chatId": chat.id, "commandId": command_id, "command": command})).await?;
+                    command_id
+                }
+                _ => {
+                    self.zeron.call(methods::QUEUE_MESSAGE, json!({"chatId": chat.id, "messageId": message_id, "text": text, "holdForTurnEnd": true})).await?;
+                    message_id
+                }
+            }
+        } else { match chosen {
             "run" => {
                 let request = run_request(chat, space, harness, text);
                 self.zeron
@@ -1590,7 +1685,7 @@ impl Tools {
                     .await?
             }
             _ => self.zeron.queue_message(&chat.id, &text).await?,
-        };
+        }};
         Ok(json!({
             "delivery": chosen,
             "id": id,

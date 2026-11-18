@@ -643,6 +643,8 @@ struct ReadSubtreeArgs {
     include_archived: bool,
     #[serde(default)]
     include_completed: bool,
+    #[serde(default)]
+    include_launch_chat_ids: bool,
 }
 
 /// The engine-internal `chat_launch_child_for_item` arguments: the work item
@@ -857,6 +859,10 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 struct ClaimChildArgs {
     inputs_hash: String,
+    #[serde(default)]
+    reuse_chat_id: Option<String>,
+    #[serde(default)]
+    delivery_mode: Option<String>,
 }
 
 /// Ledger keys binding a `create_chat` operation to its inputs (the same
@@ -2516,9 +2522,17 @@ impl AgentToolsService {
         let (operation_key, inputs_key) = child_chat_ledger_keys(&operation_id, hash);
         let ledger = |e: crate::EngineError| AgentToolError::invalid(e.to_string());
         let _serial = lock(&self.child_claims);
+        let selection_prefix = format!("agent-child-chat:reuse:{operation_id}:{hash}:");
+        let selection = || -> Result<Option<(String, String)>, AgentToolError> {
+            let stored = self.workspace.ledger_find_prefix(&selection_prefix).map_err(ledger)?;
+            Ok(stored.and_then(|value| value.strip_prefix(&selection_prefix)
+                .and_then(|suffix| suffix.rsplit_once(':'))
+                .map(|(chat, mode)| (chat.to_owned(), mode.to_owned()))))
+        };
         if self.workspace.ledger_holds(&operation_key) {
             if self.workspace.ledger_holds(&inputs_key) {
-                return Ok(json!({ "replayed": true }));
+                let selected = selection()?;
+                return Ok(json!({ "replayed": true, "reuseChatId": selected.as_ref().map(|v| &v.0), "deliveryMode": selected.as_ref().map(|v| &v.1) }));
             }
             return Err(WorkOutlineError::new(
                 mast_proto::work_outline::WorkOutlineErrorCode::OperationConflict,
@@ -2529,9 +2543,24 @@ impl AgentToolsService {
         }
         // Inputs first: a crash between the two marks leaves the operation
         // unclaimed, and the retry claims both.
+        let selected = match selection()? {
+            Some(selected) => Some(selected),
+            None => match (args.reuse_chat_id.as_deref(), args.delivery_mode.as_deref()) {
+                (Some(chat_id), Some(mode)) if matches!(mode, "run" | "steer" | "queue" | "awaitingInput") => {
+                    if chat_id.contains(':') || chat_id.is_empty() || chat_id.len() > 64 {
+                        return Err(AgentToolError::invalid("invalid reuse chat id"));
+                    }
+                    let key = format!("{selection_prefix}{chat_id}:{mode}");
+                    self.workspace.ledger_mark(&key).map_err(ledger)?;
+                    Some((chat_id.to_owned(), mode.to_owned()))
+                }
+                (None, None) => None,
+                _ => return Err(AgentToolError::invalid("invalid reuse selection")),
+            },
+        };
         self.workspace.ledger_mark(&inputs_key).map_err(ledger)?;
         self.workspace.ledger_mark(&operation_key).map_err(ledger)?;
-        Ok(json!({ "replayed": false }))
+        Ok(json!({ "replayed": false, "reuseChatId": selected.as_ref().map(|v| &v.0), "deliveryMode": selected.as_ref().map(|v| &v.1) }))
     }
 
     /// Queue the first Turn of a child Chat created by the MCP `create_chat`
@@ -2665,7 +2694,7 @@ impl AgentToolsService {
         let tree = walk
             .node(&target, 0, &mut count, &mut truncated)
             .unwrap_or(Value::Null);
-        Ok(json!({
+        let mut result = json!({
             "chatId": context.grant.chat_id,
             "rootWorkItemId": root,
             "workItemId": target,
@@ -2675,7 +2704,15 @@ impl AgentToolsService {
             "itemCount": count,
             "truncated": truncated,
             "tree": tree,
-        }))
+        });
+        if args.include_launch_chat_ids {
+            let launch_target = snapshot.item(&target).filter(|item| item.is_project)
+                .and_then(|_| snapshot.worker_destination_for(&target))
+                .filter(|destination| !snapshot.is_within(destination, &root))
+                .unwrap_or(&target);
+            result["launchChatIds"] = json!(snapshot.item(launch_target).map(|item| &item.chat_ids));
+        }
+        Ok(result)
     }
 
     /// `chat_launch_child_for_item` (engine-internal): authorize and shape
