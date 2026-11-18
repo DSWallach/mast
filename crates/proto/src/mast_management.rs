@@ -34,7 +34,9 @@ pub fn operations() -> Value {
         {"action":"save", "id":"TASK", "expectedRevision":1, "operationId":"UNIQUE", "draft":{"name":"Briefing", "prompt":"Summarize my day", "cwd":"/path", "spaceId":null, "config":{"harness":"codex", "model":"MODEL", "sandbox":"workspace-write", "autoApprove":false}, "schedule":{"type":"cron", "expression":"0 8 * * 1-5", "timezone":"America/New_York"}, "enabled":true, "graceMinutes":60, "cutoverConfirmed":false}},
         {"action":"runNow", "id":"TASK", "operationId":"UNIQUE"},
         {"action":"delete", "id":"TASK", "expectedRevision":1, "operationId":"UNIQUE"},
-        {"action":"preview", "schedule":{"type":"once", "at":1794488400000_i64}}
+        {"action":"preview", "schedule":{"type":"once", "at":1794488400000_i64}},
+        {"action":"cleanup", "mode":"preview"},
+        {"action":"cleanup", "mode":"apply", "expectedChatIds":["CONFIRMED_CHAT"]}
     ]});
     let mut catalog = json!({
         "WatchChats": {"section":"sessions", "params":{}},

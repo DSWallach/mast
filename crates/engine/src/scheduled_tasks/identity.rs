@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use mast_proto::{Chat, ScheduledChat, ScheduledTask};
 
 /// The registry task name a native task was imported from (`…json#name`).
-fn source_name(task: &ScheduledTask) -> Option<&str> {
+pub(super) fn source_name(task: &ScheduledTask) -> Option<&str> {
     task.import_source
         .as_deref()?
         .rsplit_once('#')

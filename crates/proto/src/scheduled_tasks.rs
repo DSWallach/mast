@@ -164,6 +164,39 @@ pub struct ScheduledTasksSnapshot {
     pub candidates: Vec<ScheduledImportCandidate>,
     #[serde(default)]
     pub preview: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<ScheduledRunCleanup>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRunCleanup {
+    pub tasks: Vec<ScheduledRunCleanupTask>,
+    /// False for previews and when eligibility changed before confirmation.
+    pub applied: bool,
+}
+
+impl ScheduledRunCleanup {
+    pub fn chat_ids(&self) -> impl Iterator<Item = &String> {
+        self.tasks.iter().flat_map(|task| &task.chat_ids)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRunCleanupTask {
+    pub task_id: String,
+    pub task_name: String,
+    pub space_id: Option<String>,
+    pub count: usize,
+    pub chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ScheduledRunCleanupMode {
+    Preview,
+    Apply { expected_chat_ids: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +230,10 @@ pub enum ScheduledTasksRequest {
     Preview {
         schedule: TaskSchedule,
     },
+    Cleanup {
+        #[serde(flatten)]
+        mode: ScheduledRunCleanupMode,
+    },
     ImportPreview {
         #[serde(default)]
         registry_path: Option<String>,
@@ -212,9 +249,27 @@ pub enum ScheduledTasksRequest {
 /// Default sidebar/overview projection; activity on an older run never promotes it.
 /// Retired tasks and latest runs with background output have no default row.
 pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
+    latest_task_chats(chats, false)
+        .filter(|chat| !chat.is_background_task_run())
+        .map(|chat| chat.id.as_str())
+        .collect()
+}
+
+/// The same grouping and ordering for cleanup, where the newest edition is
+/// protected regardless of output mode unless a separate rule makes it eligible.
+pub fn latest_task_chat_ids_for_cleanup(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
+    latest_task_chats(chats, true)
+        .map(|chat| chat.id.as_str())
+        .collect()
+}
+
+fn latest_task_chats(
+    chats: &[crate::Chat],
+    include_retired: bool,
+) -> impl Iterator<Item = &crate::Chat> {
     let mut latest = std::collections::HashMap::new();
     for chat in chats.iter().filter(|c| !c.archived) {
-        let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| !t.retired) else {
+        let Some(task) = chat.scheduled_task_info.as_ref().filter(|t| include_retired || !t.retired) else {
             continue;
         };
         let key = (&chat.device_id, &chat.space_id, &task.task_id);
@@ -223,11 +278,7 @@ pub fn latest_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<
             *previous = chat;
         }
     }
-    latest
-        .into_values()
-        .filter(|c| !c.is_background_task_run())
-        .map(|c| c.id.as_str())
-        .collect()
+    latest.into_values()
 }
 
 /// Runs omitted from default views, including background and retired runs.
@@ -364,6 +415,10 @@ mod tests {
         assert_eq!(
             latest_task_chat_ids(&chats),
             std::collections::HashSet::from(["interactive-new"])
+        );
+        assert_eq!(
+            latest_task_chat_ids_for_cleanup(&chats),
+            std::collections::HashSet::from(["background-new", "interactive-new"])
         );
         assert_eq!(
             hidden_task_chat_ids(&chats),

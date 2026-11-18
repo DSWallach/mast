@@ -476,6 +476,18 @@ impl RegistryDoc {
         requests
     }
 
+    /// Chats with an open Required Action, including requests whose origin
+    /// chat has since moved to another Space.
+    pub fn open_user_action_origin_chats(&self) -> std::collections::HashSet<String> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .iter()
+            .filter_map(|row| decode_request(row).ok())
+            .map(|request| request.view)
+            .filter(|request| request.is_open() && !request.chat_id.is_empty())
+            .map(|request| request.chat_id)
+            .collect()
+    }
+
     /// One live request, with its dedupe flag and origin availability.
     pub fn user_action_request(&self, id: &str) -> Option<UserActionRequestView> {
         let row = self.overlay_row(KIND_USER_ACTION_REQUESTS, id)?;

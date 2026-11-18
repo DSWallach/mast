@@ -1331,3 +1331,155 @@ async fn a_run_its_harness_cannot_start_leaves_no_chat_behind() {
     assert!(core.workspace.chat(&chat_id).unwrap().is_none());
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn cleanup_previews_and_archives_only_confirmed_idle_runs_on_the_host() {
+    use mast_rpc::methods;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (core, client, item) = item_core(&root).await;
+    let add_run = |id: &str, task: &str, at, space, device: &str| {
+        core.workspace.create_chat(id, space, Some(device), None, None).unwrap();
+        core.workspace.set_chat_scheduled_task_info(id, &ScheduledChat {
+            task_id: task.into(),
+            task_name: task.into(),
+            run_id: id.into(),
+            session_created_at: Some(at),
+            ..Default::default()
+        }).unwrap();
+    };
+    for (id, at) in [
+        ("run-a", 100),
+        ("run-z", 100),
+        ("pinned", 50),
+        ("required-action", 49),
+        ("queued", 48),
+        ("already-archived", 47),
+    ] {
+        add_run(id, "briefing", at, Some(ITEM_SPACE), ITEM_DEVICE);
+    }
+    add_run("other-space", "briefing", 200, None, ITEM_DEVICE);
+    add_run("peer-old", "briefing", 50, None, "peer");
+    add_run("peer-new", "briefing", 150, None, "peer");
+    add_run("assistant-old", "assistant-task", 1, Some(ITEM_SPACE), ITEM_DEVICE);
+    add_run("assistant-new", "assistant-task", 2, Some(ITEM_SPACE), ITEM_DEVICE);
+    let retired = core.scheduled_tasks.request(ScheduledTasksRequest::Import {
+        candidate: ScheduledImportCandidate {
+            source: format!("{}#retired-source", root.join("scheduled-tasks.json").display()),
+            source_enabled: false,
+            draft: item_draft(&root, None),
+            warnings: vec![],
+        },
+        operation_id: "import-retired-source".into(),
+    }).await.unwrap().tasks.remove(0);
+    core.scheduled_tasks.request(ScheduledTasksRequest::Delete {
+        id: retired.id.clone(),
+        expected_revision: retired.revision,
+        operation_id: "delete-retired-source".into(),
+    }).await.unwrap();
+    add_run("retired-desktop", &retired.id, 1, Some(ITEM_SPACE), ITEM_DEVICE);
+    let mut desktop = core.workspace.chat("retired-desktop").unwrap().unwrap().scheduled_task_info.unwrap();
+    desktop.source_file = Some(root.join("retired.md").to_string_lossy().into_owned());
+    core.workspace.set_chat_scheduled_task_info("retired-desktop", &desktop).unwrap();
+    core.workspace.set_chat_archived("already-archived", true).unwrap();
+    core.workspace.create_chat("ordinary", Some(ITEM_SPACE), None, None, None).unwrap();
+    core.workspace.change_sidebar_pin(&SidebarPinChange::Pin {
+        session_id: "pinned".into(), before: None, after: None,
+    }).unwrap();
+    core.doc_host.open("queued").unwrap().doc().push_queued(&mast_doc::QueuedMessage {
+        id: "queued-message".into(),
+        text: "Follow up".into(),
+        attachments: vec![],
+        hold_for_turn_end: true,
+        issued_by: ITEM_DEVICE.into(),
+        issued_at: 0,
+        edited_at: None,
+        delivery_gate: Some(mast_doc::QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: "lease".into(), owner_device_id: ITEM_DEVICE.into(),
+            since_ms: 0, base_text_hash: "test".into(),
+        }),
+    }).unwrap();
+    client.call(methods::SET_PERSONAL_ASSISTANT, json!({"chatId": "assistant-old"})).await.unwrap();
+    client.call(methods::WORK_OUTLINE_MUTATE, json!({
+        "op":"createUserActionRequest", "workItemId":item,
+        "origin":{"chatId":"required-action"}, "text":"Review this run",
+        "operationId":"cleanup-open-action",
+    })).await.unwrap();
+
+    let cleanup = |mode: serde_json::Value| {
+        let client = &client;
+        async move {
+            client.call_as::<ScheduledTasksSnapshot>(methods::SCHEDULED_TASKS, mode)
+                .await.unwrap().cleanup.unwrap()
+        }
+    };
+    let ids = |result: &ScheduledRunCleanup| result.chat_ids().cloned().collect::<BTreeSet<_>>();
+    let preview = cleanup(json!({"action":"cleanup", "mode":"preview"})).await;
+    assert_eq!(ids(&preview), BTreeSet::from(["run-a".into(), "retired-desktop".into()]));
+    assert_eq!(preview.tasks.iter().map(|row| row.count).collect::<Vec<_>>(), [1, 1]);
+    assert!(!preview.applied);
+    for id in preview.chat_ids() {
+        assert!(!core.workspace.chat(id).unwrap().unwrap().archived);
+    }
+    let confirm = json!({"action":"cleanup", "mode":"apply", "expectedChatIds":ids(&preview)});
+    core.workspace.change_sidebar_pin(&SidebarPinChange::Pin {
+        session_id: "run-a".into(), before: None, after: None,
+    }).unwrap();
+    let stale = cleanup(confirm.clone()).await;
+    assert_eq!(ids(&stale), BTreeSet::from(["retired-desktop".into()]));
+    assert!(!stale.applied, "a new pin requires another confirmation");
+    assert!(!core.workspace.chat("retired-desktop").unwrap().unwrap().archived);
+    core.workspace.change_sidebar_pin(&SidebarPinChange::Unpin {
+        session_id: "run-a".into(),
+    }).unwrap();
+    let applied = cleanup(confirm.clone()).await;
+    assert!(applied.applied);
+    assert_eq!(applied.tasks, preview.tasks);
+    let second = cleanup(confirm).await;
+    assert!(second.tasks.is_empty());
+    let archived: BTreeSet<_> = core.workspace.read_chats().unwrap().into_iter()
+        .filter(|chat| chat.archived).map(|chat| chat.id).collect();
+    assert_eq!(archived, BTreeSet::from(["already-archived".into(), "run-a".into(), "retired-desktop".into()]));
+    core.workspace.set_chat_archived("run-a", false).unwrap();
+    assert!(!core.workspace.chat("run-a").unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn cleanup_leaves_running_turns_and_pending_input_alone() {
+    for (asks, status) in [(false, SessionStatus::Working), (true, SessionStatus::AwaitingInput)] {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = mast_engine::HarnessRegistry::new();
+        registry.register(Arc::new(HeldOpenFixture { asks }));
+        let core = EngineCore::assemble_with_profile(
+            EngineProfile::development(dir.path(), "org", "user"),
+            Arc::new(registry), HarnessId::ClaudeCode, None,
+        ).unwrap();
+        // No scheduled ledger rows. These are follow-up turns on old chats.
+        for (id, at) in [("old", 1), ("latest", 2)] {
+            core.workspace.create_chat(id, None, Some(&core.device_id), None, None).unwrap();
+            core.workspace.set_chat_scheduled_task_info(id, &ScheduledChat {
+                task_id: "task".into(), task_name: "Task".into(), run_id: id.into(),
+                session_created_at: Some(at), ..Default::default()
+            }).unwrap();
+        }
+        let request = serde_json::from_value(serde_json::json!({
+            "prompt":"Follow up", "cwd":dir.path(), "model":"fixture-model",
+            "harness":"claude-code", "sandbox":"workspace-write",
+        })).unwrap();
+        core.sessions.dispatch("old", HarnessId::ClaudeCode, request, None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !core.sessions.session_status("old").is_some_and(|s| s.status == status) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let preview = core.scheduled_tasks.request(ScheduledTasksRequest::Cleanup {
+            mode: ScheduledRunCleanupMode::Preview,
+        }).await.unwrap().cleanup.unwrap();
+        assert!(preview.tasks.is_empty(), "{status:?} must keep the old run eligible for interaction");
+        core.shutdown().await;
+    }
+}

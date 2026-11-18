@@ -1,4 +1,6 @@
 //! Profile-local scheduler. Only the owning engine claims occurrences.
+mod cleanup;
+pub(crate) use cleanup::DesktopRuns;
 pub mod evaluator;
 mod identity;
 pub(crate) mod import;
@@ -112,6 +114,13 @@ impl ScheduledTasks {
         }
         match request {
             ScheduledTasksRequest::List => {}
+            ScheduledTasksRequest::Cleanup { mode } => {
+                // Cleanup takes its own short lock at commit, after inspecting
+                // the transcript queues off the async worker.
+                drop(_guard);
+                response.cleanup = Some(self.clean_up_runs(mode).await?);
+                return Ok(response);
+            }
             ScheduledTasksRequest::History { id, before } => {
                 response.runs = self.0.store.runs(Some(&id), before)?;
                 return Ok(response);

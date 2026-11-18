@@ -207,22 +207,36 @@ fn file_stamp(path: &Path) -> Option<(i64, u64)> {
 
 pub(crate) const SCHEDULED_SOURCE_MISSING: &str = "scheduled-source-missing-v1";
 
+fn cursors_dir(root: &Path) -> PathBuf {
+    root.join("external_import_cursors")
+}
+
+pub(crate) fn import_cursor_exists(root: &Path, chat_id: &str) -> bool {
+    cursors_dir(root).join(format!("{chat_id}.json")).is_file()
+}
+
 /// Imports external Claude Code sessions into brand-new Mast chats. Cheap to
-/// clone (holds only an `Arc<DocsStore>` + a `WorkspaceHost`, itself cheaply
-/// cloneable).
+/// clone across background jobs.
 #[derive(Clone)]
 pub struct ExternalSessionImporter {
     store: Arc<DocsStore>,
     device_id: String,
     workspace: WorkspaceHost,
+    scheduled_tasks: crate::scheduled_tasks::ScheduledTasks,
 }
 
 impl ExternalSessionImporter {
-    pub fn new(store: Arc<DocsStore>, device_id: &str, workspace: WorkspaceHost) -> Self {
+    pub(crate) fn new(
+        store: Arc<DocsStore>,
+        device_id: &str,
+        workspace: WorkspaceHost,
+        scheduled_tasks: crate::scheduled_tasks::ScheduledTasks,
+    ) -> Self {
         Self {
             store,
             device_id: device_id.to_string(),
             workspace,
+            scheduled_tasks,
         }
     }
 
@@ -235,6 +249,16 @@ impl ExternalSessionImporter {
         chat_id: &str,
         external_session_id: &str,
         transcript_path: &Path,
+    ) -> Result<ImportedSession, EngineError> {
+        self.import_session(chat_id, external_session_id, transcript_path, None)
+    }
+
+    fn import_session(
+        &self,
+        chat_id: &str,
+        external_session_id: &str,
+        transcript_path: &Path,
+        desktop_runs: Option<&crate::scheduled_tasks::DesktopRuns>,
     ) -> Result<ImportedSession, EngineError> {
         let stamp = file_stamp(transcript_path);
         let parsed = parse_transcript(transcript_path, &self.device_id)?;
@@ -266,22 +290,31 @@ impl ExternalSessionImporter {
         // the external session on the wrong harness entirely. Model/reasoning/
         // sandbox are left at their "unset" defaults so the user's own
         // picks/sticky defaults still apply everywhere else that reads them.
-        self.workspace.create_chat(
-            chat_id,
-            Some(space_id.as_str()),
-            Some(self.device_id.as_str()),
-            Some(ChatConfig { approval_rules: false,
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-                auto_approve: false,
-            }),
-            Some(cwd.clone()),
-        )?;
-        if let Some(task) = scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
-            self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+        let scheduled = scheduled_metadata(
+            &parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy(),
+        );
+        let config = ChatConfig {
+            approval_rules: false,
+            harness: HarnessId::ClaudeCode,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        };
+        if let Some(task) = scheduled.as_ref().filter(|info| {
+            desktop_runs.is_some_and(|desktop| desktop.should_archive(&self.device_id, info))
+        }) {
+            self.workspace.create_archived_external_chat(
+                chat_id, &space_id, config, cwd.clone(), task.clone(),
+            )?;
+        } else {
+            self.workspace.create_chat(
+                chat_id, Some(&space_id), Some(&self.device_id), Some(config), Some(cwd.clone()),
+            )?;
+            if let Some(task) = scheduled {
+                self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+            }
         }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
@@ -1064,7 +1097,7 @@ impl ExternalSessionImporter {
     }
 
     fn cursors_dir(&self) -> PathBuf {
-        self.store.root().join("external_import_cursors")
+        cursors_dir(self.store.root())
     }
 
     fn cursor_path(&self, chat_id: &str) -> PathBuf {
@@ -1228,6 +1261,7 @@ impl ExternalSessionImporter {
         let cutoff_ms = now_ms - AUTO_ADOPT_MAX_AGE.as_millis() as i64;
         let cursor_ids = self.cursor_session_ids();
         let mut adopted = 0usize;
+        let desktop_runs = self.scheduled_tasks.desktop_runs()?;
         for candidate in self.scan()? {
             if adopted >= AUTO_ADOPT_MAX_PER_SWEEP {
                 break;
@@ -1239,7 +1273,9 @@ impl ExternalSessionImporter {
                 continue;
             }
             let chat_id = uuid::Uuid::new_v4().to_string();
-            match self.import(&chat_id, &candidate.session_id, Path::new(&candidate.path)) {
+            match self.import_session(
+                &chat_id, &candidate.session_id, Path::new(&candidate.path), Some(&desktop_runs),
+            ) {
                 Ok(_) => adopted += 1,
                 Err(err) => tracing::warn!(
                     session_id = %candidate.session_id,

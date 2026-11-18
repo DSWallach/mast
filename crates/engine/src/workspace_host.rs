@@ -242,6 +242,7 @@ pub struct WorkspaceHost {
 enum ChatOrigin {
     Parent(String),
     Scheduled(mast_proto::ScheduledChat),
+    ArchivedExternal(mast_proto::ScheduledChat),
 }
 
 impl WorkspaceHost {
@@ -1857,6 +1858,24 @@ impl WorkspaceHost {
         )
     }
 
+    pub(crate) fn create_archived_external_chat(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: ChatConfig,
+        cwd: String,
+        task: mast_proto::ScheduledChat,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            Some(space_id),
+            Some(self.device_id()),
+            Some(config),
+            Some(cwd),
+            Some(ChatOrigin::ArchivedExternal(task)),
+        )
+    }
+
     fn create_chat_with_origin(
         &self,
         chat_id: &str,
@@ -1898,9 +1917,10 @@ impl WorkspaceHost {
                 ));
             }
         };
+        let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
-            Some(ChatOrigin::Scheduled(task)) => (None, Some(task)),
+            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
             _ => (None, None),
         };
         self.mutate(|doc| {
@@ -1908,7 +1928,7 @@ impl WorkspaceHost {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
-                archived: false,
+                archived,
                 cwd: Some(cwd.unwrap_or_else(|| {
                     space
                         .as_ref()
@@ -2205,6 +2225,42 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub(crate) fn open_user_action_origin_chats(&self) -> std::collections::HashSet<String> {
+        self.read(RegistryDoc::open_user_action_origin_chats)
+    }
+
+    fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
+        doc.kinds_generation(&[
+            mast_doc::registry::KIND_CHATS,
+            mast_doc::registry::KIND_SIDEBAR_PINS,
+            mast_doc::registry::work_outline::KIND_USER_ACTION_REQUESTS,
+        ])
+    }
+
+    pub(crate) fn scheduled_run_cleanup_marker(&self) -> u64 {
+        self.read(Self::scheduled_run_cleanup_generation)
+    }
+
+    /// Commit the confirmed set together, provided its registry inputs have
+    /// not changed since selection. In particular, a pin or a Required Action
+    /// arriving during selection must win over the archive.
+    pub(crate) fn archive_scheduled_runs<'a>(
+        &self,
+        marker: u64,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| {
+            if Self::scheduled_run_cleanup_generation(doc) != marker {
+                return Ok(false);
+            }
+            for id in ids {
+                doc.set_chat_archived(id, true)?;
+            }
+            Ok(true)
+        })
     }
 
     /// Stamp stable run provenance and the compatible legacy task name together.
