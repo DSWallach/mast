@@ -658,6 +658,61 @@ fn attachment_failure_precedes_chat_creation_and_restores_canvas(cx: &mut gpui::
 }
 
 #[gpui::test]
+fn queue_command_timeout_restores_draft_to_selected_chat(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| state.set_test_engine(
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)),
+    ));
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, cx| {
+        composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+        composer.send("draft text".into(), false, cx);
+    });
+    let mut operations = Vec::new();
+    let mut dispatched = false;
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            match frame["method"].as_str() {
+                Some(methods::MUTATE) => {
+                    operations.push(frame["params"]["op"].as_str().unwrap().to_string());
+                    replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap();
+                }
+                Some(methods::QUEUE_COMMAND) => { dispatched = true; }
+                _ => {}
+            }
+        }
+        if dispatched { break; }
+    }
+    assert!(dispatched);
+    let chat_id = state.read_with(cx, |state, _| state.selected_chat.clone().unwrap());
+    cx.executor().advance_clock(Duration::from_secs(31));
+    for _ in 0..1000 {
+        runtime.block_on(tokio::task::yield_now());
+        cx.run_until_parked();
+        if composer.read_with(cx, |composer, _| composer.failure.is_some()) { break; }
+    }
+    composer.read_with(cx, |composer, cx| {
+        assert!(composer.failure.is_some());
+        assert_eq!(composer.state.read(cx).selected_chat.as_deref(), Some(chat_id.as_str()));
+        let draft = if composer.current_key == chat_id {
+            composer.input.read(cx).text()
+        } else {
+            composer.drafts.get(&chat_id).map(String::as_str).unwrap_or("")
+        };
+        assert_eq!(draft, "draft text");
+        assert_eq!(composer.failed_send.as_ref().unwrap().key, chat_id);
+    });
+    assert_eq!(operations, ["createChat"]);
+}
+
+#[gpui::test]
 fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let _guard = runtime.enter();
@@ -679,12 +734,19 @@ fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext
             linked_ticket_source: None,
         });
     });
-    let composer = cx.new(|cx| Composer::new(state, cx));
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    let sent = Rc::new(std::cell::Cell::new(false));
+    let observed = sent.clone();
+    let _subscription = cx.update(|cx| cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+        if matches!(event, ComposerEvent::Sent { .. }) { observed.set(true); }
+    }));
     composer.update(cx, |composer, cx| {
         composer.current_key = "c".into();
         composer.input.update(cx, |input, cx| input.set_text("keep this message", cx));
         composer.send("keep this message".into(), true, cx);
+        assert!(state.read(cx).pending_echoes().is_empty());
     });
+    assert!(!sent.get());
     let mut queue_request = None;
     for _ in 0..100 {
         cx.run_until_parked();
