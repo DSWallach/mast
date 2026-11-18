@@ -171,13 +171,18 @@ fn closed_tool_group_stays_empty_until_opened_and_retains_height_while_closing(
                 subagent_ref: None, subagent_status: None, subagent_tail: None,
                 is_thought: false,
             };
-            let tools = Arc::new(vec![tool; 1000]);
+            let tools = Arc::new(vec![tool.clone(); 10_000]);
             let id: SharedString = "group".into();
             let summary: SharedString = "Tools".into();
             let before = this.list.logical_scroll_top();
             let _ = this.render_tool_group(&id, &tools, &summary, false, &Theme::dark(), cx);
             assert_eq!(this.tool_group_reveals[&id].rendered_height, 0.0);
             assert_eq!(this.tool_group_reveals[&id].rendered_open, Some(false));
+            let allocations = crate::perf::alloc_totals().0;
+            let _ = this.render_tool_group(&id, &tools, &summary, false, &Theme::dark(), cx);
+            let allocations = crate::perf::alloc_totals().0 - allocations;
+            assert!(allocations < 10_000, "closed group allocated {allocations} times");
+            let tools = Arc::new(vec![tool; 1000]);
             this.folds.insert(id.clone(), FoldState { open: Some(true), ..Default::default() });
             // Disable the opening tween so the next render has a settled height.
             this.tool_group_reveals.get_mut(&id).unwrap().rendered_open = Some(true);
