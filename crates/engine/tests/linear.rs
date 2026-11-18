@@ -601,6 +601,20 @@ async fn list_queries_limit_the_number_of_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
+    let rig = rig().await;
+    for _ in 0..2 {
+        let error = rig.linear_err(methods::LINEAR_PROJECT_ISSUES,
+            json!({ "projectId": "missing", "includeCompleted": true })).await;
+        assert_eq!(error.code, LinearErrorCode::NotFound);
+    }
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 1);
+    let _ = rig.linear_err(methods::LINEAR_PROJECT_ISSUES,
+        json!({ "projectId": "missing", "includeCompleted": true, "force": true })).await;
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn list_queries_paginate_and_parse() {
     let rig = rig().await;
     {

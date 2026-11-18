@@ -112,6 +112,20 @@ impl LinearKeyStore for AccountKeyStore {
 
 type SharedCall = Shared<BoxFuture<'static, Result<Value, LinearError>>>;
 
+struct ProjectIssueFailure {
+    error: LinearError,
+    at: Instant,
+    attempts: u32,
+}
+
+impl ProjectIssueFailure {
+    fn suppress_retry(&self, now: Instant) -> bool {
+        if matches!(self.error.code, LinearErrorCode::NotFound | LinearErrorCode::Invalid) { return true; }
+        let seconds = (60u64 << self.attempts.saturating_sub(1).min(4)).min(15 * 60);
+        now.saturating_duration_since(self.at) < Duration::from_secs(seconds)
+    }
+}
+
 struct Inner {
     backend: RwLock<Arc<Backend>>,
     /// `None` = not resolved yet; `Some(None)` = no key anywhere.
@@ -126,6 +140,7 @@ struct Inner {
     /// Stale-while-revalidate stores for the panel's lists (persisted when a
     /// cache directory is set). Keys: `my`, `project:<id>`.
     issue_lists: SwrStore<Vec<LinearIssueSummary>, LinearError>,
+    project_issue_failures: Mutex<HashMap<String, ProjectIssueFailure>>,
     project_lists: SwrStore<Vec<LinearProjectSummary>, LinearError>,
     /// One project's detail per id (the canonical plan panel).
     project_details: SwrStore<LinearProjectDetail, LinearError>,
@@ -191,6 +206,7 @@ impl LinearService {
                 attachments: Mutex::new(HashMap::new()),
                 inflight: Mutex::new(HashMap::new()),
                 issue_lists: SwrStore::new(LIST_CACHE_TTL),
+                project_issue_failures: Mutex::new(HashMap::new()),
                 project_lists: SwrStore::new(LIST_CACHE_TTL),
                 project_details: SwrStore::new(LIST_CACHE_TTL),
                 key_change: tokio::sync::Mutex::new(()),
@@ -260,6 +276,7 @@ impl LinearService {
         *lock(&self.inner.verified) = None;
         lock(&self.inner.issues).clear();
         lock(&self.inner.attachments).clear();
+        lock(&self.inner.project_issue_failures).clear();
         self.inner.issue_lists.clear();
         self.inner.project_lists.clear();
         self.inner.project_details.clear();
@@ -845,9 +862,16 @@ impl LinearService {
                 "projectId is required",
             ));
         }
+        if include_completed && !force && !cached_only {
+            let failures = lock(&self.inner.project_issue_failures);
+            if let Some(failure) = failures.get(&project_id).filter(|failure| failure.suppress_retry(Instant::now())) {
+                return Err(failure.error.clone());
+            }
+        }
+        let credential_revision = self.credential_revision();
         let this = self.clone();
         let id = project_id.clone();
-        self.issue_list(
+        let result = self.issue_list(
             &if include_completed { format!("project:{project_id}:all") } else { format!("project:{project_id}") },
             force,
             cached_only,
@@ -869,7 +893,20 @@ impl LinearService {
                 Ok(if include_completed { nodes.iter().filter_map(queries::issue_summary).collect() } else { open_issues(&nodes) })
             },
         )
-        .await
+        .await;
+        if include_completed && !cached_only && credential_revision == self.credential_revision() {
+            let mut failures = lock(&self.inner.project_issue_failures);
+            match &result {
+                Ok(_) => { failures.remove(&project_id); }
+                Err(error) => {
+                    let attempts = failures.get(&project_id).map_or(1, |failure| failure.attempts.saturating_add(1));
+                    if failures.len() >= 128 && !failures.contains_key(&project_id)
+                        && let Some(key) = failures.keys().next().cloned() { failures.remove(&key); }
+                    failures.insert(project_id, ProjectIssueFailure { error: error.clone(), at: Instant::now(), attempts });
+                }
+            }
+        }
+        result
     }
 
     async fn issue_list<F, Fut>(
@@ -928,6 +965,16 @@ impl Default for LinearService {
 #[cfg(test)]
 mod account_service_tests {
     use super::*;
+
+    #[test]
+    fn project_issue_failures_back_off_and_missing_projects_do_not_retry() {
+        let now = Instant::now();
+        let transient = ProjectIssueFailure { error: LinearError::new(LinearErrorCode::Network, "offline"), at: now, attempts: 2 };
+        assert!(transient.suppress_retry(now + Duration::from_secs(119)));
+        assert!(!transient.suppress_retry(now + Duration::from_secs(120)));
+        let missing = ProjectIssueFailure { error: LinearError::new(LinearErrorCode::NotFound, "missing"), at: now, attempts: 1 };
+        assert!(missing.suppress_retry(now + Duration::from_secs(86_400)));
+    }
 
     #[tokio::test]
     async fn account_list_contains_metadata_and_never_keys() {
