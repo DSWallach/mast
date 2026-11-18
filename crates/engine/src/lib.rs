@@ -647,7 +647,10 @@ impl EngineCore {
             service.set_pr_ticket_cache(pr_ticket_cache.clone());
             tokio::spawn(async move {
                 let period = std::time::Duration::from_secs(24 * 60 * 60);
-                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                // Run once after startup settles, then no more than daily for
+                // this engine. Waiting a full day after every restart would
+                // prevent the sweep on machines that restart more often.
+                let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + std::time::Duration::from_secs(60), period);
                 loop {
                     interval.tick().await;
                     let service = service.clone();

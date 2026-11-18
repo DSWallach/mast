@@ -338,7 +338,7 @@ mod tests {
         let mutate = |m: WorkOutlineMutation| workspace.work_outline_mutate(&m, &actor, &[]).unwrap();
         let now = Utc::now();
         let mut request_item = String::new();
-        for name in ["eligible", "recent", "request"] {
+        for name in ["eligible", "recent", "request", "working", "awaiting"] {
             let item = mutate(WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
                 space_id: "space".into(), parent_work_item_id: None, placement: Default::default(), title: name.into(),
                 description: None, status: Some(WorkItemStatus::Completed), operation_id: format!("item-{name}"),
@@ -363,10 +363,21 @@ mod tests {
             space_id: "space".into(), field: None, worker_worktrees: false, merged_pr_completion: None,
             archive_workers_after_days: Some(3), operation_id: "enable-archive".into(),
         }));
+        let sessions = crate::SessionsEngine::new("device".into(),
+            std::sync::Arc::new(crate::RunJournal::open(directory.path().join("journal")).unwrap()),
+            std::sync::Arc::new(crate::HarnessRegistry::new()));
+        sessions.set_test_status("working", mast_proto::SessionStatus::Working);
+        sessions.set_test_status("awaiting", mast_proto::SessionStatus::AwaitingInput);
+        service.set_sessions(sessions.clone());
+        let dispatch = sessions.lock_dispatch("eligible").await;
+        assert_eq!(service.auto_archive_workers(now).unwrap(), 0);
+        drop(dispatch);
         assert_eq!(service.auto_archive_workers(now).unwrap(), 1);
         assert!(workspace.chat("eligible").unwrap().unwrap().archived);
         assert!(!workspace.chat("recent").unwrap().unwrap().archived);
         assert!(!workspace.chat("request").unwrap().unwrap().archived);
+        assert!(!workspace.chat("working").unwrap().unwrap().archived);
+        assert!(!workspace.chat("awaiting").unwrap().unwrap().archived);
     }
 
     #[test]

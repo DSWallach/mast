@@ -646,6 +646,11 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }

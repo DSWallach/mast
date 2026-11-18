@@ -110,12 +110,16 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
         "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
     git(&rig.repo, &["branch", "launch-me"]);
+    let occupied = rig.repo.join(".worktrees/workspace/launch-me-2");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("keep"), "untouched").unwrap();
     let mut on = params(&rig, "worker-on", "on");
     on.parent_chat_id = Some("parent".into());
     let reply = launch(&rig, &on).await.unwrap();
-    let path = rig.repo.join(".worktrees/workspace/launch-me-2");
+    let path = rig.repo.join(".worktrees/workspace/launch-me-3");
     assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
-    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-2");
+    assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
+    assert_eq!(std::fs::read_to_string(occupied.join("keep")).unwrap(), "untouched");
     assert_eq!(launch(&rig, &on).await.unwrap().chat_id, reply.chat_id);
     let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
     assert!(snapshot.execution_configurations.iter().any(|config| config.work_item_id.as_deref() == Some(&rig.item)
@@ -125,7 +129,7 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
     again.parent_chat_id = Some("parent".into());
     let reply = launch(&rig, &again).await.unwrap();
     assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
-    assert!(!rig.repo.join(".worktrees/workspace/launch-me-3").exists());
+    assert!(!rig.repo.join(".worktrees/workspace/launch-me-4").exists());
     rig.core.shutdown().await;
 }
 
