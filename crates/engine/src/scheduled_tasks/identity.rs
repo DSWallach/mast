@@ -99,6 +99,7 @@ mod tests {
                 grace_minutes: 0,
                 cutover_confirmed: false,
                 work_item_id: None,
+                output: Default::default(),
             },
             created_at: 0,
             updated_at: 0,
