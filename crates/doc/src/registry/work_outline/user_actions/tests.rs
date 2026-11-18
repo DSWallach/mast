@@ -1590,6 +1590,40 @@ fn agent_proposals_target_its_item_parent_or_space_root() {
 }
 
 #[test]
+fn agent_may_link_supported_references_only_within_its_subtree() {
+    let mut f = fixture();
+    let (own, child, sibling, other, parent) = (
+        f.own.clone(), f.child.clone(), f.sibling.clone(),
+        f.other_space_item.clone(), f.parent.clone(),
+    );
+    apply(
+        &mut f.doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: parent,
+            changes: WorkItemChanges { is_project: Some(true), ..Default::default() },
+            operation_id: "link-project".into(),
+        }),
+    ).unwrap();
+    let reference = |op: &str, item: &str, provider: &str, kind: &str| {
+        WorkOutlineMutation::CreateWorkItemExternalReference(CreateWorkItemExternalReferenceParams {
+            work_item_id: item.into(),
+            provider: provider.into(),
+            reference_type: kind.into(),
+            external_id: op.into(),
+            url: format!("https://example.com/{op}"),
+            cached_title: None,
+            operation_id: op.into(),
+        })
+    };
+    as_agent(&mut f, reference("link-own", &own, "github", "pullRequest")).unwrap();
+    as_agent(&mut f, reference("link-child", &child, "linear", "issue")).unwrap();
+    denied(&mut f, reference("link-sibling", &sibling, "github", "pullRequest"));
+    denied(&mut f, reference("link-other", &other, "linear", "issue"));
+    denied(&mut f, reference("link-type", &own, "linear", "project"));
+    denied(&mut f, reference("link-provider", &own, "other", "issue"));
+}
+
+#[test]
 fn agent_is_denied_every_other_operation() {
     let mut f = fixture();
     let (own, child) = (f.own.clone(), f.child.clone());
