@@ -1717,6 +1717,9 @@ impl Overview {
                 this.outline_preview = None;
                 this.leave_work_item_details(DetailsExit::OpenChat(chat_id.clone()), cx);
             }
+            OutlineEvent::OpenTracker(chat_id) => {
+                this.leave_work_item_details(DetailsExit::OpenTracker(chat_id.clone()), cx);
+            }
             OutlineEvent::SelectionMoved => this.schedule_outline_preview(cx),
             OutlineEvent::RenameChat(chat_id) => {
                 if let Some(shell) = this.shell.upgrade() {
@@ -4584,8 +4587,6 @@ impl Render for Overview {
         self.declare_outline_spaces(cx);
         if self.view_mode == OverviewMode::Outline {
             self.sync_outline(cx);
-        } else {
-            self.suspend_board(cx);
         }
 
         let new_chat_button = self.render_new_chat_button(&theme, cx);
@@ -5695,10 +5696,6 @@ impl Overview {
         gpui::Focusable::focus_handle(self.search.read(cx), cx)
     }
 
-    pub(crate) fn suspend_board(&mut self, cx: &mut Context<Self>) {
-        self.outline.update(cx, |outline, cx| outline.suspend_board(cx));
-    }
-
     pub(crate) fn outline_entity(&self) -> Entity<OutlineView> {
         self.outline.clone()
     }
@@ -6197,6 +6194,12 @@ impl Overview {
                     full_route: false,
                 });
                 self.open_chat_panel(chat_id, cx);
+            }
+            DetailsExit::OpenTracker(chat_id) => {
+                self.close_work_item_details(cx);
+                if let Some(shell) = self.shell.upgrade() {
+                    cx.defer(move |cx| shell.update(cx, |shell, cx| shell.open_outline_tracker(chat_id, cx)));
+                }
             }
             DetailsExit::OpenItem { space_id, item_id } => {
                 self.replace_work_item_details(space_id, item_id, cx)
@@ -6971,6 +6974,7 @@ pub(crate) struct OutlineChatReturn {
 enum DetailsExit {
     Close,
     OpenChat(String),
+    OpenTracker(String),
     OpenItem { space_id: String, item_id: String },
 }
 

@@ -9832,9 +9832,6 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
-        if !matches!(self.route, Route::Overview) && let Some(overview) = &self.overview_page {
-            overview.update(cx, |overview, cx| overview.suspend_board(cx));
-        }
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar). Settings never
         // underlaps: pad below the overlaid titlebar.

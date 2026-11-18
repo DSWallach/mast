@@ -835,7 +835,6 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
-    board_watch_docs: std::collections::HashSet<String>,
     tab_watch_docs: std::collections::HashSet<String>,
 }
 
@@ -933,7 +932,6 @@ impl AppState {
             github: Default::default(),
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
-            board_watch_docs: Default::default(),
             tab_watch_docs: Default::default(),
             auto_selected: false,
             chats_synced: false,
@@ -1574,17 +1572,7 @@ impl AppState {
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
         self.tab_watch_docs.remove(doc_id);
-        if self.board_watch_docs.contains(doc_id) { return; }
         self.remove_subagent_doc_watch(doc_id);
-    }
-
-    pub(crate) fn set_board_watch_docs(&mut self, ids: std::collections::HashSet<String>, cx: &mut Context<Self>) {
-        let removed: Vec<_> = self.board_watch_docs.difference(&ids).cloned().collect();
-        self.board_watch_docs = ids;
-        for id in removed {
-            if !self.tab_watch_docs.contains(&id) { self.remove_subagent_doc_watch(&id); }
-        }
-        for id in self.board_watch_docs.clone() { self.ensure_subagent_doc_watch(id, cx); }
     }
 
     fn remove_subagent_doc_watch(&mut self, doc_id: &str) {

@@ -227,7 +227,9 @@ pub fn outline_first_use_button(id: &'static str, primary: bool, theme: &Theme) 
         .border_color(theme.border)
         .cursor_pointer()
         .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(!(primary && theme.ui_style.layout == crate::ui_style::UiLayout::Guided), |el| {
+            el.hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        })
         .when(
             primary && theme.ui_style.layout == crate::ui_style::UiLayout::Guided,
             |el| {
@@ -239,6 +241,17 @@ pub fn outline_first_use_button(id: &'static str, primary: bool, theme: &Theme) 
         );
     crate::surface_chrome::segmented_key(button, theme, false)
         .when(super::is_horizon(theme), |el| el.rounded_full())
+}
+
+/// Worker count and attention indicator for an outline row.
+pub fn outline_worker_chip(id: SharedString, count: usize, needs_you: bool, theme: &Theme) -> Stateful<Div> {
+    let selector = id.to_string();
+    div().id(id).debug_selector(move || selector.clone())
+        .flex_none().flex().items_center().gap(px(4.0)).px(px(5.0))
+        .rounded(px(theme.ui_style.tokens.control_radius.unwrap_or(4.0))).bg(theme.element_hover).cursor_pointer()
+        .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted)
+        .when(needs_you, |el| el.child(div().size(px(5.0)).rounded_full().bg(theme.warning)))
+        .child(format!("{count} worker{}", if count == 1 { "" } else { "s" }))
 }
 
 /// Start-chat action for an outline row.
@@ -260,7 +273,7 @@ pub fn outline_start_chat_button(id: SharedString, theme: &Theme) -> Stateful<Di
             10.0 + super::layout_type_adjustment(theme),
         ))
         .text_color(theme.text_muted)
-        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+        .when(!guided, |el| el.hover(|el| el.bg(theme.element_hover).text_color(theme.text)))
         .when(guided, |el| {
             el.h(px(32.0))
                 .px(px(8.0))

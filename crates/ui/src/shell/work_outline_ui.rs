@@ -717,6 +717,20 @@ fn deliver_decision(modal: WorkOutlineModal, accept: bool, window: &mut Window, 
 }
 
 impl Shell {
+    /// Open a coordinator chat and select its Tracker after selection settles.
+    pub(crate) fn open_outline_tracker(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.clone(), cx);
+        let shell = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = shell.update(cx, |this, cx| {
+                if this.active_chat == chat_id {
+                    this.set_surfaces_open(true, cx);
+                    this.set_right_active(super::RightSurface::Team, cx);
+                }
+            });
+        });
+    }
+
     /// Whether a Work Outline modal is open.
     pub(super) fn work_outline_modal_open(&self) -> bool {
         self.work_outline_modal.is_some() && !(matches!(self.route, Route::Settings(SettingsSection::Agents)) && matches!(self.work_outline_modal, Some(WorkOutlineModal::StartChat(_))))

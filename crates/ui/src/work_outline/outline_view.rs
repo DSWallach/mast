@@ -26,10 +26,10 @@ use super::actions::new_operation_id;
 use super::chips::{self, TextTooltip};
 pub(crate) mod group;
 mod move_toast;
-mod board_view;
 pub(crate) mod templates;
 mod tree_guides_view;
 mod undo;
+mod worker_rollup;
 
 use super::hints::{HintKey, WithHint};
 use super::instructions::{self, OutlineChange};
@@ -149,6 +149,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum OutlineEvent {
     /// Open the Chat's transcript.
     OpenChat(String),
+    OpenTracker(String),
     /// The user moved the selection to another row (arrow keys, Home / End,
     /// sibling jumps, a click). The Overview previews a Chat row in its chat
     /// panel without taking focus. Programmatic selection never sends it.
@@ -449,40 +450,11 @@ pub(crate) struct OutlineView {
     state: Entity<AppState>,
     focus: FocusHandle,
     picker_focus: FocusHandle,
-    board_mode: board_view::BoardMode,
-    board_root: Option<(String, String)>,
-    board_space: Option<String>,
-    board_space_scope: bool,
-    board_show_all: bool,
-    board_limit: usize,
-    board_sort: board_view::BoardSort,
-    board_sort_desc: bool,
-    board_expanded: HashSet<String>,
-    board_links: std::collections::HashMap<String, mast_engine::pr_ticket_cache::ChatLinkStatus>,
-    board_link_revision: u64,
-    board_link_versions: Vec<u64>,
-    board_transcript_revision: u64,
-    board_status_revision: u64,
-    board_cached_ids: Vec<String>,
-    board_worker_states: std::collections::HashMap<String, crate::team::WorkerState>,
-    board_rows: Vec<(String, crate::board::BoardItem)>,
-    board_groups: [Vec<usize>; 4],
-    board_artifact_revision: Option<(String, u64)>,
-    board_artifacts: std::collections::HashMap<String, Vec<(String, String)>>,
-    board_rows_dirty: bool,
-    #[cfg(test)]
-    board_rebuild_count: usize,
-    board_snapshot_revisions: Vec<(String, u64)>,
-    board_input_chats: Vec<OutlineChat>,
-    board_visible: bool,
-    board_scroll: gpui::ScrollHandle,
-    board_column_scroll: [gpui::ScrollHandle; 4],
-    board_shell_observe: Option<Subscription>,
-    board_activity: std::collections::HashMap<String, String>,
-    board_activity_ids: Vec<String>,
-    board_state_observe: Option<Subscription>,
     scroll: UniformListScrollHandle,
     inputs: OutlineInputs,
+    worker_rollup_revisions: Vec<(String, u64)>,
+    worker_rollup_chats: Vec<worker_rollup::WorkerInput>,
+    worker_rollups: std::collections::HashMap<(String, String), worker_rollup::WorkerRollup>,
     /// PR link index per Space, rebuilt only when the Space's snapshot changes.
     pr_links: pr_sync_outline::PrLinkCache,
     model: OutlineModel,
@@ -583,40 +555,11 @@ impl OutlineView {
             state,
             focus: cx.focus_handle(),
             picker_focus: cx.focus_handle(),
-            board_mode: board_view::BoardMode::Tree,
-            board_root: None,
-            board_space: None,
-            board_space_scope: false,
-            board_show_all: false,
-            board_limit: 12,
-            board_sort: board_view::BoardSort::Status,
-            board_sort_desc: false,
-            board_expanded: HashSet::new(),
-            board_links: Default::default(),
-            board_link_revision: 0,
-            board_link_versions: Vec::new(),
-            board_transcript_revision: 0,
-            board_status_revision: 0,
-            board_cached_ids: Vec::new(),
-            board_worker_states: Default::default(),
-            board_rows: Vec::new(),
-            board_groups: std::array::from_fn(|_| Vec::new()),
-            board_artifact_revision: None,
-            board_artifacts: Default::default(),
-            board_rows_dirty: true,
-            #[cfg(test)]
-            board_rebuild_count: 0,
-            board_snapshot_revisions: Vec::new(),
-            board_input_chats: Vec::new(),
-            board_visible: false,
-            board_scroll: gpui::ScrollHandle::new(),
-            board_column_scroll: std::array::from_fn(|_| gpui::ScrollHandle::new()),
-            board_shell_observe: None,
-            board_activity: Default::default(),
-            board_activity_ids: Vec::new(),
-            board_state_observe: None,
             scroll: UniformListScrollHandle::new(),
             inputs: OutlineInputs::default(),
+            worker_rollup_revisions: Vec::new(),
+            worker_rollup_chats: Vec::new(),
+            worker_rollups: Default::default(),
             pr_links: Default::default(),
             model: OutlineModel::default(),
             collapsed: HashSet::new(),
@@ -679,21 +622,20 @@ impl OutlineView {
         self.ensure_collapsed_loaded(cx);
         self.frames = inputs.spaces.clone();
         let revisions: Vec<_> = inputs.spaces.iter().filter_map(|space| space.load.snapshot().map(|snapshot| (space.id.clone(), snapshot.revision))).collect();
-        if revisions != self.board_snapshot_revisions || inputs.chats != self.board_input_chats {
-            self.board_snapshot_revisions = revisions;
-            self.board_input_chats = inputs.chats.clone();
-            self.board_rows_dirty = true;
+        let worker_chats: Vec<_> = inputs.chats.iter().map(worker_rollup::WorkerInput::from).collect();
+        if revisions != self.worker_rollup_revisions || worker_chats != self.worker_rollup_chats {
+            self.worker_rollups.clear();
+            for space in &inputs.spaces {
+                if let Some(snapshot) = space.load.snapshot() {
+                    for (item_id, rollup) in worker_rollup::build(snapshot, &inputs.chats) {
+                        self.worker_rollups.insert((space.id.clone(), item_id), rollup);
+                    }
+                }
+            }
+            self.worker_rollup_revisions = revisions;
+            self.worker_rollup_chats = worker_chats;
         }
         self.inputs = inputs;
-        if self.board_space.as_ref().is_some_and(|id| !self.inputs.spaces.iter().any(|space| &space.id == id)) {
-            self.board_space = self.state.read(cx).selected_space.clone().filter(|id| self.inputs.spaces.iter().any(|space| &space.id == id)).or_else(|| self.inputs.spaces.first().map(|space| space.id.clone()));
-            self.board_root = None;
-            self.board_space_scope = true;
-            self.board_show_all = false;
-            self.board_limit = 12;
-            self.board_rows_dirty = true;
-            self.notice = Some("Space unavailable; showing the current Space".into());
-        }
         self.retire_shown_optimistic();
         self.overlay_optimistic();
         self.reflatten();
@@ -3029,6 +2971,22 @@ impl OutlineView {
                         )
                     });
                     let artifacts = self.artifact_count_chip(&key, item, theme, cx);
+                    let worker_chip = self.worker_rollups.get(&(item.space_id.clone(), item.item_id.clone())).filter(|rollup| rollup.live > 0).cloned().map(|rollup| {
+                        let space_id = item.space_id.clone();
+                        let item_id = item.item_id.clone();
+                        crate::components::outline_worker_chip(SharedString::from(format!("outline-workers-{key}")), rollup.live, rollup.needs_you, theme)
+                            .hint("Open Tracker or work item details", HintKey::None)
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if this.is_editing() { return; }
+                                if let Some(chat_id) = &rollup.coordinator {
+                                    cx.emit(OutlineEvent::OpenTracker(chat_id.clone()));
+                                } else {
+                                    this.open_item_details(space_id.clone(), item_id.clone(), cx);
+                                }
+                            })).into_any_element()
+                    });
                     // Rough widths of the chips that share the row with the
                     // PR icon cluster (they size to their content).
                     let other_width = if item.pending_proposals > 0 {
@@ -3079,6 +3037,7 @@ impl OutlineView {
                             external.chips,
                         ),
                         external.pr_slots,
+                        worker_chip,
                         theme,
                     )
                 }
@@ -3459,6 +3418,7 @@ fn item_body(
     open_details: Option<GlyphHandlers>,
     proposals: Option<AnyElement>,
     pr_slots: Option<AnyElement>,
+    worker_chip: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
     let pr_slots = pr_slots.filter(|_| crate::components::outline_row_extras(theme));
@@ -3543,6 +3503,7 @@ fn item_body(
             ))
         })
         .children(proposals)
+        .children(worker_chip)
         .when_some(
             item.template_changed.filter(|_| !item.archived && crate::components::outline_row_extras(theme)),
             |el, (from, to)| {
@@ -3820,9 +3781,7 @@ impl Render for OutlineView {
         let mut first_use = self
             .shows_first_use(cx)
             .then(|| self.render_first_use(&theme, cx));
-        let list: AnyElement = if self.board_mode != board_view::BoardMode::Tree {
-            self.render_board(&theme, window, cx)
-        } else if count == 0 && first_use.is_some() {
+        let list: AnyElement = if count == 0 && first_use.is_some() {
             // First use: the compact line takes the empty tree's place.
             div()
                 .flex_1()
@@ -4002,8 +3961,7 @@ impl Render for OutlineView {
                 )
             })
             .children(crate::ui_style::help_card("outline", "Group work items and chats here to share context and instructions.", &theme, cx))
-            .child(self.render_board_controls(&theme, cx))
-            .when(self.board_mode == board_view::BoardMode::Tree, |el| el.children(space_root_entry))
+            .children(space_root_entry)
             .when_some(picker, |el, picker| el.child(picker))
             // With only Chats in the tree, the first-use line sits above them.
             .children(first_use)

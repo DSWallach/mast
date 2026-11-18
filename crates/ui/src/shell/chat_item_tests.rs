@@ -2208,3 +2208,14 @@ fn header_link_refetch_discards_a_response_for_the_previous_checkout(cx: &mut Te
     });
     drop(guard);
 }
+
+#[gpui::test]
+fn outline_tracker_opens_selected_coordinator_chat(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    shell.update(vcx, |shell, cx| shell.open_outline_tracker(CHAT_UI.into(), cx));
+    draw(vcx);
+    shell.read_with(vcx, |shell, cx| {
+        assert_eq!(shell.active_chat, CHAT_UI);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Team);
+    });
+}
