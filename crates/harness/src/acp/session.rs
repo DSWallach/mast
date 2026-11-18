@@ -12,7 +12,6 @@ enum LoopControl {
     Stop,
 }
 
-#[derive(Default)]
 struct AcpSessionState {
     child_exit: Option<Option<std::process::ExitStatus>>,
     exit_drain_deadline: Option<tokio::time::Instant>,
@@ -28,6 +27,13 @@ struct AcpSessionState {
     queued_steers: VecDeque<String>,
     steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)>,
     steer_backlog: VecDeque<String>,
+    client: RpcClient,
+    session_id: String,
+    prompt_complete_extension: bool,
+    prompt_stall: Option<Duration>,
+    done_current: bool,
+    open_tools: std::collections::HashSet<String>,
+    last_update_at: tokio::time::Instant,
 }
 
 impl AcpSessionState {
@@ -45,8 +51,6 @@ impl AcpSessionState {
 
     fn interrupt(
         &mut self,
-        client: &RpcClient,
-        session_id: &str,
         has_turn: bool,
         child: &Child,
         interrupt_grace: Duration,
@@ -54,7 +58,7 @@ impl AcpSessionState {
         self.interrupt_sent = true;
         self.interrupted = true;
         if has_turn {
-            client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
+            self.client.notify("session/cancel", Some(json!({ "sessionId": self.session_id })));
             if let Some(pid) = crate::process::signal_target(child) {
                 self.escalation_target = Some(pid);
                 self.escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
@@ -63,6 +67,23 @@ impl AcpSessionState {
         } else {
             LoopControl::Stop
         }
+    }
+
+    fn begin_prompt(&mut self, text: String) {
+        self.done_current = false;
+        self.open_tools.clear();
+        self.last_update_at = tokio::time::Instant::now();
+        self.prompt_seq += 1;
+        self.current_prompt_id = self
+            .prompt_complete_extension
+            .then(|| format!("zeron-p{}", self.prompt_seq));
+        self.prompt_stall_deadline = self.prompt_stall.map(|d| tokio::time::Instant::now() + d);
+        self.turn = Some(prompt_turn(
+            self.client.clone(),
+            self.session_id.clone(),
+            text,
+            self.current_prompt_id.clone(),
+        ));
     }
 
     fn escalate_interrupt(
@@ -91,8 +112,6 @@ impl AcpSessionState {
         event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
         subagents: &mut SubagentObserver,
         done_after_interrupt: bool,
-        done_current: bool,
-        session_id: &str,
         agent_name: &str,
         stderr_tail: &crate::StderrTail,
         kill_grace: Duration,
@@ -119,10 +138,10 @@ impl AcpSessionState {
                         status: DoneStatus::Interrupted,
                         result: None,
                         error: None,
-                        session_id: Some(session_id.to_owned()),
+                        session_id: Some(self.session_id.clone()),
                     }))
                     .await;
-            } else if !self.interrupted && !done_current {
+            } else if !self.interrupted && !self.done_current {
                 // A child killed mid-turn must not read as a silent success.
                 let status = match self.child_exit {
                     Some(status) => status,
@@ -138,7 +157,7 @@ impl AcpSessionState {
                         status: DoneStatus::Errored,
                         result: None,
                         error: Some(crate::crash_message(agent_name, status, stderr_tail)),
-                        session_id: Some(session_id.to_owned()),
+                        session_id: Some(self.session_id.clone()),
                     }))
                     .await;
             }
@@ -150,11 +169,8 @@ impl AcpSessionState {
     async fn expire_prompt_stall(
         &mut self,
         event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
-        session_id: &str,
         agent_name: &str,
         stall_hint: &str,
-        prompt_stall: Option<Duration>,
-        done_current: &mut bool,
     ) {
         let _ = send(
             event_tx,
@@ -162,13 +178,13 @@ impl AcpSessionState {
                 code: None, resets_at: None, message: format!(
                     "{agent_name} did not respond to the prompt at all \
                      (no wire activity for {}s). {}",
-                    prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
+                    self.prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
                     stall_hint,
                 ),
             },
         )
         .await;
-        *done_current = true;
+        self.done_current = true;
         let _ = send(
             event_tx,
             AgentEvent::Done {
@@ -177,7 +193,7 @@ impl AcpSessionState {
                 error: Some(format!(
                     "{agent_name} is unresponsive — the run was closed."
                 )),
-                session_id: Some(session_id.to_owned()),
+                session_id: Some(self.session_id.clone()),
             },
         )
         .await;
@@ -569,7 +585,7 @@ pub(super) async fn run_session(session: Session) {
     let steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
     let steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
-    let mut done_current = false;
+    let done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
@@ -590,8 +606,8 @@ pub(super) async fn run_session(session: Session) {
     // all precede a slow model request. Keep the prompt future alive until
     // its response (or an authoritative completion extension) arrives.
     // MAST_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
-    let mut last_update_at = tokio::time::Instant::now();
-    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let last_update_at = tokio::time::Instant::now();
+    let open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -614,7 +630,19 @@ pub(super) async fn run_session(session: Session) {
         queued_steers,
         steering_call,
         steer_backlog,
-        ..AcpSessionState::default()
+        client,
+        session_id,
+        prompt_complete_extension,
+        prompt_stall,
+        done_current,
+        open_tools,
+        last_update_at,
+        child_exit: None,
+        exit_drain_deadline: None,
+        escalation_deadline: None,
+        escalation_target: None,
+        interrupted: false,
+        interrupt_sent: false,
     };
     'main: loop {
         tokio::select! {
@@ -626,7 +654,7 @@ pub(super) async fn run_session(session: Session) {
 
             res = async { state.turn.as_mut().expect("guarded by if").await }, if state.turn.is_some() => {
                 state.turn = None;
-                if res.is_err() && client.is_closed() {
+                if res.is_err() && state.client.is_closed() {
                     break 'main;
                 }
                 starve_deadline = None;
@@ -695,7 +723,7 @@ pub(super) async fn run_session(session: Session) {
                     match inc {
                         Incoming::Notification { method, params } => {
                             let events =
-                                session_update_events(&method, &params, &session_id, &mut subagents);
+                                session_update_events(&method, &params, &state.session_id, &mut subagents);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -705,12 +733,12 @@ pub(super) async fn run_session(session: Session) {
                         }
                         Incoming::Request { id, method, params } => {
                             for ev in handle_server_request_live(
-                                &client,
+                                &state.client,
                                 id,
                                 &method,
                                 &params,
                                 &request_input,
-                                &session_id,
+                                &state.session_id,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -747,7 +775,7 @@ pub(super) async fn run_session(session: Session) {
                 if !state.interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
                     error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
                 }
-                done_current = true;
+                state.done_current = true;
                 if state.interrupted {
                     done_after_interrupt = true;
                 }
@@ -757,7 +785,7 @@ pub(super) async fn run_session(session: Session) {
                         status,
                         result: None,
                         error,
-                        session_id: Some(session_id.clone()),
+                        session_id: Some(state.session_id.clone()),
                     },
                 )
                 .await
@@ -783,20 +811,7 @@ pub(super) async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    done_current = false;
-                    open_tools.clear();
-                    last_update_at = tokio::time::Instant::now();
-                    state.prompt_seq += 1;
-                    state.current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
-                    state.prompt_stall_deadline =
-                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    state.turn = Some(prompt_turn(
-                        client.clone(),
-                        session_id.clone(),
-                        text,
-                        state.current_prompt_id.clone(),
-                    ));
+                    state.begin_prompt(text);
                 } else if !steering_open {
                     break 'main;
                 }
@@ -804,10 +819,10 @@ pub(super) async fn run_session(session: Session) {
 
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
-                    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != session_id) {
+                    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != state.session_id) {
                         continue;
                     }
-                    last_update_at = tokio::time::Instant::now();
+                    state.last_update_at = tokio::time::Instant::now();
                     // Wire traffic is a sign of life for the prompt-stall
                     // watchdog — EXCEPT session boilerplate: opencode emits
                     // available_commands_update right after session/new on
@@ -840,12 +855,12 @@ pub(super) async fn run_session(session: Session) {
                     // prompt-id match (a stale replay of an already-settled
                     // prompt must never settle a newer turn; grok echoes the
                     // `_meta.promptId` we mint — verified live, 1.0.4).
-                    if prompt_complete_extension
+                    if state.prompt_complete_extension
                         && method == "_x.ai/session/prompt_complete"
                         && !state.interrupted
                         && state.turn.is_some()
                         && params.get("sessionId").and_then(Value::as_str)
-                            == Some(session_id.as_str())
+                            == Some(state.session_id.as_str())
                     {
                         let pid = params
                             .get("promptId")
@@ -873,9 +888,9 @@ pub(super) async fn run_session(session: Session) {
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events =
-                        session_update_events(&method, &params, &session_id, &mut subagents);
+                        session_update_events(&method, &params, &state.session_id, &mut subagents);
                     for ev in events {
-                        track_open_tools(&ev, &mut open_tools);
+                        track_open_tools(&ev, &mut state.open_tools);
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
@@ -884,12 +899,12 @@ pub(super) async fn run_session(session: Session) {
                 Some(Incoming::Request { id, method, params }) => {
                     state.prompt_stall_deadline = None;
                     for ev in handle_server_request_live(
-                        &client,
+                        &state.client,
                         id,
                         &method,
                         &params,
                         &request_input,
-                        &session_id,
+                        &state.session_id,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -919,7 +934,7 @@ pub(super) async fn run_session(session: Session) {
                             let _ = send(&event_tx, usage).await;
                         }
                         let (status, error) = stop_outcome(&res, state.interrupted);
-                        done_current = true;
+                        state.done_current = true;
                         if state.interrupted {
                             done_after_interrupt = true;
                         }
@@ -929,7 +944,7 @@ pub(super) async fn run_session(session: Session) {
                                 status,
                                 result: None,
                                 error,
-                                session_id: Some(session_id.clone()),
+                                session_id: Some(state.session_id.clone()),
                             },
                         )
                         .await;
@@ -984,7 +999,7 @@ pub(super) async fn run_session(session: Session) {
                             match inc {
                                 Incoming::Notification { method, params } => {
                                     let events =
-                                        session_update_events(&method, &params, &session_id, &mut subagents);
+                                        session_update_events(&method, &params, &state.session_id, &mut subagents);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -994,12 +1009,12 @@ pub(super) async fn run_session(session: Session) {
                                 }
                                 Incoming::Request { id, method, params } => {
                                     for ev in handle_server_request_live(
-                                        &client,
+                                        &state.client,
                                         id,
                                         &method,
                                         &params,
                                         &request_input,
-                                &session_id,
+                                &state.session_id,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -1069,24 +1084,11 @@ pub(super) async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    done_current = false;
-                    open_tools.clear();
-                    last_update_at = tokio::time::Instant::now();
-                    state.prompt_seq += 1;
-                    state.current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
-                    state.prompt_stall_deadline =
-                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    state.turn = Some(prompt_turn(
-                        client.clone(),
-                        session_id.clone(),
-                        text,
-                        state.current_prompt_id.clone(),
-                    ));
+                    state.begin_prompt(text);
                 }
                 while let Some(next_text) = state.steer_backlog.pop_front() {
                     if state.turn.is_some() && !state.interrupted {
-                        let fut = steering_call_future(&client, &session_id, &next_text);
+                        let fut = steering_call_future(&state.client, &state.session_id, &next_text);
                         state.steering_call = Some((next_text, fut));
                         break;
                     }
@@ -1118,20 +1120,7 @@ pub(super) async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    done_current = false;
-                    open_tools.clear();
-                    last_update_at = tokio::time::Instant::now();
-                    state.prompt_seq += 1;
-                    state.current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
-                    state.prompt_stall_deadline =
-                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    state.turn = Some(prompt_turn(
-                        client.clone(),
-                        session_id.clone(),
-                        text,
-                        state.current_prompt_id.clone(),
-                    ));
+                    state.begin_prompt(text);
                 } else if state.turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
                     break 'main;
@@ -1163,14 +1152,14 @@ pub(super) async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                done_current = true;
+                state.done_current = true;
                 if !send(
                     &event_tx,
                     AgentEvent::Done {
                         status: DoneStatus::Completed,
                         result: None,
                         error: None,
-                        session_id: Some(session_id.clone()),
+                        session_id: Some(state.session_id.clone()),
                     },
                 )
                 .await
@@ -1190,20 +1179,7 @@ pub(super) async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    done_current = false;
-                    open_tools.clear();
-                    last_update_at = tokio::time::Instant::now();
-                    state.prompt_seq += 1;
-                    state.current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
-                    state.prompt_stall_deadline =
-                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    state.turn = Some(prompt_turn(
-                        client.clone(),
-                        session_id.clone(),
-                        text,
-                        state.current_prompt_id.clone(),
-                    ));
+                    state.begin_prompt(text);
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
                     // and nothing left to run — the session is over.
@@ -1221,8 +1197,8 @@ pub(super) async fn run_session(session: Session) {
                         // steer lines up behind it and dispatches at flush.
                         state.queued_steers.push_back(text);
                     } else if state.turn.is_none()
-                        && (!open_tools.is_empty()
-                            || last_update_at.elapsed() < BUSY_RECENT)
+                        && (!state.open_tools.is_empty()
+                            || state.last_update_at.elapsed() < BUSY_RECENT)
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
                         // cancel it rather than prompt into the starve.
@@ -1232,9 +1208,9 @@ pub(super) async fn run_session(session: Session) {
                             "steer into a self-continuing session; cancelling \
                              the unowned turn before prompting"
                         );
-                        client.notify(
+                        state.client.notify(
                             "session/cancel",
-                            Some(json!({ "sessionId": session_id })),
+                            Some(json!({ "sessionId": state.session_id })),
                         );
                         state.queued_steers.push_back(text);
                         cancel_flush_deadline =
@@ -1253,20 +1229,7 @@ pub(super) async fn run_session(session: Session) {
                         {
                             break 'main;
                         }
-                        done_current = false;
-                        open_tools.clear();
-                        last_update_at = tokio::time::Instant::now();
-                        state.prompt_seq += 1;
-                    state.current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
-                    state.prompt_stall_deadline =
-                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    state.turn = Some(prompt_turn(
-                        client.clone(),
-                        session_id.clone(),
-                        text,
-                        state.current_prompt_id.clone(),
-                    ));
+                        state.begin_prompt(text);
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
                         // extension: start the call, resolved by its own
@@ -1275,7 +1238,7 @@ pub(super) async fn run_session(session: Session) {
                         if state.steering_call.is_some() {
                             state.steer_backlog.push_back(text);
                         } else {
-                            let fut = steering_call_future(&client, &session_id, &text);
+                            let fut = steering_call_future(&state.client, &state.session_id, &text);
                             state.steering_call = Some((text, fut));
                         }
                     } else {
@@ -1293,7 +1256,7 @@ pub(super) async fn run_session(session: Session) {
 
             _ = interrupt.cancelled(), if !state.interrupt_sent => {
                 let has_turn = state.turn.is_some();
-                if state.interrupt(&client, &session_id, has_turn, &child, interrupt_grace)
+                if state.interrupt(has_turn, &child, interrupt_grace)
                     == LoopControl::Stop
                 {
                     break 'main;
@@ -1310,7 +1273,7 @@ pub(super) async fn run_session(session: Session) {
                 state.prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if state.prompt_stall_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
                 state.expire_prompt_stall(
-                    &event_tx, &session_id, agent_name, stall_hint, prompt_stall, &mut done_current,
+                    &event_tx, agent_name, stall_hint,
                 ).await;
                 break 'main;
             },
@@ -1327,7 +1290,7 @@ pub(super) async fn run_session(session: Session) {
     }
 
     state.finish_session(
-        &mut child, &event_tx, &mut subagents, done_after_interrupt, done_current,
-        &session_id, agent_name, &stderr_tail, kill_grace,
+        &mut child, &event_tx, &mut subagents, done_after_interrupt,
+        agent_name, &stderr_tail, kill_grace,
     ).await;
 }
