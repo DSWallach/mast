@@ -2134,6 +2134,13 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
     }
 
+    pub(crate) fn set_chat_branch_if_absent(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            if doc.chat(chat_id)?.is_none_or(|chat| chat.branch.is_some()) { return Ok(false); }
+            doc.set_chat_branch(chat_id, branch)
+        })?)
+    }
+
     pub fn set_chat_source_context(
         &self,
         chat_id: &str,

@@ -1068,6 +1068,11 @@ pub(crate) fn local_branch_exists(repo_path: &Path, branch: &str) -> bool {
     run_git(repo_path, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
 }
 
+pub(crate) fn current_branch(repo_path: &Path) -> Option<String> {
+    run_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
+        .map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
 /// `git rev-parse --show-toplevel` — the git repo (or submodule) `path`
 /// itself belongs to. `None` when `path` isn't inside any git working tree.
 fn git_toplevel(path: &Path) -> Option<PathBuf> {

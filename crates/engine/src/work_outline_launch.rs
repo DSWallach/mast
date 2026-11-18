@@ -440,8 +440,7 @@ impl WorkItemLaunchService {
             }
             None => {
                 let mut resolved = self.effective_configuration(p, &space_id).await?;
-                let has_item_setup = snapshot.execution_configurations.iter()
-                    .any(|configuration| configuration.work_item_id.as_deref() == Some(&item.id));
+                let has_item_setup = matches!(&resolved.source_scope, mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { .. });
                 let has_worktree = resolved.configuration.bindings.iter()
                     .any(|binding| binding.worktree_id.is_some() || binding.worktree_path.is_some());
                 if hand_off.is_none() && p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
@@ -483,6 +482,19 @@ impl WorkItemLaunchService {
             p.config.clone(),
             p.parent_chat_id.as_deref(),
         )?;
+        // A pinned worker worktree is not passed as a Run worktree directive,
+        // so stamp its branch here for PR tracking. This is launch-time work,
+        // never a render-time git lookup, and leaves an existing value alone.
+        if p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
+            && resolved.configuration.bindings.iter().any(|binding| binding.worktree_path.is_some())
+            && self.workspace.chat(&chat_id).map_err(engine_error)?.is_some_and(|chat| chat.branch.is_none())
+        {
+            let root = std::path::PathBuf::from(&validated.execution_root);
+            if let Some(branch) = tokio::task::spawn_blocking(move || crate::chat_workspace_plan::current_branch(&root))
+                .await.map_err(|e| engine_error(EngineError::Other(e.to_string())))? {
+                self.workspace.set_chat_branch_if_absent(&chat_id, &branch).map_err(engine_error)?;
+            }
+        }
         // Name the chat before its first turn can schedule automatic titling.
         // Preserve an existing title on retries or after a user rename.
         if p.parent_chat_id.is_some()
