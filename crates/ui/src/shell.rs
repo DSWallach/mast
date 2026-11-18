@@ -106,6 +106,7 @@ mod menu_bar_ui;
 mod running_ui;
 mod sidebar_pins;
 mod sidebar_resort;
+use sidebar_resort::{SidebarSessionDrag, SidebarSessionDrop, SidebarSessionTransfer, SidebarSessionGap, SidebarSessionSlide, SidebarSessionReturn, PinnedSessionDragState, SidebarKeyedRow, SidebarSessionRows};
 use sidebar_resort::sidebar_key_order_changed;
 pub use sidebar_resort::{resort_offsets, RESORT};
 mod sidebar_chat_rows;
@@ -420,107 +421,6 @@ struct RightTabDragState {
     over: usize,
     epoch: usize,
     prev_over: usize,
-}
-
-/// Sidebar-only drag payload. Regular sessions never acquire a manual order.
-#[derive(Clone, PartialEq)]
-struct SidebarSessionDrag {
-    chat_id: String,
-    visible_ids: std::sync::Arc<Vec<String>>,
-    filter: Option<String>,
-    profile_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarSessionDrop {
-    Pinned(usize),
-    Regular,
-    Section(String),
-}
-
-struct SidebarSessionTransfer {
-    payload: SidebarSessionDrag,
-    origin: std::rc::Rc<std::cell::Cell<Point<Pixels>>>,
-    cursor_offset: Point<Pixels>,
-    pointer: Point<Pixels>,
-    viewport: Option<gpui::Bounds<Pixels>>,
-    slide: SidebarSessionSlide,
-    preview: Option<SidebarSessionGap>,
-    source_group: String,
-    source_index: usize,
-    row_height: f32,
-    source_collapse: SidebarSessionSlide,
-    collapsed_height: f32,
-    section_gaps: std::collections::HashMap<String, SidebarSessionSlide>,
-    siblings: std::collections::HashMap<String, SidebarSessionSlide>,
-}
-
-#[derive(Clone)]
-struct SidebarSessionGap {
-    group: String,
-    index: usize,
-    pinned: bool,
-    top: f32,
-}
-
-/// The same slot-to-slot easing as pinned reordering, applied to the actual row.
-struct SidebarSessionSlide {
-    from: f32,
-    to: f32,
-    epoch: u64,
-    started: std::time::Instant,
-}
-
-impl SidebarSessionSlide {
-    fn current(&self) -> f32 {
-        let progress = TAB_SLIDE
-            .progress(self.started.elapsed().as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
-        motion::lerp(self.from, self.to, progress)
-    }
-
-    fn retarget(&mut self, target: f32) {
-        if (target - self.to).abs() < 0.5 {
-            return;
-        }
-        self.from = self.current();
-        self.to = target;
-        self.epoch = self.epoch.wrapping_add(1);
-        self.started = std::time::Instant::now();
-    }
-}
-
-struct SidebarSessionReturn {
-    transfer: SidebarSessionTransfer,
-    epoch: u64,
-    started: std::time::Instant,
-}
-
-/// Live destination for a pinned-session drag. The real row remains clipped
-/// to the sidebar and slides between slots with its pinned siblings.
-struct PinnedSessionDragState {
-    chat_id: String,
-    visible_ids: std::sync::Arc<Vec<String>>,
-    from: usize,
-    over: usize,
-    prev_over: usize,
-    epoch: usize,
-    filter: Option<String>,
-    profile_key: String,
-    pointer_y: Option<f32>,
-    viewport_top: f32,
-    viewport_bottom: f32,
-    generation: u64,
-    autoscroll_active: bool,
-}
-
-type SidebarKeyedRow = (String, f32, AnyElement);
-
-struct SidebarSessionRows {
-    custom_count: usize,
-    regular_count: usize,
-    rows: Vec<SidebarKeyedRow>,
-    pinned_count: usize,
-    moving_row: Option<(AnyElement, f32)>,
 }
 
 /// Ghost chip following the pointer while a surface tab drags.
