@@ -133,6 +133,12 @@ fn scheduled_results_sit_under_the_plan_and_above_newer_artifacts() {
         ["Plan", "Results: GitHub", "Results: Slack", "Scratch", "Notes"]
     );
     assert_eq!(store.plan_of(SPACE, "w-api").unwrap().title, "Plan");
+    let shown = store.for_work_item(SPACE, "w-api");
+    assert_eq!(
+        model::row(shown[1], 0, &Default::default()).role.as_deref(),
+        Some("results")
+    );
+    assert_eq!(model::header(shown[1], None).role.as_deref(), Some("results"));
     // Results are not a plan: the plan pin still names only the plan.
     assert_eq!(store.count_for_work_item(SPACE, "w-api"), 5);
 }

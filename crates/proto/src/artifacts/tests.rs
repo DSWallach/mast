@@ -508,10 +508,12 @@ fn scheduled_results_rank_between_the_plan_and_other_artifacts() {
     let mut plan = view();
     plan.pinned_as_plan = true;
     let mut results = view();
+    results.pinned_as_plan = false;
     results.id = "b".repeat(32);
     results.role = Some(crate::ScheduledRunResults::role_for("task"));
     results.updated_at = 1;
     let mut newer = view();
+    newer.pinned_as_plan = false;
     newer.id = "c".repeat(32);
     newer.updated_at = 99;
     assert!(!plan.is_scheduled_results() && !newer.is_scheduled_results());

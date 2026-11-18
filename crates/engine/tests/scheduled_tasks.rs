@@ -2165,7 +2165,7 @@ async fn simultaneous_publishes_from_one_run_let_exactly_one_through() {
         draft.name = format!("Racer {round}");
         draft.output = ScheduledTaskOutput::Background;
         save_lifecycle_task(&core, &task, 0, draft).await;
-        let run = claim_run_without_results(&core, &task, "race").await;
+        let run = claim_run_without_results(&core, &task, &format!("race-{round}")).await;
         core.scheduled_tasks
             .tick(chrono::Utc::now().timestamp_millis())
             .await
