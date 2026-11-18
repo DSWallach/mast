@@ -518,6 +518,9 @@ fn scheduled_results_rank_between_the_plan_and_other_artifacts() {
     newer.updated_at = 99;
     assert!(!plan.is_scheduled_results() && !newer.is_scheduled_results());
     assert!(results.is_scheduled_results() && !results.pinned_as_plan);
+    let mut shouted = results.clone();
+    shouted.role = shouted.role.map(|role| format!(" {} ", role.to_uppercase()));
+    assert!(shouted.is_scheduled_results());
     let snapshot = ArtifactsSnapshot {
         artifacts: vec![newer.clone(), results.clone(), plan.clone()],
         ..Default::default()

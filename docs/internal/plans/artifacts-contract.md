@@ -313,12 +313,15 @@ title, so the engine resolves the existing artifact by item and role
 sharing an item differ by role, so each has its own artifact and revision
 history. Readers find a task's artifact by role, never by title.
 
+Roles compare trimmed and lowercased everywhere (`ScheduledRunResults::normalize_role`,
+the same normalization `artifact_id` uses), so ` Scheduled-Results:ABC ` is the same
+role as `scheduled-results:abc` in the guard, in `resolve` and in the rank below.
+
 **Publish guard (`guard_results_publish`).** It applies only to `artifact_publish`
-from a chat that is a Background scheduled run on an item. Other chats, Interactive
-runs and artifacts with other roles are untouched. The call is rejected with
+from a chat that is a Background scheduled run on an item. The call is rejected with
 `invalid` when:
 
-- the role has the `scheduled-results:` prefix but is not this task's role
+- the role is in the `scheduled-results:` namespace but is not this task's role
   ("this role belongs to another task's results");
 - the title or the role matches this task's results identity but the other half
   does not ("use both exactly");
@@ -329,14 +332,28 @@ runs and artifacts with other roles are untouched. The call is rejected with
 
 The check and the record run under one lock (`agent_publish_serial`), so two
 simultaneous publishes from one run cannot both pass: exactly one is accepted.
-A user, another task or an earlier run publishing the same artifact is allowed
-and does not count for the run (the scheduler checks `by.chatId`).
+
+**Who can write the artifact.**
+
+- The task's own Background run: once, with both title and role exactly as
+  contracted. This is the only writer the scheduler counts, by `by.chatId`
+  equal to the run's chat.
+- Another task's Background run: rejected for this role by the namespace rule
+  (it writes its own role instead).
+- Any chat that is not a Background scheduled run (an interactive chat on the
+  item, a user's agent), the UI's edit, register and promote actions, and the
+  external-edit watcher: not restricted by the guard. They can add revisions or
+  edit the file, and these never satisfy a run's check. The guard protects a
+  run's own publication; it does not make the artifact read-only.
 
 **Pin.** Results are not pinned as the plan, and plan pinning (one per item) is
 unchanged. They get a distinct, derived rank with no persisted field:
-`ArtifactView::pin_rank` is 0 for the pinned plan, 1 for a role with the results
-prefix and 2 otherwise. `ArtifactsSnapshot::for_work_item` and the UI's
-`details_order` (item details panel and chat work context) sort by rank first,
-then by `updatedAt` descending, then title, so results stay above a newer ordinary
-artifact and under the plan. Several tasks' results share rank 1 and order among
-themselves by recency.
+`ArtifactView::pin_rank` is 0 for the pinned plan, 1 for a role in the results
+namespace and 2 otherwise. The two sort surfaces differ in what follows the rank:
+
+- `ArtifactsSnapshot::for_work_item` sorts by rank only; within a rank it keeps the
+  snapshot's own order (`workItemId`, `title`, `id`). It does not order by recency.
+- The UI's `details_order` (item details panel and chat work context) sorts by rank,
+  then `updatedAt` descending, then title, so results stay above a newer ordinary
+  artifact and under the plan, and several tasks' results order among themselves by
+  recency.

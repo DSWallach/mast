@@ -380,7 +380,7 @@ pub(crate) fn resolve(input: &ResolveInput<'_>) -> Option<WorkContext> {
 }
 
 /// Live artifacts of `item_id` and its descendants: pinned plans first, then
-/// newest first.
+/// scheduled results, then newest first.
 fn item_artifacts(
     snapshot: &WorkOutlineSnapshot,
     artifacts: Option<&ArtifactsSnapshot>,

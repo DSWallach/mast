@@ -2821,8 +2821,8 @@ impl ArtifactsService {
         let role = args.role.as_deref().map(str::trim).unwrap_or_default();
         let titled = mast_proto::artifacts::normalize_title(&args.title)
             == mast_proto::artifacts::normalize_title(&expected.title);
-        let roled = role.eq_ignore_ascii_case(&expected.role);
-        if role.starts_with(mast_proto::RESULTS_ROLE_PREFIX) && !roled {
+        let roled = mast_proto::ScheduledRunResults::normalize_role(role) == expected.role;
+        if mast_proto::ScheduledRunResults::is_results_role(role) && !roled {
             return Err(ArtifactError::invalid(
                 "this role belongs to another task's results; use the role from your results contract",
             ));

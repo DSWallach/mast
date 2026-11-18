@@ -2101,6 +2101,10 @@ async fn a_background_run_may_publish_its_results_once_and_never_as_the_plan() {
     assert!(err(publish(&results.title, "plan", "k1", false)).contains("use both exactly"));
     assert!(err(publish("Anything", "scheduled-results:other", "k1", false)).contains("another task"));
     assert!(err(publish(&results.title, &results.role, "k1", true)).contains("not the item's plan"));
+    // Roles compare trimmed and lowercased, as artifact ids do.
+    assert!(err(publish("Anything", " Scheduled-Results:OTHER ", "k1", false)).contains("another task"));
+    let padded = format!("  {}  ", results.role.to_uppercase());
+    assert!(err(publish(&results.title, &padded, "k1", true)).contains("not the item's plan"));
 
     let ok = publish(&results.title, &results.role, "k1", false).unwrap();
     assert_eq!(ok["artifactId"], results.artifact_id);
@@ -2109,6 +2113,7 @@ async fn a_background_run_may_publish_its_results_once_and_never_as_the_plan() {
     publish(&results.title, &results.role, "k1", false).unwrap();
     std::fs::write(root.join("results.md"), "Run: again").unwrap();
     assert!(err(publish(&results.title, &results.role, "k2", false)).contains("publishes once"));
+    assert!(err(publish(&results.title, &padded, "k4", false)).contains("publishes once"));
     // Unrelated artifacts from the run are not restricted.
     publish("Scratch notes", "doc", "k3", false).unwrap();
     core.shutdown().await;

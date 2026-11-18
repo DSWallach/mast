@@ -375,11 +375,9 @@ impl ArtifactView {
     /// A scheduled task's results artifact, recognized by its reserved role
     /// (`ScheduledRunResults::role_for`). Not the plan and not a plan pin.
     pub fn is_scheduled_results(&self) -> bool {
-        self.role.as_deref().is_some_and(|role| {
-            role.trim()
-                .to_ascii_lowercase()
-                .starts_with(crate::scheduled_tasks::RESULTS_ROLE_PREFIX)
-        })
+        self.role
+            .as_deref()
+            .is_some_and(crate::scheduled_tasks::ScheduledRunResults::is_results_role)
     }
 
     /// Where the artifact sits in a work item's list: the pinned plan, then

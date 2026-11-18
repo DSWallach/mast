@@ -44,7 +44,7 @@ pub(crate) fn resolve(
             a.work_item_id.as_deref() == Some(work_item_id)
                 && a.role
                     .as_deref()
-                    .is_some_and(|r| r.eq_ignore_ascii_case(&role))
+                    .is_some_and(|r| ScheduledRunResults::normalize_role(r) == role)
         })
         .min_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)))
         .map(|a| ScheduledRunResults {
