@@ -1,6 +1,6 @@
 //! Pure lifecycle derivation from a ticket's cached facts.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LifecycleStage {
     NotStarted,
     Building,
@@ -8,6 +8,20 @@ pub(crate) enum LifecycleStage {
     PrReview,
     ReadyToMerge,
     Done,
+}
+
+impl LifecycleStage {
+    pub(crate) const ALL: [Self; 6] = [Self::NotStarted, Self::Building, Self::CodeReview,
+        Self::PrReview, Self::ReadyToMerge, Self::Done];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NotStarted => "Not started", Self::Building => "Building",
+            Self::CodeReview => "Code review", Self::PrReview => "PR review",
+            Self::ReadyToMerge => "Ready to merge", Self::Done => "Done",
+        }
+    }
+    pub(crate) fn index(self) -> usize { Self::ALL.iter().position(|stage| *stage == self).unwrap() }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

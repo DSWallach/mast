@@ -176,8 +176,8 @@ pub(crate) fn ticket_lifecycle(
     use crate::tracker_lifecycle::{ChatFacts, PullRequestFacts, derive_ticket_lifecycle};
     let chats: Vec<_> = workers.iter().filter(|worker| !worker.archived).map(|worker| ChatFacts {
         branch_review,
-        ready_request: worker.ready.is_some(),
-        needs_answer: worker.state == WorkerState::Waiting,
+        ready_request: worker.ready.as_ref().is_some_and(|action| action.text.trim().to_ascii_lowercase().starts_with("ready to merge")),
+        needs_answer: worker.state == WorkerState::Waiting || worker.ready.is_some(),
         idle_over_three_days: worker.state == WorkerState::Idle && worker.last_active
             .is_some_and(|at| now.signed_duration_since(at) > chrono::Duration::days(3)),
     }).collect();

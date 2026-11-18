@@ -13,17 +13,14 @@ use crate::team::{
     ITEM_TAB_WORKERS, SUGGEST_ARCHIVE_AT, TeamFacts, TeamInput, WorkerFacts, WorkerPr,
     team,
 };
+use crate::tracker_lifecycle::{LifecycleRow, LifecycleStage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 enum TrackerFilter {
     #[default]
     All,
-    Working,
     NeedsYou,
-    Ready,
-    OpenPrs,
-    MergedPrs,
-    Done,
+    Stage(LifecycleStage),
 }
 
 #[derive(Default)]
@@ -36,11 +33,13 @@ pub(super) struct TrackerState {
     other_chats: Vec<WorkerFacts>,
     additional_chats: std::collections::HashMap<String, Vec<WorkerFacts>>,
     expanded_chats: std::collections::HashSet<String>,
-    grouped_rows: std::collections::HashMap<(TrackerFilter, crate::team::TrackerGroup), Vec<usize>>,
+    grouped_rows: std::collections::HashMap<(TrackerFilter, LifecycleStage), Vec<usize>>,
     stale_rows: std::collections::HashMap<TrackerFilter, Vec<usize>>,
+    lifecycle_rows: std::collections::HashMap<String, LifecycleRow>,
     other_expanded: bool,
     stale_expanded: bool,
     counts: [usize; 6],
+    needs_you: usize,
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
     requests: std::collections::HashMap<String, String>,
     stalled: std::collections::HashMap<String, (String, bool)>,
@@ -55,26 +54,12 @@ pub(super) struct TrackerState {
     pub(super) rebuilds: usize,
 }
 
-fn tracker_matches(worker: &WorkerFacts, filter: TrackerFilter) -> bool {
-    use crate::team::{TrackerGroup, WorkerState};
+fn tracker_matches(row: &LifecycleRow, filter: TrackerFilter) -> bool {
     match filter {
         TrackerFilter::All => true,
-        TrackerFilter::Working => worker.state == WorkerState::Working,
-        TrackerFilter::NeedsYou => worker.tracker_group() == TrackerGroup::NeedsYou,
-        TrackerFilter::Ready => worker.tracker_group() == TrackerGroup::ReadyToMerge,
-        TrackerFilter::OpenPrs => worker.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("open")),
-        TrackerFilter::MergedPrs => worker.prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
-        TrackerFilter::Done => worker.tracker_group() == TrackerGroup::Done,
+        TrackerFilter::NeedsYou => row.needs_you,
+        TrackerFilter::Stage(stage) => row.stage == stage,
     }
-}
-
-fn tracker_counts(workers: &[&WorkerFacts], completed_without_chats: usize) -> [usize; 6] {
-    let count = |filter| workers.iter().filter(|worker| tracker_matches(worker, filter)).count();
-    let pr_count = |state: &str| workers.iter().flat_map(|worker| &worker.prs)
-        .filter(|pr| pr.state.eq_ignore_ascii_case(state))
-        .map(|pr| (pr.number, &pr.url)).collect::<std::collections::HashSet<_>>().len();
-    [count(TrackerFilter::Working), count(TrackerFilter::NeedsYou), count(TrackerFilter::Ready),
-        pr_count("open"), pr_count("merged"), count(TrackerFilter::Done) + completed_without_chats]
 }
 
 fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallback: &str) -> String {
@@ -101,7 +86,7 @@ fn tracker_select_rows(facts: &mut TeamFacts, snapshot: Option<&mast_proto::Work
         let mut selected = std::collections::HashMap::<String, usize>::new();
         let mut rows: Vec<WorkerFacts> = Vec::new();
         for worker in facts.workers.drain(..) {
-            let Some(item) = assignments.get(worker.chat_id.as_str()) else { rows.push(worker); continue; };
+            let Some(item) = assignments.get(worker.chat_id.as_str()) else { other_chats.push(worker); continue; };
             if Some(item.id.as_str()) == root || !item.child_ids.is_empty() { other_chats.push(worker); continue; }
             if let Some(&index) = selected.get(&item.id) {
                 for pr in &worker.prs { if !rows[index].prs.iter().any(|existing| existing.url == pr.url) { rows[index].prs.push(pr.clone()); } }
@@ -132,7 +117,7 @@ fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Opti
 }
 
 fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
-    let labels = ["Chat started", "Changes", "PR open", "Checks", "Review", "Merged"];
+    let labels = ["Not started", "Building", "Code review", "PR review", "Ready to merge", "Done"];
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
     for (index, (label, lit)) in labels.into_iter().zip(stages).enumerate() {
         let tip = SharedString::from(format!("{label}: {}", if lit { "observed" } else { "not observed" }));
@@ -157,19 +142,12 @@ mod tracker_tests {
     }
 
     #[test]
-    fn tracker_rollup_counts_unique_pull_requests() {
-        let mut first = worker("first", WorkerState::Working);
-        let mut second = worker("second", WorkerState::Waiting);
-        let pr = WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 1, url: "https://example.com/1".into(), checks: None,
-            review: None, draft: false, state: "OPEN".into() };
-        first.prs.push(pr.clone());
-        second.prs.push(pr);
-        second.prs.push(WorkerPr { branch: None, head_sha: None, additions: None, deletions: None, number: 2, url: "https://example.com/2".into(), checks: None,
-            review: None, draft: false, state: "MERGED".into() });
-        assert_eq!(tracker_counts(&[&first, &second], 3), [1, 1, 0, 1, 1, 3]);
-        assert!(tracker_matches(&first, TrackerFilter::OpenPrs));
-        assert!(!tracker_matches(&first, TrackerFilter::NeedsYou));
-        assert!(tracker_matches(&second, TrackerFilter::MergedPrs));
+    fn tracker_filters_by_lifecycle_and_needs_you() {
+        let worker = worker("first", WorkerState::Waiting);
+        let row = crate::team::ticket_lifecycle(&[&worker], Some(false), None, false, chrono::Utc::now());
+        assert!(tracker_matches(&row, TrackerFilter::NeedsYou));
+        assert!(tracker_matches(&row, TrackerFilter::Stage(LifecycleStage::Building)));
+        assert!(!tracker_matches(&row, TrackerFilter::Stage(LifecycleStage::Done)));
     }
 
     #[test]
@@ -179,15 +157,6 @@ mod tracker_tests {
         let prs = vec![pr(1, "CLOSED"), pr(2, "MERGED"), pr(3, "OPEN"), pr(4, "")];
         assert_eq!(tracker_primary_pr(&prs).unwrap().number, 3);
         assert_eq!(tracker_pr_reference(&prs[3]), "project#4");
-    }
-
-    #[test]
-    fn tracker_completed_worker_matches_done_without_ticket() {
-        let worker = worker("done", WorkerState::Done);
-        assert!(tracker_matches(&worker, TrackerFilter::Done));
-        let stages = worker.tracker_stages();
-        assert!(stages.chat_started && stages.changes && stages.pr_open && stages.checks && stages.review && stages.merged);
-        assert_eq!(tracker_counts(&[&worker], 2)[5], 3);
     }
 
     #[test]
@@ -459,16 +428,21 @@ impl Shell {
         };
         let all_workers = facts.clone();
         let (other_chats, additional_chats) = tracker_select_rows(&mut facts, snapshot.as_deref(), chat_id);
-        let stale_chats: std::collections::HashSet<String> = facts.live().filter(|worker| worker.tracker_group() == crate::team::TrackerGroup::Idle
-            && worker.last_active.is_some_and(|at| chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(3)))
-            .map(|worker| worker.chat_id.clone()).collect();
+        let now = chrono::Utc::now();
+        let lifecycle_rows: std::collections::HashMap<_, _> = facts.workers.iter().map(|worker| {
+            let mut workers = vec![worker];
+            workers.extend(additional_chats.get(&worker.chat_id).into_iter().flatten());
+            let completed = worker.work_item_title.as_ref().map(|_| worker.state == crate::team::WorkerState::Done && !worker.archived);
+            (worker.chat_id.clone(), crate::team::ticket_lifecycle(&workers, completed, None, false, now))
+        }).collect();
         let mut grouped_rows = std::collections::HashMap::<_, Vec<usize>>::new();
         let mut stale_rows = std::collections::HashMap::<_, Vec<usize>>::new();
         for (index, worker) in facts.workers.iter().enumerate().filter(|(_, worker)| !worker.archived) {
-            for filter in [TrackerFilter::All, TrackerFilter::Working, TrackerFilter::NeedsYou, TrackerFilter::Ready, TrackerFilter::OpenPrs, TrackerFilter::MergedPrs, TrackerFilter::Done] {
-                if tracker_matches(worker, filter) {
-                    if stale_chats.contains(&worker.chat_id) { stale_rows.entry(filter).or_default().push(index); }
-                    else { grouped_rows.entry((filter, worker.tracker_group())).or_default().push(index); }
+            let row = &lifecycle_rows[&worker.chat_id];
+            for filter in [TrackerFilter::All, TrackerFilter::NeedsYou].into_iter().chain(LifecycleStage::ALL.map(TrackerFilter::Stage)) {
+                if tracker_matches(row, filter) {
+                    if row.stale { stale_rows.entry(filter).or_default().push(index); }
+                    else { grouped_rows.entry((filter, row.stage)).or_default().push(index); }
                 }
             }
         }
@@ -517,9 +491,17 @@ impl Shell {
                 .map(|item| { let unassigned = without_chats.contains(item.id.as_str()); (item, unassigned) })
                 .collect::<Vec<_>>())
         }).unwrap_or_default();
-        let tickets_done = items.iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).count();
-        let not_started = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
-        let completed_items = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
+        let not_started: Vec<_> = items.iter().filter(|(item, unassigned)| *unassigned && item.status != crate::board::BoardStatus::Done).map(|(item, _)| item.clone()).collect();
+        let completed_items: Vec<_> = items.into_iter().filter(|(item, unassigned)| *unassigned && item.status == crate::board::BoardStatus::Done).map(|(item, _)| item).collect();
+        let mut counts = [0; 6];
+        let mut needs_you = 0;
+        for worker in facts.live() {
+            let row = &lifecycle_rows[&worker.chat_id];
+            counts[row.stage.index()] += 1;
+            needs_you += usize::from(row.needs_you);
+        }
+        counts[LifecycleStage::NotStarted.index()] += not_started.len();
+        counts[LifecycleStage::Done.index()] += completed_items.len();
         let ids: Vec<_> = facts.workers.iter().map(|worker| worker.chat_id.clone()).collect();
         let review_targets: std::collections::HashMap<_, _> = facts.live().filter_map(|worker| {
             if let Some(pr) = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open")
@@ -555,9 +537,11 @@ impl Shell {
         self.tracker.completed_items = completed_items;
         self.tracker.other_chats = other_chats;
         self.tracker.additional_chats = additional_chats;
+        self.tracker.lifecycle_rows = lifecycle_rows;
         self.tracker.grouped_rows = grouped_rows;
         self.tracker.stale_rows = stale_rows;
-        self.tracker.counts = tracker_counts(&facts.live().collect::<Vec<_>>(), tickets_done);
+        self.tracker.counts = counts;
+        self.tracker.needs_you = needs_you;
         self.tracker.metadata = metadata;
         self.tracker.requests = requests;
         self.tracker.stalled = stalled;
@@ -687,13 +671,19 @@ impl Shell {
         } else {
             let reports = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::latest_reports).unwrap_or_default();
             let unseen = self.wakes.statuses.get(&chat_id).map(crate::orchestrator_wakes::unseen_by_worker).unwrap_or_default();
-            let [working, needs_you, ready, open_prs, merged_prs, done] = self.tracker.counts;
-            let counts = [(TrackerFilter::Working, "working", working), (TrackerFilter::NeedsYou, "need you", needs_you),
-                (TrackerFilter::Ready, "ready to merge", ready), (TrackerFilter::OpenPrs, "PRs open", open_prs),
-                (TrackerFilter::MergedPrs, "PRs merged", merged_prs), (TrackerFilter::Done, "tickets done", done)];
             self.ensure_wake_status(&chat_id, cx);
+            let colors = [theme.border_strong, theme.accent, theme.accent, theme.warning, theme.success, theme.text_faint];
+            let mut bar = div().debug_selector(|| "tracker-stage-bar".into()).flex().w_full().h(px(5.0)).gap(px(2.0));
+            for (count, color) in self.tracker.counts.into_iter().zip(colors) {
+                if count > 0 {
+                    bar = bar.child(div().h_full().flex_grow(count as f32).flex_basis(px(0.0)).rounded_full().bg(color));
+                }
+            }
+            col = col.child(bar);
             let mut rollup = div().debug_selector(|| "team-rollup".into()).flex().flex_wrap().items_center().gap(px(Theme::SPACE_SM));
-            for (filter, label, count) in counts {
+            let filters = LifecycleStage::ALL.into_iter().map(|stage| (TrackerFilter::Stage(stage), stage.label(), self.tracker.counts[stage.index()]))
+                .chain(std::iter::once((TrackerFilter::NeedsYou, "need you", self.tracker.needs_you)));
+            for (filter, label, count) in filters {
                 let selected = self.tracker.filter == filter;
                 rollup = rollup.child(Self::chip(&theme, format!("tracker-filter-{filter:?}"), format!("{count} {label}"), if selected { ChipTone::Link } else { ChipTone::Dim })
                     .cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
@@ -715,13 +705,12 @@ impl Shell {
             rollup = rollup.child(settings);
             col = col.child(rollup);
             col = col.child(self.render_team_archive_block(&chat_id, &all_workers, &theme, cx));
-            use crate::team::TrackerGroup;
-            for (group, label) in [(TrackerGroup::NeedsYou, "Needs you"), (TrackerGroup::ReadyToMerge, "Ready to merge"),
-                (TrackerGroup::Errored, "Errored"), (TrackerGroup::Working, "Working"), (TrackerGroup::Idle, "Idle"),
-                (TrackerGroup::NotStarted, "Not started"), (TrackerGroup::Done, "Done")] {
+            for group in [LifecycleStage::ReadyToMerge, LifecycleStage::PrReview, LifecycleStage::CodeReview,
+                LifecycleStage::Building, LifecycleStage::NotStarted, LifecycleStage::Done] {
+                let label = group.label();
                 let matching = self.tracker.grouped_rows.get(&(self.tracker.filter, group)).map(Vec::as_slice).unwrap_or_default();
-                let show_not_started = group == TrackerGroup::NotStarted && self.tracker.filter == TrackerFilter::All && !self.tracker.not_started.is_empty();
-                let show_completed = group == TrackerGroup::Done && matches!(self.tracker.filter, TrackerFilter::All | TrackerFilter::Done)
+                let show_not_started = group == LifecycleStage::NotStarted && matches!(self.tracker.filter, TrackerFilter::All | TrackerFilter::Stage(LifecycleStage::NotStarted)) && !self.tracker.not_started.is_empty();
+                let show_completed = group == LifecycleStage::Done && matches!(self.tracker.filter, TrackerFilter::All | TrackerFilter::Stage(LifecycleStage::Done))
                     && !self.tracker.completed_items.is_empty();
                 if matching.is_empty() && !show_not_started && !show_completed { continue; }
                 let group_count = matching.len() + if show_not_started { self.tracker.not_started.len() } else { 0 }
@@ -735,7 +724,7 @@ impl Shell {
                                 .child(div().size(px(7.0)).rounded_full().bg(theme.border))
                                 .children(item.ticket.clone().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
                                 .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
-                            .child(tracker_stage_track(&item.id, [false; 6], &theme)));
+                            .child(tracker_stage_track(&item.id, [true, false, false, false, false, false], &theme)));
                     }
                 }
                 if show_completed {
@@ -794,7 +783,7 @@ impl Shell {
         header = header.child(crate::components::shell_parts::worker_title(theme, title));
         if let Some(chats) = self.tracker.additional_chats.get(&id) {
             let toggle_id = id.clone();
-            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer().child(format!("+{} chats", chats.len()))
+            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer().child(format!("{} chats", chats.len() + 1))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); if !this.tracker.expanded_chats.remove(&toggle_id) { this.tracker.expanded_chats.insert(toggle_id.clone()); } cx.notify(); })));
         }
         if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
@@ -802,8 +791,11 @@ impl Shell {
             header = header.child(crate::components::shell_parts::worker_unseen_badge(theme, format!("team-worker-unseen-{id}"))
                 .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
         }
-        let stages = worker.tracker_stages();
-        let track = tracker_stage_track(&id, [stages.chat_started, stages.changes, stages.pr_open, stages.checks, stages.review, stages.merged], theme);
+        if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you) {
+            header = header.child(Self::chip(theme, format!("tracker-needs-you-{id}"), "Needs you".into(), ChipTone::Warn));
+        }
+        let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
+        let track = tracker_stage_track(&id, std::array::from_fn(|index| index <= stage.index()), theme);
         let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
             .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
         if let Some(todo) = self.tracker.todos.get(&id) {

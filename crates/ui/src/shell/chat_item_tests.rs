@@ -1083,8 +1083,15 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
     shell.update(vcx, |shell, cx| {
         let now = chrono::Utc::now();
         shell.state.update(cx, |state, _| {
+            let mut snapshot = (**state.work_outline("s1").snapshot().unwrap()).clone();
             for i in 0..n {
                 let id = format!("w-{i}");
+                let item_id = format!("fixture-item-{i}");
+                snapshot.items.iter_mut().find(|item| item.id == API).unwrap().child_ids.push(item_id.clone());
+                snapshot.items.push(serde_json::from_value(serde_json::json!({
+                    "id": item_id, "spaceId": "s1", "title": format!("Worker {i}"),
+                    "parentWorkItemId": API, "chatIds": [id.clone()]
+                })).unwrap());
                 let mut worker = chat(&id);
                 worker.parent_chat_id = Some(CHAT_API.into());
                 worker.branch = Some(format!("feature/w-{i}"));
@@ -1104,6 +1111,8 @@ fn add_workers(shell: &Entity<Shell>, vcx: &mut VisualTestContext, n: usize) {
                     });
                 }
             }
+            snapshot.revision += 1;
+            state.set_work_outline_for_test(snapshot);
             state.board_status_revision = state.board_status_revision.wrapping_add(1);
         });
         for i in 0..n {
@@ -1154,14 +1163,14 @@ fn tracker_filters_workers_by_rollup(cx: &mut TestAppContext) {
     draw(vcx);
     assert!(has(vcx, "team-worker-w-0"));
     assert!(has(vcx, "team-worker-w-1"));
-    let position = vcx.debug_bounds("tracker-filter-Working").unwrap().center();
+    let position = vcx.debug_bounds("tracker-filter-NeedsYou").unwrap().center();
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    assert!(!has(vcx, "team-worker-w-0"));
+    assert!(has(vcx, "team-worker-w-1"));
     vcx.simulate_click(position, gpui::Modifiers::default());
     draw(vcx);
     assert!(has(vcx, "team-worker-w-0"));
-    assert!(!has(vcx, "team-worker-w-1"));
-    vcx.simulate_click(position, gpui::Modifiers::default());
-    draw(vcx);
-    assert!(has(vcx, "team-worker-w-1"));
 }
 
 #[gpui::test]
