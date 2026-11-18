@@ -971,6 +971,26 @@ impl WorkspaceHost {
         self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
     }
 
+    /// Pin an automatically created checkout only if the item still has no
+    /// configuration. The check and write share the registry lock.
+    pub(crate) fn configure_worker_execution_if_absent(
+        &self,
+        params: &mast_proto::ConfigureExecutionParams,
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<bool, mast_proto::WorkOutlineError> {
+        self.mutate(|doc| {
+            if doc.row_state(mast_doc::registry::work_outline::KIND_EXECUTION_CONFIGURATIONS, &params.scope.row_id()) == mast_doc::RowState::Live {
+                return Ok(false);
+            }
+            doc.apply_work_outline_mutation(
+                &mast_proto::WorkOutlineMutation::ConfigureExecution(params.clone()),
+                actor,
+                Utc::now().timestamp_millis(),
+            )?;
+            Ok(true)
+        })
+    }
+
     /// Apply a prepared pack under one registry lock after validating it on a
     /// private copy. If a live write unexpectedly fails, compensate in reverse
     /// order while still holding the lock and report any compensation failures.
