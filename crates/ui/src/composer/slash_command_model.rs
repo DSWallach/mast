@@ -75,7 +75,7 @@ pub(super) fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
 }
 
 /// Height of the slash popup's key legend (22px caps + breathing room).
-const SLASH_FOOTER_HEIGHT: f32 = 30.0;
+pub(super) const SLASH_FOOTER_HEIGHT: f32 = 30.0;
 
 /// The attach chord as the legend spells it (the `mod-enter` binding).
 pub(super) fn slash_attach_key_label() -> &'static str {
