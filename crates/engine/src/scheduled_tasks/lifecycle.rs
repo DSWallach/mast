@@ -1,23 +1,8 @@
 use super::{ScheduledTasks, fail, store::Followup};
-use crate::EngineError;
-use mast_doc::{SessionCommandPayload, SessionCommandStatus, SessionDoc};
+use crate::{DocHost, EngineError};
 use mast_proto::*;
 
 const FOLLOWUP_RETRY_MS: i64 = 60_000;
-
-fn has_queued_turn(doc: &SessionDoc) -> Result<bool, EngineError> {
-    Ok(!doc.read_queue()?.is_empty()
-        || doc.read_commands()?.iter().any(|command| {
-            command.status == SessionCommandStatus::Pending
-                && matches!(
-                    command.payload,
-                    SessionCommandPayload::Run { .. }
-                        | SessionCommandPayload::RunWithInstructions { .. }
-                        | SessionCommandPayload::Steer { .. }
-                        | SessionCommandPayload::RespondInput { .. }
-                )
-        }))
-}
 
 impl ScheduledTasks {
     pub(super) fn record_run(
@@ -105,7 +90,7 @@ impl ScheduledTasks {
                         return Ok(false);
                     }
                     match &doc {
-                        Some(doc) => Ok(!has_queued_turn(doc)?),
+                        Some(doc) => Ok(!DocHost::session_doc_has_queued_turn(doc)?),
                         None => Ok(false),
                     }
                 })

@@ -476,6 +476,28 @@ impl RegistryDoc {
         requests
     }
 
+    /// Chats referenced by open Required Actions, including chat links in
+    /// system requests and origins that moved to another Space.
+    pub fn open_user_action_chats(&self) -> std::collections::HashSet<String> {
+        self.open_user_action_chat_ids().collect()
+    }
+
+    fn open_user_action_chat_ids(&self) -> impl Iterator<Item = String> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .into_iter()
+            .filter_map(|row| decode_request(&row).ok())
+            .map(|request| request.view)
+            .filter(UserActionRequestView::is_open)
+            .flat_map(|request| {
+                let origin = (!request.chat_id.is_empty()).then_some(request.chat_id);
+                let links = request.links.into_iter().filter_map(|link| match link.target {
+                    mast_proto::RequestLinkTarget::Chat { id } => Some(id),
+                    _ => None,
+                });
+                origin.into_iter().chain(links)
+            })
+    }
+
     /// One live request, with its dedupe flag and origin availability.
     pub fn user_action_request(&self, id: &str) -> Option<UserActionRequestView> {
         let row = self.overlay_row(KIND_USER_ACTION_REQUESTS, id)?;
@@ -503,17 +525,7 @@ impl RegistryDoc {
 
     /// Includes system requests that point to the chat through a link.
     pub fn has_open_action_for_chat(&self, chat_id: &str) -> bool {
-        self.overlay_rows(KIND_USER_ACTION_REQUESTS).iter().any(|row| {
-            let fields = &row.fields;
-            let mentions_chat = fields.get("chatId").and_then(Value::as_str) == Some(chat_id)
-                || fields.get("links").and_then(Value::as_array).is_some_and(|links| {
-                    links.iter().any(|link| {
-                        link.pointer("/target/type").and_then(Value::as_str) == Some("chat")
-                            && link.pointer("/target/id").and_then(Value::as_str) == Some(chat_id)
-                    })
-                });
-            mentions_chat && decode_request(row).is_ok_and(|r| r.view.is_open())
-        })
+        self.open_user_action_chat_ids().any(|id| id == chat_id)
     }
 
     /// One live proposal with its effective status.

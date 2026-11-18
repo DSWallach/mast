@@ -97,6 +97,24 @@ Deleted tasks and source tasks never imported into Mast appear under **Retired
 tasks** in Scheduled tasks. Their runs stay readable in history and are hidden
 from the sidebar, Overview, and Work Outline.
 
+## Clean up old runs
+
+On **Scheduled tasks**, select the run device and choose **Clean up old runs**.
+The preview shows how many chats will be archived for each task. Choose
+**Archive runs** to confirm. If eligibility changes while you review the
+preview, Mast shows the updated counts for you to confirm again.
+
+Cleanup archives superseded runs and Desktop runs from schedules that have
+moved to Mast or been retired. Runs with an open Required Action, running or
+queued work, or pending input stay available, as do pinned chats and personal
+assistant runs. Archived runs remain in **Run history** and can be restored
+from the archive.
+
+The background import sweep archives newly discovered Desktop runs from
+handed-off or retired schedules as it imports them. When Mast cannot verify
+retirement from the source registries, it leaves that run's import visible.
+Hosts that predate this feature do not offer the cleanup action.
+
 ## Import Claude schedules
 
 On macOS, **Import from Claude…** previews the schedule registries under Claude's

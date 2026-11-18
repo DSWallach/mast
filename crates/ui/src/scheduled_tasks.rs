@@ -29,6 +29,7 @@ pub struct TaskEditor {
 pub struct ScheduledTasksPage {
     state: Entity<AppState>,
     snapshot: ScheduledTasksSnapshot,
+    cleanup: Option<ScheduledRunCleanup>,
     target: Option<String>,
     connection: Option<crate::state::EngineHandle>,
     models: Vec<Model>,
@@ -70,6 +71,7 @@ impl ScheduledTasksPage {
                 this.catalog_error = None;
                 this.busy = false;
                 this.snapshot = Default::default();
+                this.cleanup = None;
                 this.editor = None;
                 this.requested_task = None;
                 this.models.clear();
@@ -84,6 +86,7 @@ impl ScheduledTasksPage {
         let mut page = Self {
             state,
             snapshot: Default::default(),
+            cleanup: None,
             target,
             connection,
             models: vec![],
@@ -141,6 +144,7 @@ impl ScheduledTasksPage {
                 self.harnesses.clear();
             }
         }
+        self.cleanup = None;
         self.requested_task = Some(id);
         self.editor = None;
         self.open_requested_task(cx);
@@ -148,6 +152,7 @@ impl ScheduledTasksPage {
         cx.notify();
     }
     pub fn show_tasks(&mut self, cx: &mut Context<Self>) {
+        self.cleanup = None;
         self.editor = None;
         self.requested_task = None;
         self.choices = None;
@@ -171,6 +176,9 @@ impl ScheduledTasksPage {
     }
     pub(crate) fn set_active(&mut self, active: bool) {
         self.active = active;
+        if !active {
+            self.cleanup = None;
+        }
     }
     fn load(&mut self, cx: &mut Context<Self>) {
         self.call(ScheduledTasksRequest::List, cx);
@@ -229,6 +237,14 @@ impl ScheduledTasksPage {
         };
         let is_preview = matches!(request, ScheduledTasksRequest::Preview { .. });
         let is_import_preview = matches!(request, ScheduledTasksRequest::ImportPreview { .. });
+        let is_cleanup = matches!(request, ScheduledTasksRequest::Cleanup { .. });
+        let is_cleanup_apply = matches!(
+            request,
+            ScheduledTasksRequest::Cleanup { mode: ScheduledRunCleanupMode::Apply { .. } }
+        );
+        if is_cleanup {
+            self.message = None;
+        }
         let mut params = serde_json::to_value(request).unwrap();
         if saved_id.is_some() && let Some(draft) = params["draft"].as_object_mut() {
             // Send explicit defaults to hosts that understand them. Omission
@@ -266,7 +282,11 @@ impl ScheduledTasksPage {
                 p.busy = false;
                 match result {
                     Ok(snapshot) => {
-                        if is_preview {
+                        if is_cleanup {
+                            if let Some(cleanup) = snapshot.cleanup {
+                                p.show_cleanup_result(cleanup, is_cleanup_apply);
+                            }
+                        } else if is_preview {
                             p.snapshot.preview = snapshot.preview;
                         } else if is_import_preview {
                             p.snapshot.candidates = snapshot.candidates;
@@ -297,6 +317,19 @@ impl ScheduledTasksPage {
         }));
         cx.notify();
     }
+    fn show_cleanup_result(&mut self, cleanup: ScheduledRunCleanup, attempted_apply: bool) {
+        if cleanup.applied {
+            self.cleanup = None;
+            let count = cleanup.chat_ids().count();
+            self.message = Some(format!("Archived {count} {}.", run_label(count)));
+        } else if self.active && self.editor.is_none() && self.requested_task.is_none() {
+            self.cleanup = Some(cleanup);
+            if attempted_apply {
+                self.message = Some("Eligible runs changed. Review the updated preview.".into());
+            }
+        }
+    }
+
     fn finish_task_load(&mut self, saved_id: Option<&str>, cx: &mut Context<Self>) {
         if let Some(id) = saved_id {
             if self.editor.as_ref().is_some_and(|e| e.id == id) {
@@ -687,6 +720,59 @@ impl ScheduledTasksPage {
         self.choices = None;
         cx.notify();
     }
+    fn render_cleanup(&self, cleanup: &ScheduledRunCleanup, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let count = cleanup.chat_ids().count();
+        let mut panel = crate::components::scheduled_task_parts::cleanup_panel(theme)
+            .id("scheduled-run-cleanup-preview")
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(
+                if count == 0 { "No old runs to archive".to_owned() }
+                else { format!("Archive {count} {}?", run_label(count)) }
+            ));
+        if count > 0 {
+            panel = panel
+                .child(div().text_color(theme.text_muted).child("You can restore archived runs from Archived sessions."))
+                .child(
+                    div()
+                        .id("scheduled-run-cleanup-counts")
+                        .max_h(px(220.0))
+                        .overflow_y_scroll()
+                        .children(cleanup.tasks.iter().map(|task| {
+                            div().child(format!("{} · {} {}", task.task_name, task.count, run_label(task.count)))
+                        })),
+                );
+        }
+        let expected_chat_ids = cleanup.chat_ids().cloned().collect::<Vec<_>>();
+        panel.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.0))
+                .child(
+                    popover::btn_ghost(theme, if count == 0 { "Done" } else { "Cancel" }, "tasks-cleanup-cancel")
+                        .id("tasks-cleanup-cancel")
+                        .debug_selector(|| "tasks-cleanup-cancel".into())
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            if !p.busy {
+                                p.cleanup = None;
+                                cx.notify();
+                            }
+                        })),
+                )
+                .when(count > 0, |el| {
+                    el.child(
+                        popover::btn_primary(theme, "Archive runs")
+                            .id("tasks-cleanup-apply")
+                            .debug_selector(|| "tasks-cleanup-apply".into())
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.call(ScheduledTasksRequest::Cleanup {
+                                    mode: ScheduledRunCleanupMode::Apply { expected_chat_ids: expected_chat_ids.clone() },
+                                }, cx);
+                            })),
+                    )
+                }),
+        )
+    }
+
     fn render_task_history(
         &self,
         task_id: &str,
@@ -877,6 +963,10 @@ fn field(theme: &Theme, label: &str, input: Entity<ComposerInput>) -> AnyElement
         .child(popover::dialog_field(theme, input.into_any_element()))
         .into_any_element()
 }
+fn run_label(count: usize) -> &'static str {
+    if count == 1 { "run" } else { "runs" }
+}
+
 impl Render for ScheduledTasksPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -955,6 +1045,7 @@ impl Render for ScheduledTasksPage {
                             p.editor = None;
                             p.requested_task = None;
                             p.snapshot = Default::default();
+                            p.cleanup = None;
                             p.models.clear();
                             p.catalogs.clear();
                             p.harnesses.clear();
@@ -1462,6 +1553,20 @@ impl Render for ScheduledTasksPage {
                         )
                     })),
             );
+            if self.target.as_deref().is_some_and(|device| {
+                self.state.read(cx).device_supports(device, capabilities::SCHEDULED_RUN_CLEANUP_V1)
+            }) {
+                content = content.child(
+                    popover::btn_ghost(&theme, "Clean up old runs", "tasks-cleanup-preview")
+                        .id("tasks-cleanup-preview")
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.call(ScheduledTasksRequest::Cleanup { mode: ScheduledRunCleanupMode::Preview }, cx);
+                        })),
+                );
+            }
+            if let Some(cleanup) = self.cleanup.clone() {
+                content = content.child(self.render_cleanup(&cleanup, &theme, cx));
+            }
             if self.snapshot.tasks.is_empty() {
                 content = content.child(
                     "No scheduled tasks yet. Create a task or preview your Claude schedules.",
@@ -2125,6 +2230,108 @@ mod tests {
             assert!(e.prompt.read(cx).measured_content_height() > 100.0);
             assert!(e.cwd.read(cx).measured_width().unwrap() < 640.0);
         });
+    }
+
+    #[gpui::test]
+    fn cleanup_confirmation_refreshes_cancels_and_closes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| ScheduledTasksPage::new(state, cx));
+        let preview = |id: &str| ScheduledRunCleanup {
+            tasks: vec![ScheduledRunCleanupTask {
+                task_id: "task".into(),
+                task_name: "Briefing".into(),
+                space_id: None,
+                count: 1,
+                chat_ids: vec![id.into()],
+            }],
+            applied: false,
+        };
+        page.update(cx, |p, cx| {
+            p.error = None;
+            p.show_cleanup_result(preview("original"), false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_some());
+
+        page.update(cx, |p, cx| {
+            p.show_cleanup_result(preview("replacement"), true);
+            assert_eq!(p.cleanup.as_ref().unwrap().chat_ids().next().unwrap(), "replacement");
+            assert!(p.message.as_deref().unwrap().contains("Eligible runs changed"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let cancel = cx.debug_bounds("tasks-cleanup-cancel").unwrap().center();
+        cx.simulate_click(cancel, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_none());
+
+        page.update(cx, |p, cx| {
+            p.show_cleanup_result(preview("replacement"), false);
+            p.set_active(false);
+            p.show_cleanup_result(preview("late"), false);
+            assert!(p.cleanup.is_none());
+            p.set_active(true);
+            p.show_cleanup_result(ScheduledRunCleanup { applied: true, ..preview("replacement") }, true);
+            assert!(p.cleanup.is_none());
+            assert_eq!(p.message.as_deref(), Some("Archived 1 run."));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_none());
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_run_cleanup_snapshot() -> anyhow::Result<()> {
+        struct Fixture(Entity<ScheduledTasksPage>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+            }
+        }
+
+        let path = crate::snapshot::render_to_png(
+            "scheduled-run-cleanup",
+            gpui::size(px(850.0), px(700.0)),
+            crate::ui_style::UiStyleId::Default,
+            crate::theme::Appearance::Light,
+            |_, cx| {
+                let _ = crate::typography::register_fonts(cx);
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.devices.push(serde_json::from_value(serde_json::json!({
+                        "id":"host", "name":"This Mac", "platform":"macos",
+                        "capabilities":[capabilities::SCHEDULED_RUN_CLEANUP_V1],
+                    })).unwrap());
+                    state
+                });
+                let page = cx.new(|cx| {
+                    let mut page = ScheduledTasksPage::new(state, cx);
+                    page.error = None;
+                    page.target = Some("host".into());
+                    page.cleanup = Some(ScheduledRunCleanup {
+                        applied: false,
+                        tasks: [
+                            ("briefing", "Daily briefing", vec!["run-a", "run-b", "run-c"]),
+                            ("nightly", "Nightly checks", vec!["run-d"]),
+                        ].into_iter().map(|(id, name, runs)| ScheduledRunCleanupTask {
+                            task_id: id.into(),
+                            task_name: name.into(),
+                            space_id: None,
+                            count: runs.len(),
+                            chat_ids: runs.into_iter().map(str::to_owned).collect(),
+                        }).collect(),
+                    });
+                    page
+                });
+                cx.new(|_| Fixture(page))
+            },
+        )?;
+        println!("{}", path.display());
+        Ok(())
     }
 
     #[cfg(all(feature = "snapshot", target_os = "macos"))]
