@@ -286,6 +286,8 @@ impl ScheduledTasks {
                 draft.enabled = false;
                 draft.config.auto_approve = false;
                 draft.config.approval_rules = true;
+                // A client that predates the setting omits it; imports start off.
+                draft.write_to_notion.get_or_insert(false);
                 self.validate(&draft)?;
                 let id =
                     import::task_id(self.0.store.scope(), &response.device_id, &candidate.source);

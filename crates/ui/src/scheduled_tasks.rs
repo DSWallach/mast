@@ -1920,6 +1920,97 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_notion_toggle_round_trips_through_save_and_reopen(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            s.devices.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "current", "name": "current", "platform": "macos",
+                    "capabilities": [
+                        capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                        capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                    ],
+                }))
+                .unwrap(),
+            );
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let toggle = |cx: &mut gpui::VisualTestContext| {
+            let at = cx.debug_bounds("task-notion-writes").expect("the toggle is offered").center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // What Save sends, and a reopen of the task as the host would store it.
+        let saved = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| {
+                let draft = p.editor_draft(cx).unwrap();
+                let wire = serde_json::to_value(&draft).unwrap().get("writeToNotion").cloned();
+                let task = ScheduledTask {
+                    id: "task".into(),
+                    revision: 1,
+                    device_id: "current".into(),
+                    draft: draft.clone(),
+                    created_at: 0,
+                    updated_at: 0,
+                    next_due: None,
+                    deleted: false,
+                    import_source: None,
+                    source_handoff_at: None,
+                };
+                p.edit(Some(task), cx);
+                p.error = None;
+                (draft.write_to_notion, wire)
+            })
+        };
+        let draft = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+        assert_eq!(draft(cx), Some(false));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(true), Some(serde_json::json!(true))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(true));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(false), Some(serde_json::json!(false))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(false));
+
+        // A task saved before the setting shows on, and its first toggle turns it off.
+        page.update(cx, |p, cx| {
+            let mut legacy = p.editor_draft(cx).unwrap();
+            legacy.write_to_notion = None;
+            let task = ScheduledTask {
+                id: "legacy".into(),
+                revision: 1,
+                device_id: "current".into(),
+                draft: legacy,
+                created_at: 0,
+                updated_at: 0,
+                next_due: None,
+                deleted: false,
+                import_source: None,
+                source_handoff_at: None,
+            };
+            p.edit(Some(task), cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert_eq!(draft(cx), None);
+        toggle(cx);
+        assert_eq!(draft(cx), Some(false));
+    }
+
+    #[gpui::test]
     fn task_list_opens_settings_with_only_that_tasks_history_including_background_runs(
         cx: &mut gpui::TestAppContext,
     ) {

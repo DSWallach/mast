@@ -808,7 +808,7 @@ mod sandbox_support_tests {
             req.scheduled_notion_writes = writes;
             let mut cmd = process::Command::new("true");
             export_scheduled_task(&mut cmd, ScheduledEnv::of(&req));
-            cmd.as_std()
+            cmd.as_std_mut()
                 .get_envs()
                 .filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned())))
                 .collect::<Vec<_>>()

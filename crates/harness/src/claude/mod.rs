@@ -1352,6 +1352,33 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn scheduled_runs_reach_the_claude_process_environment() {
+        let harness = ClaudeHarness::default();
+        let envs = |scheduled: Option<&str>, writes: Option<bool>| {
+            let mut request = plain_request();
+            request.scheduled_task = scheduled.map(Into::into);
+            request.scheduled_notion_writes = writes;
+            let mut cmd = harness.build_command(&PathBuf::from("/bin/claude"), &request, vec![]);
+            cmd.as_std_mut()
+                .get_envs()
+                .filter(|(k, _)| k.to_string_lossy().starts_with("MAST_SCHEDULED_"))
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let task = ("MAST_SCHEDULED_TASK".to_owned(), "Daily".to_owned());
+        let flag = |v: &str| ("MAST_SCHEDULED_WRITE_TO_NOTION".to_owned(), v.to_owned());
+        assert_eq!(envs(Some("Daily"), Some(false)), [task.clone(), flag("0")]);
+        assert_eq!(envs(Some("Daily"), Some(true)), [task.clone(), flag("1")]);
+        assert_eq!(envs(Some("Daily"), None), [task]);
+        assert!(envs(None, Some(false)).is_empty());
+    }
+
     fn plain_request() -> RunRequest {
         serde_json::from_value(json!({
             "prompt": "p", "model": null, "reasoning": null, "cwd": "",

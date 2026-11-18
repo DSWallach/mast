@@ -185,6 +185,9 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     assert_eq!(preview.candidates[0].draft.grace_minutes, 360);
     assert!(!preview.candidates[0].draft.enabled);
     assert!(!preview.candidates[0].draft.config.auto_approve);
+    assert_eq!(preview.candidates[0].draft.write_to_notion, Some(false));
+    // A client that predates the setting submits the candidate without it.
+    preview.candidates[0].draft.write_to_notion = None;
     let import = ScheduledTasksRequest::Import {
         candidate: preview.candidates[0].clone(),
         operation_id: "import-one".into(),
@@ -198,6 +201,7 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
         .unwrap();
     assert_eq!(result.tasks.len(), 1);
     assert!(!result.tasks[0].draft.enabled);
+    assert_eq!(result.tasks[0].draft.write_to_notion, Some(false));
     assert!(result.runs.is_empty());
     let original_task = result.tasks[0].clone();
     core.scheduled_tasks
@@ -1916,6 +1920,10 @@ async fn write_to_notion_setting_reaches_the_run_prompt_and_chat_and_survives_ol
         let chat_id = run.chat_id.as_deref().unwrap();
         let chat = core.workspace.chat(chat_id).unwrap().unwrap();
         assert_eq!(chat.scheduled_task_info.unwrap().write_to_notion, setting);
+        // The dispatched request carries what the harness exports as env.
+        let dispatched = core.sessions.last_request(chat_id).unwrap();
+        assert_eq!(dispatched.scheduled_task.as_deref(), Some("Scheduled integration"));
+        assert_eq!(dispatched.scheduled_notion_writes, setting);
         let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
         let mast_doc::SessionCommandPayload::Run { request, .. } = &commands[0].payload else {
             panic!("expected a plain run for {id}");
