@@ -1219,7 +1219,7 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
-## In flight (snapshot 2026-11-18 11:00; coordinator 544369c6)
+## In flight (snapshot 2026-11-18 11:00; coordinator 544369c6 handing off)
 
 - **Installed: release 111** (2c02e2c3c), full perf gate (soak vs 110: CPU 4.7 vs 4.7 %, footprint 458 vs 526 MB).
   tracker-polish from Mikey's real-data audit: stage pips success/current/muted (Not started shows none); merged
