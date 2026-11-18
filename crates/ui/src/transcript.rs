@@ -4225,6 +4225,8 @@ impl Render for Transcript {
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]
+mod render_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(feature = "appshots-fixture")]
