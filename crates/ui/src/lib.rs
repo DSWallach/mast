@@ -89,6 +89,8 @@ pub mod settings;
 pub mod shell;
 mod board;
 mod team;
+mod tracker_lifecycle;
+mod tracker_tickets;
 #[cfg(test)]
 #[global_allocator]
 static COUNTING_ALLOC: perf::CountingAlloc = perf::CountingAlloc;

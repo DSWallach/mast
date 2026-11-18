@@ -1344,6 +1344,34 @@ async fn read_subtree_lists_descendants_chats_and_requests_within_the_callers_su
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn health_is_read_only_and_restricted_to_the_callers_subtree() {
+    let rig = rig().await;
+    let root = create_item(&rig, "health-root", "Root", None).await;
+    let child = create_item(&rig, "health-child", "Child", Some(&root)).await;
+    let sibling = create_item(&rig, "health-sibling", "Sibling", Some(&root)).await;
+    let elsewhere = create_item(&rig, "health-elsewhere", "Elsewhere", None).await;
+    update_item(&rig, "health-project", &root, json!({ "isProject": true })).await.unwrap();
+    assign_chat(&rig, "health-caller", CHAT, &root).await;
+    assign_chat(&rig, "health-worker", OTHER_CHAT, &child).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "health-run", SPACE, &rig.core.device_id);
+    let before = snapshot(&rig).revision;
+    let result = tool(&rig, lease.token(), "work_outline_health", json!({})).await.unwrap();
+    assert_eq!(result["workItemId"], root);
+    assert!(result["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "chatOnContainer" && entry["chatId"] == CHAT));
+    let tracker_result = rig.client.call(methods::WORK_OUTLINE_HEALTH,
+        json!({ "spaceId": SPACE, "workItemId": root })).await.unwrap();
+    assert_eq!(tracker_result["entries"], result["entries"]);
+    assert_eq!(snapshot(&rig).revision, before);
+    let child_result = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": child })).await.unwrap();
+    assert_eq!(child_result["workItemId"], child);
+    let error = tool(&rig, lease.token(), "work_outline_health", json!({ "workItemId": elsewhere })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+    let worker = rig.core.sessions.agent_tokens().mint(OTHER_CHAT, "health-worker-run", SPACE, &rig.core.device_id);
+    let error = tool(&rig, worker.token(), "work_outline_health", json!({ "workItemId": sibling })).await.unwrap_err();
+    assert!(error.contains("work-outline/unauthorized"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn read_subtree_caps_its_output_and_says_so() {
     let rig = rig().await;
     let root = create_item(&rig, "op-root", "Big", None).await;

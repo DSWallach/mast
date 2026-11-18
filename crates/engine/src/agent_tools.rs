@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 mod archive;
+mod health;
 
 use crate::diff_targets::DiffTargetError;
 use crate::doc_host::DocHost;
@@ -103,6 +104,29 @@ fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> 
         external_id,
         url,
     })
+}
+
+fn parse_linear_project(input: &str) -> Result<ExternalReference, AgentToolError> {
+    let input = input.trim();
+    let url_path = input.strip_prefix("https://linear.app/").or_else(|| input.strip_prefix("http://linear.app/"));
+    let (external_id, url) = if let Some(rest) = url_path {
+        let path = rest.split(['?', '#']).next().unwrap_or("");
+        let parts: Vec<_> = path.trim_end_matches('/').split('/').collect();
+        let slug = match parts.as_slice() {
+            [workspace, "project", slug, ..] if !workspace.is_empty() && !slug.is_empty() => *slug,
+            ["project", slug, ..] if !slug.is_empty() => *slug,
+            _ => return Err(AgentToolError::invalid("invalid Linear project URL")),
+        };
+        (slug.to_owned(), input.to_owned())
+    } else {
+        (input.to_owned(), format!("https://linear.app/project/{input}"))
+    };
+    if external_id.is_empty() || external_id.len() > 200
+        || !external_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        return Err(AgentToolError::invalid("linearProject must be a Linear project URL or project id"));
+    }
+    Ok(ExternalReference { provider: mast_proto::linear::LINEAR_PROVIDER,
+        reference_type: mast_proto::linear::LINEAR_PROJECT_REFERENCE, external_id, url })
 }
 
 fn parse_pull_request(input: &str) -> Result<ExternalReference, AgentToolError> {
@@ -527,6 +551,7 @@ struct CreateChildArgs {
 struct LinkArgs {
     work_item_id: String,
     linear_issue: Option<String>,
+    linear_project: Option<String>,
     pull_request: Option<String>,
 }
 
@@ -893,8 +918,10 @@ pub struct AgentToolsService {
     artifacts: Mutex<Option<crate::artifacts::ArtifactsService>>,
     /// Chat diff targets (`bind_chat_worktree`).
     diff_targets: Mutex<Option<crate::diff_targets::DiffTargets>>,
+    diff_sync: Mutex<Option<crate::diff_sync::CheckoutDiffSync>>,
     /// PR state for the finished-worker rule.
     pr_ticket_cache: Mutex<Option<crate::pr_ticket_cache::PrTicketCache>>,
+    health_branches: crate::work_outline_health::DefaultBranchCache,
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
 }
@@ -916,8 +943,10 @@ impl AgentToolsService {
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
+            health_branches: crate::work_outline_health::DefaultBranchCache::default(),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
+            diff_sync: Mutex::new(None),
         }
     }
 
@@ -934,6 +963,10 @@ impl AgentToolsService {
     /// Attach the engine's diff targets service (engine assembly).
     pub fn set_diff_targets(&self, diff_targets: crate::diff_targets::DiffTargets) {
         *lock(&self.diff_targets) = Some(diff_targets);
+    }
+
+    pub fn set_diff_sync(&self, diff_sync: crate::diff_sync::CheckoutDiffSync) {
+        *lock(&self.diff_sync) = Some(diff_sync);
     }
 
     /// The artifact service and the caller it acts for.
@@ -1116,6 +1149,7 @@ impl AgentToolsService {
             tools::READ_CURRENT => Ok(self.read_current(context)),
             tools::GET_USER_ACTION_REQUEST => self.get_user_action_request(context, arguments),
             tools::READ_SUBTREE => self.read_subtree(context, arguments),
+            tools::HEALTH => self.health(context, arguments),
             tools::CREATE_CHILD => self.create_child(context, arguments),
             tools::LINK => self.link(context, arguments),
             tools::ASSOCIATE_CURRENT_CHAT => self.associate_current_chat(context, arguments),
@@ -1618,12 +1652,13 @@ impl AgentToolsService {
             )
             .into());
         }
-        let reference = match (args.linear_issue.as_deref(), args.pull_request.as_deref()) {
-            (Some(issue), None) => parse_linear_issue(issue)?,
-            (None, Some(pr)) => parse_pull_request(pr)?,
+        let reference = match (args.linear_issue.as_deref(), args.linear_project.as_deref(), args.pull_request.as_deref()) {
+            (Some(issue), None, None) => parse_linear_issue(issue)?,
+            (None, Some(project), None) => parse_linear_project(project)?,
+            (None, None, Some(pr)) => parse_pull_request(pr)?,
             _ => {
                 return Err(AgentToolError::invalid(
-                    "provide exactly one of linearIssue or pullRequest",
+                    "provide exactly one of linearIssue, linearProject, or pullRequest",
                 ));
             }
         };

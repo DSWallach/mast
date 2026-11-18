@@ -1166,6 +1166,14 @@ pub struct WatchWorkOutlineParams {
     pub space_id: String,
 }
 
+/// Params of `WorkOutlineHealth` for a user-facing Tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkOutlineHealthParams {
+    pub space_id: String,
+    pub work_item_id: String,
+}
+
 /// `createWorkItem`. Reply: [`CreateWorkItemResult`]. The new item's id is
 /// `derive_id(operationId, "item")`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

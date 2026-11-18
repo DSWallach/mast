@@ -189,6 +189,7 @@ fn rpc_params_field_names() {
             space_id: None,
             expected_account_id: None,
             project_id: "p-1".into(),
+            include_completed: false,
             force: false,
             cached_only: false,
         },

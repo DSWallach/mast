@@ -151,6 +151,10 @@ pub mod methods {
     /// forwardable; hosts that predate the feature answer `unknown method`,
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
+    pub const WORK_OUTLINE_HEALTH: &str = "WorkOutlineHealth";
+    pub const WATCH_TRACKER_PR_CACHE: &str = "WatchTrackerPrCache";
+    /// Completed Linear sync passes for one Space; current revision first.
+    pub const WATCH_LINEAR_SYNC: &str = "WatchLinearSync";
     /// Read-only workflow-pack export and import previews.
     pub const WORKFLOW_PACK_EXPORT_PREVIEW: &str = "WorkflowPackExportPreview";
     pub const WORKFLOW_PACK_IMPORT_PREVIEW: &str = "WorkflowPackImportPreview";
@@ -294,6 +298,7 @@ pub mod methods {
     pub const LINEAR_MY_PROJECTS: &str = "LinearMyProjects";
     /// `LinearProjectIssuesParams {projectId}` → `[LinearIssueSummary]`.
     pub const LINEAR_PROJECT_ISSUES: &str = "LinearProjectIssues";
+    pub const LINEAR_PROJECT_ISSUE_PAGE: &str = "LinearProjectIssuePage";
     /// `LinearProjectDetailParams {projectId}` → `LinearProjectDetail`
     /// (read-only, cached; device-local).
     pub const LINEAR_PROJECT_DETAIL: &str = "LinearProjectDetail";

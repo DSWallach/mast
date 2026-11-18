@@ -35,7 +35,7 @@ use crate::work_outline::actions::OperationSlot;
 use crate::work_outline::chips::TextTooltip;
 
 /// Whether `id` reads as a Linear UUID (a project id) rather than a URL slug.
-fn looks_like_uuid(id: &str) -> bool {
+pub(crate) fn looks_like_uuid(id: &str) -> bool {
     let parts: Vec<&str> = id.split('-').collect();
     parts.len() == 5
         && parts

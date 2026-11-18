@@ -165,6 +165,33 @@ pub(crate) struct WorkerFacts {
     pub archivable: Option<Archivable>,
 }
 
+/// Derive a ticket's lifecycle once when its cached worker facts change.
+pub(crate) fn ticket_lifecycle(
+    workers: &[&WorkerFacts],
+    item_completed: Option<bool>,
+    linear_completed: Option<bool>,
+    branch_review: bool,
+    now: DateTime<Utc>,
+) -> crate::tracker_lifecycle::LifecycleRow {
+    use crate::tracker_lifecycle::{ChatFacts, PullRequestFacts, derive_ticket_lifecycle};
+    let chats: Vec<_> = workers.iter().filter(|worker| !worker.archived).map(|worker| ChatFacts {
+        branch_review,
+        ready_request: worker.ready.as_ref().is_some_and(|action| action.text.trim().to_ascii_lowercase().starts_with("ready to merge")),
+        needs_answer: worker.state == WorkerState::Waiting || worker.ready.is_some(),
+        idle_over_three_days: worker.state == WorkerState::Idle && worker.last_active
+            .is_some_and(|at| now.signed_duration_since(at) > chrono::Duration::days(3)),
+    }).collect();
+    let prs: Vec<_> = workers.iter().flat_map(|worker| &worker.prs).map(|pr| PullRequestFacts {
+        state_known: !pr.state.is_empty(),
+        open: pr.state.eq_ignore_ascii_case("open"),
+        merged: pr.state.eq_ignore_ascii_case("merged"),
+        approved: pr.review == Some("approved") && !pr.draft,
+        changes_requested: pr.review == Some("changes requested"),
+        checks_passing: pr.checks == Some(ChecksStatus::Passing),
+    }).collect();
+    derive_ticket_lifecycle(&chats, &prs, item_completed, linear_completed)
+}
+
 impl WorkerFacts {
     pub(crate) fn tracker_group(&self) -> TrackerGroup {
         match (self.state, self.ready.is_some()) {
@@ -650,5 +677,21 @@ mod tests {
         worker.prs[0].state = "MERGED".into();
         assert!(worker.tracker_stages().merged);
         assert!(worker.tracker_stages().pr_open);
+    }
+
+    #[test]
+    fn ticket_lifecycle_uses_all_workers_and_preserves_pr_precedence() {
+        use crate::tracker_lifecycle::LifecycleStage;
+        let mut facts = facts_of(&[(WorkerState::Waiting, false), (WorkerState::Idle, true)]);
+        facts.workers[1].prs.push(WorkerPr { branch: None, head_sha: None, additions: None,
+            deletions: None, number: 1, url: "u".into(), checks: Some(ChecksStatus::Passing),
+            review: Some("approved"), draft: false, state: "OPEN".into() });
+        let workers: Vec<_> = facts.workers.iter().collect();
+        let row = ticket_lifecycle(&workers, Some(false), None, false, Utc::now());
+        assert_eq!(row.stage, LifecycleStage::ReadyToMerge);
+        assert!(row.needs_you);
+        facts.workers[1].prs[0].draft = true;
+        let workers: Vec<_> = facts.workers.iter().collect();
+        assert_eq!(ticket_lifecycle(&workers, Some(false), None, false, Utc::now()).stage, LifecycleStage::PrReview);
     }
 }

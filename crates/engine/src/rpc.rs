@@ -336,6 +336,7 @@ impl EngineRpc {
         ));
         agent_tools.set_sessions(sessions.clone());
         agent_tools.set_diff_targets(diff_targets.clone());
+        agent_tools.set_diff_sync(diff_sync.clone());
         // Engine assembly replaces this with the shared service
         // (`with_pr_review_sync`); a bare RPC surface has no background loop.
         let pr_review_sync = crate::pr_review_sync::PrReviewSyncService::new(
@@ -2683,6 +2684,26 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
             }
+            methods::WORK_OUTLINE_HEALTH => {
+                let p: mast_proto::WorkOutlineHealthParams = parse_params(params)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                if snapshot.item(&p.work_item_id).is_none() {
+                    return Err(RpcError::Failed("work-outline/notFound: work item not found".into()));
+                }
+                let result = Box::pin(self.agent_tools.health_snapshot(&snapshot, &p.work_item_id)).await
+                    .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+                RpcReply::value(&result)
+            }
+            methods::WATCH_TRACKER_PR_CACHE => {
+                Ok(RpcReply::Stream(watch_stream(self.pr_ticket_cache()?.watch_pr_revision())))
+            }
+            methods::WATCH_LINEAR_SYNC => {
+                let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
+                if self.workspace.space(&p.space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+                    return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+                }
+                Ok(RpcReply::Stream(watch_stream(self.linear.watch_sync(&p.space_id))))
+            }
             methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
                 let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
                 let (pack, redactions) = self
@@ -2968,10 +2989,15 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
                 Self::linear_reply(
                     self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
-                        .project_issues(&p.project_id, p.force, p.cached_only)
+                        .project_issues(&p.project_id, p.include_completed, p.force, p.cached_only)
                         .await,
                 )
                 .await
+            }
+            methods::LINEAR_PROJECT_ISSUE_PAGE => {
+                let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                    .project_issue_page(&p.project_id, p.force, p.cached_only).await).await
             }
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;

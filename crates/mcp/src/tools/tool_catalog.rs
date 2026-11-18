@@ -218,6 +218,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: agent_tool_names::HEALTH,
+            description: "Read-only cleanup checks for your work item or a descendant. Results use cached Linear and PR facts; missing PR details are queued through the existing throttled cache and unknown facts are reported separately.",
+            input_schema: json!({ "type": "object", "properties": {
+                "workItemId": { "type": "string", "description": "Your item or a descendant; defaults to your item." }
+            }}),
+        },
+        ToolDef {
             name: agent_tool_names::CREATE_CHILD,
             description: "Create a work item under your chat's item, a descendant, or an item inside your project. The item records your chat as its creator. Required: title and idempotencyKey. Optional: description, parentWorkItemId, status. Without parentWorkItemId, a chat inside a project creates the item in the project's worker destination (e.g. its \"Tasks\" container) when it has one, otherwise under your own item; the reply says which (resolvedToWorkerDestination). Inside a project you may also name any item of that project (e.g. a sibling Tasks container) as parentWorkItemId.",
             input_schema: json!({
@@ -235,12 +242,13 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::LINK,
-            description: "Attach a Linear issue or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
+            description: "Attach a Linear issue, Linear project, or GitHub pull request to your work item or a descendant. Supply exactly one reference. No network request is made.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workItemId": { "type": "string" },
                     "linearIssue": { "type": "string" },
+                    "linearProject": { "type": "string", "description": "Linear project URL or id." },
                     "pullRequest": { "type": "string" },
                     "idempotencyKey": idempotency_key_schema()
                 },

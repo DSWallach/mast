@@ -188,6 +188,7 @@ pub async fn sync_enabled_spaces(
                 );
             }
         }
+        linear.notify_sync(&space);
     }
 }
 

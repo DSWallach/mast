@@ -2909,7 +2909,15 @@ impl Shell {
             {
                 changes.update(cx, |changes, cx| changes.ensure_content(cx));
             }
+            if panels.changes_open && self.resolved_right_active(cx) == RightSurface::Team {
+                let chat_id = self.active_chat.clone();
+                self.load_tracker_project(&chat_id, false, cx);
+                self.watch_tracker_sync(&chat_id, cx);
+            } else {
+                self.stop_tracker_sync();
+            }
         }
+        self.refresh_tracker_source_if_changed(cx);
         self.prewarm_workspace_search(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
@@ -3063,10 +3071,16 @@ impl Shell {
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.changes_open = open);
         if !open {
+            self.stop_tracker_sync();
             self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
             // with the conversation gone read as a broken chat.
             self.right_pane_expanded = false;
+        } else if self.resolved_right_active(cx) == RightSurface::Team {
+            let chat_id = self.active_chat.clone();
+            self.invalidate_tracker_review();
+            self.load_tracker_project(&chat_id, false, cx);
+            self.watch_tracker_sync(&chat_id, cx);
         }
         let to = self.right_target(cx);
         self.right_tween = Some(WidthTween::new(from, to));
@@ -3256,6 +3270,7 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if surface != RightSurface::Team { self.stop_tracker_sync(); }
         if self.resolved_right_active(cx) != surface {
             self.suspend_file_images(cx);
         }
@@ -3284,7 +3299,13 @@ impl Shell {
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
             RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
-            RightSurface::Picker | RightSurface::Item | RightSurface::Team | RightSurface::Review => {}
+            RightSurface::Team => {
+                let chat_id = self.active_chat.clone();
+                self.invalidate_tracker_review();
+                self.load_tracker_project(&chat_id, false, cx);
+                self.watch_tracker_sync(&chat_id, cx);
+            }
+            RightSurface::Picker | RightSurface::Item | RightSurface::Review => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();
@@ -4866,6 +4887,10 @@ impl Shell {
                             fetched_at: Instant::now(),
                         },
                     );
+                    if this.right_pane_open(cx) && this.resolved_right_active(cx) == RightSurface::Team {
+                        let active_chat = this.active_chat.clone();
+                        this.load_tracker_health(&active_chat, cx);
+                    }
                 }
                 cx.notify();
             })
