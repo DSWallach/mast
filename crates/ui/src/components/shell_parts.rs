@@ -370,6 +370,7 @@ pub(crate) fn surface_add_button(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fade = "right-surface-add-fade";
     let button = div()
         .id("right-surface-add")
+        .debug_selector(|| "right-surface-add".into())
         .size(px(24.0))
         .flex_none()
         .flex()
