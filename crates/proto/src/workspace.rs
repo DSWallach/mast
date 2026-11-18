@@ -40,10 +40,10 @@ pub mod capabilities {
     pub const TOKEN_USAGE_INSIGHTS_V1: &str = "token-usage-insights-v1";
     pub const PR_REVIEW_LAUNCH_V1: &str = "pr-review-launch-v1";
     /// Review launches honor `mergeGate` and the Space's review launch
-    /// defaults, and the Claude Code harness runs the `agent` model option as
-    /// `--agent`. Clients offer the merge-gate toggle, and engines forward a
-    /// review that names an agent or a merge gate, only to hosts that
-    /// advertise it.
+    /// defaults, and the Claude Code, Codex and Antigravity harnesses run the
+    /// `agent` model option as a named agent definition. Clients offer the
+    /// merge-gate toggle and agent defaults, and engines forward a review
+    /// that names an agent or a merge gate, only to hosts that advertise it.
     pub const REVIEW_LAUNCH_AGENT_V1: &str = "review-launch-agent-v1";
     /// The host stores a scheduled task's `workItemId`, attaches each run to
     /// that item and delivers its instructions. Clients offer the Work item

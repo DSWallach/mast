@@ -590,15 +590,34 @@ pub struct SetPrReviewPromptsParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrReviewLaunchDefaults {
-    /// Claude Code subagent the review runs as (`claude --agent <name>`).
+    /// Agent definition the review runs as, on harnesses that
+    /// [run agent definitions](crate::HarnessId::runs_agent_definitions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Harness the models below belong to, and the one a review without an
+    /// explicit pick starts on. Unset means Claude Code. Model ids are
+    /// harness-specific, so they are never sent to another harness. A
+    /// harness id this build does not know reads as unset.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_harness"
+    )]
+    pub harness: Option<crate::HarnessId>,
     /// Model of an ordinary (draft) review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_model: Option<String>,
     /// Model of a merge-gate review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_model: Option<String>,
+}
+
+fn lenient_harness<'de, D>(deserializer: D) -> Result<Option<crate::HarnessId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl PrReviewLaunchDefaults {
@@ -616,13 +635,22 @@ impl PrReviewLaunchDefaults {
         };
         Self {
             agent: clean(&self.agent),
+            harness: self.harness,
             draft_model: clean(&self.draft_model),
             gate_model: clean(&self.gate_model),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.agent.is_none() && self.draft_model.is_none() && self.gate_model.is_none()
+        self.agent.is_none()
+            && self.harness.is_none()
+            && self.draft_model.is_none()
+            && self.gate_model.is_none()
+    }
+
+    /// The harness a review without an explicit pick starts on.
+    pub fn harness_or_default(&self) -> crate::HarnessId {
+        self.harness.unwrap_or(crate::HarnessId::ClaudeCode)
     }
 
     /// The model a review launch uses: the gate model for a merge-gate

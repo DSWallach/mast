@@ -480,13 +480,15 @@ fn launch_defaults_are_normalized_validated_and_cleared() {
 
     let defaults = PrReviewLaunchDefaults {
         agent: Some(" pr-review ".into()),
-        draft_model: Some("claude-haiku-4-5".into()),
+        harness: Some(mast_proto::HarnessId::Codex),
+        draft_model: Some("gpt-5-mini".into()),
         gate_model: Some("  ".into()),
     };
     set_launch(&mut doc, WorkOutlineActorKind::User, defaults, "set").unwrap();
     let want = PrReviewLaunchDefaults {
         agent: Some("pr-review".into()),
-        draft_model: Some("claude-haiku-4-5".into()),
+        harness: Some(mast_proto::HarnessId::Codex),
+        draft_model: Some("gpt-5-mini".into()),
         gate_model: None,
     };
     assert_eq!(snapshot(&doc, SPACE).space_settings.pr_review_launch, Some(want.clone()));
@@ -495,8 +497,13 @@ fn launch_defaults_are_normalized_validated_and_cleared() {
     for (bad, op) in [
         (PrReviewLaunchDefaults { agent: Some("rm -rf".into()), ..Default::default() }, "bad-agent"),
         (PrReviewLaunchDefaults { agent: Some("--help".into()), ..Default::default() }, "flag-agent"),
+        (PrReviewLaunchDefaults { agent: Some("../x".into()), ..Default::default() }, "path-agent"),
         (PrReviewLaunchDefaults { agent: Some("a".repeat(65)), ..Default::default() }, "long-agent"),
         (PrReviewLaunchDefaults { gate_model: Some("m".repeat(201)), ..Default::default() }, "long-model"),
+        (
+            PrReviewLaunchDefaults { harness: Some(mast_proto::HarnessId::Cursor), ..Default::default() },
+            "other-harness",
+        ),
     ] {
         let error = set_launch(&mut doc, WorkOutlineActorKind::User, bad, op).unwrap_err();
         assert_eq!(error.code, WorkOutlineErrorCode::Invalid, "{op}");
@@ -512,6 +519,7 @@ fn launch_defaults_survive_a_prompt_rewrite_and_agents_cannot_set_them() {
     let mut doc = doc();
     let defaults = PrReviewLaunchDefaults {
         agent: Some("pr-review".into()),
+        harness: None,
         draft_model: None,
         gate_model: Some("claude-opus-5-5".into()),
     };

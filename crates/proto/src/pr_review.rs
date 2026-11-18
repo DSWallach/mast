@@ -469,6 +469,7 @@ mod tests {
         assert_eq!(settings.pr_review_launch, None);
         let defaults = PrReviewLaunchDefaults {
             agent: Some(" pr-review ".into()),
+            harness: None,
             draft_model: Some("".into()),
             gate_model: Some("claude-opus-5-5".into()),
         }
@@ -479,6 +480,21 @@ mod tests {
         );
         assert_eq!(defaults.model_for(true), Some("claude-opus-5-5"));
         assert_eq!(defaults.model_for(false), None);
+        assert_eq!(defaults.harness_or_default(), crate::HarnessId::ClaudeCode);
         assert!(PrReviewLaunchDefaults::default().is_empty());
+
+        let codex: PrReviewLaunchDefaults = serde_json::from_value(
+            serde_json::json!({"harness": "codex", "draftModel": "gpt-5"}),
+        )
+        .unwrap();
+        assert_eq!(codex.harness, Some(crate::HarnessId::Codex));
+        assert_eq!(serde_json::to_value(&codex).unwrap()["harness"], "codex");
+        // A harness from a newer build keeps the rest of the defaults.
+        let future: PrReviewLaunchDefaults = serde_json::from_value(
+            serde_json::json!({"harness": "someday", "agent": "pr-review"}),
+        )
+        .unwrap();
+        assert_eq!(future.harness, None);
+        assert_eq!(future.agent.as_deref(), Some("pr-review"));
     }
 }

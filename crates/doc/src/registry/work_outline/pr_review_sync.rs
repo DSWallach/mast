@@ -209,9 +209,15 @@ impl RegistryDoc {
             && !mast_proto::is_valid_agent_name(agent)
         {
             return Err(invalid(format!(
-                "The review agent name must be 1-{} letters, digits, '_', '.', ':' or '-'",
+                "The review agent name must be 1-{} letters, digits, '_', '.', ':' or '-', \
+                 and must not start with '-' or '.' or contain '..'",
                 mast_proto::AGENT_NAME_MAX_LEN
             )));
+        }
+        if !defaults.harness_or_default().runs_agent_definitions() {
+            return Err(invalid(
+                "Review launch defaults support Claude Code, Codex and Antigravity",
+            ));
         }
         for model in [&defaults.draft_model, &defaults.gate_model]
             .into_iter()
