@@ -4790,6 +4790,47 @@ impl DocHost {
             .map_or(0, |queue| queue.len())
     }
 
+    /// Read the live document or its persisted snapshot without opening a
+    /// session, joining a room, or starting command drains.
+    pub(crate) fn scheduled_run_doc(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<Arc<SessionDoc>>, EngineError> {
+        if let Some(handle) = self.loaded(chat_id) {
+            return Ok(Some(handle.doc.clone()));
+        }
+        let Some(snapshot) = self.inner.store.load_snapshot(chat_id)? else {
+            return Ok(None);
+        };
+        let raw = loro::LoroDoc::new();
+        raw.import(&snapshot)
+            .map_err(|error| EngineError::Other(format!("snapshot import failed: {error}")))?;
+        Ok(Some(Arc::new(SessionDoc::from_doc(raw))))
+    }
+
+    /// Inspect an open doc or its local snapshot without opening a session,
+    /// joining a room, or draining pending commands during a cleanup preview.
+    pub(crate) fn has_queued_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        match self.scheduled_run_doc(chat_id)? {
+            Some(doc) => Self::session_doc_has_queued_turn(&doc),
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn session_doc_has_queued_turn(doc: &SessionDoc) -> Result<bool, EngineError> {
+        Ok(!doc.read_queue()?.is_empty()
+            || doc.read_commands()?.iter().any(|command| {
+                command.status == SessionCommandStatus::Pending
+                    && matches!(
+                        command.payload,
+                        SessionCommandPayload::Run { .. }
+                            | SessionCommandPayload::RunWithInstructions { .. }
+                            | SessionCommandPayload::Steer { .. }
+                            | SessionCommandPayload::RespondInput { .. }
+                    )
+            }))
+    }
+
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }

@@ -85,13 +85,7 @@ impl Overview {
                         {
                             return false;
                         }
-                        AttentionFilter::Stalled
-                            if status != ChatIndicator::Errored
-                                && state
-                                    .session_for(&chat.id)
-                                    .and_then(|s| s.last_turn_tool_failures.as_ref())
-                                    .is_none() =>
-                        {
+                        AttentionFilter::Stalled if status != ChatIndicator::Errored => {
                             return false;
                         }
                         _ => {}

@@ -47,49 +47,70 @@ impl PersonalAssistant {
         }
     }
 
-    /// The picked chat, or any run of its scheduled task.
-    pub fn covers(&self, chat: &Chat) -> bool {
+    /// The picked chat, or any run of its scheduled task. A designation made
+    /// on an imported run also covers the native task that run was merged
+    /// into; `chats` is where that merge is looked up, only when a run of
+    /// the same device and Space does not match directly.
+    pub fn covers(&self, chat: &Chat, chats: &[Chat]) -> bool {
+        self.covers_with(chat, || self.merged_task(chats))
+    }
+
+    /// Resolve the imported task once when matching a list of chats.
+    pub fn coverage<'a>(&'a self, chats: &'a [Chat]) -> impl Fn(&Chat) -> bool + 'a {
+        let merged = self.merged_task(chats);
+        move |chat| self.covers_with(chat, || merged)
+    }
+
+    fn covers_with<'a>(&self, chat: &Chat, merged: impl FnOnce() -> Option<&'a str>) -> bool {
+        if chat.is_background_task_run() {
+            return false;
+        }
         if chat.id == self.chat_id {
             return true;
         }
         let (Some(task), Some(info)) = (&self.scheduled_task, &chat.scheduled_task_info) else {
             return false;
         };
-        (info.task_id == task.task_id || info.legacy_task_id.as_ref() == Some(&task.task_id))
-            && chat.device_id == task.device_id
-            && chat.space_id == task.space_id
+        if chat.device_id != task.device_id || chat.space_id != task.space_id {
+            return false;
+        }
+        info.task_id == task.task_id
+            || info.legacy_task_id.as_ref() == Some(&task.task_id)
+            || merged() == Some(info.task_id.as_str())
+    }
+
+    /// The native task id a designated imported task was merged into.
+    fn merged_task<'a>(&self, chats: &'a [Chat]) -> Option<&'a str> {
+        let task = self.scheduled_task.as_ref()?;
+        chats.iter().find_map(|c| {
+            let info = c.scheduled_task_info.as_ref()?;
+            (info.legacy_task_id.as_ref() == Some(&task.task_id)
+                && c.device_id == task.device_id
+                && c.space_id == task.space_id)
+                .then_some(info.task_id.as_str())
+        })
     }
 
     /// The chat the sidebar shows: the task's latest unarchived run, else the
-    /// picked chat. A designation made on an imported run follows the native
-    /// task that run was merged into.
+    /// picked chat.
     pub fn current<'a>(&self, chats: &'a [Chat]) -> Option<&'a Chat> {
-        let merged = self.scheduled_task.as_ref().and_then(|task| {
-            chats.iter().find_map(|c| {
-                let info = c.scheduled_task_info.as_ref()?;
-                (info.legacy_task_id.as_ref() == Some(&task.task_id)
-                    && c.device_id == task.device_id
-                    && c.space_id == task.space_id)
-                    .then_some((info.task_id.as_str(), task))
-            })
-        });
-        let in_task = |c: &Chat| {
-            self.covers(c)
-                || merged.is_some_and(|(id, task)| {
-                    c.scheduled_task_info.as_ref().is_some_and(|i| i.task_id == id)
-                        && c.device_id == task.device_id
-                        && c.space_id == task.space_id
-                })
-        };
-        if self.scheduled_task.is_some()
-            && let Some(latest) = chats
+        if self.scheduled_task.is_some() {
+            let covers = self.coverage(chats);
+            if let Some(latest) = chats
                 .iter()
-                .filter(|c| !c.archived && c.scheduled_task_info.is_some() && in_task(c))
+                .filter(|c| {
+                    !c.archived
+                        && c.scheduled_task_info.is_some()
+                        && covers(c)
+                })
                 .max_by(|a, b| crate::task_chat_order(a).cmp(&crate::task_chat_order(b)))
-        {
-            return Some(latest);
+            {
+                return Some(latest);
+            }
         }
-        chats.iter().find(|c| c.id == self.chat_id)
+        chats
+            .iter()
+            .find(|c| c.id == self.chat_id && !c.is_background_task_run())
     }
 }
 
@@ -127,9 +148,9 @@ mod tests {
             run("other-space", "t1", 9, "s2"),
         ];
         let assistant = PersonalAssistant::for_chat(&chats[0], 0);
-        assert!(assistant.covers(&chats[1]));
-        assert!(!assistant.covers(&chats[2]));
-        assert!(!assistant.covers(&chats[3]));
+        assert!(assistant.covers(&chats[1], &chats));
+        assert!(!assistant.covers(&chats[2], &chats));
+        assert!(!assistant.covers(&chats[3], &chats));
         assert_eq!(assistant.current(&chats).map(|c| c.id.as_str()), Some("new"));
     }
 
@@ -137,11 +158,36 @@ mod tests {
     fn a_designation_on_an_imported_run_follows_its_merged_native_task() {
         let mut merged = run("imported", "native", 1, "s1");
         merged.scheduled_task_info.as_mut().unwrap().legacy_task_id = Some("legacy".into());
-        let chats = vec![merged, run("native-run", "native", 4, "s1")];
+        let chats = vec![
+            merged,
+            run("native-run", "native", 4, "s1"),
+            run("other-space", "native", 9, "s2"),
+        ];
         let mut assistant = PersonalAssistant::for_chat(&chats[0], 0);
         assistant.scheduled_task.as_mut().unwrap().task_id = "legacy".into();
-        assert!(assistant.covers(&chats[0]));
+        assert!(assistant.covers(&chats[0], &chats));
+        assert!(assistant.covers(&chats[1], &chats), "a native run of the merged task");
+        assert!(!assistant.covers(&chats[2], &chats));
+        assert!(!assistant.covers(&chats[1], &[]), "without the merge in view");
         assert_eq!(assistant.current(&chats).map(|c| c.id.as_str()), Some("native-run"));
+    }
+
+    #[test]
+    fn a_scheduled_assistant_only_covers_interactive_runs() {
+        let mut background = run("background", "t1", 3, "s1");
+        background.scheduled_task_info.as_mut().unwrap().output =
+            crate::ScheduledTaskOutput::Background;
+        let chats = [
+            run("picked", "t1", 1, "s1"),
+            run("interactive", "t1", 2, "s1"),
+            background,
+        ];
+        let assistant = PersonalAssistant::for_chat(&chats[0], 0);
+        assert!(!assistant.covers(&chats[2], &chats));
+        assert_eq!(
+            assistant.current(&chats).map(|c| c.id.as_str()),
+            Some("interactive")
+        );
     }
 
     #[test]
@@ -150,7 +196,7 @@ mod tests {
         plain.scheduled_task_info = None;
         let chats = vec![plain, run("run", "t1", 2, "s1")];
         let assistant = PersonalAssistant::for_chat(&chats[0], 0);
-        assert!(!assistant.covers(&chats[1]));
+        assert!(!assistant.covers(&chats[1], &chats));
         assert_eq!(assistant.current(&chats).map(|c| c.id.as_str()), Some("plain"));
     }
 

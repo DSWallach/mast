@@ -10,7 +10,10 @@ impl Overview {
         let (assistant, current) = {
             let state = self.state.read(cx);
             let assistant = state.personal_assistant.current(&state.chats).cloned();
-            let current = state.selected_chat_row().cloned();
+            let current = state
+                .selected_chat_row()
+                .filter(|chat| !chat.is_background_task_run())
+                .cloned();
             (assistant, current)
         };
         let same = assistant

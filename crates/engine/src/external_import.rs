@@ -205,22 +205,38 @@ fn file_stamp(path: &Path) -> Option<(i64, u64)> {
     Some((mtime, meta.len()))
 }
 
+pub(crate) const SCHEDULED_SOURCE_MISSING: &str = "scheduled-source-missing-v1";
+
+fn cursors_dir(root: &Path) -> PathBuf {
+    root.join("external_import_cursors")
+}
+
+pub(crate) fn import_cursor_exists(root: &Path, chat_id: &str) -> bool {
+    cursors_dir(root).join(format!("{chat_id}.json")).is_file()
+}
+
 /// Imports external Claude Code sessions into brand-new Mast chats. Cheap to
-/// clone (holds only an `Arc<DocsStore>` + a `WorkspaceHost`, itself cheaply
-/// cloneable).
+/// clone across background jobs.
 #[derive(Clone)]
 pub struct ExternalSessionImporter {
     store: Arc<DocsStore>,
     device_id: String,
     workspace: WorkspaceHost,
+    scheduled_tasks: crate::scheduled_tasks::ScheduledTasks,
 }
 
 impl ExternalSessionImporter {
-    pub fn new(store: Arc<DocsStore>, device_id: &str, workspace: WorkspaceHost) -> Self {
+    pub(crate) fn new(
+        store: Arc<DocsStore>,
+        device_id: &str,
+        workspace: WorkspaceHost,
+        scheduled_tasks: crate::scheduled_tasks::ScheduledTasks,
+    ) -> Self {
         Self {
             store,
             device_id: device_id.to_string(),
             workspace,
+            scheduled_tasks,
         }
     }
 
@@ -233,6 +249,16 @@ impl ExternalSessionImporter {
         chat_id: &str,
         external_session_id: &str,
         transcript_path: &Path,
+    ) -> Result<ImportedSession, EngineError> {
+        self.import_session(chat_id, external_session_id, transcript_path, None)
+    }
+
+    fn import_session(
+        &self,
+        chat_id: &str,
+        external_session_id: &str,
+        transcript_path: &Path,
+        desktop_runs: Option<&crate::scheduled_tasks::DesktopRuns>,
     ) -> Result<ImportedSession, EngineError> {
         let stamp = file_stamp(transcript_path);
         let parsed = parse_transcript(transcript_path, &self.device_id)?;
@@ -264,22 +290,31 @@ impl ExternalSessionImporter {
         // the external session on the wrong harness entirely. Model/reasoning/
         // sandbox are left at their "unset" defaults so the user's own
         // picks/sticky defaults still apply everywhere else that reads them.
-        self.workspace.create_chat(
-            chat_id,
-            Some(space_id.as_str()),
-            Some(self.device_id.as_str()),
-            Some(ChatConfig { approval_rules: false,
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-                auto_approve: false,
-            }),
-            Some(cwd.clone()),
-        )?;
-        if let Some(task) = scheduled_metadata(&parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy()) {
-            self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+        let scheduled = scheduled_metadata(
+            &parsed, external_session_id, &self.device_id, &self.store.root().to_string_lossy(),
+        );
+        let config = ChatConfig {
+            approval_rules: false,
+            harness: HarnessId::ClaudeCode,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        };
+        if let Some(task) = scheduled.as_ref().filter(|info| {
+            desktop_runs.is_some_and(|desktop| desktop.should_archive(&self.device_id, info))
+        }) {
+            self.workspace.create_archived_external_chat(
+                chat_id, &space_id, config, cwd.clone(), task.clone(),
+            )?;
+        } else {
+            self.workspace.create_chat(
+                chat_id, Some(&space_id), Some(&self.device_id), Some(config), Some(cwd.clone()),
+            )?;
+            if let Some(task) = scheduled {
+                self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+            }
         }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
@@ -811,6 +846,53 @@ impl ExternalSessionImporter {
         Ok(repaired)
     }
 
+    /// Stamps `sourceFile` on runs tagged before it was recorded so identically
+    /// named tasks from different accounts stay separate. A marker records
+    /// runs whose import cursor and transcript cannot supply a source file.
+    pub fn backfill_scheduled_source_files(&self) -> Result<usize, EngineError> {
+        let markers = self.store.root().join(SCHEDULED_SOURCE_MISSING);
+        let mut stamped = 0;
+        for chat in self.workspace.read_chats()? {
+            let Some(info) = chat
+                .scheduled_task_info
+                .as_ref()
+                .filter(|i| i.source_file.is_none())
+            else {
+                continue;
+            };
+            let marker = markers.join(&chat.id);
+            if chat.device_id != self.device_id || marker.is_file() {
+                continue;
+            }
+            let first = match self.transcript_path_for(&chat.id).and_then(|path| {
+                let Some(path) = path else { return Ok(None) };
+                match File::open(path) {
+                    Ok(file) => Ok(first_raw_user_message_from_file(file)),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(err) => Err(err.into()),
+                }
+            }) {
+                Ok(first) => first,
+                Err(error) => {
+                    tracing::warn!(chat_id = %chat.id, %error, "scheduled source backfill skipped a run");
+                    continue;
+                }
+            };
+            if let Some((_, file)) = first.as_deref().and_then(scheduled_tag) {
+                let info = mast_proto::ScheduledChat {
+                    source_file: Some(file.to_owned()),
+                    ..info.clone()
+                };
+                self.workspace.set_chat_scheduled_task_info(&chat.id, &info)?;
+                stamped += 1;
+            } else {
+                std::fs::create_dir_all(&markers)?;
+                std::fs::write(marker, b"")?;
+            }
+        }
+        Ok(stamped)
+    }
+
     fn scheduled_task_markers_dir(&self) -> PathBuf {
         self.store.root().join("scheduled-task-scan-v2")
     }
@@ -1015,7 +1097,7 @@ impl ExternalSessionImporter {
     }
 
     fn cursors_dir(&self) -> PathBuf {
-        self.store.root().join("external_import_cursors")
+        cursors_dir(self.store.root())
     }
 
     fn cursor_path(&self, chat_id: &str) -> PathBuf {
@@ -1179,6 +1261,7 @@ impl ExternalSessionImporter {
         let cutoff_ms = now_ms - AUTO_ADOPT_MAX_AGE.as_millis() as i64;
         let cursor_ids = self.cursor_session_ids();
         let mut adopted = 0usize;
+        let desktop_runs = self.scheduled_tasks.desktop_runs()?;
         for candidate in self.scan()? {
             if adopted >= AUTO_ADOPT_MAX_PER_SWEEP {
                 break;
@@ -1190,7 +1273,9 @@ impl ExternalSessionImporter {
                 continue;
             }
             let chat_id = uuid::Uuid::new_v4().to_string();
-            match self.import(&chat_id, &candidate.session_id, Path::new(&candidate.path)) {
+            match self.import_session(
+                &chat_id, &candidate.session_id, Path::new(&candidate.path), Some(&desktop_runs),
+            ) {
                 Ok(_) => adopted += 1,
                 Err(err) => tracing::warn!(
                     session_id = %candidate.session_id,
@@ -1419,7 +1504,19 @@ fn scheduled_metadata(
     device: &str,
     scope: &str,
 ) -> Option<mast_proto::ScheduledChat> {
-    let text = parsed.first_user_message.as_deref()?;
+    let (name, file) = scheduled_tag(parsed.first_user_message.as_deref()?)?;
+    Some(mast_proto::ScheduledChat {
+        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
+        task_name: name.to_owned(),
+        run_id: session_id.to_owned(),
+        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
+        source_file: Some(file.to_owned()),
+        ..Default::default()
+    })
+}
+
+/// The `(name, file)` of a scheduled-task wrapper in a run's first message.
+fn scheduled_tag(text: &str) -> Option<(&str, &str)> {
     // A task wrapper must start a line; discussing a tag in prose is not a run.
     let tag = text
         .lines()
@@ -1430,16 +1527,7 @@ fn scheduled_metadata(
         .split('"')
         .next()?;
     let file = tag.split("file=\"").nth(1)?.split('"').next()?;
-    if name.is_empty() || file.is_empty() {
-        return None;
-    }
-    Some(mast_proto::ScheduledChat {
-        task_id: crate::scheduled_tasks::import::imported_identity(file, name, device, session_id, scope),
-        task_name: name.to_owned(),
-        run_id: session_id.to_owned(),
-        session_created_at: parsed.entries.first().map(|(_, e)| e.created_at),
-        ..Default::default()
-    })
+    (!name.is_empty() && !file.is_empty()).then_some((name, file))
 }
 
 struct ParsedTranscript {
@@ -1752,7 +1840,10 @@ fn scan_transcript_summary(path: &Path) -> Option<TranscriptSummary> {
 /// load). `None` when the file is unreadable or truly has no user line with
 /// real text.
 fn first_raw_user_message(path: &Path) -> Option<String> {
-    let file = File::open(path).ok()?;
+    first_raw_user_message_from_file(File::open(path).ok()?)
+}
+
+fn first_raw_user_message_from_file(file: File) -> Option<String> {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let Ok(line) = line else { continue };

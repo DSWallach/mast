@@ -765,5 +765,7 @@ child template apply as live rules.
 A scheduled task can select a Work item in its Space. Each run is attached to
 that item and receives the item's inherited instructions. Only the latest
 unarchived run per task and device appears in item chat lists, associated-chat
-counts, and the unassociated chat list. Older and retired runs remain readable
-through Scheduled tasks → Run history. See [Scheduled tasks](guide/scheduled-tasks.md).
+counts, the unassociated chat list, and an agent's subtree read. Older and
+retired runs keep their assignment, so a run still knows its item, and the
+snapshot lists them in `hiddenRunChatIds`. They remain readable through
+Scheduled tasks → Run history. See [Scheduled tasks](guide/scheduled-tasks.md).

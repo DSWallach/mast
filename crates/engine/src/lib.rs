@@ -416,10 +416,12 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
         let external_import = external_import::ExternalSessionImporter::new(
             store_for_import.clone(),
             &device_id,
             workspace.clone(),
+            scheduled_tasks.clone(),
         );
         // One-time, idempotent repair for chats imported before `last_message_at`
         // stamping existed (see `repair_missing_timestamps`'s doc comment) —
@@ -497,10 +499,17 @@ impl EngineCore {
         }
         {
             let importer = external_import.clone();
-            tokio::task::spawn_blocking(move || match importer.repair_scheduled_tasks() {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(count = n, "tagged imported scheduled-task runs"),
-                Err(err) => tracing::warn!(error = %err, "scheduled-task repair pass failed"),
+            tokio::task::spawn_blocking(move || {
+                match importer.repair_scheduled_tasks() {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(count = n, "tagged imported scheduled-task runs"),
+                    Err(err) => tracing::warn!(error = %err, "scheduled-task repair pass failed"),
+                }
+                match importer.backfill_scheduled_source_files() {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(count = n, "recorded source files of imported runs"),
+                    Err(err) => tracing::warn!(error = %err, "scheduled-run source backfill failed"),
+                }
             });
         }
         // Chats that ran before `Chat.actual_model` existed: recover the model
@@ -661,7 +670,6 @@ impl EngineCore {
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
         let pr_ticket_sweep = pr_ticket_cache.spawn_sweep_loop();
-        let scheduled_tasks = scheduled_tasks::ScheduledTasks::open(profile.store_root(), workspace.clone(), doc_host.clone(), sessions.clone(), registry.clone())?;
         scheduled_tasks.start();
         Ok(Self {
             scheduled_tasks,

@@ -54,7 +54,7 @@ pub struct OutlineChat {
     /// request's `originChatAvailable` false).
     pub archived: bool,
     /// A scheduled run that is not its task's latest (or whose task is
-    /// retired): no outline list shows it as a chat of its own.
+    /// retired): listed in `hiddenRunChatIds`, left out of chat counts.
     pub hidden_run: bool,
 }
 
@@ -808,12 +808,10 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
                 WorkItemChatAssignmentState::Associated | WorkItemChatAssignmentState::DanglingChat
             )
         {
-            if !hidden_runs.contains(chat_id) {
-                item_chats
-                    .entry(key.as_str())
-                    .or_default()
-                    .push(chat_id.into());
-            }
+            item_chats
+                .entry(key.as_str())
+                .or_default()
+                .push(chat_id.into());
             if state == WorkItemChatAssignmentState::Associated {
                 if !hidden_runs.contains(chat_id) {
                     *item_associated.entry(key.as_str()).or_default() += 1;
@@ -971,14 +969,20 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     }
 
     // Unassociated Chats of this Space: live Chats with no effective
-    // association (archived and child Chats included; projectless never;
-    // superseded scheduled runs never).
+    // association (archived and child Chats included; projectless never).
     let unassociated_chat_ids: Vec<String> = inputs
         .chats
         .iter()
         .filter(|c| c.space_id.as_deref() == Some(space_id))
         .filter(|c| !associated_chats.contains(c.id.as_str()))
-        .filter(|c| !c.hidden_run)
+        .map(|c| c.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let hidden_run_chat_ids: Vec<String> = inputs
+        .chats
+        .iter()
+        .filter(|c| c.hidden_run && c.space_id.as_deref() == Some(space_id))
         .map(|c| c.id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -1014,6 +1018,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
         items: views,
         assignments,
         unassociated_chat_ids,
+        hidden_run_chat_ids,
         external_references: references,
         repairs: repairs.into_iter().collect(),
         instructions,

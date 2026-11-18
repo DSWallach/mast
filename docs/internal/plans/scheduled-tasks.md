@@ -4,7 +4,7 @@ Status: native implementation built on `david/scheduled-tasks`, 2026-11-11. Exis
 
 ## Implementation notes
 
-The native task manager is available from the sidebar clock button. It includes task editing, Space/device selection, shared model-catalog choices for model/thinking/context, schedule previews and presets, pause/enable, Run now, deletion, Claude import preview, and session history. Sidebar and Overview use the same latest-edition projection; original session timestamps determine the order of imported editions. A scheduled session exposes Run history and, when applicable, Latest run in its header.
+The native task manager is available from the sidebar clock button. It includes task editing, Space/device selection, shared model-catalog choices for model/thinking/context, schedule previews and presets, pause/enable, Run now, deletion, Claude import preview, and session history. New tasks default to Background on supported hosts and require a work item. Sidebar, Overview, and Work Outline use the same latest-edition projection; original session timestamps determine the order of imported editions. A scheduled session exposes Run history and, when applicable, Latest run in its header.
 
 The engine uses a profile-local SQLite ledger with transactional occurrence claims, indexed active-run lookup, durable input snapshots, schema migrations, bounded dispatch, and restart reconciliation. The `ScheduledTasks` RPC uses the existing device-addressed routing. The native page refreshes while visible rather than adding a new streamed RPC. Shared model-row normalization was extracted from the existing composer so the scheduler and composer offer compatible context-window choices.
 
@@ -41,16 +41,16 @@ The following times are interpreted as America/New_York, consistent with current
 
 | Enabled task | Registry schedule in Eastern time | Migration concern |
 | --- | --- | --- |
-| Slack Briefing | Weekdays 03:30 | Slack connection and Notion procedure/output |
-| Claude Sessions Briefing | Weekdays 03:45 | Access to existing Claude session history; Notion |
-| Linear Project Daily Briefing | Weekdays 04:00 | Linear and Notion; procedure can perform writes |
-| Linear Tickets Briefing | Weekdays 04:30 | Linear and Notion |
-| GitHub priority briefing | Weekdays 04:40 | GitHub CLI and Notion; prompt says 04:55, registry wins |
-| Codespace Manager | Weekdays 04:45 | Local wrappers, credentials, skills, agents, Notion; creates/deletes resources |
-| Assistant daily summary | Weekdays 05:00 | Multiple tools and upstream briefings; existing procedure remains authoritative |
-| Codespace Stall Watch | Every 30 minutes, weekdays 09:00–17:30 | Local wrappers; narrowly permitted resume operation |
+| Chat digest | Weekdays 03:30 | Chat connection and a document-tool procedure/output |
+| Session digest | Weekdays 03:45 | Access to existing Claude session history; document tool |
+| Project digest | Weekdays 04:00 | Issue tracker and document tool; procedure can perform writes |
+| Ticket digest | Weekdays 04:30 | Issue tracker and document tool |
+| Pull request digest | Weekdays 04:40 | GitHub CLI and document tool; prompt and registry times differ, registry wins |
+| Environment cleanup | Weekdays 04:45 | Local wrappers, credentials, skills, agents; creates/deletes resources |
+| Daily summary | Weekdays 05:00 | Multiple tools and upstream digests; existing procedure remains authoritative |
+| Stall check | Every 30 minutes, weekdays 09:00–17:30 | Local wrappers; narrowly permitted resume operation |
 
-Keep all four disabled one-time jobs disabled. The retired `daily-priority-briefing` prompt has no live definition and must not be recreated. Do not put user-specific account IDs, private Notion page IDs, or raw approval lists into upstream fixtures/docs.
+Keep all four disabled one-time jobs disabled. A retired routine's prompt has no live definition and must not be recreated. Do not put user-specific account IDs, private Notion page IDs, or raw approval lists into upstream fixtures/docs.
 
 ## User experience
 
@@ -66,14 +66,32 @@ Each occurrence opens a fresh normal chat. History shows scheduled time separate
 
 ### Latest session and older editions
 
-User requirement: both the sidebar and the overview show only the most recent session for each scheduled task by default. Older editions remain accessible when viewing any session belonging to that task.
+The **Output** selector controls whether an edition appears in default chat views. **Interactive** runs can appear in the sidebar and Overview and be designated as the personal assistant. **Background** runs require a work item and appear in Scheduled tasks history and the work item's hidden runs, including when they are the latest edition. The sidebar and Overview hide them even if their assignment changes.
 
-- Represent each task once in the default sidebar and overview. Its session link opens the newest session, with that run's date and status. Do not render all past runs as separate default rows or cards. A task with no sessions still appears in task management with its schedule/setup state.
+- Represent each task whose latest unarchived run is Interactive once in the default sidebar and overview. Its session link opens the newest session, with that run's date and status. Do not render all past runs as separate default rows or cards. A task with no sessions still appears in task management with its schedule/setup state.
 - Add a **Run history** control to the scheduled-task session header, labelled with the current edition's date/time. It lists that task's sessions newest first, including dates, outcomes, and which one is open. Selecting an edition opens its original transcript. Provide **Latest run** from an older edition, and the same history access from the task's overview entry.
 - Opening or continuing an older session does not promote it to the latest edition or add it to the default sidebar/overview. Determine newest by the persisted session creation instant, with a stable ID tie-breaker, rather than last-message activity. An explicit Run now creates a new edition; a skipped occurrence with no chat does not replace the current latest session.
 - When a new session is created, update the default task entry without switching away from an older edition the user is reading. Keep the header clear that an older edition is open and offer navigation to the new latest run.
 - Apply the same presentation to native runs and imported Claude task sessions, keyed by stable task identity and source account/Space boundaries. Never combine unrelated tasks just because their display names match. Legacy name-only imports need a source-scoped identity mapping before joining a task's history.
 - Hiding older editions is a presentation rule: retain their transcripts, links, search access, and unresolved Required Actions. Load history in pages rather than downloading every transcript. Show skipped/no-session occurrences in operational history without presenting them as session editions.
+
+The task manager offers **Clean up old runs** on the selected host. The
+`ScheduledTasks` RPC's `cleanup` action accepts `mode: preview` and returns
+groups with task and Space identity, counts, and chat IDs. For `mode: apply`,
+the caller supplies those IDs as `expectedChatIds`. The host recomputes
+eligibility and returns a fresh preview if the set changed before confirmation.
+Repeated apply calls write nothing once those runs are archived.
+
+Cleanup shares the default projection's device, Space, task key and ordering.
+A retired native task still has a newest edition for supersession purposes.
+Desktop runs also qualify after a recorded native handoff, deletion of their
+Mast task, or retirement of their Desktop definition. Cleanup checks open
+Required Actions, in-flight and queued work, sidebar pins, and personal
+assistant coverage before selecting chats. The background auto-adopt sweep
+uses the same Desktop source rule and creates qualifying chats already
+archived. Archived transcripts remain reachable through history. The additive
+cleanup reply is optional, and the UI checks `scheduled-run-cleanup-v1`
+before offering cleanup against the selected host.
 
 Surface failures, missing credentials, and approval requests through existing notifications/Required Actions where available, with one deduplicated actionable notice per problem. A task waiting for input remains active and blocks overlapping occurrences; it is never reported as successful.
 
@@ -96,7 +114,9 @@ Do not store credentials in task records. Store account references and resolve c
 
 ### Launch integration
 
-Extract the reusable recoverable launch sequence from `WorkItemLaunchService` into a shared service rather than shelling out to a CLI or simulating UI input. Keep the existing work-item API as a wrapper with its current validation and instruction semantics. Add a scheduled-task caller supplying persisted configuration, validated execution binding, explicit task prompt, and deterministic operation IDs. Task chats need not be attached to a Work Outline item; an optional association supplies the existing inherited instruction behavior without creating an item every half hour.
+Extract the reusable recoverable launch sequence from `WorkItemLaunchService` into a shared service rather than shelling out to a CLI or simulating UI input. Keep the existing work-item API as a wrapper with its current validation and instruction semantics. Add a scheduled-task caller supplying persisted configuration, validated execution binding, explicit task prompt, and deterministic operation IDs. Background tasks require a Work Outline item and use the existing assignment and inherited instruction path. Interactive tasks can also use this path by choosing a work item.
+
+The task draft and the immutable occurrence snapshot store `output`. A missing field defaults to Interactive. Scheduled chat metadata is written when the chat is created and carries the captured mode so the shared projection can hide background runs independently of assignment. The editor sends Background only to owners advertising `scheduled-task-output-v1`. Older owners ignore the field and continue to run Interactive tasks. When an older editor omits the field on a save, a current owner preserves the stored mode.
 
 Launch order: persist occurrence snapshot → validate owner/config/tools → idempotently create chat and record task/run provenance → apply captured instructions → durably queue the first message → reconcile actual run lifecycle. Derive IDs with existing helpers so operation IDs meet the current 64-character limit. Retrying a launch uses identical inputs and IDs. Preserve account pinning, queue validation, approval handling, cancellation, and publication through existing services.
 
@@ -106,7 +126,7 @@ Add stable `scheduledTaskId` and `scheduledTaskRunId` chat metadata, retaining t
 
 - Store IANA timezones and calculate UTC occurrences explicitly. Use wall-clock cron semantics; document day-of-month/day-of-week OR behavior and Sunday aliases. Reject unsupported cron syntax with a clear error. Evaluate an appropriate parser/timezone dependency during implementation and pin the chosen semantics in tests.
 - Spring daylight saving gap: skip nonexistent local times. Fall repeated hour: run once at the first matching local instant. Use the same deduplication rule after restart, so the second repeated instant cannot create another run.
-- Default misfire policy: coalesce to the latest missed occurrence within a configurable grace window, proposed six hours for daily briefings and one interval for the stall watch. Skip older occurrences with an aggregate history reason. Expired one-time tasks remain expired. Never replay an unbounded backlog on restart.
+- Default misfire policy: coalesce to the latest missed occurrence within a configurable grace window, proposed six hours for daily digests and one interval for the stall check. Skip older occurrences with an aggregate history reason. Expired one-time tasks remain expired. Never replay an unbounded backlog on restart.
 - Default overlap policy: one active occurrence per task, including queued launch and waiting-for-approval/input. Record newer occurrences as skipped while active; do not build a growing queue. Manual runs obey this too. Use a configurable global scheduled-run limit, initially two, and a bounded oldest-due-first queue. Recheck grace and paused state before dispatch from that queue.
 - Existing time ordering is not a dependency guarantee. Preserve schedules during import and show freshness issues reported by existing procedures. Explicit task dependencies and conditional workflows can follow later; do not silently invent them during migration.
 - Recheck pause/delete/revision/ownership before dispatch, serializing those changes with claims. Scheduled jobs do not bypass existing execution checks or auto-continue settings.
@@ -119,6 +139,29 @@ On restart, reconcile occurrence IDs against chats, queued commands, and run jou
 
 The promise is one logical occurrence and idempotent dispatch, not exactly-once external side effects. Validate crash boundaries instead of relying on a claimed row alone. If persistence is corrupt or unavailable, stop scheduling and surface the error; never treat it as a new empty ledger and redispatch old jobs.
 
+### Background run archive and retention
+
+The run snapshot captures `afterSuccess`. Its default is Archive, which applies
+only to Background runs. The editor uses `scheduled-task-after-success-v1` to
+offer Archive and Keep and to send the field. An older host drops the field. A
+current host preserves the stored choice when an older editor omits it.
+
+Lifecycle reconciliation persists the run outcome and its follow-ups together.
+It applies archive guards for open Required Actions, pending input, queued
+turns, pins and the personal assistant. The registry records a completed
+automatic archive in the same write as the archive flag so a crash replay
+cannot undo a user's restore. Background failures, interruptions, cancellations
+and input waits update a task-scoped Required Action. Success resolves it.
+A user pause or deletion before a run chat exists records the cancellation
+without filing an action.
+
+The proposed retention policy keeps run history and defaults to 14 days. It
+protects the latest run, restored chats, chats with open Required Actions and
+chats outside the scheduled-run ledger. Automatic deletion and its setting are
+pending a transcript purge path. The existing Delete Chat operation removes
+the registry row and the local snapshot while the synced session document
+survives. The scheduler currently performs no deletions.
+
 ## Claude import and cutover
 
 1. Discover the selected Claude account's schedule registries and parse a version-tolerant read-only snapshot. Import cron/fireAt, enabled state, prompt path, cwd/worktree choice, model, last scheduled boundary, and permission metadata. Ignore unrelated fields while reporting unsupported schedule variants. Preview differences against prompt descriptions.
@@ -128,16 +171,16 @@ The promise is one logical occurrence and idempotent dispatch, not exactly-once 
 5. Present permission differences explicitly. Claude `auto`, `acceptEdits`, and per-tool `approvedPermissions` are not equivalent to Mast's boolean auto-approve. Never translate scoped approvals into permission bypass. Use Ask by default, or require an explicit task-specific choice of Mast's existing Auto-approve behavior. Exact scoped approval compatibility, if required for these tasks, is a separately tested extension to the existing permission control channel, not a scheduler-specific bypass. Until resolved, mark the task as requiring setup.
 6. Validate with fixtures and supervised runs that obey real task permissions. Do not label a write-capable run a dry run unless writes are actually suppressed by the chosen execution mechanism. Statically importing a prompt never authorizes executing it.
 7. For each task, have the user pause its Claude schedule through the supported Claude surface, verify it is paused and no source run is in flight, then activate Mast with a cutover timestamp. Ignore source occurrences before that boundary. If source state cannot be verified, keep Mast paused and show the remaining step. Avoid editing Claude's private JSON while it is running.
-8. Migrate briefings before the assistant summary and Codespace automation, verify results and tool parity, then retire the original schedules. Rollback pauses Mast, drains/cancels its pending work, confirms no active occurrence remains, and re-enables Claude from a new boundary.
+8. Migrate the digests before the daily summary and environment automation, verify results and tool parity, then retire the original schedules. Rollback pauses Mast, drains/cancels its pending work, confirms no active occurrence remains, and re-enables Claude from a new boundary.
 
 ## Implementation sequence and acceptance
 
 1. **Contracts and evaluator.** Add proposed types in `crates/proto/src/scheduled_tasks.rs`; implement pure cron/timezone/one-time evaluation. Define wire compatibility and lifecycle reasons. Acceptance: all eight observed cron expressions have correct next occurrences; invalid syntax, DST gaps/repeats, clock rollback, and expired one-time schedules have deterministic results.
 2. **Durable scheduler.** Add `crates/engine/src/scheduled_tasks/{mod,store,evaluator}.rs`; wire profile storage, startup, wake handling, and shutdown. Acceptance: duplicate ticks and restart cannot create duplicate occurrences; edits, pause, coalescing, queue limits, corrupt storage, profile switches, and device ownership work with fake time.
 3. **Launch and lifecycle integration.** Extract the shared launch helper; add dispatcher/reconciler, task provenance, and bounded concurrency. Acceptance: failure injection after each durable launch step repairs the same chat/message/command; ambiguous started runs are not relaunched; normal Work Outline launches retain their existing guarantees; approval/input/cancel outcomes are accurate.
-4. **RPC and interface.** Register list/watch, create/update, enable/pause, run-now, delete, paginated run-history, and import-preview/apply methods using existing RPC authentication/device routing. Mutations use idempotency keys and expected revision checks. Return a latest-session summary per task for sidebar/overview rendering, using the same ordering rule as history. Add Scheduled tasks UI and notifications. Acceptance: a user can create a task, preview times, run it, inspect its chat, pause it remotely on the owner, and resolve a blocked setup state. Both sidebar and overview show one latest session per task by default; the session header and overview history action open older editions. Reading or continuing an older session does not reorder editions, and a new run does not interrupt that reading. Verify manual runs, skipped occurrences, task renames, same-name tasks, imported history, pagination, and restart preserve these rules. Unsupported clients read additive metadata safely.
+4. **RPC and interface.** Register list/watch, create/update, enable/pause, run-now, delete, paginated run-history, and import-preview/apply methods using existing RPC authentication/device routing. Mutations use idempotency keys and expected revision checks. Return a latest-session summary per task for sidebar/overview rendering, using the same ordering rule as history. Add Scheduled tasks UI and notifications. Acceptance: a user can create a task, preview times, run it, inspect its chat, pause it remotely on the owner, and resolve a blocked setup state. Both sidebar and overview show the latest session per task when it is Interactive; the session header and overview history action open older editions. Reading or continuing an older session does not reorder editions, and a new run does not interrupt that reading. Verify manual runs, skipped occurrences, task renames, same-name tasks, imported history, pagination, and restart preserve these rules. Unsupported clients read additive metadata safely.
 5. **Migration and permission readiness.** Implement the read-only importer and preview, with redacted fixtures matching both observed registry locations. Acceptance: 12 source definitions produce eight recurring candidates and four disabled one-time entries; the retired orphan prompt stays excluded; repeat import is idempotent; timezone/model/tool/permission mismatches remain visible; enabling requires a verified cutover boundary.
-6. **Pilot and operating guide.** Document host availability, headless deployment, permissions, missed runs, recovery, and rollback. Run a synthetic overnight/restart pilot before supervised real briefings. Acceptance: one logical run per due time, correct Eastern timestamps, bounded catch-up, usable notices for unavailable tools, and no duplicate Claude/Mast dispatch across the cutover boundary.
+6. **Pilot and operating guide.** Document host availability, headless deployment, permissions, missed runs, recovery, and rollback. Run a synthetic overnight/restart pilot before supervised real runs. Acceptance: one logical run per due time, correct Eastern timestamps, bounded catch-up, usable notices for unavailable tools, and no duplicate Claude/Mast dispatch across the cutover boundary.
 
 Validation uses isolated temporary homes/profiles, injected tick times, mock harnesses, and sanitized registries; no production tasks are executed by the tests. The native application build, focused protocol/scheduler/UI suites, and existing external-import, Work Outline launch, and profile-isolation regressions passed. New Rust modules pass formatting checks, and the complete diff passes whitespace checks.
 

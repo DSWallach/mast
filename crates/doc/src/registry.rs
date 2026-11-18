@@ -1491,14 +1491,34 @@ impl RegistryDoc {
     }
 
     pub fn set_chat_archived(&mut self, chat_id: &str, archived: bool) -> Result<bool, DocError> {
+        self.write_chat_archive(chat_id, archived, false)
+    }
+
+    pub fn scheduled_success_archived(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id)
+            .and_then(|row| row.fields.get("scheduledSuccessArchived").and_then(Value::as_bool))
+            .unwrap_or_default()
+    }
+
+    /// The success marker survives a restore and prevents a replay from
+    /// archiving a chat the user has since restored.
+    pub fn archive_scheduled_success(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        self.write_chat_archive(chat_id, true, true)
+    }
+
+    fn write_chat_archive(&mut self, chat_id: &str, archived: bool, success: bool) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
+        }
+        let mut archived_fields = fields([("archived", json!(archived))]);
+        if success {
+            archived_fields.insert("scheduledSuccessArchived".into(), json!(true));
         }
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("archived", json!(archived))]),
+            archived_fields,
         );
         Ok(true)
     }

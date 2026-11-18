@@ -370,7 +370,9 @@ impl OverviewRow {
     }
 
     fn is_stalled(&self) -> bool {
-        self.status == ChatIndicator::Errored || self.tool_failures.is_some()
+        // Tool failures can be handled within a successful turn and do not
+        // establish that the session itself has stopped on an error.
+        self.status == ChatIndicator::Errored
     }
 }
 
@@ -1557,7 +1559,7 @@ pub struct Overview {
     attention_filter: AttentionFilter,
     /// Pre-attention-filter count of rows needing user interaction.
     needs_interaction_count: usize,
-    /// Pre-attention-filter count of stalled rows (errored or failed tool calls).
+    /// Pre-attention-filter count of errored rows.
     stalled_count: usize,
     /// The chat the List should scroll into view on the next render (opening
     /// the link editor) — consumed by the List body
@@ -2588,6 +2590,7 @@ impl Overview {
         let by_id: HashMap<&str, &OverviewRow> =
             rows.iter().map(|row| (row.chat.id.as_str(), row)).collect();
         let state = self.state.read(cx);
+        let hidden_runs = mast_proto::hidden_task_chat_ids(&state.chats);
         state
             .chats
             .iter()
@@ -2611,6 +2614,7 @@ impl Overview {
                 });
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 let visible = shown_by_toggles
+                    && !hidden_runs.contains(chat.id.as_str())
                     && self
                         .sidebar_scope
                         .as_deref()
@@ -2630,9 +2634,7 @@ impl Overview {
                         AttentionFilter::NeedsInteraction => {
                             status == ChatIndicator::AwaitingInput || user_action_required
                         }
-                        AttentionFilter::Stalled => {
-                            status == ChatIndicator::Errored || tool_failures.is_some()
-                        }
+                        AttentionFilter::Stalled => status == ChatIndicator::Errored,
                     };
                 let pr_number = row.and_then(|r| r.pr_number).or_else(|| {
                     self.link_status.get(&chat.id).and_then(|entry| {
@@ -5656,7 +5658,7 @@ impl Overview {
             } else {
                 format!("{} tool calls failed", failures.count)
             };
-            let selector = format!("overview-row-stalled-{chat_id}");
+            let selector = format!("overview-row-tool-failures-{chat_id}");
             let mut pill = div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
@@ -5974,6 +5976,7 @@ impl Overview {
             chats: (*self.outline_chats).clone(),
             options: OutlineOptions {
                 hide_completed: self.hide_stale && !self.outline_show_completed,
+                attention_only: self.attention_filter != AttentionFilter::All,
                 show_archived: self.show_archived,
                 query: self.search.read(cx).text().trim().to_lowercase(),
                 all_spaces: true,
@@ -9163,7 +9166,7 @@ mod logic_tests {
                 "id": id, "deviceId": "host", "archived": false, "cwd": "/work/alpha",
                 "createdAt": "2026-01-01T00:00:00Z",
                 "scheduledTaskInfo": {
-                    "taskId": task, "taskName": "stall-watch", "runId": id,
+                    "taskId": task, "taskName": "routine-a", "runId": id,
                     "sessionCreatedAt": created, "retired": retired
                 }
             }))
@@ -9193,7 +9196,7 @@ mod logic_tests {
                 "id": "watch", "revision": 1, "deviceId": "host", "createdAt": 0,
                 "updatedAt": 0, "nextDue": 1_800_000_000_000i64,
                 "draft": {
-                    "name": "Codespace Stall Watch", "prompt": "p", "cwd": "/work",
+                    "name": "Workspace health check", "prompt": "p", "cwd": "/work",
                     "spaceId": null, "enabled": true, "graceMinutes": 30,
                     "schedule": {"type": "cron", "expression": "*/30 9-17 * * 1-5",
                         "timezone": "America/New_York"},
@@ -9230,7 +9233,17 @@ mod logic_tests {
                 .unwrap()
                 .chat;
             let (task, _) = o.task_for(latest).expect("the host reported the task");
-            assert_eq!(task.draft.name, "Codespace Stall Watch");
+            assert_eq!(task.draft.name, "Workspace health check");
+            // The Work Outline sees every run but shows only the latest.
+            let visible = |id: &str| {
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == id)
+                    .unwrap_or_else(|| panic!("{id} reaches the outline"))
+                    .visible
+            };
+            assert!(visible("latest") && visible("plain"));
+            assert!(!visible("older") && !visible("gone"));
         });
         assert!(vcx.debug_bounds("overview-task-row-watch").is_some());
         assert!(vcx.debug_bounds("overview-task-history-watch").is_some());
@@ -9239,14 +9252,29 @@ mod logic_tests {
     }
 
     #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    struct ScheduledTaskOverviewFixture(Entity<Overview>);
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    impl Render for ScheduledTaskOverviewFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+        }
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
     #[test]
     #[ignore = "requires macOS Metal and access to macOS services"]
     fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
-        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+        for (name, appearance) in [
+            ("light", crate::theme::Appearance::Light),
+            ("dark", crate::theme::Appearance::Dark),
+        ] {
             for width in [640.0, 1440.0] {
                 crate::snapshot::render_to_png(
                     &format!("scheduled-task-rows-{name}-{}", width as u32),
-                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    gpui::size(px(width), px(480.0)),
+                    crate::ui_style::UiStyleId::Default,
+                    appearance,
                     |_, cx| {
                         let _ = crate::typography::register_fonts(cx);
                         let state = cx.new(|_| AppState::new());
@@ -9258,8 +9286,9 @@ mod logic_tests {
                             })).unwrap()];
                         });
                         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
-                        cx.new(|cx| {
+                        let composer =
+                            cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        let overview = cx.new(|cx| {
                             let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
                             overview.view_mode = OverviewMode::List;
                             let task = serde_json::from_value(serde_json::json!({
@@ -9274,10 +9303,79 @@ mod logic_tests {
                                 device_id:"host".into(), tasks:vec![task], ..Default::default()
                             })));
                             overview
-                        })
+                        });
+                        cx.new(|_| ScheduledTaskOverviewFixture(overview))
                     },
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "snapshot", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires macOS Metal and access to macOS services"]
+    fn scheduled_task_outline_snapshot() -> anyhow::Result<()> {
+        for (name, appearance) in [
+            ("light", crate::theme::Appearance::Light),
+            ("dark", crate::theme::Appearance::Dark),
+        ] {
+            crate::snapshot::render_to_png(
+                &format!("scheduled-task-outline-{name}"),
+                gpui::size(px(1100.0), px(480.0)),
+                crate::ui_style::UiStyleId::Default,
+                appearance,
+                |_, cx| {
+                    let _ = crate::typography::register_fonts(cx);
+                    let state = cx.new(|_| AppState::new());
+                    state.update(cx, |s, _| {
+                        s.spaces = vec![serde_json::from_value(serde_json::json!({
+                            "id": "s1", "path": "/work/project", "deviceId": "host",
+                            "createdAt": "2026-11-16T12:00:00Z",
+                        })).unwrap()];
+                        s.chats = [
+                            ("latest", "Health check · latest run", 2),
+                            ("earlier", "Health check · earlier run", 1),
+                        ]
+                        .into_iter()
+                        .map(|(id, title, created)| serde_json::from_value(serde_json::json!({
+                            "id": id, "title": title, "deviceId": "host", "spaceId": "s1",
+                            "archived": false, "createdAt": "2026-11-16T12:00:00Z",
+                            "scheduledTaskInfo": {
+                                "taskId": "routine", "taskName": "Health check", "runId": id,
+                                "sessionCreatedAt": created
+                            }
+                        })).unwrap())
+                        .collect();
+                    });
+                    let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+                    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                    let overview = cx.new(|cx| {
+                        let mut overview = Overview::new(
+                            state, gpui::WeakEntity::new_invalid(), transcript, composer, cx,
+                        );
+                        let mut item = crate::work_outline::store::fixture_snapshot("s1").items.remove(0);
+                        item.title = "Workspace health".into();
+                        item.child_ids.clear();
+                        item.chat_ids = vec!["earlier".into(), "latest".into()];
+                        item.rollup = Default::default();
+                        let snapshot = WorkOutlineSnapshot {
+                            space_id: "s1".into(),
+                            available: true,
+                            synced: true,
+                            root_work_item_ids: vec![item.id.clone()],
+                            items: vec![item],
+                            ..Default::default()
+                        };
+                        // Keep both associations in the fixture so this isolates
+                        // Overview's visibility check from engine materialization.
+                        overview.set_outline_loads(fixture_loads(Some(snapshot)), cx);
+                        overview.set_mode(OverviewMode::Outline, cx);
+                        overview
+                    });
+                    cx.new(|_| ScheduledTaskOverviewFixture(overview))
+                },
+            )?;
         }
         Ok(())
     }
@@ -9473,7 +9571,11 @@ mod logic_tests {
             state.chats = vec![
                 row("c-awaiting", "/work/alpha", None).chat,
                 row("c-failed-tools", "/work/alpha", None).chat,
-                row("c-errored", "/work/alpha", None).chat,
+                {
+                    let mut chat = row("c-errored", "/work/alpha", None).chat;
+                    chat.last_message_at = Some(now);
+                    chat
+                },
                 row("c-idle", "/work/alpha", None).chat,
             ];
             state.sessions = vec![
@@ -9539,19 +9641,22 @@ mod logic_tests {
                 .is_some()
         );
         assert!(
-            vcx.debug_bounds("overview-row-stalled-c-failed-tools")
+            vcx.debug_bounds("overview-row-tool-failures-c-failed-tools")
                 .is_some()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         assert!(
             vcx.debug_bounds("overview-row-needs-input-c-idle")
                 .is_none()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_none()
+        );
 
+        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.needs_interaction_count, 1);
-            assert_eq!(o.stalled_count, 2);
+            assert_eq!(o.stalled_count, 1);
             assert_eq!(o.list_order.len(), 4);
         });
 
@@ -9567,13 +9672,34 @@ mod logic_tests {
             assert_eq!(o.list_order[0].0, "c-awaiting");
         });
 
-        // Clicking the "stalled" pill switches to the 2 stalled sessions.
+        // Clicking the "stalled" pill shows the errored session only.
         let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
         vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
         draw(vcx);
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.attention_filter, AttentionFilter::Stalled);
-            assert_eq!(o.list_order.len(), 2);
+            assert_eq!(o.list_order.len(), 1);
+            assert_eq!(o.list_order[0].0, "c-errored");
+            assert!(
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-errored")
+                    .unwrap()
+                    .visible
+            );
+            assert!(
+                !o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-failed-tools")
+                    .unwrap()
+                    .visible
+            );
+        });
+
+        overview.update(vcx, |o, cx| {
+            let ids = o.sidebar_filter_ids(cx).unwrap();
+            assert!(ids.contains("c-errored"));
+            assert!(!ids.contains("c-failed-tools"));
         });
 
         // Clicking "stalled" again clears the filter.
@@ -9603,9 +9729,12 @@ mod logic_tests {
             cx.notify();
         });
         draw(vcx);
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_some());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_some()
+        );
         overview.read_with(vcx, |o, _| {
-            assert_eq!(o.stalled_count, 3);
+            assert_eq!(o.stalled_count, 1);
         });
     }
 
@@ -10057,6 +10186,47 @@ mod logic_tests {
             vcx.debug_bounds("work-item-artifacts-register-input")
                 .is_some()
         );
+    }
+
+    #[gpui::test]
+    fn attention_filter_reaches_outline(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (overview, state, vcx) = outline_overview(cx, dir.path());
+        let now = Utc::now();
+        state.update(vcx, |state, cx| {
+            state.sessions.push(mast_proto::Session {
+                chat_id: CHAT_AUTH.into(),
+                device_id: "d".into(),
+                status: mast_proto::SessionStatus::AwaitingInput,
+                started_at: Some(now),
+                updated_at: now,
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
+            });
+            cx.notify();
+        });
+        overview.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
+        for filter in [AttentionFilter::NeedsInteraction, AttentionFilter::Stalled] {
+            if filter == AttentionFilter::Stalled {
+                state.update(vcx, |state, cx| {
+                    state.sessions[0].status = mast_proto::SessionStatus::Errored;
+                    cx.notify();
+                });
+            }
+            overview.update(vcx, |o, cx| {
+                o.attention_filter = filter;
+                o.rows_dirty = true;
+                cx.notify();
+            });
+            draw(vcx);
+            overview.read_with(vcx, |o, cx| {
+                let model = o.outline.read(cx).model();
+                assert!(model.row(&row_key::item("s1", API_AUTH)).is_some());
+                assert!(model.row(&row_key::chat(CHAT_AUTH)).is_some());
+                assert!(model.row(&row_key::item("s1", HOUSEKEEPING)).is_none());
+            });
+        }
     }
 
     /// Acceptance 30: only the visible slice of a large outline renders.
