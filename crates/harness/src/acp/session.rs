@@ -20,6 +20,14 @@ struct AcpSessionState {
     escalation_target: Option<SignalTarget>,
     interrupted: bool,
     interrupt_sent: bool,
+    prompt_seq: u64,
+    current_prompt_id: Option<String>,
+    completed_prompts: VecDeque<String>,
+    prompt_stall_deadline: Option<tokio::time::Instant>,
+    turn: Option<BoxFuture<'static, Result<Value, HarnessError>>>,
+    queued_steers: VecDeque<String>,
+    steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)>,
+    steer_backlog: VecDeque<String>,
 }
 
 impl AcpSessionState {
@@ -59,12 +67,11 @@ impl AcpSessionState {
 
     fn escalate_interrupt(
         &mut self,
-        turn: &mut Option<BoxFuture<'static, Result<Value, HarnessError>>>,
         escalation_signal: &mut Signal,
         kill_grace: Duration,
     ) {
         // Once escalation starts, a late response no longer owns this turn.
-        *turn = None;
+        self.turn = None;
         if let Some(target) = &self.escalation_target {
             send_signal(target, *escalation_signal);
         }
@@ -528,9 +535,9 @@ pub(super) async fn run_session(session: Session) {
     // one prompt is outstanding at a time, identified by `current_prompt_id`;
     // settled ids are remembered so a STALE `prompt_complete` (a late replay
     // of an already-settled prompt) can never settle a newer turn.
-    let mut prompt_seq: u64 = 1;
-    let mut current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-    let mut completed_prompts: VecDeque<String> = VecDeque::new();
+    let prompt_seq: u64 = 1;
+    let current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+    let completed_prompts: VecDeque<String> = VecDeque::new();
     // `MAST_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
     let prompt_stall: Option<Duration> = match mast_proto::env::var("MAST_ACP_PROMPT_STALL_MS")
         .ok()
@@ -540,9 +547,9 @@ pub(super) async fn run_session(session: Session) {
         Some(ms) => Some(Duration::from_millis(ms)),
         None => prompt_stall,
     };
-    let mut prompt_stall_deadline: Option<tokio::time::Instant> =
+    let prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-    let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
+    let turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),
             session_id.clone(),
@@ -552,19 +559,18 @@ pub(super) async fn run_session(session: Session) {
     });
     // Steers waiting for the turn boundary (agents without the extension, or
     // extension steers that lost the turn-end race).
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
+    let queued_steers: VecDeque<String> = VecDeque::new();
     // The in-flight `_session/steering` call (text + response future), plus
     // followers awaiting their turn. Polled from the main select so the loop
     // keeps draining `incoming` while the agent responds — awaiting inline
     // deadlocks against a full incoming channel when the agent floods
     // updates (the reader blocks on the channel and never parses the
     // steering response).
-    let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
-    let mut steer_backlog: VecDeque<String> = VecDeque::new();
+    let steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
+    let steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
     let mut done_current = false;
     let mut done_after_interrupt = false;
-    let mut state = AcpSessionState::default();
     let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
     // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
@@ -599,6 +605,17 @@ pub(super) async fn run_session(session: Session) {
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
+    let mut state = AcpSessionState {
+        prompt_seq,
+        current_prompt_id,
+        completed_prompts,
+        prompt_stall_deadline,
+        turn,
+        queued_steers,
+        steering_call,
+        steer_backlog,
+        ..AcpSessionState::default()
+    };
     'main: loop {
         tokio::select! {
             status = child.wait(), if state.child_exit.is_none() => {
@@ -607,17 +624,17 @@ pub(super) async fn run_session(session: Session) {
             _ = tokio::time::sleep_until(state.exit_drain_deadline.unwrap_or_else(tokio::time::Instant::now)),
                 if state.exit_drain_deadline.is_some() => break 'main,
 
-            res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
-                turn = None;
+            res = async { state.turn.as_mut().expect("guarded by if").await }, if state.turn.is_some() => {
+                state.turn = None;
                 if res.is_err() && client.is_closed() {
                     break 'main;
                 }
                 starve_deadline = None;
-                prompt_stall_deadline = None;
-                if let Some(id) = current_prompt_id.take() {
-                    completed_prompts.push_back(id);
-                    while completed_prompts.len() > 32 {
-                        completed_prompts.pop_front();
+                state.prompt_stall_deadline = None;
+                if let Some(id) = state.current_prompt_id.take() {
+                    state.completed_prompts.push_back(id);
+                    while state.completed_prompts.len() > 32 {
+                        state.completed_prompts.pop_front();
                     }
                 }
                 // Settle an in-flight `_session/steering` call BEFORE closing
@@ -632,7 +649,7 @@ pub(super) async fn run_session(session: Session) {
                 // timeout guards the flooded-incoming edge (reader blocked on
                 // a full channel never parses the response): past it the call
                 // is abandoned and the steer redelivered.
-                if let Some((text, mut fut)) = steering_call.take() {
+                if let Some((text, mut fut)) = state.steering_call.take() {
                     let outcome = match tokio::time::timeout(
                         Duration::from_millis(1000),
                         &mut fut,
@@ -662,12 +679,12 @@ pub(super) async fn run_session(session: Session) {
                             break 'main;
                         }
                     } else {
-                        queued_steers.push_back(text);
+                        state.queued_steers.push_back(text);
                     }
                     // Followers waiting on the settled call have no live turn
                     // to inject into anymore: boundary delivery.
-                    while let Some(next_text) = steer_backlog.pop_front() {
-                        queued_steers.push_back(next_text);
+                    while let Some(next_text) = state.steer_backlog.pop_front() {
+                        state.queued_steers.push_back(next_text);
                     }
                 }
                 // Updates streamed before the prompt response are already
@@ -753,7 +770,7 @@ pub(super) async fn run_session(session: Session) {
                 // Persistent session: a queued steer becomes the next turn;
                 // otherwise stay alive for the mailbox — the caller owns
                 // teardown (mirrors the codex harness).
-                if let Some(text) = queued_steers.pop_front() {
+                if let Some(text) = state.queued_steers.pop_front() {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
                         &event_tx,
@@ -769,16 +786,16 @@ pub(super) async fn run_session(session: Session) {
                     done_current = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    prompt_seq += 1;
-                    current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-                    prompt_stall_deadline =
+                    state.prompt_seq += 1;
+                    state.current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
+                    state.prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    turn = Some(prompt_turn(
+                    state.turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
                         text,
-                        current_prompt_id.clone(),
+                        state.current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
                     break 'main;
@@ -810,7 +827,7 @@ pub(super) async fn run_session(session: Session) {
                                 | Some("current_mode_update")
                         );
                     if !boilerplate {
-                        prompt_stall_deadline = None;
+                        state.prompt_stall_deadline = None;
                     }
                     // `_x.ai/session/prompt_complete` — the AUTHORITATIVE
                     // turn end for agents advertising it (grok): the
@@ -826,7 +843,7 @@ pub(super) async fn run_session(session: Session) {
                     if prompt_complete_extension
                         && method == "_x.ai/session/prompt_complete"
                         && !state.interrupted
-                        && turn.is_some()
+                        && state.turn.is_some()
                         && params.get("sessionId").and_then(Value::as_str)
                             == Some(session_id.as_str())
                     {
@@ -835,20 +852,20 @@ pub(super) async fn run_session(session: Session) {
                             .and_then(Value::as_str)
                             .map(str::to_owned);
                         let stale = pid.as_deref().is_some_and(|p| {
-                            completed_prompts.iter().any(|c| c == p)
-                        }) || (pid.is_some() && pid != current_prompt_id);
+                            state.completed_prompts.iter().any(|c| c == p)
+                        }) || (pid.is_some() && pid != state.current_prompt_id);
                         if !stale {
                             let stop = params
                                 .get("stopReason")
                                 .and_then(Value::as_str)
                                 .unwrap_or("end_turn")
                                 .to_owned();
-                            if let Some(old) = turn.take() {
+                            if let Some(old) = state.turn.take() {
                                 tokio::spawn(async move {
                                     let _ = old.await;
                                 });
                             }
-                            turn = Some(Box::pin(async move {
+                            state.turn = Some(Box::pin(async move {
                                 Ok(json!({ "stopReason": stop }))
                             }));
                         }
@@ -865,7 +882,7 @@ pub(super) async fn run_session(session: Session) {
                     }
                 }
                 Some(Incoming::Request { id, method, params }) => {
-                    prompt_stall_deadline = None;
+                    state.prompt_stall_deadline = None;
                     for ev in handle_server_request_live(
                         &client,
                         id,
@@ -888,7 +905,7 @@ pub(super) async fn run_session(session: Session) {
                     // Only a RESOLVED response is a clean finish; a request
                     // failed by the reader's EOF cleanup falls through to the
                     // crash-message bookkeeping below (stderr tail intact).
-                    if let Some(mut fut) = turn.take()
+                    if let Some(mut fut) = state.turn.take()
                         && let Ok(res @ Ok(_)) =
                             tokio::time::timeout(Duration::from_millis(50), &mut fut).await
                     {
@@ -921,10 +938,10 @@ pub(super) async fn run_session(session: Session) {
                 }
             },
 
-            res = async { steering_call.as_mut().expect("guarded by if").1.as_mut().await },
-                if steering_call.is_some() =>
+            res = async { state.steering_call.as_mut().expect("guarded by if").1.as_mut().await },
+                if state.steering_call.is_some() =>
             {
-                let (text, _) = steering_call.take().expect("guarded by if");
+                let (text, _) = state.steering_call.take().expect("guarded by if");
                 let outcome = match &res {
                     Ok(resp) => resp
                         .get("outcome")
@@ -952,7 +969,7 @@ pub(super) async fn run_session(session: Session) {
                     // consumer (parked session → Working) with no next turn
                     // and no Done ever coming — the stranded-Working /
                     // eternal-timer bug. Post-turn: nothing left to do.
-                    if turn.is_some() {
+                    if state.turn.is_some() {
                         // The injection proves the turn is LIVE: any settle
                         // deadline armed by an earlier noRunningTurn reply
                         // is no longer valid.
@@ -1012,7 +1029,7 @@ pub(super) async fn run_session(session: Session) {
                             break 'main;
                         }
                     }
-                } else if turn.is_some() {
+                } else if state.turn.is_some() {
                     // Raced the turn end: redeliver at the boundary the
                     // loop is about to hit. `noRunningTurn` is stronger —
                     // the adapter says nothing is running while our prompt
@@ -1035,7 +1052,7 @@ pub(super) async fn run_session(session: Session) {
                         starve_deadline =
                             Some(tokio::time::Instant::now() + STARVE_GRACE);
                     }
-                    queued_steers.push_back(text);
+                    state.queued_steers.push_back(text);
                 } else {
                     // The turn ended while the call was in flight and its
                     // boundary already passed — the steer becomes the next
@@ -1055,26 +1072,26 @@ pub(super) async fn run_session(session: Session) {
                     done_current = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    prompt_seq += 1;
-                    current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-                    prompt_stall_deadline =
+                    state.prompt_seq += 1;
+                    state.current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
+                    state.prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    turn = Some(prompt_turn(
+                    state.turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
                         text,
-                        current_prompt_id.clone(),
+                        state.current_prompt_id.clone(),
                     ));
                 }
-                while let Some(next_text) = steer_backlog.pop_front() {
-                    if turn.is_some() && !state.interrupted {
+                while let Some(next_text) = state.steer_backlog.pop_front() {
+                    if state.turn.is_some() && !state.interrupted {
                         let fut = steering_call_future(&client, &session_id, &next_text);
-                        steering_call = Some((next_text, fut));
+                        state.steering_call = Some((next_text, fut));
                         break;
                     }
                     // No live turn to inject into: boundary delivery.
-                    queued_steers.push_back(next_text);
+                    state.queued_steers.push_back(next_text);
                 }
             },
 
@@ -1086,8 +1103,8 @@ pub(super) async fn run_session(session: Session) {
                 cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if cancel_flush_deadline.is_some() && !state.interrupted => {
                 cancel_flush_deadline = None;
-                if turn.is_none()
-                    && let Some(text) = queued_steers.pop_front()
+                if state.turn.is_none()
+                    && let Some(text) = state.queued_steers.pop_front()
                 {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
@@ -1104,18 +1121,18 @@ pub(super) async fn run_session(session: Session) {
                     done_current = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    prompt_seq += 1;
-                    current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-                    prompt_stall_deadline =
+                    state.prompt_seq += 1;
+                    state.current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
+                    state.prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    turn = Some(prompt_turn(
+                    state.turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
                         text,
-                        current_prompt_id.clone(),
+                        state.current_prompt_id.clone(),
                     ));
-                } else if turn.is_none() && !steering_open {
+                } else if state.turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
                     break 'main;
                 }
@@ -1127,7 +1144,7 @@ pub(super) async fn run_session(session: Session) {
             // and usage updates must never arm this recovery.
             _ = tokio::time::sleep_until(
                 starve_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if starve_deadline.is_some() && turn.is_some() && !state.interrupted => {
+            ), if starve_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
                 starve_deadline = None;
                 tracing::warn!(
                     target: "mast_harness::acp",
@@ -1136,7 +1153,7 @@ pub(super) async fn run_session(session: Session) {
                 );
                 // Drop the dead future: a response that somehow arrives later
                 // resolves a closed channel harmlessly.
-                turn = None;
+                state.turn = None;
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
                     &event_tx,
@@ -1160,7 +1177,7 @@ pub(super) async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                if let Some(text) = queued_steers.pop_front() {
+                if let Some(text) = state.queued_steers.pop_front() {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
                         &event_tx,
@@ -1176,16 +1193,16 @@ pub(super) async fn run_session(session: Session) {
                     done_current = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    prompt_seq += 1;
-                    current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-                    prompt_stall_deadline =
+                    state.prompt_seq += 1;
+                    state.current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
+                    state.prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    turn = Some(prompt_turn(
+                    state.turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
                         text,
-                        current_prompt_id.clone(),
+                        state.current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
@@ -1199,11 +1216,11 @@ pub(super) async fn run_session(session: Session) {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if turn.is_none() && cancel_flush_deadline.is_some() {
+                    if state.turn.is_none() && cancel_flush_deadline.is_some() {
                         // A busy-session cancel is already in flight: this
                         // steer lines up behind it and dispatches at flush.
-                        queued_steers.push_back(text);
-                    } else if turn.is_none()
+                        state.queued_steers.push_back(text);
+                    } else if state.turn.is_none()
                         && (!open_tools.is_empty()
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
@@ -1219,10 +1236,10 @@ pub(super) async fn run_session(session: Session) {
                             "session/cancel",
                             Some(json!({ "sessionId": session_id })),
                         );
-                        queued_steers.push_back(text);
+                        state.queued_steers.push_back(text);
                         cancel_flush_deadline =
                             Some(tokio::time::Instant::now() + CANCEL_FLUSH);
-                    } else if turn.is_none() {
+                    } else if state.turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
                         let (prev, next) = rotate(&mut assistant_message_id);
                         if !send(
@@ -1239,43 +1256,44 @@ pub(super) async fn run_session(session: Session) {
                         done_current = false;
                         open_tools.clear();
                         last_update_at = tokio::time::Instant::now();
-                        prompt_seq += 1;
-                    current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-                    prompt_stall_deadline =
+                        state.prompt_seq += 1;
+                    state.current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{}", state.prompt_seq));
+                    state.prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    turn = Some(prompt_turn(
+                    state.turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
                         text,
-                        current_prompt_id.clone(),
+                        state.current_prompt_id.clone(),
                     ));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
                         // extension: start the call, resolved by its own
                         // select branch. One call in flight at a time;
                         // followers wait in the backlog.
-                        if steering_call.is_some() {
-                            steer_backlog.push_back(text);
+                        if state.steering_call.is_some() {
+                            state.steer_backlog.push_back(text);
                         } else {
                             let fut = steering_call_future(&client, &session_id, &text);
-                            steering_call = Some((text, fut));
+                            state.steering_call = Some((text, fut));
                         }
                     } else {
                         // No extension (Grok today): turn-boundary delivery.
-                        queued_steers.push_back(text);
+                        state.queued_steers.push_back(text);
                     }
                 }
                 None => {
                     steering_open = false;
-                    if turn.is_none() && queued_steers.is_empty() {
+                    if state.turn.is_none() && state.queued_steers.is_empty() {
                         break 'main;
                     }
                 }
             },
 
             _ = interrupt.cancelled(), if !state.interrupt_sent => {
-                if state.interrupt(&client, &session_id, turn.is_some(), &child, interrupt_grace)
+                let has_turn = state.turn.is_some();
+                if state.interrupt(&client, &session_id, has_turn, &child, interrupt_grace)
                     == LoopControl::Stop
                 {
                     break 'main;
@@ -1289,8 +1307,8 @@ pub(super) async fn run_session(session: Session) {
             // launch-time update check). Surface a visible error instead of
             // indefinite Working.
             _ = tokio::time::sleep_until(
-                prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
-            ), if prompt_stall_deadline.is_some() && turn.is_some() && !state.interrupted => {
+                state.prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
+            ), if state.prompt_stall_deadline.is_some() && state.turn.is_some() && !state.interrupted => {
                 state.expire_prompt_stall(
                     &event_tx, &session_id, agent_name, stall_hint, prompt_stall, &mut done_current,
                 ).await;
@@ -1301,7 +1319,7 @@ pub(super) async fn run_session(session: Session) {
             // or signal a pid after the child has been reaped.
             _ = tokio::time::sleep_until(state.escalation_deadline.unwrap_or_else(tokio::time::Instant::now)),
                 if state.escalation_deadline.is_some() => {
-                state.escalate_interrupt(&mut turn, &mut escalation_signal, kill_grace);
+                state.escalate_interrupt(&mut escalation_signal, kill_grace);
             },
 
             _ = event_tx.closed() => break 'main,
