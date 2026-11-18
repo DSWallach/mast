@@ -98,6 +98,7 @@ struct MockState {
     attachments_error: bool,
     accept_other_key: bool,
     delay: Duration,
+    block_issue: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 #[derive(Clone)]
@@ -304,7 +305,7 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<MockState>>) 
         .unwrap_or_default()
         .to_owned();
     let auth = headers.get("authorization").cloned();
-    let (reply, delay) = {
+    let (reply, delay, blocked) = {
         let mut state = state.lock().unwrap();
         state.recorded.push(Recorded {
             authorization: auth.clone(),
@@ -315,8 +316,13 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<MockState>>) 
             Some(reply) => reply,
             None => route(&state, &operation, auth.as_deref(), &request["variables"]),
         };
-        (reply, state.delay)
+        let blocked = if operation == "MastLinearIssue" { state.block_issue.take() } else { None };
+        (reply, state.delay, blocked)
     };
+    if let Some((started, release)) = blocked {
+        started.notify_one();
+        release.notified().await;
+    }
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
@@ -627,6 +633,33 @@ async fn tracker_project_page_reports_when_the_bounded_result_has_more() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tracker_project_page_cache_is_isolated_by_account() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-1", "Account A", None, "started")], None)}})));
+    let params = json!({"spaceId": SPACE, "projectId": "shared"});
+    let first = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params.clone()).await.unwrap();
+    assert_eq!(first["issues"][0]["title"], "Account A");
+
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT,
+        json!({"label": "Personal", "apiKey": OTHER_KEY})).await.unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": account["id"], "operationId": "cache-select-personal"})).await.unwrap();
+    assert!(rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.is_err());
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-2", "Account B", None, "started")], None)}})));
+    let second = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params).await.unwrap();
+    assert_eq!(second["issues"][0]["title"], "Account B");
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": null, "operationId": "cache-select-default"})).await.unwrap();
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.unwrap();
+    assert_eq!(cached["issues"][0]["title"], "Account A");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
     let rig = rig().await;
     for _ in 0..2 {
@@ -910,6 +943,33 @@ async fn space_scoped_linear_operations_need_linear_on() {
     // Still off in the other Space.
     let text = rig.mutate(create(OFF_SPACE, "op-other")).await.unwrap_err();
     assert!(text.contains("linear/disabledForSpace"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_discards_issue_fetched_before_account_switch() {
+    let rig = rig().await;
+    rig.mock.set_issue(issue_node("ENG-1", "Initial", Some("Initial body"), "started"));
+    rig.enable(SPACE, true).await;
+    let item = rig.from_linear("race-item", None, "ENG-1").await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({"label": "Personal", "apiKey": OTHER_KEY})).await.unwrap();
+    rig.mock.set_issue(issue_node("ENG-1", "Account A", Some("Account A body"), "started"));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    rig.mock.state.lock().unwrap().block_issue = Some((started.clone(), release.clone()));
+    let refresh = rig.call(methods::LINEAR_REFRESH_LINKED_ITEMS, json!({"spaceId": SPACE}));
+    let switch = async {
+        started.notified().await;
+        rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+            "accountId": account["id"], "operationId": "race-switch"})).await.unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::join!(refresh, switch);
+    assert_eq!(result.unwrap()["updated"], 0);
+    let snapshot = rig.snapshot(SPACE);
+    let item = snapshot.item(&item).unwrap();
+    assert_eq!(item.title, "ENG-1 · Initial");
+    assert_eq!(item.description.as_deref(), Some("Initial body"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

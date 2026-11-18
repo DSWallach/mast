@@ -701,12 +701,11 @@ impl Tools {
         let mut result = json!({"chatId": chat.id, "status": status, "workItemId": work_item_id,
             "reusedExisting": true, "replayed": claim["replayed"]});
         if let Some(prompt) = args.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-            let mode = claim["deliveryMode"].as_str().unwrap_or("run");
-            if mode == "awaitingInput" {
+            if status == "awaitingInput" && claim["replayed"] != true {
                 anyhow::bail!("chat is waiting for an answer; use respond_to_input");
             }
             let sent = Box::pin(self.send_message(Some(origin), SendArgs {
-                chat: existing_id.to_owned(), text: prompt.to_owned(), mode: Some(mode.to_owned()),
+                chat: existing_id.to_owned(), text: prompt.to_owned(), mode: Some("deferred_auto".to_owned()),
                 wait: args.wait, timeout_secs: args.timeout_secs, operation_id: Some(operation_id),
             })).await?;
             result["sent"] = sent["sent"].clone();
@@ -975,6 +974,12 @@ impl Tools {
         let candidate = if !args.new_chat && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
             Box::pin(self.reusable_chat(origin, item, &harnesses)).await?
         } else { None };
+
+        if work_item_id.is_some() && candidate.is_none()
+            && args.prompt.as_deref().is_none_or(|p| p.trim().is_empty())
+        {
+            anyhow::bail!("workItemId needs a prompt when starting a new chat");
+        }
 
         let (chat_id, replayed) = match (origin, agent_key.as_deref()) {
             (Some(origin), Some(key)) => {
@@ -1627,6 +1632,7 @@ impl Tools {
             })
             .unwrap_or(SessionStatus::Idle);
         let chosen = match mode {
+            "deferred_auto" if operation_id.is_some() => "auto",
             "auto" => match live {
                 SessionStatus::Idle | SessionStatus::Errored => "run",
                 SessionStatus::Working => {
@@ -1648,6 +1654,13 @@ impl Tools {
         let command_id = operation_id.map(|op| mast_proto::derive_id(op, mast_proto::roles::COMMAND));
         let id = if let (Some(message_id), Some(command_id)) = (message_id, command_id) {
             match chosen {
+                "auto" => {
+                    let command = SessionCommandPayload::AutoMessage {
+                        request: run_request(chat, space, harness, text), message_id, instructions: None,
+                    };
+                    self.zeron.call(methods::QUEUE_COMMAND, json!({"chatId": chat.id, "commandId": command_id, "command": command})).await?;
+                    command_id
+                }
                 "run" | "steer" => {
                     let command = if chosen == "run" {
                         SessionCommandPayload::Run { request: run_request(chat, space, harness, text), message_id }

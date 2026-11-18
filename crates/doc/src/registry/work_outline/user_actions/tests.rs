@@ -1617,9 +1617,13 @@ fn agent_may_link_supported_references_only_within_its_subtree() {
     };
     as_agent(&mut f, reference("link-own", &own, "github", "pullRequest")).unwrap();
     as_agent(&mut f, reference("link-child", &child, "linear", "issue")).unwrap();
+    as_agent(&mut f, reference("link-project-own", &own, "linear", "project")).unwrap();
+    as_agent(&mut f, reference("link-project-child", &child, "linear", "project")).unwrap();
     denied(&mut f, reference("link-sibling", &sibling, "github", "pullRequest"));
     denied(&mut f, reference("link-other", &other, "linear", "issue"));
-    denied(&mut f, reference("link-type", &own, "linear", "project"));
+    denied(&mut f, reference("link-project-sibling", &sibling, "linear", "project"));
+    denied(&mut f, reference("link-project-other", &other, "linear", "project"));
+    denied(&mut f, reference("link-type", &own, "linear", "other"));
     denied(&mut f, reference("link-provider", &own, "other", "issue"));
 }
 

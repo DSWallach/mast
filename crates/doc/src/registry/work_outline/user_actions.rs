@@ -1752,7 +1752,7 @@ impl RegistryDoc {
     /// - `proposeWorkItemInstruction` targeting the assigned item, its
     ///   parent, or the Space root, with no other origin Chat.
     ///
-    /// - GitHub pull requests and Linear issues on the assigned item or its descendants.
+    /// - GitHub pull requests and Linear issues or projects on the assigned item or its descendants.
     ///
     /// Everything else (move, archive, restore, remove, other references, repair,
     /// instruction writes, revisions, applications, execution
@@ -1854,9 +1854,10 @@ impl RegistryDoc {
                     (p.provider.as_str(), p.reference_type.as_str()),
                     (mast_proto::pr_review_sync::GITHUB_PROVIDER, mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE)
                         | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_PROJECT_REFERENCE)
                 ) {
                     return Err(unauthorized(
-                        "Agents may only link GitHub pull requests and Linear issues",
+                        "Agents may only link GitHub pull requests and Linear issues or projects",
                     ));
                 }
                 in_scope(&p.work_item_id)
