@@ -446,6 +446,14 @@ impl WorkItemLaunchService {
         {
             let title = match snapshot.linear_issue_reference(&item.id) {
                 Some(reference) => format!("{} {}", reference.external_id, item.title),
+                None if item.title.trim().eq_ignore_ascii_case("planning") => {
+                    let context = item.parent_work_item_id.as_deref()
+                        .and_then(|id| snapshot.item(id))
+                        .map(|parent| parent.title.as_str())
+                        .filter(|title| !title.trim().is_empty() && !title.trim().eq_ignore_ascii_case("planning"))
+                        .unwrap_or_else(|| space.display_name());
+                    format!("{context} {}", item.title)
+                }
                 None => item.title.clone(),
             };
             self.workspace

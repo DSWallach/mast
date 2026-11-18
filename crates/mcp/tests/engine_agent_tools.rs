@@ -277,6 +277,7 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     Box::pin(check_reuse_without_prompt(&tools, &linked_id, &launched_id)).await;
     Box::pin(check_force_chat(&core, &tools, &linked_id, &launched_id)).await;
     Box::pin(check_unlinked_item_title(&core, &tools)).await;
+    Box::pin(check_planning_item_title(&core, &tools)).await;
 
     let args = json!({ "project": SPACE, "harness": "claude-code", "title": "Reviewer",
                        "prompt": "review the diff", "idempotency_key": "spawn-reviewer" });
@@ -309,7 +310,7 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         .iter()
         .filter(|c| c.parent_chat_id.as_deref() == Some(PARENT))
         .collect();
-    assert_eq!(children.len(), 4);
+    assert_eq!(children.len(), 5);
     assert!(children.iter().any(|c| c.id == child));
     let operation = mast_proto::agent_tools::operation_id(PARENT, "spawn-reviewer");
     let command_id = derive_id(&operation, roles::COMMAND);
@@ -433,6 +434,13 @@ async fn check_unlinked_item_title(core: &EngineCore, tools: &Tools) {
     let chat = tools.call("create_chat", json!({"workItemId": item["workItemId"], "prompt": "Review the change", "idempotencyKey": "launch-unlinked"})).await.unwrap();
     let stored = core.workspace.chat(chat["chatId"].as_str().unwrap()).unwrap().unwrap();
     assert_eq!(stored.title.as_deref(), Some("Review behavior"));
+}
+
+async fn check_planning_item_title(core: &EngineCore, tools: &Tools) {
+    let item = tools.call("work_outline_create_child", json!({"title": "Planning", "idempotencyKey": "create-planning"})).await.unwrap();
+    let chat = tools.call("create_chat", json!({"workItemId": item["workItemId"], "prompt": "Plan the change", "idempotencyKey": "launch-planning"})).await.unwrap();
+    let stored = core.workspace.chat(chat["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(stored.title.as_deref(), Some("Feature Planning"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
