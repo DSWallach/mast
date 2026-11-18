@@ -1607,11 +1607,18 @@ struct ChatRowView {
 }
 
 impl Render for ChatRowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
         let args = self.args.clone();
+        let row_id = format!("chat-{}", args.id);
+        let hover_key = format!("{row_id}-hover");
+        let hover = motion::hover_t(&hover_key);
+        let hovered = shell.read(cx).chat_status_hover.as_deref() == Some(row_id.as_str());
+        if (hovered && hover < 1.0) || (!hovered && hover > 0.0) {
+            window.request_animation_frame();
+        }
         // A view root is laid out against its bounds but sizes to its content, so
         // restore the full-width stretch the row had as a direct flex child.
         let row = shell.update(cx, |shell, cx| {
@@ -1669,6 +1676,29 @@ impl Shell {
         };
         // Width stays auto so the row stretches like the uncached row did.
         view.cached(gpui::StyleRefinement::default().h(px(height.max(0.0)))).into_any_element()
+    }
+
+    fn update_chat_row_hover(&mut self, row_id: &str, fade_key: &str, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let row = row_id.strip_prefix("chat-").and_then(|id| self.sidebar_row_views.get(id)).cloned();
+        if let Some(row) = row {
+            motion::set_hover(fade_key, hovered, motion::reduced_motion(cx));
+            if hovered {
+                self.chat_status_hover = Some(row_id.to_string());
+            } else if self.chat_status_hover.as_deref() == Some(row_id) {
+                self.chat_status_hover = None;
+            }
+            row.update(cx, |_, cx| cx.notify());
+        } else {
+            motion::hover_listener(fade_key.to_owned())(&hovered, window, cx);
+            if hovered {
+                self.chat_status_hover = Some(row_id.to_string());
+            } else if self.chat_status_hover.as_deref() == Some(row_id) {
+                self.chat_status_hover = None;
+            } else {
+                return;
+            }
+            cx.notify();
+        }
     }
 
     /// Drop row views for chats that left the list; called once per sidebar pass.
@@ -7535,16 +7565,8 @@ impl Shell {
                 .when(!preview, |el| el.cursor_pointer()
                     .on_hover({
                         let hover_id = row_id.clone();
-                        cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                    this.chat_status_hover = Some(hover_id.clone());
-                                    cx.notify();
-                                }
-                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.chat_status_hover = None;
-                                cx.notify();
-                            }
+                        cx.listener(move |this, hovered: &bool, window, cx| {
+                            this.update_chat_row_hover(&hover_id, &format!("{hover_id}-hover"), *hovered, window, cx);
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(select_id.clone(), cx)))
@@ -7712,19 +7734,9 @@ impl Shell {
             // hover listener per element).
             .when(!preview, |el| {
                 el.on_hover({
-                    let fade_hover = motion::hover_listener(fade_key.clone());
                     let hover_id = row_id.clone();
                     cx.listener(move |this, hovered: &bool, window, cx| {
-                        fade_hover(hovered, window, cx);
-                        if *hovered {
-                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
-                                cx.notify();
-                            }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
-                            cx.notify();
-                        }
+                        this.update_chat_row_hover(&hover_id, &fade_key, *hovered, window, cx);
                     })
                 })
                 .cursor_pointer()

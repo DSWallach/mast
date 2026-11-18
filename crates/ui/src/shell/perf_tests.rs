@@ -988,20 +988,30 @@ fn model_options_hash_cost() {
 
 #[gpui::test]
 fn sidebar_hover_frame_cost(cx: &mut TestAppContext) {
-    let (_shell, sidebar, _state, vcx) = sidebar_budget_fixture(cx);
+    let (shell, sidebar, _state, vcx) = sidebar_budget_fixture(cx);
     vcx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
     for _ in 0..4 { animation_frame(vcx); }
     let centers: Vec<_> = ["chat-c359", "chat-c358", "chat-c357", "chat-c356", "chat-c355", "chat-c354"]
         .into_iter()
-        .filter_map(|id| vcx.debug_bounds(id).map(|bounds| bounds.center()))
+        .filter_map(|id| vcx.debug_bounds(id).map(|bounds| (id, bounds.center())))
         .take(2).collect();
     assert_eq!(centers.len(), 2, "fixture must expose two chat rows");
     let before = sidebar_counts(&sidebar, vcx);
     let started = std::time::Instant::now();
     for index in 0..BUDGET_FRAMES {
-        vcx.simulate_mouse_move(centers[index as usize % 2], None, gpui::Modifiers::default());
+        let (id, center) = centers[index as usize % 2];
+        let move_before = sidebar_counts(&sidebar, vcx);
+        vcx.simulate_mouse_move(center, None, gpui::Modifiers::default());
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear());
+        let move_spent = sidebar_delta(move_before, sidebar_counts(&sidebar, vcx));
+        assert!(move_spent.chat_rows <= 2, "hover rebuilt more than two rows: {move_spent:?}");
+        assert_eq!(shell.read_with(vcx, |shell, _| shell.chat_status_hover.clone()).as_deref(), Some(id));
+        assert_eq!(motion::hover_t(&format!("{id}-hover")), 1.0, "hover wash must reach its endpoint with reduced motion");
+        if index > 0 {
+            let (previous_id, _) = centers[(index as usize - 1) % 2];
+            assert_eq!(motion::hover_t(&format!("{previous_id}-hover")), 0.0, "the previous row must clear its hover wash");
+        }
     }
     let spent = sidebar_delta(before, sidebar_counts(&sidebar, vcx));
     eprintln!("BUDGET hover ms/frame: {:.3}; {spent:?}", started.elapsed().as_secs_f64() * 1000.0 / BUDGET_FRAMES as f64);
