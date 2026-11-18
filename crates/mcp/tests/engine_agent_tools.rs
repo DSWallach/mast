@@ -268,36 +268,11 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         .unwrap();
     assert_eq!(current["workItem"]["id"], item);
 
-    // Reference mutations use the same rows as Linear import and PR linking.
-    let linked = tools.call("work_outline_create_child", json!({
-        "title": "Implement feature", "linearIssue": "ENG-123", "idempotencyKey": "create-linked"
-    })).await.unwrap();
-    let linked_id = linked["workItemId"].as_str().unwrap();
-    let err = tools.call("work_outline_create_child", json!({
-        "title": "Implement feature", "linearIssue": "ENG-999", "idempotencyKey": "create-linked"
-    })).await.unwrap_err();
-    assert!(err.contains("operationConflict"), "{err}");
-    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
-    let issue = snapshot.linear_issue_reference(linked_id).unwrap();
-    assert_eq!(issue.external_id, "ENG-123");
-    assert_eq!(issue.provider, mast_proto::linear::LINEAR_PROVIDER);
-    tools.call("work_outline_link", json!({"workItemId": linked_id,
-        "pullRequest": "acme/repo#42", "idempotencyKey": "link-pr"})).await.unwrap();
-    tools.call("work_outline_link", json!({"workItemId": linked_id,
-        "linearIssue": "https://linear.app/acme/issue/ENG-456/description", "idempotencyKey": "link-linear"})).await.unwrap();
-    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
-    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "acme/repo#42" && r.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER));
-    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "ENG-456" && r.provider == mast_proto::linear::LINEAR_PROVIDER));
-    let err = tools.call("work_outline_link", json!({"workItemId": "foreign-item", "linearIssue": "ENG-3", "idempotencyKey": "link-foreign"})).await.unwrap_err();
-    assert!(err.contains("unauthorized"), "{err}");
-    let err = tools.call("work_outline_create_child", json!({"title": "Invalid", "linearIssue": "not an issue", "idempotencyKey": "invalid-linear"})).await.unwrap_err();
-    assert!(err.contains("linearIssue"), "{err}");
 
-    let launched = tools.call("create_chat", json!({"workItemId": linked_id,
-        "prompt": "Implement the feature", "idempotencyKey": "launch-linked"})).await.unwrap();
-    let launched_id = launched["chatId"].as_str().unwrap();
-    let launched_chat = core.workspace.chat(launched_id).unwrap().unwrap();
-    assert_eq!(launched_chat.title.as_deref(), Some("ENG-123 Implement feature"));
+
+    let linked_id = Box::pin(check_create_linked_item(&core, &tools)).await;
+    Box::pin(check_link_work_item(&core, &tools, &linked_id)).await;
+    Box::pin(check_item_chat_title(&core, &tools, &linked_id)).await;
 
     let args = json!({ "project": SPACE, "harness": "claude-code", "title": "Reviewer",
                        "prompt": "review the diff", "idempotency_key": "spawn-reviewer" });
@@ -373,6 +348,44 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         assert!(err.contains("unauthenticated"), "{name}: {err}");
     }
     let _: Value = current;
+}
+
+async fn check_create_linked_item(core: &EngineCore, tools: &Tools) -> String {
+    let linked = tools.call("work_outline_create_child", json!({
+        "title": "Implement feature", "linearIssue": "ENG-123", "idempotencyKey": "create-linked"
+    })).await.unwrap();
+    let linked_id = linked["workItemId"].as_str().unwrap().to_owned();
+    let err = tools.call("work_outline_create_child", json!({
+        "title": "Implement feature", "linearIssue": "ENG-999", "idempotencyKey": "create-linked"
+    })).await.unwrap_err();
+    assert!(err.contains("operationConflict"), "{err}");
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
+    let issue = snapshot.linear_issue_reference(&linked_id).unwrap();
+    assert_eq!(issue.external_id, "ENG-123");
+    assert_eq!(issue.provider, mast_proto::linear::LINEAR_PROVIDER);
+    linked_id
+}
+
+async fn check_link_work_item(core: &EngineCore, tools: &Tools, linked_id: &str) {
+    tools.call("work_outline_link", json!({"workItemId": linked_id,
+        "pullRequest": "acme/repo#42", "idempotencyKey": "link-pr"})).await.unwrap();
+    tools.call("work_outline_link", json!({"workItemId": linked_id,
+        "linearIssue": "https://linear.app/acme/issue/ENG-456/description", "idempotencyKey": "link-linear"})).await.unwrap();
+    let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
+    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "acme/repo#42" && r.provider == mast_proto::pr_review_sync::GITHUB_PROVIDER));
+    assert!(snapshot.external_references.iter().any(|r| r.work_item_id == linked_id && r.external_id == "ENG-456" && r.provider == mast_proto::linear::LINEAR_PROVIDER));
+    let err = tools.call("work_outline_link", json!({"workItemId": "foreign-item", "linearIssue": "ENG-3", "idempotencyKey": "link-foreign"})).await.unwrap_err();
+    assert!(err.contains("unauthorized"), "{err}");
+    let err = tools.call("work_outline_create_child", json!({"title": "Invalid", "linearIssue": "not an issue", "idempotencyKey": "invalid-linear"})).await.unwrap_err();
+    assert!(err.contains("linearIssue"), "{err}");
+}
+
+async fn check_item_chat_title(core: &EngineCore, tools: &Tools, linked_id: &str) {
+    let launched = tools.call("create_chat", json!({"workItemId": linked_id,
+        "prompt": "Implement the feature", "idempotencyKey": "launch-linked"})).await.unwrap();
+    let launched_id = launched["chatId"].as_str().unwrap();
+    let launched_chat = core.workspace.chat(launched_id).unwrap().unwrap();
+    assert_eq!(launched_chat.title.as_deref(), Some("ENG-123 Implement feature"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
