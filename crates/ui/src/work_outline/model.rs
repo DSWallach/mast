@@ -100,6 +100,8 @@ pub(crate) struct OutlineChat {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OutlineOptions {
     pub hide_completed: bool,
+    /// Keep only paths leading to visible chats.
+    pub attention_only: bool,
     pub show_archived: bool,
     /// Trimmed, lowercased search text; empty matches everything.
     pub query: String,
@@ -408,7 +410,7 @@ pub(crate) fn flatten(
                 }
             }
             roots.extend(children);
-        } else if !children.is_empty() || options.query.is_empty() {
+        } else if !children.is_empty() || (options.query.is_empty() && !options.attention_only) {
             roots.push(Node {
                 key: row_key::space(&space.id),
                 kind: OutlineRowKind::Space {
@@ -614,8 +616,10 @@ fn item_node<'s>(
     // archived item: its Chats move to Unassociated Chats instead of pinning
     // the item in view (dimmed, and immovable since archived items cannot
     // move). The assignment itself is untouched.
-    let archived_hidden =
-        item.archived_at.is_some() && !options.show_archived && children.is_empty();
+    let archived_hidden = item.archived_at.is_some()
+        && !options.show_archived
+        && children.is_empty()
+        && !options.attention_only;
     if archived_hidden && !homed.is_empty() {
         let unassociated = ctx
             .by_home
@@ -636,7 +640,10 @@ fn item_node<'s>(
         })
         .collect();
     for chat_id in &item.chat_ids {
-        if !archived_hidden && !ctx.chats.contains_key(chat_id.as_str()) && options.query.is_empty()
+        if !options.attention_only
+            && !archived_hidden
+            && !ctx.chats.contains_key(chat_id.as_str())
+            && options.query.is_empty()
         {
             chat_nodes.push(Node {
                 key: row_key::chat(chat_id),
@@ -654,7 +661,7 @@ fn item_node<'s>(
     let self_visible =
         (!archived || options.show_archived) && (!completed || !options.hide_completed);
     let has_visible_below = !children.is_empty() || !chat_nodes.is_empty();
-    if !(has_visible_below || (under_match && self_visible)) {
+    if !(has_visible_below || (!options.attention_only && under_match && self_visible)) {
         if completed && !archived && options.hide_completed && options.query.is_empty() {
             ctx.hidden_completed += 1;
         }
@@ -1010,6 +1017,29 @@ pub(crate) mod tests {
             all_spaces: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn attention_filter_keeps_only_matching_chat_ancestors() {
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let mut chats = fixture_chats("s1");
+        for chat in &mut chats {
+            chat.visible = chat.id == CHAT_AUTH;
+        }
+        let options = OutlineOptions {
+            attention_only: true,
+            ..opts()
+        };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        assert_eq!(
+            keys(&model),
+            vec![
+                (0, row_key::item("s1", LAUNCH)),
+                (1, row_key::item("s1", API)),
+                (2, row_key::item("s1", API_AUTH)),
+                (3, row_key::chat(CHAT_AUTH)),
+            ]
+        );
     }
 
     #[test]

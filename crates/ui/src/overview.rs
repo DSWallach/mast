@@ -5974,6 +5974,7 @@ impl Overview {
             chats: (*self.outline_chats).clone(),
             options: OutlineOptions {
                 hide_completed: self.hide_stale && !self.outline_show_completed,
+                attention_only: self.attention_filter != AttentionFilter::All,
                 show_archived: self.show_archived,
                 query: self.search.read(cx).text().trim().to_lowercase(),
                 all_spaces: true,
