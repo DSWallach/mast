@@ -104,7 +104,7 @@ pub(crate) struct LifecycleRow {
 
 pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
     let pr = facts.pull_request;
-    let stage = if pr.merged {
+    let stage = if pr.merged || facts.item_completed {
         LifecycleStage::Done
     } else if pr.open {
         if pr.approved && !pr.changes_requested && pr.checks_passing {
@@ -112,7 +112,7 @@ pub(crate) fn derive_lifecycle(facts: LifecycleFacts) -> LifecycleRow {
         } else {
             LifecycleStage::PrReview
         }
-    } else if facts.item_completed || facts.linear_completed {
+    } else if facts.linear_completed {
         LifecycleStage::Done
     } else if facts.ready_request || facts.branch_review {
         LifecycleStage::CodeReview
@@ -160,6 +160,9 @@ mod tests {
         let row = derive_lifecycle(facts);
         assert_eq!(row.stage, LifecycleStage::PrReview);
         assert!(row.linear_completed_with_open_pr);
+        facts.item_completed = true;
+        assert_eq!(derive_lifecycle(facts).stage, LifecycleStage::Done);
+        facts.item_completed = false;
         facts.pull_request.approved = true;
         facts.pull_request.changes_requested = true;
         facts.pull_request.checks_passing = true;
