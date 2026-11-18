@@ -280,3 +280,38 @@ fn tool_group_clicks_toggle_group_and_detail(cx: &mut gpui::TestAppContext) {
         assert_eq!(this.list.logical_scroll_top().item_ix, 0);
     });
 }
+
+#[gpui::test]
+fn tool_group_schedules_frames_only_while_motion_is_enabled(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let transcript = cx.new(|cx| Transcript::new(state, cx));
+    transcript.update(cx, |this, _| {
+        this.folds.insert("group".into(), FoldState { open: Some(true), ..Default::default() });
+        this.tool_group_reveals.insert("group".into(), ToolGroupReveal {
+            starts: vec![Some(Instant::now())], ..Default::default()
+        });
+    });
+    let tools = Arc::new(vec![ToolItem {
+        part_id: "call".into(), call: ToolCall::Exec { command: "pwd".into() },
+        is_error: false, resolved: true, detail: None, invocation: None,
+        output_ref: None, output_bytes: None, diff_ref: None,
+        subagent_ref: None, subagent_status: None, subagent_tail: None, is_thought: false,
+    }]);
+    let (_, vcx) = cx.add_window_view(|_, _| ToolGroupFixture { transcript: transcript.clone(), tools });
+    vcx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        window.refresh();
+        window.draw(cx).clear();
+        assert!(window.simulate_next_frame(cx) > 0);
+        cx.set_reduce_motion(true);
+        window.refresh();
+        window.draw(cx).clear();
+        assert_eq!(window.simulate_next_frame(cx), 0);
+    });
+}
