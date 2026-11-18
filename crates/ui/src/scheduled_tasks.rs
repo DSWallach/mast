@@ -803,7 +803,6 @@ pub(crate) fn next_run_label(task: &ScheduledTask) -> Option<String> {
     })
 }
 
-/// The newest run's state and detail (`runs` come newest first).
 fn run_state_label(state: ScheduledRunState) -> &'static str {
     match state {
         ScheduledRunState::Launching => "Launching",
@@ -818,6 +817,7 @@ fn run_state_label(state: ScheduledRunState) -> &'static str {
     }
 }
 
+/// The newest run's state and detail (`runs` come newest first).
 pub(crate) fn last_outcome_label(runs: &[ScheduledRun], task_id: &str) -> String {
     runs.iter()
         .find(|r| r.task_id == task_id)

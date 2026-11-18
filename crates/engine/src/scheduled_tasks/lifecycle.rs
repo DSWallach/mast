@@ -84,9 +84,6 @@ impl ScheduledTasks {
         };
         let workspace = &self.0.workspace;
         let tokens = self.0.sessions.agent_tokens();
-        // Doc cache code can read the registry under its own lock. Obtain
-        // the doc before taking the registry lock, then inspect its contents.
-        let doc = self.0.host.scheduled_run_doc(chat_id)?;
         workspace.archive_scheduled_run_if(
             chat_id,
             |chat| {
@@ -102,13 +99,16 @@ impl ScheduledTasks {
                         .is_some_and(|assistant| assistant.chat_id == chat.id)
             },
             || {
-                if self.0.sessions.turn_in_flight(chat_id) {
-                    return Ok(false);
-                }
-                match &doc {
-                    Some(doc) => Ok(!has_queued_turn(doc)?),
-                    None => Ok(false),
-                }
+                let doc = self.0.host.scheduled_run_doc(chat_id)?;
+                Ok(move || {
+                    if self.0.sessions.turn_in_flight(chat_id) {
+                        return Ok(false);
+                    }
+                    match &doc {
+                        Some(doc) => Ok(!has_queued_turn(doc)?),
+                        None => Ok(false),
+                    }
+                })
             },
         )
     }

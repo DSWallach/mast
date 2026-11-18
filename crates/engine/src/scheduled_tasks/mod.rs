@@ -596,7 +596,15 @@ impl ScheduledTasks {
                 r.state = ScheduledRunState::Cancelled;
                 r.finished_at = Some(now);
                 r.detail = Some("The task was paused or deleted before dispatch".into());
-                self.record_run(&r, Some(now))?;
+                // The user already acted. There is no unattended run to
+                // review when dispatch is cancelled before a chat exists.
+                if let Some(chat_id) = &r.chat_id
+                    && self.0.workspace.chat(chat_id)?.is_some()
+                {
+                    self.record_run(&r, Some(now))?;
+                } else {
+                    self.0.store.update_run(&r)?;
+                }
                 continue;
             }
             let deadline_base = if r.manual {

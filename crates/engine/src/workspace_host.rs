@@ -2213,16 +2213,23 @@ impl WorkspaceHost {
 
     /// Recheck registry protections together with the archive write. Returns
     /// false when a transient protection should defer the scheduled follow-up.
-    pub(crate) fn archive_scheduled_run_if(
+    pub(crate) fn archive_scheduled_run_if<Ready>(
         &self,
         chat_id: &str,
-        expected: impl FnOnce(&Chat) -> bool,
-        ready: impl FnOnce() -> Result<bool, EngineError>,
-    ) -> Result<bool, EngineError> {
-        let _transition = lock(&self.inner.chat_archive_transition);
-        self.mutate(|doc| {
+        expected: impl Fn(&Chat) -> bool,
+        load_readiness_check: impl FnOnce() -> Result<Ready, EngineError>,
+    ) -> Result<bool, EngineError>
+    where
+        Ready: FnOnce() -> Result<bool, EngineError>,
+    {
+        enum Status {
+            Done,
+            Blocked,
+            Candidate,
+        }
+        let status = |doc: &RegistryDoc| -> Result<Status, EngineError> {
             let Some(chat) = doc.chat(chat_id)? else {
-                return Ok(true);
+                return Ok(Status::Done);
             };
             if chat.device_id != self.device_id()
                 || chat.archived
@@ -2232,13 +2239,32 @@ impl WorkspaceHost {
                     prefs.pinned_session_ids.iter().any(|id| id == chat_id)
                 })
             {
-                return Ok(true);
+                return Ok(Status::Done);
             }
-            if doc.has_open_action_for_chat(chat_id) || !ready()? {
-                return Ok(false);
+            if doc.has_open_action_for_chat(chat_id) {
+                return Ok(Status::Blocked);
             }
-            doc.archive_scheduled_success(chat_id)?;
-            Ok(true)
+            Ok(Status::Candidate)
+        };
+        match self.read(&status)? {
+            Status::Done => return Ok(true),
+            Status::Blocked => return Ok(false),
+            Status::Candidate => {}
+        }
+        // Load potentially cold session state after the cheap registry
+        // checks, outside the registry lock. Recheck under lock before write.
+        let ready = load_readiness_check()?;
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| match status(doc)? {
+            Status::Done => Ok(true),
+            Status::Blocked => Ok(false),
+            Status::Candidate => {
+                if !ready()? {
+                    return Ok(false);
+                }
+                doc.archive_scheduled_success(chat_id)?;
+                Ok(true)
+            }
         })
     }
 
