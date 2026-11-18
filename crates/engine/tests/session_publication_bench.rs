@@ -28,6 +28,11 @@ macro_rules! session_publication_benchmark {
                     let mut receivers: Vec<_> = (0..watchers)
                         .map(|_| core.workspace.merged_sessions_watch(engine.watch_sessions()))
                         .collect();
+                    use crate::sessions::publication_metrics as metrics;
+                    use std::sync::atomic::Ordering;
+                    for counter in [&metrics::LOCAL, &metrics::LOCAL_CPU, &metrics::MERGES, &metrics::MERGE_CPU, &metrics::EMISSIONS] {
+                        counter.store(0, Ordering::Relaxed);
+                    }
                     let cpu_start = cpu_seconds();
                     let start = Instant::now();
                     let mut emissions = 0;
@@ -59,9 +64,11 @@ macro_rules! session_publication_benchmark {
                     }
                     let elapsed = start.elapsed().as_secs_f64();
                     let cpu = cpu_seconds() - cpu_start;
-                    // The current implementation performs one full local clone/sort
-                    // per update and one merge per independently subscribed watch.
-                    eprintln!("BENCH session publication | active={active} watchers={watchers} elapsed_s={elapsed:.3} cpu_s={cpu:.4} core_pct={:.2} updates_per_s={:.1} local_table_clones_per_s={:.1} local_sorts_per_s={:.1} inferred_merges_per_s={:.1} emissions_per_s={:.1}", 100.0 * cpu / elapsed, updates as f64 / elapsed, updates as f64 / elapsed, updates as f64 / elapsed, emissions as f64 / elapsed, emissions as f64 / elapsed);
+                    let local = metrics::LOCAL.load(Ordering::Relaxed);
+                    let merges = metrics::MERGES.load(Ordering::Relaxed);
+                    let sent = metrics::EMISSIONS.load(Ordering::Relaxed);
+                    let publication_cpu = (metrics::LOCAL_CPU.load(Ordering::Relaxed) + metrics::MERGE_CPU.load(Ordering::Relaxed)) as f64 / 1e9;
+                    eprintln!("BENCH session publication | active={active} watchers={watchers} elapsed_s={elapsed:.3} process_cpu_s={cpu:.4} publication_cpu_s={publication_cpu:.4} publication_core_pct={:.2} updates_per_s={:.1} local_table_clones_per_s={:.1} local_sorts_per_s={:.1} merges_per_s={:.1} sent_per_s={:.1} received_per_s={:.1}", 100.0 * publication_cpu / elapsed, updates as f64 / elapsed, local as f64 / elapsed, local as f64 / elapsed, merges as f64 / elapsed, sent as f64 / elapsed, emissions as f64 / elapsed);
                 }
             }
         }

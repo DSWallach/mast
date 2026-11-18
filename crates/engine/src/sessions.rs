@@ -156,6 +156,26 @@ pub enum WorkerSignal {
     ToolFailures { chat_id: String, failures: mast_proto::ToolFailures },
 }
 
+#[cfg(test)]
+pub(crate) mod publication_metrics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static LOCAL: AtomicU64 = AtomicU64::new(0);
+    pub static LOCAL_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static MERGES: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_CPU: AtomicU64 = AtomicU64::new(0);
+    pub static EMISSIONS: AtomicU64 = AtomicU64::new(0);
+    pub fn cpu_ns() -> u64 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) }, 0);
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+    pub fn record(counter: &AtomicU64, cpu: &AtomicU64, start: u64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        cpu.fetch_add(cpu_ns() - start, Ordering::Relaxed);
+    }
+}
+
 struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
@@ -1905,8 +1925,12 @@ impl Inner {
             }
             entry.updated_at = now;
             let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             self.sessions_tx.send_replace(list);
             session
         };
@@ -1922,8 +1946,12 @@ impl Inner {
             if entry.todo_progress == Some(progress) { return; }
             entry.todo_progress = Some(progress);
             let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             self.sessions_tx.send_replace(list);
             session
         };
@@ -1957,6 +1985,7 @@ impl Inner {
         };
         let session = {
             let mut statuses = lock(&self.statuses);
+            let existed = statuses.contains_key(chat_id);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
@@ -1969,6 +1998,17 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                 });
+            // Repeated Working notifications carry no new state. Refresh the
+            // heartbeat at the same cadence as stream activity instead of
+            // publishing a new timestamp for every notification.
+            if existed && entry.status == SessionStatus::Working
+                && status == SessionStatus::Working
+                && !fresh_start
+                && completed_turn.is_none()
+                && now.signed_duration_since(entry.updated_at).num_milliseconds() < 10_000
+            {
+                return;
+            }
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
             // restamps (a steer into a parked session is a NEW turn — reusing
@@ -2010,8 +2050,12 @@ impl Inner {
                 }
             }
             let session = entry.clone();
+            #[cfg(test)]
+            let publication_start = publication_metrics::cpu_ns();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            #[cfg(test)]
+            publication_metrics::record(&publication_metrics::LOCAL, &publication_metrics::LOCAL_CPU, publication_start);
             // send_replace: keep the current value fresh even with no receivers,
             // so late WatchSessions subscribers see the last transition.
             self.sessions_tx.send_replace(list);
@@ -4028,6 +4072,31 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_publication_suppresses_noop_and_publishes_expired_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SessionsEngine::new("device".into(), Arc::new(RunJournal::open(dir.path()).unwrap()), Arc::new(HarnessRegistry::new()));
+        let mut receiver = engine.watch_sessions();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(receiver.has_changed().unwrap());
+        let first = receiver.borrow_and_update().clone();
+        engine.inner.set_status("chat", SessionStatus::Working, false);
+        assert!(!receiver.has_changed().unwrap());
+        engine.inner.touch_session("chat");
+        assert!(!receiver.has_changed().unwrap());
+        lock(&engine.inner.statuses).get_mut("chat").unwrap().updated_at = Utc::now() - chrono::Duration::seconds(11);
+        engine.inner.touch_session("chat");
+        assert!(receiver.has_changed().unwrap());
+        let refreshed = receiver.borrow_and_update().clone();
+        assert!(refreshed[0].updated_at >= first[0].updated_at);
+        assert_eq!(engine.watch_sessions().borrow().as_slice(), refreshed.as_slice());
+        let progress = mast_proto::TodoProgress { done: 1, total: 2 };
+        engine.inner.set_todo_progress("chat", progress);
+        receiver.borrow_and_update();
+        engine.inner.set_todo_progress("chat", progress);
+        assert!(!receiver.has_changed().unwrap());
+    }
 
     #[test]
     fn todo_events_update_session_progress_for_supported_harnesses() {
