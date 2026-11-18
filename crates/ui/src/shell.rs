@@ -68,6 +68,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 mod code_ref;
 mod actions_ui;
 mod account_synchronization;
+#[cfg(test)] use account_synchronization::{wait_for_remote_engine_shutdown, stop_synced_runtime};
 use account_synchronization::{UpdateFlow, SyncFlow, ShellEscapeOutcome, AccountMenuAction, resolve_shell_escape, import_summary_outcome, local_work_phrase, account_menu_action, sync_flow_after_auth};
 pub(crate) mod artifacts_ui;
 #[cfg(test)]

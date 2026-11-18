@@ -136,7 +136,7 @@ const RUNTIME_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Wait until a stopped daemon can no longer win the next bootstrap probe and
 /// has released the data directory for the replacement runtime.
-async fn wait_for_remote_engine_shutdown(
+pub(super) async fn wait_for_remote_engine_shutdown(
     ipc_port: u16,
     data_dir: &std::path::Path,
     timeout: Duration,
@@ -166,7 +166,7 @@ async fn wait_for_remote_engine_shutdown(
 
 /// Stop the engine that owns the synced profile and wait until a local runtime
 /// can safely acquire both its IPC port and data-directory lock.
-async fn stop_synced_runtime(
+pub(super) async fn stop_synced_runtime(
     engine: crate::state::EngineHandle,
     ipc_port: u16,
     data_dir: &std::path::Path,
