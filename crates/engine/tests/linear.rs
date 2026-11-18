@@ -228,7 +228,7 @@ fn route(state: &MockState, operation: &str, auth: Option<&str>, variables: &Val
         "MastLinearMyProjects" => {
             Reply::ok(json!({ "projects": page(state.projects.clone(), None) }))
         }
-        "MastLinearProjectIssues" => {
+        "MastLinearProjectIssues" | "MastLinearProjectIssuesAll" => {
             let id = variables["id"].as_str().unwrap_or_default();
             match state.project_issues.get(id) {
                 Some(nodes) => {
@@ -590,6 +590,17 @@ async fn rate_limits_retry_with_a_capped_wait_then_give_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn list_queries_limit_the_number_of_pages() {
+    let rig = rig().await;
+    rig.mock.state.lock().unwrap().my_issue_pages = (0..8)
+        .map(|index| vec![issue_node(&format!("ENG-{index}"), "Ticket", None, "started")])
+        .collect();
+    let issues = rig.call(methods::LINEAR_MY_ISSUES, json!({})).await.unwrap();
+    assert_eq!(issues.as_array().unwrap().len(), 5);
+    assert_eq!(rig.mock.count("MastLinearMyIssues"), 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn list_queries_paginate_and_parse() {
     let rig = rig().await;
     {
@@ -663,6 +674,14 @@ async fn list_queries_paginate_and_parse() {
         .unwrap();
     assert_eq!(open.as_array().unwrap().len(), 1);
     assert_eq!(open[0]["identifier"], json!("ENG-5"));
+    let all = rig
+        .call(methods::LINEAR_PROJECT_ISSUES, json!({ "projectId": "p-1", "includeCompleted": true }))
+        .await.unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(all[1]["identifier"], json!("ENG-6"));
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUES,
+        json!({ "projectId": "p-1", "includeCompleted": true, "cachedOnly": true })).await.unwrap();
+    assert_eq!(cached, all);
     let err = rig
         .linear_err(
             methods::LINEAR_PROJECT_ISSUES,

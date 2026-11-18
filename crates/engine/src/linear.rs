@@ -672,7 +672,7 @@ impl LinearService {
         let mut nodes = Vec::new();
         let mut after: Option<String> = None;
         let mut found = false;
-        loop {
+        for _ in 0..cap.div_ceil(queries::PAGE_SIZE) {
             let data = self
                 .call(
                     query,
@@ -684,7 +684,7 @@ impl LinearService {
             let (page, next) = queries::connection_page(connection);
             nodes.extend(page);
             match next {
-                Some(cursor) if nodes.len() < cap => after = Some(cursor),
+                Some(cursor) if nodes.len() < cap && after.as_deref() != Some(cursor.as_str()) => after = Some(cursor),
                 _ => break,
             }
         }
@@ -834,6 +834,7 @@ impl LinearService {
     pub async fn project_issues(
         &self,
         project_id: &str,
+        include_completed: bool,
         force: bool,
         cached_only: bool,
     ) -> Result<Vec<LinearIssueSummary>, LinearError> {
@@ -847,13 +848,13 @@ impl LinearService {
         let this = self.clone();
         let id = project_id.clone();
         self.issue_list(
-            &format!("project:{project_id}"),
+            &if include_completed { format!("project:{project_id}:all") } else { format!("project:{project_id}") },
             force,
             cached_only,
             move || async move {
                 let (nodes, found) = this
                     .paginate(
-                        &queries::project_issues(),
+                        &if include_completed { queries::project_issues_including_completed() } else { queries::project_issues() },
                         json!({ "id": id }),
                         "/project/issues",
                         MAX_LIST_ISSUES,
@@ -865,7 +866,7 @@ impl LinearService {
                         "That Linear project was not found",
                     ));
                 }
-                Ok(open_issues(&nodes))
+                Ok(if include_completed { nodes.iter().filter_map(queries::issue_summary).collect() } else { open_issues(&nodes) })
             },
         )
         .await

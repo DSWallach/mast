@@ -422,7 +422,8 @@ pub struct LinearMyProjectsParams {
 }
 
 /// `LinearProjectIssues {projectId}` → `[LinearIssueSummary]`: the project's
-/// open issues (not completed/canceled), at most [`MAX_LIST_ISSUES`].
+/// open issues by default, or all issues with `includeCompleted`, at most
+/// [`MAX_LIST_ISSUES`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearProjectIssuesParams {
@@ -432,6 +433,9 @@ pub struct LinearProjectIssuesParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_account_id: Option<String>,
     pub project_id: String,
+    /// Include completed and canceled issues in the bounded project list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_completed: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

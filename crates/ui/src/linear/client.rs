@@ -293,12 +293,24 @@ impl WorkOutlineActions {
         project_id: &str,
         read: ListRead,
     ) -> LinearTask<Vec<LinearIssueSummary>> {
+        self.linear_project_issue_list(space_id, account_id, project_id, false, read)
+    }
+
+    pub(crate) fn linear_project_issue_list(
+        &self,
+        space_id: &str,
+        account_id: &str,
+        project_id: &str,
+        include_completed: bool,
+        read: ListRead,
+    ) -> LinearTask<Vec<LinearIssueSummary>> {
         self.linear_call(
             methods::LINEAR_PROJECT_ISSUES,
             LinearProjectIssuesParams {
                 space_id: Some(space_id.to_owned()),
                 expected_account_id: Some(account_id.to_owned()),
                 project_id: project_id.to_string(),
+                include_completed,
                 force: read.force(),
                 cached_only: read.stored_only(),
             },
