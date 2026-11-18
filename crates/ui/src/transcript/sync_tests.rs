@@ -91,3 +91,47 @@ fn pending_viewport_restores_with_and_without_row_diff(cx: &mut gpui::TestAppCon
         }
     });
 }
+
+#[gpui::test]
+fn row_replacement_and_insertion_update_layout(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = perf_bench::long_chat(2);
+            state.transcript_revision += 1;
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, cx| transcript.sync(cx));
+        let initial_rows = transcript.read(cx).rows.len();
+        state.update(cx, |state, _| {
+            if let mast_doc::MessagePart::Text { text, .. } = &mut state.transcript[0].parts[0] {
+                text.push_str(" changed");
+            }
+            state.transcript_revision += 1;
+        });
+        transcript.update(cx, |transcript, cx| {
+            let revision = transcript.viewport_layout_revision;
+            transcript.sync(cx);
+            assert_eq!(transcript.rows.len(), initial_rows);
+            assert_ne!(transcript.viewport_layout_revision, revision);
+        });
+        state.update(cx, |state, _| {
+            let mut entry = perf_bench::long_chat(1).remove(0);
+            entry.id = "appended".into();
+            state.transcript.push(entry);
+            state.transcript_revision += 1;
+        });
+        transcript.update(cx, |transcript, cx| {
+            let revision = transcript.viewport_layout_revision;
+            transcript.sync(cx);
+            assert!(transcript.rows.len() > initial_rows);
+            assert_ne!(transcript.viewport_layout_revision, revision);
+        });
+    });
+}
