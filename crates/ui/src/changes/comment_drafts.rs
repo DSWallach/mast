@@ -1,6 +1,7 @@
 use super::*;
 
 impl Changes {
+    /// Cloned because rendering borrows `self` mutably a moment later.
     pub(super) fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         // Explicit-checkout panes are read-only inspection surfaces. They may
         // represent an unmatched worktree, so the selected chat's composer

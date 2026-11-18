@@ -79,6 +79,7 @@ pub(crate) mod walkthrough;
 
 use diff_painters::*;
 pub use diff_painters::{comment_adder_left, split_adder_left};
+pub(crate) use diff_painters::{render_file_body_with_syntax, COMMENT_ADDER_SIZE};
 use file_list::*;
 use review_state::*;
 

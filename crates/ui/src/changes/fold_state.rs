@@ -448,5 +448,4 @@ impl Changes {
         cx.notify();
     }
 
-    /// Cloned because rendering borrows `self` mutably a moment later.
 }
