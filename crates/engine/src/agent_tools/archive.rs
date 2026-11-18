@@ -343,7 +343,8 @@ mod tests {
         let mutate = |m: WorkOutlineMutation| workspace.work_outline_mutate(&m, &actor, &[]).unwrap();
         let now = Utc::now();
         let mut request_item = String::new();
-        for name in ["eligible", "recent", "request", "working", "awaiting", "recently-idle"] {
+        let mut system_request_item = String::new();
+        for name in ["eligible", "recent", "request", "system-request", "working", "awaiting", "recently-idle"] {
             let item = mutate(WorkOutlineMutation::CreateWorkItem(mast_proto::CreateWorkItemParams {
                 space_id: "space".into(), parent_work_item_id: None, placement: Default::default(), title: name.into(),
                 description: None, status: Some(WorkItemStatus::Completed), operation_id: format!("item-{name}"),
@@ -355,11 +356,17 @@ mod tests {
             let age = if name == "recent" { 2 } else { 4 };
             workspace.set_chat_activity(name, Some((now - chrono::Duration::days(age)).timestamp_millis()), Some((now - chrono::Duration::days(10)).timestamp_millis())).unwrap();
             if name == "request" { request_item = item; }
+            else if name == "system-request" { system_request_item = item; }
         }
         mutate(WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
             options: vec![], links: vec![], facts: vec![], kind: None, priority: None, work_item_id: request_item,
             origin: mast_proto::UserActionRequestOrigin { chat_id: "request".into(), ..Default::default() },
             text: "Waiting".into(), info: None, dedupe_key: None, operation_id: "request-open".into(),
+        }));
+        mutate(WorkOutlineMutation::CreateUserActionRequest(mast_proto::CreateUserActionRequestParams {
+            options: vec![], links: vec![], facts: vec![], kind: None, priority: None, work_item_id: system_request_item,
+            origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::System, ..Default::default() },
+            text: "System request".into(), info: None, dedupe_key: None, operation_id: "system-request-open".into(),
         }));
         let service = AgentToolsService::new(super::super::AgentTokens::new(), workspace.clone(),
             std::sync::Arc::new(crate::work_outline::WorkOutlineService::new(workspace.clone())), None);
@@ -373,6 +380,8 @@ mod tests {
             std::sync::Arc::new(crate::HarnessRegistry::new()));
         sessions.set_test_status("working", mast_proto::SessionStatus::Working);
         sessions.set_test_status("awaiting", mast_proto::SessionStatus::AwaitingInput);
+        sessions.set_test_status_time("working", now - chrono::Duration::days(4));
+        sessions.set_test_status_time("awaiting", now - chrono::Duration::days(4));
         sessions.set_test_status("recently-idle", mast_proto::SessionStatus::Idle);
         service.set_sessions(sessions.clone());
         let dispatch = sessions.lock_dispatch("eligible").await;
@@ -382,6 +391,7 @@ mod tests {
         assert!(workspace.chat("eligible").unwrap().unwrap().archived);
         assert!(!workspace.chat("recent").unwrap().unwrap().archived);
         assert!(!workspace.chat("request").unwrap().unwrap().archived);
+        assert!(!workspace.chat("system-request").unwrap().unwrap().archived);
         assert!(!workspace.chat("working").unwrap().unwrap().archived);
         assert!(!workspace.chat("awaiting").unwrap().unwrap().archived);
         assert!(!workspace.chat("recently-idle").unwrap().unwrap().archived);

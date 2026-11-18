@@ -651,6 +651,11 @@ impl SessionsEngine {
         self.inner.set_status(chat_id, status, true);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_status_time(&self, chat_id: &str, at: chrono::DateTime<Utc>) {
+        if let Some(session) = lock(&self.inner.statuses).get_mut(chat_id) { session.updated_at = at; }
+    }
+
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
         self.inner.registry.installed_for(harness)
     }
