@@ -162,10 +162,14 @@ fn live_markdown_seeds_historical_text_before_rendering(cx: &mut gpui::TestAppCo
 fn live_frame_statistics_count_only_valid_live_rows(cx: &mut gpui::TestAppContext) {
     const CHILD: &str = "MAST_RENDER_STATS_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let test = format!("{module}::live_frame_statistics_count_only_valid_live_rows");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "transcript::render_tests::live_frame_statistics_count_only_valid_live_rows", "--nocapture"])
+            .args(["--exact", &test, "--nocapture"])
             .env(CHILD, "1").env("MAST_FRAME_STATS", "1").output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("running 1 test") && stdout.contains("1 passed"), "{stdout}");
         return;
     }
     #[derive(Clone)]
