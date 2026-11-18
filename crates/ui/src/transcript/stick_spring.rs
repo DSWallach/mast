@@ -81,4 +81,3 @@ impl StickSpring {
         if target - pos <= 0.5 { target } else { pos }
     }
 }
-

@@ -395,4 +395,3 @@ pub(super) fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolI
         is_thought: true,
     }
 }
-

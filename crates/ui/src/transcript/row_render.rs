@@ -166,7 +166,7 @@ impl Transcript {
                     question: None,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                
+
                 render::render_block(
                     &top.block,
                     *block_ix,

@@ -315,4 +315,3 @@ pub fn diff_to_file(diff: &mast_proto::ToolDiff) -> crate::changes::FileDiff {
         max_line,
     }
 }
-
