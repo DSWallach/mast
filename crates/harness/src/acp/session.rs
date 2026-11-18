@@ -1,11 +1,25 @@
 //! Ownership and event ordering for one ACP session.
 use super::*;
 
+#[cfg(unix)]
+type SignalTarget = i32;
+#[cfg(windows)]
+type SignalTarget = std::sync::Arc<crate::windows_process::Job>;
+
+#[derive(PartialEq, Eq)]
+enum LoopControl {
+    Continue,
+    Stop,
+}
+
 #[derive(Default)]
 struct AcpSessionState {
     child_exit: Option<Option<std::process::ExitStatus>>,
     exit_drain_deadline: Option<tokio::time::Instant>,
     escalation_deadline: Option<tokio::time::Instant>,
+    escalation_target: Option<SignalTarget>,
+    interrupted: bool,
+    interrupt_sent: bool,
 }
 
 impl AcpSessionState {
@@ -19,6 +33,28 @@ impl AcpSessionState {
         child.request_group_shutdown();
         // Descendants may hold stdout open after the adapter exits.
         self.exit_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
+    }
+
+    fn interrupt(
+        &mut self,
+        client: &RpcClient,
+        session_id: &str,
+        has_turn: bool,
+        child: &Child,
+        interrupt_grace: Duration,
+    ) -> LoopControl {
+        self.interrupt_sent = true;
+        self.interrupted = true;
+        if has_turn {
+            client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
+            if let Some(pid) = crate::process::signal_target(child) {
+                self.escalation_target = Some(pid);
+                self.escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
+            }
+            LoopControl::Continue
+        } else {
+            LoopControl::Stop
+        }
     }
 
     async fn expire_prompt_stall(
@@ -443,11 +479,8 @@ pub(super) async fn run_session(session: Session) {
     let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
-    let mut interrupted = false;
-    let mut interrupt_sent = false;
     let mut done_current = false;
     let mut done_after_interrupt = false;
-    let mut escalation_target = None;
     let mut state = AcpSessionState::default();
     let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
@@ -530,7 +563,7 @@ pub(super) async fn run_session(session: Session) {
                             .to_owned(),
                         Ok(Err(_)) | Err(_) => "promptRequired".to_owned(),
                     };
-                    if interrupted {
+                    if state.interrupted {
                         // Winding down; abandoned like any queued steer.
                     } else if outcome != "promptRequired" {
                         let (prev, next) = rotate(&mut assistant_message_id);
@@ -610,12 +643,12 @@ pub(super) async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                let (status, mut error) = stop_outcome(&res, interrupted);
-                if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+                let (status, mut error) = stop_outcome(&res, state.interrupted);
+                if !state.interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
                     error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
                 }
                 done_current = true;
-                if interrupted {
+                if state.interrupted {
                     done_after_interrupt = true;
                 }
                 if !send(
@@ -631,7 +664,7 @@ pub(super) async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                if interrupted || res.is_err() {
+                if state.interrupted || res.is_err() {
                     break 'main;
                 }
                 // Persistent session: a queued steer becomes the next turn;
@@ -709,7 +742,7 @@ pub(super) async fn run_session(session: Session) {
                     // `_meta.promptId` we mint — verified live, 1.0.4).
                     if prompt_complete_extension
                         && method == "_x.ai/session/prompt_complete"
-                        && !interrupted
+                        && !state.interrupted
                         && turn.is_some()
                         && params.get("sessionId").and_then(Value::as_str)
                             == Some(session_id.as_str())
@@ -785,9 +818,9 @@ pub(super) async fn run_session(session: Session) {
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
                         }
-                        let (status, error) = stop_outcome(&res, interrupted);
+                        let (status, error) = stop_outcome(&res, state.interrupted);
                         done_current = true;
-                        if interrupted {
+                        if state.interrupted {
                             done_after_interrupt = true;
                         }
                         let _ = send(
@@ -824,7 +857,7 @@ pub(super) async fn run_session(session: Session) {
                         "promptRequired".to_owned()
                     }
                 };
-                if interrupted {
+                if state.interrupted {
                     // The run is winding down; the steer is abandoned like
                     // any queued steer at interrupt.
                 } else if outcome != "promptRequired" {
@@ -952,7 +985,7 @@ pub(super) async fn run_session(session: Session) {
                     ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
-                    if turn.is_some() && !interrupted {
+                    if turn.is_some() && !state.interrupted {
                         let fut = steering_call_future(&client, &session_id, &next_text);
                         steering_call = Some((next_text, fut));
                         break;
@@ -968,7 +1001,7 @@ pub(super) async fn run_session(session: Session) {
             // now-idle agent.
             _ = tokio::time::sleep_until(
                 cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if cancel_flush_deadline.is_some() && !interrupted => {
+            ), if cancel_flush_deadline.is_some() && !state.interrupted => {
                 cancel_flush_deadline = None;
                 if turn.is_none()
                     && let Some(text) = queued_steers.pop_front()
@@ -1011,7 +1044,7 @@ pub(super) async fn run_session(session: Session) {
             // and usage updates must never arm this recovery.
             _ = tokio::time::sleep_until(
                 starve_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if starve_deadline.is_some() && turn.is_some() && !interrupted => {
+            ), if starve_deadline.is_some() && turn.is_some() && !state.interrupted => {
                 starve_deadline = None;
                 tracing::warn!(
                     target: "mast_harness::acp",
@@ -1078,7 +1111,7 @@ pub(super) async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            steer = steering.recv(), if steering_open && !state.interrupted => match steer {
                 Some(msg) => {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
@@ -1158,20 +1191,10 @@ pub(super) async fn run_session(session: Session) {
                 }
             },
 
-            _ = interrupt.cancelled(), if !interrupt_sent => {
-                interrupt_sent = true;
-                interrupted = true;
-                if turn.is_some() {
-                    client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
-                    // Escalate if the agent doesn't wind down (stopReason
-                    // "cancelled") within the grace periods.
-                    if let Some(pid) = crate::process::signal_target(&child) {
-                        escalation_target = Some(pid);
-                        state.escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
-                    }
-                } else {
-                    // Idle between turns: nothing to cancel — the terminal
-                    // bookkeeping below still guarantees Done { Interrupted }.
+            _ = interrupt.cancelled(), if !state.interrupt_sent => {
+                if state.interrupt(&client, &session_id, turn.is_some(), &child, interrupt_grace)
+                    == LoopControl::Stop
+                {
                     break 'main;
                 }
             },
@@ -1184,7 +1207,7 @@ pub(super) async fn run_session(session: Session) {
             // indefinite Working.
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
-            ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
+            ), if prompt_stall_deadline.is_some() && turn.is_some() && !state.interrupted => {
                 state.expire_prompt_stall(
                     &event_tx, &session_id, agent_name, stall_hint, prompt_stall, &mut done_current,
                 ).await;
@@ -1198,7 +1221,7 @@ pub(super) async fn run_session(session: Session) {
                 // Once signal escalation starts, a late prompt response no longer
                 // owns this turn (including any usage attached to that response).
                 turn = None;
-                if let Some(target) = &escalation_target {
+                if let Some(target) = &state.escalation_target {
                     send_signal(target, escalation_signal);
                 }
                 state.escalation_deadline = match escalation_signal {
@@ -1216,7 +1239,7 @@ pub(super) async fn run_session(session: Session) {
 
     // A vanished Devin process cannot send subagent_completed. Settle every
     // open nested transcript before the parent's terminal Done.
-    let subagent_status = if interrupted {
+    let subagent_status = if state.interrupted {
         DoneStatus::Interrupted
     } else {
         DoneStatus::Errored
@@ -1230,7 +1253,7 @@ pub(super) async fn run_session(session: Session) {
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
-        if interrupted && !done_after_interrupt {
+        if state.interrupted && !done_after_interrupt {
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Interrupted,
@@ -1239,7 +1262,7 @@ pub(super) async fn run_session(session: Session) {
                     session_id: Some(session_id.clone()),
                 }))
                 .await;
-        } else if !interrupted && !done_current {
+        } else if !state.interrupted && !done_current {
             // A child killed mid-turn must not read as a silent success.
             let status = match state.child_exit {
                 Some(status) => status,
