@@ -214,6 +214,7 @@ mod tests {
                     "work-outline-launch-v1",
                     "pr-review-launch-v1",
                     "scheduled-task-work-item-v1",
+                    "scheduled-task-output-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",
                     "linear-v1",
