@@ -1,5 +1,5 @@
-//! Run with `cargo test -p mast-engine --profile installed --lib session_publication_benchmark -- --ignored --nocapture --test-threads=1`.
-//! Included in the sessions unit tests to exercise the private production update paths.
+// Run with `cargo test -p mast-engine --profile installed --lib session_publication_benchmark -- --ignored --nocapture --test-threads=1`.
+// Included in the sessions unit tests to exercise the private production update paths.
 
 macro_rules! session_publication_benchmark {
     () => {
