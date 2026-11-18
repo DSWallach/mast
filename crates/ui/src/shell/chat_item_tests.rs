@@ -1186,6 +1186,21 @@ fn tracker_lists_unassigned_descendants_without_workers(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.iter_mut().find(|chat| chat.id == "w-0").unwrap().archived = true;
+            state.board_status_revision = state.board_status_revision.wrapping_add(1);
+        });
+        shell.open_team_tab(cx);
+    });
+    draw(vcx);
+    assert!(has(vcx, "tracker-item-fixture-item-0"));
+}
+
+#[gpui::test]
 fn tracker_remains_selected_when_expanded(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
     add_workers(&shell, vcx, 2);

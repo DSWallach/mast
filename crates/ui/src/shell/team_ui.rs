@@ -481,7 +481,10 @@ impl Shell {
         }
         let items = snapshot.as_ref().and_then(|snapshot| {
             let root = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
-            let without_chats: std::collections::HashSet<_> = snapshot.items.iter().filter(|item| item.chat_ids.is_empty()).map(|item| item.id.as_str()).collect();
+            let live_chats: std::collections::HashSet<_> = state.chats.iter().filter(|chat| !chat.archived).map(|chat| chat.id.as_str()).collect();
+            let without_chats: std::collections::HashSet<_> = snapshot.items.iter()
+                .filter(|item| !item.chat_ids.iter().any(|id| live_chats.contains(id.as_str())))
+                .map(|item| item.id.as_str()).collect();
             let leaves: std::collections::HashSet<_> = snapshot.items.iter().filter(|item| item.child_ids.is_empty()).map(|item| item.id.as_str()).collect();
             let indicators = state.board_indicators(chrono::Utc::now());
             let links = self.chat_header_links.iter().filter_map(|(id, entry)| Some((id.clone(), entry.status.clone()?))).collect();
