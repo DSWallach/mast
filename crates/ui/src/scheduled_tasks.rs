@@ -2074,9 +2074,16 @@ mod tests {
     #[test]
     #[ignore = "requires macOS Metal and access to macOS services"]
     fn scheduled_run_cleanup_snapshot() -> anyhow::Result<()> {
+        struct Fixture(Entity<ScheduledTasksPage>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+            }
+        }
+
         let path = crate::snapshot::render_to_png(
             "scheduled-run-cleanup",
-            gpui::size(px(700.0), px(460.0)),
+            gpui::size(px(850.0), px(700.0)),
             crate::ui_style::UiStyleId::Default,
             crate::theme::Appearance::Light,
             |_, cx| {
@@ -2089,7 +2096,7 @@ mod tests {
                     })).unwrap());
                     state
                 });
-                cx.new(|cx| {
+                let page = cx.new(|cx| {
                     let mut page = ScheduledTasksPage::new(state, cx);
                     page.error = None;
                     page.target = Some("host".into());
@@ -2107,7 +2114,8 @@ mod tests {
                         }).collect(),
                     });
                     page
-                })
+                });
+                cx.new(|_| Fixture(page))
             },
         )?;
         println!("{}", path.display());
