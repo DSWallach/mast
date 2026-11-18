@@ -2227,8 +2227,69 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
-    pub(crate) fn open_user_action_origin_chats(&self) -> std::collections::HashSet<String> {
-        self.read(RegistryDoc::open_user_action_origin_chats)
+    pub(crate) fn scheduled_task_actions(&self, key: &str) -> Vec<mast_proto::UserActionRequestView> {
+        self.read(|doc| doc.scheduled_task_actions(key, self.device_id()))
+    }
+
+    /// Recheck registry protections together with the archive write. Returns
+    /// false when a transient protection should defer the scheduled follow-up.
+    pub(crate) fn archive_scheduled_run_if<Ready>(
+        &self,
+        chat_id: &str,
+        expected: impl Fn(&Chat) -> bool,
+        load_readiness_check: impl FnOnce() -> Result<Ready, EngineError>,
+    ) -> Result<bool, EngineError>
+    where
+        Ready: FnOnce() -> Result<bool, EngineError>,
+    {
+        enum Status {
+            Done,
+            Blocked,
+            Candidate,
+        }
+        let status = |doc: &RegistryDoc| -> Result<Status, EngineError> {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(Status::Done);
+            };
+            if chat.device_id != self.device_id()
+                || chat.archived
+                || doc.scheduled_success_archived(chat_id)
+                || !expected(&chat)
+                || doc.sidebar_preferences().is_some_and(|prefs| {
+                    prefs.pinned_session_ids.iter().any(|id| id == chat_id)
+                })
+            {
+                return Ok(Status::Done);
+            }
+            if doc.has_open_action_for_chat(chat_id) {
+                return Ok(Status::Blocked);
+            }
+            Ok(Status::Candidate)
+        };
+        match self.read(&status)? {
+            Status::Done => return Ok(true),
+            Status::Blocked => return Ok(false),
+            Status::Candidate => {}
+        }
+        // Load potentially cold session state after the cheap registry
+        // checks, outside the registry lock. Recheck under lock before write.
+        let ready = load_readiness_check()?;
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| match status(doc)? {
+            Status::Done => Ok(true),
+            Status::Blocked => Ok(false),
+            Status::Candidate => {
+                if !ready()? {
+                    return Ok(false);
+                }
+                doc.archive_scheduled_success(chat_id)?;
+                Ok(true)
+            }
+        })
+    }
+
+    pub(crate) fn open_user_action_chats(&self) -> std::collections::HashSet<String> {
+        self.read(RegistryDoc::open_user_action_chats)
     }
 
     fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
@@ -2534,6 +2595,12 @@ impl WorkspaceHost {
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
     pub fn flush(&self) {
         self.inner.save_snapshot();
+    }
+
+    /// Persist scheduled follow-up registry writes before acknowledging their
+    /// queue entries in the scheduler database.
+    pub(crate) fn persist_scheduled_followups(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides

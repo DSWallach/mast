@@ -40,6 +40,20 @@ impl ScheduledTaskOutput {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduledTaskAfterSuccess {
+    #[default]
+    Archive,
+    Keep,
+}
+
+impl ScheduledTaskAfterSuccess {
+    fn is_archive(&self) -> bool {
+        *self == Self::Archive
+    }
+}
+
 impl crate::Chat {
     pub fn is_background_task_run(&self) -> bool {
         self.scheduled_task_info
@@ -82,6 +96,9 @@ pub struct ScheduledTaskDraft {
     // Keep the legacy wire shape for interactive tasks and their replay keys.
     #[serde(default, skip_serializing_if = "ScheduledTaskOutput::is_interactive")]
     pub output: ScheduledTaskOutput,
+    /// Applies only to Background runs and is captured in each run snapshot.
+    #[serde(default, skip_serializing_if = "ScheduledTaskAfterSuccess::is_archive")]
+    pub after_success: ScheduledTaskAfterSuccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -391,6 +408,15 @@ mod tests {
         draft.output = ScheduledTaskOutput::Background;
         let background = serde_json::to_value(&draft).unwrap();
         assert_eq!(background["output"], "background");
+        assert!(background.get("afterSuccess").is_none());
+        assert_eq!(
+            serde_json::from_value::<ScheduledTaskDraft>(background).unwrap(),
+            draft
+        );
+        assert_eq!(draft.after_success, ScheduledTaskAfterSuccess::Archive);
+        draft.after_success = ScheduledTaskAfterSuccess::Keep;
+        let background = serde_json::to_value(&draft).unwrap();
+        assert_eq!(background["afterSuccess"], "keep");
         assert_eq!(
             serde_json::from_value::<ScheduledTaskDraft>(background).unwrap(),
             draft

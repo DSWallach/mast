@@ -195,6 +195,14 @@ impl ScheduledTasksPage {
         })
     }
 
+    fn after_success_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1)
+        })
+    }
+
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -238,12 +246,18 @@ impl ScheduledTasksPage {
             self.message = None;
         }
         let mut params = serde_json::to_value(request).unwrap();
-        if saved_id.is_some() && self.output_supported(cx) {
-            // An explicit Interactive selection differs from an older
-            // client's save without a mode.
-            let output = &mut params["draft"]["output"];
-            if output.is_null() {
-                *output = serde_json::json!(ScheduledTaskOutput::Interactive);
+        if saved_id.is_some() && let Some(draft) = params["draft"].as_object_mut() {
+            // Send explicit defaults to hosts that understand them. Omission
+            // means preserve the stored policy on an older client's save.
+            if self.output_supported(cx) {
+                draft.entry("output").or_insert(serde_json::json!(ScheduledTaskOutput::Interactive));
+            }
+            if self.after_success_supported(cx)
+                && draft.get("output").and_then(|mode| mode.as_str()) == Some("background")
+            {
+                draft.entry("afterSuccess").or_insert(serde_json::json!(ScheduledTaskAfterSuccess::Archive));
+            } else {
+                draft.remove("afterSuccess");
             }
         }
         params["targetDeviceId"] = serde_json::json!(target);
@@ -501,6 +515,7 @@ impl ScheduledTasksPage {
                     } else {
                         ScheduledTaskOutput::Interactive
                     },
+                    after_success: Default::default(),
                 },
             )
         };
@@ -686,6 +701,12 @@ impl ScheduledTasksPage {
                         _ => ScheduledTaskOutput::Interactive,
                     };
                 }
+                "afterSuccess" => {
+                    e.draft.after_success = match value.as_str() {
+                        "keep" => ScheduledTaskAfterSuccess::Keep,
+                        _ => ScheduledTaskAfterSuccess::Archive,
+                    };
+                }
                 "workItem" => e.draft.work_item_id = (!value.is_empty()).then_some(value.clone()),
                 "contextWindow" => {
                     e.draft
@@ -769,49 +790,71 @@ impl ScheduledTasksPage {
             .border_t_1()
             .border_color(theme.border)
             .child(div().text_size(px(16.0)).child("Run history"));
-        let mut chats: Vec<_> = self
+        let mut chat_by_id: HashMap<_, _> = self
             .state
             .read(cx)
             .chats
             .iter()
-            .filter(|c| {
-                c.scheduled_task_info
+            .filter(|chat| {
+                chat.scheduled_task_info
                     .as_ref()
-                    .is_some_and(|t| t.task_id == task_id)
-                    && Some(&c.device_id) == self.target.as_ref()
+                    .is_some_and(|info| info.task_id == task_id)
+                    && Some(&chat.device_id) == self.target.as_ref()
             })
-            .cloned()
+            .map(|chat| (chat.id.as_str(), chat))
             .collect();
-        chats.sort_by(|a, b| mast_proto::task_chat_order(b).cmp(&mast_proto::task_chat_order(a)));
-        if chats.is_empty() {
-            content = content.child(
-                div()
-                    .text_color(theme.text_muted)
-                    .child("No runs yet for this task."),
-            );
+        let mut rows: Vec<_> = self
+            .snapshot
+            .runs
+            .iter()
+            .filter(|run| run.task_id == task_id)
+            .map(|run| {
+                let chat = run.chat_id.as_deref().and_then(|id| chat_by_id.remove(id));
+                let order = chat.map_or((run.created_at, run.id.as_str()), task_chat_order);
+                (order, chat, Some(run))
+            })
+            .collect();
+        rows.extend(chat_by_id.into_values().map(|chat| {
+            (task_chat_order(chat), Some(chat), None)
+        }));
+        rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        if rows.is_empty() {
+            return content
+                .child(div().text_color(theme.text_muted).child("No runs yet for this task."))
+                .into_any_element();
         }
-        for (i, chat) in chats.into_iter().enumerate() {
-            let id = chat.id.clone();
-            let selector_id = id.clone();
-            content = content.child(
-                popover::btn_ghost(
-                    theme,
-                    &format!(
-                        "{} · {}{}",
-                        chrono::DateTime::from_timestamp_millis(
-                            mast_proto::task_chat_order(&chat).0
-                        )
-                        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
-                        .unwrap_or_default(),
-                        chat.title.as_deref().unwrap_or("Task run"),
-                        if i == 0 { " · Latest" } else { "" }
-                    ),
-                    format!("history-{}", chat.id),
-                )
-                .id(SharedString::from(format!("history-{}", chat.id)))
-                .debug_selector(move || format!("task-run-{selector_id}").into())
-                .on_click(cx.listener(move |p, _, _, cx| p.open_chat(id.clone(), cx))),
-            );
+        let mut latest_chat = true;
+        for ((created_at, _), chat, run) in rows {
+            let date = chrono::DateTime::from_timestamp_millis(created_at)
+                .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_default();
+            let title = chat.and_then(|chat| chat.title.as_deref())
+                .or_else(|| run.map(|run| run.snapshot.name.as_str()))
+                .unwrap_or("Task run");
+            let mut label = format!("{date} · {title}");
+            if let Some(run) = run {
+                label.push_str(" · ");
+                label.push_str(run_state_label(run.state));
+            }
+            if let Some(chat) = chat {
+                if chat.archived {
+                    label.push_str(" · Archived");
+                }
+                if std::mem::take(&mut latest_chat) {
+                    label.push_str(" · Latest");
+                }
+                let id = chat.id.clone();
+                let selector_id = id.clone();
+                content = content.child(
+                    popover::btn_ghost(theme, &label, format!("history-{id}"))
+                        .id(SharedString::from(format!("history-{id}")))
+                        .debug_selector(move || format!("task-run-{selector_id}").into())
+                        .on_click(cx.listener(move |p, _, _, cx| p.open_chat(id.clone(), cx))),
+                );
+            } else {
+                content = content.child(div().text_color(theme.text_muted).child(label));
+            }
         }
         content.into_any_element()
     }
@@ -846,14 +889,28 @@ pub(crate) fn next_run_label(task: &ScheduledTask) -> Option<String> {
     })
 }
 
+fn run_state_label(state: ScheduledRunState) -> &'static str {
+    match state {
+        ScheduledRunState::Launching => "Launching",
+        ScheduledRunState::Queued => "Queued",
+        ScheduledRunState::Running => "Running",
+        ScheduledRunState::AwaitingInput => "Awaiting input",
+        ScheduledRunState::Completed => "Completed",
+        ScheduledRunState::Failed => "Failed",
+        ScheduledRunState::Interrupted => "Interrupted",
+        ScheduledRunState::Cancelled => "Cancelled",
+        ScheduledRunState::Skipped => "Skipped",
+    }
+}
+
 /// The newest run's state and detail (`runs` come newest first).
 pub(crate) fn last_outcome_label(runs: &[ScheduledRun], task_id: &str) -> String {
     runs.iter()
         .find(|r| r.task_id == task_id)
         .map(|r| {
             format!(
-                "{:?}{}",
-                r.state,
+                "{}{}",
+                run_state_label(r.state),
                 r.detail
                     .as_ref()
                     .map(|d| format!(" · {d}"))
@@ -1131,6 +1188,14 @@ impl Render for ScheduledTasksPage {
                     },
                 ),
                 (
+                    "afterSuccess",
+                    "After a successful run",
+                    match e.draft.after_success {
+                        ScheduledTaskAfterSuccess::Archive => "Archive",
+                        ScheduledTaskAfterSuccess::Keep => "Keep",
+                    },
+                ),
+                (
                     "workItem",
                     if background {
                         "Work item (required)"
@@ -1146,6 +1211,7 @@ impl Render for ScheduledTasksPage {
             .into_iter()
             .filter(|(key, ..)| match *key {
                 "output" => output_supported,
+                "afterSuccess" => background && output_supported && self.after_success_supported(cx),
                 "workItem" => work_item_supported,
                 _ => true,
             }) {
@@ -1227,6 +1293,10 @@ impl Render for ScheduledTasksPage {
                     "output" => vec![
                         ("interactive".into(), "Interactive".into()),
                         ("background".into(), "Background".into()),
+                    ],
+                    "afterSuccess" => vec![
+                        ("archive".into(), "Archive".into()),
+                        ("keep".into(), "Keep".into()),
                     ],
                     "workItem" => (!background)
                         .then(|| (String::new(), "None".into()))
@@ -1728,6 +1798,7 @@ mod tests {
                     vec![
                         capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                        capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
                     ],
                 ),
                 ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
@@ -1752,11 +1823,15 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_some());
+        assert!(cx.debug_bounds("task-select-afterSuccess").is_some());
         page.update(cx, |p, cx| {
             assert_eq!(
                 p.editor_draft(cx).unwrap().output,
                 ScheduledTaskOutput::Background
             );
+            assert_eq!(p.editor_draft(cx).unwrap().after_success, ScheduledTaskAfterSuccess::Archive);
+            p.choice("afterSuccess", "keep".into(), cx);
+            assert_eq!(p.editor_draft(cx).unwrap().after_success, ScheduledTaskAfterSuccess::Keep);
             p.save(cx);
             assert_eq!(
                 p.error.as_deref(),
@@ -1767,6 +1842,10 @@ mod tests {
                 p.editor_draft(cx).unwrap().output,
                 ScheduledTaskOutput::Interactive
             );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
+        page.update(cx, |p, cx| {
             p.target = Some("item-only".into());
             p.edit(None, cx);
             assert_eq!(
@@ -1777,6 +1856,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_none());
+        assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
         page.update(cx, |p, cx| {
             p.target = Some("older".into());
             cx.notify();
@@ -2282,10 +2362,11 @@ mod tests {
                     vec![
                         capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                        capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
                     ]
                 };
                 crate::snapshot::render_to_png(
-                    &format!("scheduled-task-editor-{host}-{name}"),
+                    &format!("scheduled-task-retention-editor-{host}-{name}"),
                     gpui::size(px(850.0), px(1500.0)),
                     crate::ui_style::UiStyleId::Default,
                     appearance,
@@ -2297,7 +2378,7 @@ mod tests {
                             p.target = Some("host".into());
                             state.update(cx, |s, _| {
                                 s.devices.push(serde_json::from_value(serde_json::json!({"id":"host","name":"This Mac","platform":"macos","capabilities":capabilities})).unwrap());
-                                s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":false,"createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
+                                s.chats = vec![serde_json::from_value(serde_json::json!({"id":"morning-previous","deviceId":"host","title":"Daily summary","archived":host == "background","createdAt":"2026-11-11T08:00:00Z","scheduledTaskInfo":{"taskId":"morning","taskName":"Daily summary","runId":"morning-previous"}})).unwrap()];
                             });
                             p.edit(None, cx);
                             p.editor.as_mut().unwrap().id = "morning".into();
@@ -2309,6 +2390,21 @@ mod tests {
                             let draft = &mut p.editor.as_mut().unwrap().draft;
                             draft.work_item_id = (host != "older").then(|| "routines".into());
                             draft.output = output;
+                            p.snapshot.runs = vec![ScheduledRun {
+                                id: "morning-previous".into(),
+                                task_id: "morning".into(),
+                                scheduled_for: 1_794_384_000_000,
+                                created_at: 1_794_384_000_000,
+                                finished_at: Some(1_794_384_060_000),
+                                manual: false,
+                                state: ScheduledRunState::Completed,
+                                detail: None,
+                                chat_id: Some("morning-previous".into()),
+                                task_revision: 1,
+                                snapshot: draft.clone(),
+                                awaiting_request_id: None,
+                                awaiting_since: None,
+                            }];
                             p.error = None;
                             p
                         });

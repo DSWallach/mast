@@ -139,6 +139,29 @@ On restart, reconcile occurrence IDs against chats, queued commands, and run jou
 
 The promise is one logical occurrence and idempotent dispatch, not exactly-once external side effects. Validate crash boundaries instead of relying on a claimed row alone. If persistence is corrupt or unavailable, stop scheduling and surface the error; never treat it as a new empty ledger and redispatch old jobs.
 
+### Background run archive and retention
+
+The run snapshot captures `afterSuccess`. Its default is Archive, which applies
+only to Background runs. The editor uses `scheduled-task-after-success-v1` to
+offer Archive and Keep and to send the field. An older host drops the field. A
+current host preserves the stored choice when an older editor omits it.
+
+Lifecycle reconciliation persists the run outcome and its follow-ups together.
+It applies archive guards for open Required Actions, pending input, queued
+turns, pins and the personal assistant. The registry records a completed
+automatic archive in the same write as the archive flag so a crash replay
+cannot undo a user's restore. Background failures, interruptions, cancellations
+and input waits update a task-scoped Required Action. Success resolves it.
+A user pause or deletion before a run chat exists records the cancellation
+without filing an action.
+
+The proposed retention policy keeps run history and defaults to 14 days. It
+protects the latest run, restored chats, chats with open Required Actions and
+chats outside the scheduled-run ledger. Automatic deletion and its setting are
+pending a transcript purge path. The existing Delete Chat operation removes
+the registry row and the local snapshot while the synced session document
+survives. The scheduler currently performs no deletions.
+
 ## Claude import and cutover
 
 1. Discover the selected Claude account's schedule registries and parse a version-tolerant read-only snapshot. Import cron/fireAt, enabled state, prompt path, cwd/worktree choice, model, last scheduled boundary, and permission metadata. Ignore unrelated fields while reporting unsupported schedule variants. Preview differences against prompt descriptions.

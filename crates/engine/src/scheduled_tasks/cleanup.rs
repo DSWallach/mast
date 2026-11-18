@@ -146,7 +146,7 @@ impl ScheduledTasks {
             .as_ref()
             .map(|assistant| assistant.coverage(&chats));
         let active = self.active_chat_ids()?;
-        let actions = workspace.open_user_action_origin_chats();
+        let actions = workspace.open_user_action_chats();
         let mut groups = BTreeMap::<_, Vec<&Chat>>::new();
         for chat in &chats {
             let Some(info) = &chat.scheduled_task_info else {

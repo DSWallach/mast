@@ -476,16 +476,26 @@ impl RegistryDoc {
         requests
     }
 
-    /// Chats with an open Required Action, including requests whose origin
-    /// chat has since moved to another Space.
-    pub fn open_user_action_origin_chats(&self) -> std::collections::HashSet<String> {
+    /// Chats referenced by open Required Actions, including chat links in
+    /// system requests and origins that moved to another Space.
+    pub fn open_user_action_chats(&self) -> std::collections::HashSet<String> {
+        self.open_user_action_chat_ids().collect()
+    }
+
+    fn open_user_action_chat_ids(&self) -> impl Iterator<Item = String> {
         self.overlay_rows(KIND_USER_ACTION_REQUESTS)
-            .iter()
-            .filter_map(|row| decode_request(row).ok())
+            .into_iter()
+            .filter_map(|row| decode_request(&row).ok())
             .map(|request| request.view)
-            .filter(|request| request.is_open() && !request.chat_id.is_empty())
-            .map(|request| request.chat_id)
-            .collect()
+            .filter(UserActionRequestView::is_open)
+            .flat_map(|request| {
+                let origin = (!request.chat_id.is_empty()).then_some(request.chat_id);
+                let links = request.links.into_iter().filter_map(|link| match link.target {
+                    mast_proto::RequestLinkTarget::Chat { id } => Some(id),
+                    _ => None,
+                });
+                origin.into_iter().chain(links)
+            })
     }
 
     /// One live request, with its dedupe flag and origin availability.
@@ -496,6 +506,26 @@ impl RegistryDoc {
             .into_iter()
             .find(|r| r.view.id == id)
             .map(|r| r.view)
+    }
+
+    /// Open requests raised by the scheduler for a task, even if it has
+    /// moved to another Work Outline item since a failed edition.
+    pub fn scheduled_task_actions(&self, key: &str, device: &str) -> Vec<UserActionRequestView> {
+        self.overlay_rows(KIND_USER_ACTION_REQUESTS)
+            .iter()
+            .filter(|row| row.fields.get("dedupeKey").and_then(Value::as_str) == Some(key))
+            .filter_map(|row| decode_request(row).ok().map(|request| request.view))
+            .filter(|request| {
+                request.is_open()
+                    && request.origin_kind == UserActionOriginKind::System
+                    && request.created_by.as_ref().is_some_and(|actor| actor.device_id == device)
+            })
+            .collect()
+    }
+
+    /// Includes system requests that point to the chat through a link.
+    pub fn has_open_action_for_chat(&self, chat_id: &str) -> bool {
+        self.open_user_action_chat_ids().any(|id| id == chat_id)
     }
 
     /// One live proposal with its effective status.
