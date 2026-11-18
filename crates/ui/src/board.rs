@@ -1,7 +1,7 @@
 //! Derived coordination board facts. This module does not fetch or persist data.
 use crate::chat_metadata::HeaderTicket;
 use crate::team::{self, TeamInput, WorkerFacts};
-use mast_proto::{ToolCall, WorkItemEffectiveStatus, WorkOutlineSnapshot};
+use mast_proto::{WorkItemEffectiveStatus, WorkOutlineSnapshot};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -10,17 +10,6 @@ pub(crate) enum BoardStatus {
     InProgress,
     InReview,
     Done,
-}
-
-impl BoardStatus {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Todo => "To do",
-            Self::InProgress => "In progress",
-            Self::InReview => "In review",
-            Self::Done => "Done",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,42 +177,9 @@ pub(crate) fn board(
         .collect()
 }
 
-/// Activity for a typed call, falling back to the existing preview otherwise.
-pub(crate) fn activity(call: Option<&ToolCall>, preview: Option<&str>) -> Option<String> {
-    let text = match call {
-        Some(ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. }) => {
-            Some(format!("editing {path}"))
-        }
-        Some(ToolCall::ApplyPatch { path }) => Some(format!(
-            "editing {}",
-            path.as_deref().unwrap_or("workspace")
-        )),
-        Some(ToolCall::Exec { command }) => Some(format!("running {command}")),
-        _ => None,
-    };
-    text.as_deref().or(preview).and_then(team::activity_line)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn activity_prefers_typed_calls_and_falls_back() {
-        assert_eq!(
-            activity(
-                Some(&ToolCall::Exec {
-                    command: "cargo test".into()
-                }),
-                Some("message")
-            ),
-            Some("running cargo test".into())
-        );
-        assert_eq!(
-            activity(None, Some("  last message\nmore")),
-            Some("last message".into())
-        );
-        assert_eq!(activity(None, None), None);
-    }
     #[test]
     fn board_classifies_items_and_scopes_descendants() {
         let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({

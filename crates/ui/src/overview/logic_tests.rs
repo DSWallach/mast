@@ -714,6 +714,7 @@ fn overview_mode_loads_a_saved_canvas_view_as_outline_and_writes_exactly_one() {
         OverviewMode::from_flags(&flags(&["viewMode:myPrs", "viewMode:board"])),
         OverviewMode::Outline
     );
+    assert_eq!(OverviewMode::from_flags(&flags(&["viewMode:table"])), OverviewMode::Outline);
     // The writer purges every `viewMode:` entry and writes one.
     for mode in [OverviewMode::List, OverviewMode::Outline] {
         let mut set = flags(&[
