@@ -91,7 +91,7 @@ pub(crate) struct OutlineChat {
     /// show. Hidden Chats are skipped silently; Chats missing from the list
     /// altogether are "dangling".
     pub visible: bool,
-    /// Last activity, unix millis; newer sorts first.
+    /// Last activity, unix millis; newer unpinned chats sort first.
     pub activity: i64,
     /// Mast agent-tool calls that failed in the session's last completed turn.
     pub tool_failures: Option<mast_proto::ToolFailures>,
@@ -304,7 +304,7 @@ struct Ctx<'a> {
     options: &'a OutlineOptions,
     chats: HashMap<&'a str, &'a OutlineChat>,
     /// Visible Chats per home row key (an item, a parent Chat, or an
-    /// Unassociated group), newest first. Each home is consumed once.
+    /// Unassociated group), pinned first and then newest first. Each home is consumed once.
     by_home: HashMap<String, Vec<&'a OutlineChat>>,
     hidden_completed: usize,
 }
@@ -315,6 +315,13 @@ fn text_matches(query: &str, fields: &[Option<&str>]) -> bool {
             .iter()
             .flatten()
             .any(|field| field.to_lowercase().contains(query))
+}
+
+fn compare_chats(a: &OutlineChat, b: &OutlineChat, pins: &HashSet<String>) -> std::cmp::Ordering {
+    pins.contains(&b.id)
+        .cmp(&pins.contains(&a.id))
+        .then_with(|| b.activity.cmp(&a.activity))
+        .then_with(|| a.id.cmp(&b.id))
 }
 
 /// Flatten `spaces` and `chats` into visible rows. `collapsed` holds row
@@ -368,7 +375,7 @@ pub(crate) fn flatten(
         }
     }
     for list in by_home.values_mut() {
-        list.sort_by(|a, b| options.pinned_chats.contains(&b.id).cmp(&options.pinned_chats.contains(&a.id)).then_with(|| b.activity.cmp(&a.activity)).then_with(|| a.id.cmp(&b.id)));
+        list.sort_by(|a, b| compare_chats(a, b, &options.pinned_chats));
     }
 
     let mut ctx = Ctx {
@@ -606,7 +613,7 @@ fn item_node<'s>(
             children.push(node);
         }
     }
-    // Associated Chats (newest first), then dangling assignments.
+    // Associated Chats (pinned first, then newest), then dangling assignments.
     let mut homed = ctx
         .by_home
         .remove(&row_key::item(space_id, &item.id))
@@ -623,7 +630,7 @@ fn item_node<'s>(
             .entry(row_key::unassociated(Some(space_id)))
             .or_default();
         unassociated.extend(std::mem::take(&mut homed));
-        unassociated.sort_by(|a, b| options.pinned_chats.contains(&b.id).cmp(&options.pinned_chats.contains(&a.id)).then_with(|| b.activity.cmp(&a.activity)).then_with(|| a.id.cmp(&b.id)));
+        unassociated.sort_by(|a, b| compare_chats(a, b, &options.pinned_chats));
     }
     let mut chat_nodes: Vec<Node> = homed
         .into_iter()
@@ -1016,15 +1023,47 @@ pub(crate) mod tests {
     #[test]
     fn pinned_chats_sort_first_among_siblings_without_moving_children() {
         let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
-        let mut chats = vec![chat("older", Some("s1")), chat("newer", Some("s1")), chat("child", Some("s1"))];
+        let mut chats = vec![
+            chat("older", Some("s1")),
+            chat("newer", Some("s1")),
+            chat("child", Some("s1")),
+        ];
         chats[1].activity = 10;
         chats[2].parent_chat_id = Some("older".into());
-        let options = OutlineOptions { pinned_chats: ["older".to_string()].into_iter().collect(), ..opts() };
+        let options = OutlineOptions {
+            pinned_chats: ["older".to_string()].into_iter().collect(),
+            ..opts()
+        };
         let model = flatten(&spaces, &chats, &HashSet::new(), &options);
         let older = model.position(&row_key::chat("older")).unwrap();
         let child = model.position(&row_key::chat("child")).unwrap();
         let newer = model.position(&row_key::chat("newer")).unwrap();
         assert!(older < child && child < newer);
+    }
+
+    #[test]
+    fn pinned_child_sorts_first_only_within_its_parent() {
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let mut chats = vec![chat("parent", Some("s1")), chat("older", Some("s1")), chat("newer", Some("s1"))];
+        chats[1].parent_chat_id = Some("parent".into());
+        chats[2].parent_chat_id = Some("parent".into());
+        chats[2].activity = 10;
+        let options = OutlineOptions { pinned_chats: ["older".to_string()].into_iter().collect(), ..opts() };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        let parent = model.position(&row_key::chat("parent")).unwrap();
+        let older = model.position(&row_key::chat("older")).unwrap();
+        let newer = model.position(&row_key::chat("newer")).unwrap();
+        assert!(parent < older && older < newer);
+        assert_eq!(model.rows[older].parent, Some(parent));
+    }
+
+    #[test]
+    fn pinned_chat_from_hidden_archived_item_sorts_first_when_unassociated() {
+        let (spaces, mut chats) = archived_synced_pr_spaces();
+        chats.iter_mut().find(|c| c.id == CHAT_LOOSE_A).unwrap().activity = 100;
+        let options = OutlineOptions { pinned_chats: [CHAT_PR.to_string()].into_iter().collect(), ..opts() };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        assert!(model.position(&row_key::chat(CHAT_PR)).unwrap() < model.position(&row_key::chat(CHAT_LOOSE_A)).unwrap());
     }
 
     #[test]
