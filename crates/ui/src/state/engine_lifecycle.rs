@@ -521,4 +521,5 @@ impl AppState {
             }
         })
         .detach();
-    }}
+    }
+}
