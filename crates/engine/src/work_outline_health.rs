@@ -1,5 +1,52 @@
 //! Read-only health checks over facts collected for one outline subtree.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Cached repository default branches. This is queried when health is
+/// requested, never from a render callback. Failures are cached as well.
+#[derive(Default)]
+pub struct DefaultBranchCache {
+    entries: tokio::sync::Mutex<HashMap<String, (Instant, Option<String>)>>,
+}
+
+impl DefaultBranchCache {
+    async fn get_with<F, Fut>(&self, path: &str, lookup: F) -> Option<String>
+    where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Option<String>> {
+        let mut entries = self.entries.lock().await;
+        if let Some((at, branch)) = entries.get(path)
+            && at.elapsed() < if branch.is_some() { Duration::from_secs(900) } else { Duration::from_secs(300) } {
+            return branch.clone();
+        }
+        let branch = lookup().await;
+        if entries.len() >= 128 && !entries.contains_key(path)
+            && let Some(oldest) = entries.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) {
+            entries.remove(&oldest);
+        }
+        entries.insert(path.to_owned(), (Instant::now(), branch.clone()));
+        branch
+    }
+
+    /// Resolve the locally recorded remote HEAD. A missing or invalid value
+    /// stays unknown; it must not be guessed from a checkout's current branch.
+    pub async fn get(&self, path: &str) -> Option<String> {
+        if path.is_empty() || crate::repos::is_automatic_access_blocked(std::path::Path::new(path)) { return None; }
+        self.get_with(path, || async {
+            let mut command = mast_harness::git_command_async();
+            command.current_dir(path).args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+                .stdin(std::process::Stdio::null()).kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(3), async {
+                let _permit = crate::git_gate::acquire("health:default-branch").await;
+                command.output().await
+            }).await.ok()?.ok()?;
+            if !output.status.success() { return None; }
+            let name = String::from_utf8(output.stdout).ok()?;
+            let branch = name.trim().strip_prefix("origin/")?.trim();
+            (!branch.is_empty()).then(|| branch.to_owned())
+        }).await
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HealthItem {
     pub id: String,
@@ -136,6 +183,24 @@ pub fn check_health(items: &[HealthItem], chats: &[HealthChat], prs: &[HealthPul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_branch_cache_reuses_results_and_backs_off_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = DefaultBranchCache::default();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..2 {
+            assert_eq!(cache.get_with("repo", || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some("main".into())
+            }).await.as_deref(), Some("main"));
+            assert_eq!(cache.get_with("missing", || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                None
+            }).await, None);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn subtree_does_not_include_siblings_or_archived_descendants() {
