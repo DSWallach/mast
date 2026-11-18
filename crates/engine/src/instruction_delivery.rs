@@ -396,15 +396,21 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Default)]
     pub(crate) struct FakeRegistry {
         pub revisions: Mutex<HashMap<String, InstructionRevisionView>>,
+        missing_revision: AtomicBool,
     }
 
     impl InstructionRegistry for FakeRegistry {
         fn instruction_revision(&self, id: &str) -> Option<InstructionRevisionView> {
-            self.revisions.lock().unwrap().get(id).cloned()
+            let revision = self.revisions.lock().unwrap().get(id).cloned();
+            if revision.is_none() {
+                self.missing_revision.store(true, Ordering::SeqCst);
+            }
+            revision
         }
         fn selected_instruction_revision(&self, _: &str) -> Option<InstructionRevisionPin> {
             None
@@ -519,7 +525,18 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    async fn wait_for_missing_revision(registry: &FakeRegistry) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !registry.missing_revision.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "revision wait did not start"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
         let registry: Arc<FakeRegistry> = Arc::default();
         // A different revision exists; it must never be used.
@@ -539,17 +556,22 @@ mod tests {
             max_step: Duration::from_millis(80),
         };
         let reg = registry.clone();
-        let error = resolve_pin_waiting(
-            move || Some(reg.clone() as Arc<dyn InstructionRegistry>),
-            &pin,
-            wait,
-        )
-        .await
-        .unwrap_err();
+        let task = tokio::spawn(async move {
+            resolve_pin_waiting(
+                move || Some(reg.clone() as Arc<dyn InstructionRegistry>),
+                &pin,
+                wait,
+            )
+            .await
+        });
+        wait_for_missing_revision(&registry).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(wait.max).await;
+        let error = task.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("has not synced"), "{error}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_revision_that_syncs_during_the_wait_is_delivered() {
         let registry: Arc<FakeRegistry> = Arc::default();
         let b = body("Late");
@@ -557,26 +579,28 @@ mod tests {
             revision_id: "rev".into(),
             revision_hash: b.hash.clone(),
         };
-        let late = registry.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            late.revisions
-                .lock()
-                .unwrap()
-                .insert("rev".into(), view("rev", b));
-        });
         let reg = registry.clone();
-        let envelope = resolve_pin_waiting(
-            move || Some(reg.clone() as Arc<dyn InstructionRegistry>),
-            &pin,
-            RevisionWait {
-                max: Duration::from_secs(5),
-                initial: Duration::from_millis(20),
-                max_step: Duration::from_millis(80),
-            },
-        )
-        .await
-        .unwrap();
+        let task = tokio::spawn(async move {
+            resolve_pin_waiting(
+                move || Some(reg.clone() as Arc<dyn InstructionRegistry>),
+                &pin,
+                RevisionWait {
+                    max: Duration::from_secs(5),
+                    initial: Duration::from_millis(20),
+                    max_step: Duration::from_millis(80),
+                },
+            )
+            .await
+        });
+        wait_for_missing_revision(&registry).await;
+        assert!(!task.is_finished());
+        registry
+            .revisions
+            .lock()
+            .unwrap()
+            .insert("rev".into(), view("rev", b));
+        tokio::time::advance(Duration::from_millis(80)).await;
+        let envelope = task.await.unwrap().unwrap();
         assert!(envelope.rendered.contains("Late"));
     }
 

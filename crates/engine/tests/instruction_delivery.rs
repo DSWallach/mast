@@ -10,6 +10,7 @@
 //!   without writing the user message and never substitute another revision.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,6 +40,7 @@ struct FakeRegistry {
     revisions: Mutex<HashMap<String, InstructionRevisionView>>,
     selected: Mutex<Option<InstructionRevisionPin>>,
     reports: Mutex<Vec<ExecutionSessionReport>>,
+    missing_revision: AtomicBool,
 }
 
 impl FakeRegistry {
@@ -89,7 +91,11 @@ impl FakeRegistry {
 
 impl InstructionRegistry for FakeRegistry {
     fn instruction_revision(&self, revision_id: &str) -> Option<InstructionRevisionView> {
-        self.revisions.lock().unwrap().get(revision_id).cloned()
+        let revision = self.revisions.lock().unwrap().get(revision_id).cloned();
+        if revision.is_none() {
+            self.missing_revision.store(true, Ordering::SeqCst);
+        }
+        revision
     }
     fn selected_instruction_revision(&self, _chat_id: &str) -> Option<InstructionRevisionPin> {
         self.selected.lock().unwrap().clone()
@@ -213,13 +219,24 @@ fn has_user_message(core: &EngineCore, id: &str) -> bool {
 }
 
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !predicate() {
         assert!(
-            tokio::time::Instant::now() < deadline,
+            std::time::Instant::now() < deadline,
             "timed out waiting for {what}"
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+}
+
+async fn wait_for_missing_revision(registry: &FakeRegistry) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !registry.missing_revision.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "revision wait did not start"
+        );
+        tokio::task::yield_now().await;
     }
 }
 
@@ -683,10 +700,15 @@ async fn an_integrity_failure_fails_closed() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::from_secs(3600),
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
     // Another revision exists and is even selected; it must not be used.
     let other = rig.registry.add("rev-other", "Something else");
     rig.registry.select(&other);
@@ -695,12 +717,20 @@ async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
         revision_hash: "0".repeat(64),
     };
     let id = queue(&rig.core, pinned("hello", "m-1", &missing));
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    wait_for_missing_revision(&rig.registry).await;
     assert_eq!(
         command(&rig.core, &id).unwrap().status,
         SessionCommandStatus::Pending,
         "still waiting for the revision to sync"
     );
+    // The command gate measures real elapsed time. Expire its test-only
+    // deadline explicitly after observing the pending state.
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::ZERO,
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
+    tokio::time::advance(Duration::from_millis(200)).await;
     let resolved = wait_resolved(&rig.core, &id).await;
     assert_eq!(resolved.status, SessionCommandStatus::Rejected);
     assert!(
@@ -715,15 +745,20 @@ async fn a_missing_revision_waits_then_fails_and_never_substitutes() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_revision_that_syncs_during_the_wait_is_delivered() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
+    rig.core.doc_host.set_revision_wait(RevisionWait {
+        max: Duration::from_secs(3600),
+        initial: Duration::from_millis(50),
+        max_step: Duration::from_millis(200),
+    });
     // Pin computed for a revision the registry does not have yet.
     let staging = FakeRegistry::default();
     let late = staging.add("rev-late", "Arrives late");
     let id = queue(&rig.core, pinned("hello", "m-1", &late));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_missing_revision(&rig.registry).await;
     assert_eq!(
         command(&rig.core, &id).unwrap().status,
         SessionCommandStatus::Pending
@@ -739,6 +774,7 @@ async fn a_revision_that_syncs_during_the_wait_is_delivered() {
         .lock()
         .unwrap()
         .insert("rev-late".into(), view);
+    tokio::time::advance(Duration::from_millis(200)).await;
     assert_eq!(
         wait_resolved(&rig.core, &id).await.status,
         SessionCommandStatus::Applied
