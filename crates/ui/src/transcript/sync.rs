@@ -17,6 +17,7 @@ struct SyncDiff {
 }
 
 impl Transcript {
+    /// Rebuild rows from app state; splice minimal ranges into the list.
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
         let _measurement = SyncMeasurement::start();

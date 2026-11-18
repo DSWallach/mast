@@ -2162,7 +2162,6 @@ impl Transcript {
         }
     }
 
-    /// Rebuild rows from app state; splice minimal ranges into the list.
     /// Cached row build for one entry (streaming entries bypass the cache).
     /// Expand/collapse one long user bubble. Heights come from the text's
     /// passive paint cache, never from transcript state, so this changes

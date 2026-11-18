@@ -125,6 +125,7 @@ fn row_replacement_and_insertion_update_layout(cx: &mut gpui::TestAppContext) {
             let revision = transcript.viewport_layout_revision;
             transcript.sync(cx);
             assert_eq!(transcript.rows.len(), initial_rows);
+            assert_eq!(transcript.list.item_count(), transcript.rows.len());
             assert_ne!(transcript.viewport_layout_revision, revision);
         });
         state.update(cx, |state, _| {
@@ -137,6 +138,7 @@ fn row_replacement_and_insertion_update_layout(cx: &mut gpui::TestAppContext) {
             let revision = transcript.viewport_layout_revision;
             transcript.sync(cx);
             assert!(transcript.rows.len() > initial_rows);
+            assert_eq!(transcript.list.item_count(), transcript.rows.len());
             assert_ne!(transcript.viewport_layout_revision, revision);
         });
     });
