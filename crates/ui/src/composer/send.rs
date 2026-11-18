@@ -154,153 +154,13 @@ impl Composer {
         let staged_appshots = &send.staged_appshots;
         let staged = &send.staged;
         let text = &send.text;
-        let created_at = send.created_at;
         let queue = send.queue;
         let clean_queue_attachment_text = send.clean_queue_attachment_text;
-        let queued_flow = send.queued_flow;
-        let upload_ids = &send.upload_ids;
-        let echo_paths = &send.echo_paths;
-        let echo_text = &send.echo_text;
         let workspace_message = &send.workspace_message;
         let worktree_name_source = &send.worktree_name_source;
         #[cfg(test)]
         let fail_send_before_dispatch = send.fail_send_before_dispatch;
-                // Attachments stage FIRST — before the chat row or anything
-                // else exists. Staging is chat-independent (keyed by
-                // uploadId), and ordering it first makes a new-chat send
-                // atomic: a staging failure aborts with NOTHING created,
-                // instead of stranding a just-minted empty chat (v0.2.12
-                // "failed to stage → empty transcript" report).
-                //
-                // Queued flow: commit the bytes to the LOCAL engine's uploads
-                // dir (fast, offline-safe) — the queued command carries the
-                // `pending://` refs and the engine delivers the bytes to a
-                // remote host afterwards, retrying until they land. Legacy
-                // flow (old engines): stage on the host device up front,
-                // bounded by a total budget so a degraded link fails the send
-                // loudly instead of grinding through silent per-chunk retries
-                // for minutes.
-                let mut content = text.clone();
-                let mut attachment_paths: Vec<String> = Vec::new();
-                let mut transfers: Vec<serde_json::Value> = Vec::new();
-                if !staged.is_empty() && queued_flow {
-                    // Local staging is disk-speed; publish progress anyway so
-                    // huge files still narrate.
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(upload_ids) {
-                        if let Err(err) = attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            None,
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
-                            return Err("Couldn't stage the attachment locally.".to_string());
-                        }
-                        transfers.push(serde_json::json!({
-                            "uploadId": upload_id,
-                            "fileName": att.name,
-                        }));
-                    }
-                    // The echo refs ARE the persisted refs — no refresh pass.
-                    attachment_paths = echo_paths.clone();
-                    content = echo_text.clone();
-                } else if !staged.is_empty() {
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(upload_ids) {
-                        match attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            host_device_id.as_deref(),
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            Ok(path) => attachment_paths.push(path),
-                            Err(err) => {
-                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    // Seed the transcript cache from local bytes so the sent
-                    // bubble's thumbnails never round-trip (seedTranscript-
-                    // Attachment in the original send path).
-                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
-                        if seed_device != *device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-                        }
-                    }
-                    let appshot_paths: HashMap<String, String> = staged
-                        .iter()
-                        .zip(&attachment_paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
-                        .collect();
-                    content = attachments::with_attachments(
-                        &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
-                        &attachment_paths,
-                    );
-                    // A normal send already has an optimistic echo: refresh it
-                    // in place with the uploaded refs so its thumbnails never
-                    // flicker. A queued message has no transcript echo at all;
-                    // its queue row is the only representation until dispatch.
-                    if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
-                            id: message_id.clone(),
-                            role: mast_doc::MessageRole::User,
-                            parts: vec![MessagePart::Text {
-                                id: "t0".into(),
-                                text: content.clone(),
-                            }],
-                            created_at,
-                            device_id: "local".into(),
-                            status: None,
-                            continuation_of: None,
-                        };
-                        let echo_chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.remove_echo(&echo_chat_id, &message_id);
-                                s.push_echo(&echo_chat_id, refreshed);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                }
+        let (content, attachment_paths, transfers) = Self::stage_send_attachments(send, this, cx).await?;
 
                 // Resolve the working directory: existing chats keep theirs;
                 // new chats run per the checkout plan (t3code env-mode): the
@@ -648,6 +508,161 @@ impl Composer {
                     .ok();
                 }
                 Ok(None)
+    }
+
+    async fn stage_send_attachments(send: &PreparedSend, this: &gpui::WeakEntity<Composer>, cx: &mut gpui::AsyncApp) -> Result<(String, Vec<String>, Vec<serde_json::Value>), String> {
+        let engine = &send.engine;
+        let message_id = &send.message_id;
+        let chat_id = &send.chat_id;
+        let device_id = &send.device_id;
+        let host_device_id = &send.host_device_id;
+        let staged_appshots = &send.staged_appshots;
+        let staged = &send.staged;
+        let text = &send.text;
+        let created_at = send.created_at;
+        let queue = send.queue;
+        let queued_flow = send.queued_flow;
+        let upload_ids = &send.upload_ids;
+        let echo_paths = &send.echo_paths;
+        let echo_text = &send.echo_text;
+                // Attachments stage FIRST — before the chat row or anything
+                // else exists. Staging is chat-independent (keyed by
+                // uploadId), and ordering it first makes a new-chat send
+                // atomic: a staging failure aborts with NOTHING created,
+                // instead of stranding a just-minted empty chat (v0.2.12
+                // "failed to stage → empty transcript" report).
+                //
+                // Queued flow: commit the bytes to the LOCAL engine's uploads
+                // dir (fast, offline-safe) — the queued command carries the
+                // `pending://` refs and the engine delivers the bytes to a
+                // remote host afterwards, retrying until they land. Legacy
+                // flow (old engines): stage on the host device up front,
+                // bounded by a total budget so a degraded link fails the send
+                // loudly instead of grinding through silent per-chunk retries
+                // for minutes.
+                let mut content = text.clone();
+                let mut attachment_paths: Vec<String> = Vec::new();
+                let mut transfers: Vec<serde_json::Value> = Vec::new();
+                if !staged.is_empty() && queued_flow {
+                    // Local staging is disk-speed; publish progress anyway so
+                    // huge files still narrate.
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(upload_ids) {
+                        if let Err(err) = attachments::upload_attachment(
+                            &engine,
+                            cx.background_executor(),
+                            None,
+                            upload_id,
+                            att,
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
+                            return Err("Couldn't stage the attachment locally.".to_string());
+                        }
+                        transfers.push(serde_json::json!({
+                            "uploadId": upload_id,
+                            "fileName": att.name,
+                        }));
+                    }
+                    // The echo refs ARE the persisted refs — no refresh pass.
+                    attachment_paths = echo_paths.clone();
+                    content = echo_text.clone();
+                } else if !staged.is_empty() {
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(upload_ids) {
+                        match attachments::upload_attachment(
+                            &engine,
+                            cx.background_executor(),
+                            host_device_id.as_deref(),
+                            upload_id,
+                            att,
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
+                            Ok(path) => attachment_paths.push(path),
+                            Err(err) => {
+                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
+                                return Err(
+                                    "Couldn't upload the attachment — the device may be offline."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    // Seed the transcript cache from local bytes so the sent
+                    // bubble's thumbnails never round-trip (seedTranscript-
+                    // Attachment in the original send path).
+                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
+                    for (path, att) in attachment_paths.iter().zip(staged) {
+                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        if seed_device != *device_id {
+                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                        }
+                    }
+                    let appshot_paths: HashMap<String, String> = staged
+                        .iter()
+                        .zip(&attachment_paths)
+                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+                        .collect();
+                    content = attachments::with_attachments(
+                        &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
+                        &attachment_paths,
+                    );
+                    // A normal send already has an optimistic echo: refresh it
+                    // in place with the uploaded refs so its thumbnails never
+                    // flicker. A queued message has no transcript echo at all;
+                    // its queue row is the only representation until dispatch.
+                    if should_publish_optimistic_echo(queue) {
+                        let refreshed = SessionMessageEntry {
+                            id: message_id.clone(),
+                            role: mast_doc::MessageRole::User,
+                            parts: vec![MessagePart::Text {
+                                id: "t0".into(),
+                                text: content.clone(),
+                            }],
+                            created_at,
+                            device_id: "local".into(),
+                            status: None,
+                            continuation_of: None,
+                        };
+                        let echo_chat_id = chat_id.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.remove_echo(&echo_chat_id, &message_id);
+                                s.push_echo(&echo_chat_id, refreshed);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                }
+
+        Ok((content, attachment_paths, transfers))
     }
 
     fn prepare_send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) -> Option<PreparedSend> {
