@@ -169,12 +169,13 @@ its title. The claim records a provisional identity from the current task name,
 same way. A rename therefore keeps one artifact and its revision history.
 There is one artifact per task and item.
 
-It is not pinned. Pinning is plan-scoped (one plan per item), so a pinned
-results artifact would replace the item's plan. It stays visible without a pin:
-the item's artifact list sorts the pinned plan first and then by last update,
-and every run updates this artifact. Consumers (the read path) find it by
-`role`, never by title. Runs claimed before this contract, and Interactive
-runs, have no `results` and are never checked.
+It is not pinned as the plan: plan pinning is one per item, so that would
+replace the item's plan. Instead it is the artifact with the reserved results
+role, which every item list ranks under the plan and above other artifacts
+(`ArtifactView::pin_rank`), even when an ordinary artifact is newer. See
+`artifacts-contract.md`. Consumers (the read path) find it by `role`, never by
+title. Runs claimed before this contract, and Interactive runs, have no
+`results` and are never checked.
 
 `prompt_with_contract` appends the contract to the prompt on launch. It depends
 only on the run, so a launch retried after a crash queues the same message. The

@@ -2153,3 +2153,61 @@ async fn renaming_a_task_keeps_one_results_artifact_and_its_history() {
     assert_eq!(artifacts, 1);
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn simultaneous_publishes_from_one_run_let_exactly_one_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for round in 0..4 {
+        let task = format!("racer-{round}");
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.name = format!("Racer {round}");
+        draft.output = ScheduledTaskOutput::Background;
+        save_lifecycle_task(&core, &task, 0, draft).await;
+        let run = claim_run_without_results(&core, &task, "race").await;
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let results = run.results.clone().unwrap();
+        let caller = mast_engine::artifacts::AgentCaller {
+            chat_id: run.chat_id.clone().unwrap(),
+            run_id: "agent-run".into(),
+            space_id: ITEM_SPACE.into(),
+            device_id: ITEM_DEVICE.into(),
+            work_item_id: Some(item.clone()),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|n| {
+                std::fs::write(root.join(format!("race-{round}-{n}.md")), format!("Run: {n}")).unwrap();
+                let (artifacts, caller, barrier, results) =
+                    (core.artifacts.clone(), caller.clone(), barrier.clone(), results.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    artifacts
+                        .agent_publish(
+                            &caller,
+                            &serde_json::json!({
+                                "path": format!("race-{round}-{n}.md"),
+                                "title": results.title, "role": results.role,
+                                "note": "n", "idempotencyKey": format!("key-{n}"),
+                            }),
+                        )
+                        .is_ok()
+                })
+            })
+            .collect();
+        let accepted = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(accepted, 1, "round {round}");
+        let artifact = core.workspace.artifact(&results.artifact_id).unwrap();
+        assert_eq!(artifact.revisions.len(), 1, "round {round}");
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    }
+    core.shutdown().await;
+}

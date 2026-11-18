@@ -298,3 +298,45 @@ tab/options_view.rs}`; manifest fields in `crates/proto/src/artifacts.rs`.
   document, so the in-frame zoom resets.
 - **Unverified.** The transform scale, ResizeObserver refit and per-column horizontal scroll are
   only checked as generated HTML in headless tests, not in a real WKWebView.
+
+## Amendment: scheduled results artifacts (2026-11-18)
+
+A Background scheduled run on a work item owns one artifact per task and item.
+This section covers how it is identified, how `artifact_publish` treats it and how
+lists order it. The run side is in `scheduled-tasks.md`.
+
+**Identity.** `role` is `scheduled-results:<32 hex>` (`ScheduledRunResults::role_for`,
+the hash of the task id, so it fits `MAX_ROLE_CHARS`). `title` is `Results: <task
+name>` as of the first publish and then stays: the artifact id includes the
+title, so the engine resolves the existing artifact by item and role
+(`scheduled_tasks::results::resolve`) and reuses its title after a rename. Tasks
+sharing an item differ by role, so each has its own artifact and revision
+history. Readers find a task's artifact by role, never by title.
+
+**Publish guard (`guard_results_publish`).** It applies only to `artifact_publish`
+from a chat that is a Background scheduled run on an item. Other chats, Interactive
+runs and artifacts with other roles are untouched. The call is rejected with
+`invalid` when:
+
+- the role has the `scheduled-results:` prefix but is not this task's role
+  ("this role belongs to another task's results");
+- the title or the role matches this task's results identity but the other half
+  does not ("use both exactly");
+- `pinAsPlan` is set on the results artifact ("not the item's plan");
+- this run's chat already published a revision of it under a different
+  idempotency key ("a run publishes once"). The same key is a replay and returns
+  the first result.
+
+The check and the record run under one lock (`agent_publish_serial`), so two
+simultaneous publishes from one run cannot both pass: exactly one is accepted.
+A user, another task or an earlier run publishing the same artifact is allowed
+and does not count for the run (the scheduler checks `by.chatId`).
+
+**Pin.** Results are not pinned as the plan, and plan pinning (one per item) is
+unchanged. They get a distinct, derived rank with no persisted field:
+`ArtifactView::pin_rank` is 0 for the pinned plan, 1 for a role with the results
+prefix and 2 otherwise. `ArtifactsSnapshot::for_work_item` and the UI's
+`details_order` (item details panel and chat work context) sort by rank first,
+then by `updatedAt` descending, then title, so results stay above a newer ordinary
+artifact and under the plan. Several tasks' results share rank 1 and order among
+themselves by recency.

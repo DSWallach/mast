@@ -372,6 +372,29 @@ impl ArtifactView {
         self.revisions.iter().find(|r| r.id == id)
     }
 
+    /// A scheduled task's results artifact, recognized by its reserved role
+    /// (`ScheduledRunResults::role_for`). Not the plan and not a plan pin.
+    pub fn is_scheduled_results(&self) -> bool {
+        self.role.as_deref().is_some_and(|role| {
+            role.trim()
+                .to_ascii_lowercase()
+                .starts_with(crate::scheduled_tasks::RESULTS_ROLE_PREFIX)
+        })
+    }
+
+    /// Where the artifact sits in a work item's list: the pinned plan, then
+    /// scheduled results (every task's, whatever else is newer), then the rest.
+    /// Surfaces sort by this first so they agree.
+    pub fn pin_rank(&self) -> u8 {
+        if self.pinned_as_plan {
+            0
+        } else if self.is_scheduled_results() {
+            1
+        } else {
+            2
+        }
+    }
+
     /// The plan scope: the work item, else the chat.
     pub fn plan_scope(&self) -> Option<PlanScope<'_>> {
         if let Some(item) = self.work_item_id.as_deref() {
@@ -414,7 +437,8 @@ impl ArtifactsSnapshot {
         self.artifacts.iter().find(|a| a.id == id)
     }
 
-    /// Live artifacts of one work item, the pinned plan first.
+    /// Live artifacts of one work item: the pinned plan, then scheduled
+    /// results, then the rest (see [`ArtifactView::pin_rank`]).
     pub fn for_work_item(&self, work_item_id: &str) -> Vec<&ArtifactView> {
         let mut out: Vec<&ArtifactView> = self
             .artifacts
@@ -422,7 +446,7 @@ impl ArtifactsSnapshot {
             .filter(|a| a.archived_at.is_none())
             .filter(|a| a.work_item_id.as_deref() == Some(work_item_id))
             .collect();
-        out.sort_by_key(|a| !a.pinned_as_plan);
+        out.sort_by_key(|a| a.pin_rank());
         out
     }
 
