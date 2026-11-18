@@ -9,7 +9,11 @@ pub(super) struct ShellFrame {
 }
 
 impl Shell {
-    pub(super) fn reconcile_frame_state(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ShellFrame {
+    pub(super) fn reconcile_frame_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ShellFrame {
         self.render_time = Some(std::time::Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
@@ -213,6 +217,12 @@ impl Shell {
             self.update_jump_hints(&window.modifiers(), cx);
         }
 
-        ShellFrame { gate, restart_required, frost, text, font }
+        ShellFrame {
+            gate,
+            restart_required,
+            frost,
+            text,
+            font,
+        }
     }
 }
