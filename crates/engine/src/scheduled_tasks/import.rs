@@ -63,20 +63,7 @@ pub(crate) fn imported_identity(
     session: &str,
     scope: &str,
 ) -> String {
-    let mut sources = Vec::new();
-    for path in registries() {
-        let Ok(bytes) = read(&path, 2 * 1024 * 1024) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
-        for row in value["scheduledTasks"].as_array().into_iter().flatten() {
-            if row["id"].as_str() == Some(name) && row["filePath"].as_str() == Some(file) {
-                sources.push(format!("{}#{name}", path.display()));
-            }
-        }
-    }
+    let (mut sources, _) = desktop_sources(file, name);
     let source = if sources.len() == 1 {
         sources.remove(0)
     } else if sources.len() > 1 {
@@ -85,6 +72,33 @@ pub(crate) fn imported_identity(
         format!("legacy:{device}:{file}")
     };
     task_id(scope, device, &source)
+}
+
+/// An absent definition is evidence of retirement only if the registries
+/// we found could be read. A transiently unreadable registry is inconclusive.
+pub(super) fn desktop_source_retired(file: &str, name: &str) -> bool {
+    let (sources, all_read) = desktop_sources(file, name);
+    all_read && sources.is_empty()
+}
+
+fn desktop_sources(file: &str, name: &str) -> (Vec<String>, bool) {
+    let mut sources = Vec::new();
+    let mut all_read = true;
+    for path in registries() {
+        let rows = read(&path, 2 * 1024 * 1024)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let Some(rows) = rows.as_ref().and_then(|value| value["scheduledTasks"].as_array()) else {
+            all_read = false;
+            continue;
+        };
+        for row in rows {
+            if row["id"].as_str() == Some(name) && row["filePath"].as_str() == Some(file) {
+                sources.push(format!("{}#{name}", path.display()));
+            }
+        }
+    }
+    (sources, all_read)
 }
 
 pub(crate) fn task_id(scope: &str, device: &str, source: &str) -> String {

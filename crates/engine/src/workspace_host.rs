@@ -239,6 +239,13 @@ pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
 }
 
+#[derive(Default)]
+struct NewChatMetadata {
+    parent_chat_id: Option<String>,
+    scheduled: Option<mast_proto::ScheduledChat>,
+    archived: bool,
+}
+
 impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
@@ -1822,6 +1829,36 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_row(
+            chat_id, space_id, device_id, config, cwd,
+            NewChatMetadata { parent_chat_id, ..Default::default() },
+        )
+    }
+
+    pub(crate) fn create_external_chat(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: ChatConfig,
+        cwd: String,
+        scheduled: Option<mast_proto::ScheduledChat>,
+        archived: bool,
+    ) -> Result<(), EngineError> {
+        self.create_chat_row(
+            chat_id, Some(space_id), Some(self.device_id()), Some(config), Some(cwd),
+            NewChatMetadata { scheduled, archived, ..Default::default() },
+        )
+    }
+
+    fn create_chat_row(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        metadata: NewChatMetadata,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -1846,7 +1883,7 @@ impl WorkspaceHost {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
-                archived: false,
+                archived: metadata.archived,
                 cwd: Some(cwd.unwrap_or_else(|| {
                     space
                         .as_ref()
@@ -1868,11 +1905,11 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 actual_model: None,
-                scheduled_task: None,
-                scheduled_task_info: None,
+                scheduled_task: metadata.scheduled.as_ref().map(|task| task.task_name.clone()),
+                scheduled_task_info: metadata.scheduled,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
-                parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                parent_chat_id: metadata.parent_chat_id.filter(|p| !p.trim().is_empty()),
                 side_of: None,
                 side_absorbed_through: None,
                 linked_pr_url: None,
@@ -2141,6 +2178,42 @@ impl WorkspaceHost {
             if let Some(hook) = hook { hook(chat_id).map_err(EngineError::Other)?; }
         }
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub(crate) fn open_user_action_origin_chats(&self) -> std::collections::HashSet<String> {
+        self.read(RegistryDoc::open_user_action_origin_chats)
+    }
+
+    fn scheduled_run_cleanup_generation(doc: &RegistryDoc) -> u64 {
+        doc.kinds_generation(&[
+            mast_doc::registry::KIND_CHATS,
+            mast_doc::registry::KIND_SIDEBAR_PINS,
+            mast_doc::registry::work_outline::KIND_USER_ACTION_REQUESTS,
+        ])
+    }
+
+    pub(crate) fn scheduled_run_cleanup_marker(&self) -> u64 {
+        self.read(Self::scheduled_run_cleanup_generation)
+    }
+
+    /// Commit the confirmed set together, provided its registry inputs have
+    /// not changed since selection. In particular, a pin or a Required Action
+    /// arriving during selection must win over the archive.
+    pub(crate) fn archive_scheduled_runs<'a>(
+        &self,
+        marker: u64,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<bool, EngineError> {
+        let _transition = lock(&self.inner.chat_archive_transition);
+        self.mutate(|doc| {
+            if Self::scheduled_run_cleanup_generation(doc) != marker {
+                return Ok(false);
+            }
+            for id in ids {
+                doc.set_chat_archived(id, true)?;
+            }
+            Ok(true)
+        })
     }
 
     /// Stamp stable run provenance and the compatible legacy task name together.

@@ -75,6 +75,24 @@ User requirement: both the sidebar and the overview show only the most recent se
 - Apply the same presentation to native runs and imported Claude task sessions, keyed by stable task identity and source account/Space boundaries. Never combine unrelated tasks just because their display names match. Legacy name-only imports need a source-scoped identity mapping before joining a task's history.
 - Hiding older editions is a presentation rule: retain their transcripts, links, search access, and unresolved Required Actions. Load history in pages rather than downloading every transcript. Show skipped/no-session occurrences in operational history without presenting them as session editions.
 
+The task manager offers **Clean up old runs** on the selected host. The
+`ScheduledTasks` RPC's `cleanup` action accepts `mode: preview` and returns
+groups with task and Space identity, counts, and chat IDs. For `mode: apply`,
+the caller supplies those IDs as `expectedChatIds`. The host recomputes
+eligibility and returns a fresh preview if the set changed before confirmation.
+Repeated apply calls write nothing once those runs are archived.
+
+Cleanup shares the default projection's device, Space, task key and ordering.
+A retired native task still has a newest edition for supersession purposes.
+Desktop runs also qualify after a recorded native handoff, deletion of their
+Mast task, or retirement of their Desktop definition. Cleanup checks open
+Required Actions, in-flight and queued work, sidebar pins, and personal
+assistant coverage before selecting chats. The background auto-adopt sweep
+uses the same Desktop source rule and creates qualifying chats already
+archived. Archived transcripts remain reachable through history. The additive
+cleanup reply is optional, and the UI checks `scheduled-run-cleanup-v1`
+before offering cleanup against the selected host.
+
 Surface failures, missing credentials, and approval requests through existing notifications/Required Actions where available, with one deduplicated actionable notice per problem. A task waiting for input remains active and blocks overlapping occurrences; it is never reported as successful.
 
 ## Architecture and storage

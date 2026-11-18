@@ -4790,6 +4790,36 @@ impl DocHost {
             .map_or(0, |queue| queue.len())
     }
 
+    /// Inspect an open doc or its local snapshot without opening a session,
+    /// joining a room, or draining pending commands during a cleanup preview.
+    pub(crate) fn has_queued_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        fn pending(doc: &SessionDoc) -> Result<bool, EngineError> {
+            Ok(!doc.read_queue()?.is_empty()
+                || doc.read_commands()?.iter().any(|command| {
+                    command.status == SessionCommandStatus::Pending
+                        && matches!(
+                            command.payload,
+                            SessionCommandPayload::Run { .. }
+                                | SessionCommandPayload::RunWithInstructions { .. }
+                                | SessionCommandPayload::Steer { .. }
+                                | SessionCommandPayload::RespondInput { .. }
+                        )
+                }))
+        }
+
+        let handle = lock(&self.inner.handles).get(chat_id).cloned();
+        if let Some(handle) = handle {
+            return pending(&handle.doc);
+        }
+        let Some(snapshot) = self.inner.store.load_snapshot(chat_id)? else {
+            return Ok(false);
+        };
+        let raw = loro::LoroDoc::new();
+        raw.import(&snapshot)
+            .map_err(|error| EngineError::Other(format!("snapshot import failed: {error}")))?;
+        pending(&SessionDoc::from_doc(raw))
+    }
+
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }

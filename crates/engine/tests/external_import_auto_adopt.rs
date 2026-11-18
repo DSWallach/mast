@@ -211,6 +211,66 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
     );
     assert_eq!(core.workspace.read_chats().unwrap().len(), 3);
 
+    // The same sweep archives handed-off and retired Desktop runs on arrival.
+    use mast_proto::ScheduledTasksRequest as Request;
+    let schedules = fake_home.path().join(
+        "Library/Application Support/Claude/claude-code-sessions/account/org",
+    );
+    std::fs::create_dir_all(&schedules).unwrap();
+    let cutover = schedules.join("handoff.md");
+    let paused = schedules.join("paused.md");
+    let retired = schedules.join("retired.md");
+    for file in [&cutover, &paused, &retired] {
+        std::fs::write(file, "Summarize the day's work.").unwrap();
+    }
+    let registry = schedules.join("scheduled-tasks.json");
+    std::fs::write(&registry, serde_json::to_vec(&serde_json::json!({"scheduledTasks":[
+        {"id":"handoff", "filePath":cutover, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()},
+        {"id":"paused", "filePath":paused, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()}
+    ]})).unwrap()).unwrap();
+    let candidates = core.scheduled_tasks.request(Request::ImportPreview {
+        registry_path: Some(registry.to_string_lossy().into_owned()),
+        timezone: "UTC".into(), space_id: None,
+    }).await.unwrap().candidates;
+    let task = core.scheduled_tasks.request(Request::Import {
+        candidate: candidates.into_iter().find(|c| c.source.ends_with("#handoff")).unwrap(),
+        operation_id: "import-handoff".into(),
+    }).await.unwrap().tasks.remove(0);
+    let mut draft = task.draft;
+    draft.cutover_confirmed = true;
+    draft.enabled = true;
+    let task = core.scheduled_tasks.request(Request::Save {
+        id: task.id, expected_revision: task.revision, draft, operation_id: "cutover".into(),
+    }).await.unwrap().tasks.remove(0);
+    assert!(task.source_handoff_at.is_some());
+    // A backlog chat from the same source is selected even as the only
+    // edition in its Space. Explicit import still leaves it visible.
+    let backlog = data_dir.path().join("backlog.jsonl");
+    let cwd = data_dir.path().to_str().unwrap();
+    let wrapper = format!(
+        "<scheduled-task name=\"handoff\" file=\"{}\">\nSummarize the day's work.\n</scheduled-task>",
+        cutover.display(),
+    );
+    std::fs::write(&backlog, transcript("backlog", cwd, &wrapper)).unwrap();
+    core.external_import.import("backlog", "backlog", &backlog).unwrap();
+    assert!(!core.workspace.chat("backlog").unwrap().unwrap().archived);
+    let preview = core.scheduled_tasks.request(Request::Cleanup {
+        mode: mast_proto::ScheduledRunCleanupMode::Preview,
+    }).await.unwrap().cleanup.unwrap();
+    assert_eq!(preview.chat_ids().map(String::as_str).collect::<Vec<_>>(), ["backlog"]);
+
+    for (name, file) in [("handoff", cutover), ("paused", paused), ("retired", retired)] {
+        let msg = format!("<scheduled-task name=\"{name}\" file=\"{}\">\nSummarize the day's work.\n</scheduled-task>", file.display());
+        write_aged(&proj, name, data_dir.path().to_str().unwrap(), &msg, HOUR);
+    }
+    assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 3);
+    let chats = core.workspace.read_chats().unwrap();
+    for (session, archived) in [("handoff", true), ("retired", true), ("paused", false), ("sess-settled", false)] {
+        let chat = chats.iter().find(|c| c.harness_session_id.as_deref() == Some(session)).unwrap();
+        assert_eq!(chat.archived, archived, "{session}");
+    }
+    assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 0);
+
     core.shutdown().await;
     unsafe {
         match previous_home {
