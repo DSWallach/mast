@@ -172,13 +172,9 @@ impl Changes {
             .map(|suggestion| format!("Draft · agent suggestion · {}", suggestion.severity))
             .unwrap_or_else(|| "Draft · agent suggestion".into());
         let button = |id: String, text: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .cursor_pointer()
-                .when(true, crate::components::hunk_header)
-                .when(text == "Accept", |el| crate::components::review_primary_action(el, theme))
-                .when(text != "Accept", |el| crate::components::hunk_action(el, theme))
-                .child(text)
+            crate::components::button(SharedString::from(id), text,
+                if text == "Accept" { crate::components::ButtonVariant::Primary } else { crate::components::ButtonVariant::Secondary },
+                crate::components::ButtonSize::Sm, theme)
         };
         div()
             .w_full()
@@ -368,12 +364,8 @@ impl Changes {
         let remove_id = comment.id.clone();
         let stage_id = comment.id.clone();
         let button = |id: String, label: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .cursor_pointer()
-                .when(true, crate::components::hunk_header)
-                .when(true, |el| crate::components::hunk_action(el, theme))
-                .child(label)
+            crate::components::button(SharedString::from(id), label, crate::components::ButtonVariant::Secondary,
+                crate::components::ButtonSize::Sm, theme)
         };
         div()
             .w_full()
