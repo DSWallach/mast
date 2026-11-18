@@ -433,7 +433,8 @@ impl WorkItemLaunchService {
         )?;
         // Name the chat before its first turn can schedule automatic titling.
         // Preserve an existing title on retries or after a user rename.
-        if self
+        if p.parent_chat_id.is_some()
+            && self
             .workspace
             .chat(&chat_id)
             .map_err(engine_error)?

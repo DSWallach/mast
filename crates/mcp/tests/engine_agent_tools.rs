@@ -273,6 +273,10 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         "title": "Implement feature", "linearIssue": "ENG-123", "idempotencyKey": "create-linked"
     })).await.unwrap();
     let linked_id = linked["workItemId"].as_str().unwrap();
+    let err = tools.call("work_outline_create_child", json!({
+        "title": "Implement feature", "linearIssue": "ENG-999", "idempotencyKey": "create-linked"
+    })).await.unwrap_err();
+    assert!(err.contains("operationConflict"), "{err}");
     let snapshot = mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE));
     let issue = snapshot.linear_issue_reference(linked_id).unwrap();
     assert_eq!(issue.external_id, "ENG-123");

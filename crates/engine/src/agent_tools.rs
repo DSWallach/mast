@@ -104,9 +104,12 @@ fn parse_linear_issue(input: &str) -> Result<ExternalReference, AgentToolError> 
 }
 
 fn parse_pull_request(input: &str) -> Result<ExternalReference, AgentToolError> {
-    let pr = crate::work_outline_pr_links::pull_request_from_url(input)
-        .or_else(|| mast_proto::pr_review_sync::PullRequestRef::parse_external_id(input))
-        .ok_or_else(|| {
+    let input = input.trim();
+    let pr = if input.starts_with("https://github.com/") || input.starts_with("http://github.com/") {
+        crate::work_outline_pr_links::pull_request_from_url(input)
+    } else {
+        mast_proto::pr_review_sync::PullRequestRef::parse_external_id(input)
+    }.ok_or_else(|| {
             AgentToolError::invalid("pullRequest must be a GitHub PR URL or owner/repo#number")
         })?;
     Ok(ExternalReference {
@@ -1506,6 +1509,26 @@ impl AgentToolsService {
                 )));
             }
         };
+        // Include the optional reference in the replay contract. The item and
+        // its reference are separate idempotent mutations, so a retry can
+        // finish an interrupted link without accepting different inputs.
+        {
+            let input_hash = derive_id(&arguments.to_string(), "create-child-inputs");
+            let operation_key = format!("agent-child-item:op:{operation_id}");
+            let input_key = format!("agent-child-item:in:{operation_id}:{input_hash}");
+            let _serial = lock(&self.child_claims);
+            if self.workspace.ledger_holds(&operation_key) {
+                if !self.workspace.ledger_holds(&input_key) {
+                    return Err(WorkOutlineError::new(
+                        mast_proto::work_outline::WorkOutlineErrorCode::OperationConflict,
+                        "idempotencyKey was already used with different inputs",
+                    ).into());
+                }
+            } else {
+                self.workspace.ledger_mark(&input_key).map_err(|e| AgentToolError::invalid(e.to_string()))?;
+                self.workspace.ledger_mark(&operation_key).map_err(|e| AgentToolError::invalid(e.to_string()))?;
+            }
+        }
         // No explicit parent: workers of a project go to its worker
         // destination, anything else under the Chat's own item.
         let mut to_destination = false;
