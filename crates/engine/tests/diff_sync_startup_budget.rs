@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mast_engine::{EngineCore, HarnessRegistry};
+use mast_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
 use mast_harness::git_spawn_count;
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -31,12 +31,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, what: &str, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
 
@@ -73,11 +74,11 @@ async fn first_sync_of_many_checkouts_stays_within_budget() {
     }
     let harness_before = git_spawn_count();
     core.diff_sync.reconcile_now().await;
-    wait_for("every checkout publishes a diff", || {
+    wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == CHECKOUTS
     })
     .await;
-    wait_for("startup settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
     let spawns = git_spawn_count() - harness_before;
     let budget = PER_CHECKOUT_BUDGET * CHECKOUTS as u64 + SLACK;
     println!(

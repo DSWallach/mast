@@ -44,12 +44,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, what: &str, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
 fn checksums(sync: &CheckoutDiffSync) -> Vec<(String, String)> {
@@ -82,6 +83,9 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
         git(&repo, &["commit", "-q", "-m", "initial"]);
         // A modified and an untracked file so each diff is non-trivial.
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::File::open(repo.join("a.txt")).unwrap().set_times(
+            std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        ).unwrap();
         std::fs::write(repo.join("new.txt"), "untracked\n").unwrap();
         core.workspace
             .create_space(&format!("space-{i}"), &core.device_id, &repo.to_string_lossy(), None, true)
@@ -92,7 +96,7 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
         repos.push(repo);
     }
     core.diff_sync.reconcile_now().await;
-    wait_for("every checkout publishes a diff", || {
+    wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == CHECKOUTS
     })
     .await;
@@ -100,13 +104,13 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
     // is pending (initial capture, attach re-check). Event-driven, not a
     // wall-clock quiet guess, so a loaded box cannot leave attach work for the
     // measured window.
-    wait_for("startup settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
 
     let harness_before = git_spawn_count();
     let gate_before = git_gate::spawn_count();
     for _ in 0..REPAIR_PASSES {
         core.diff_sync.repair_now().await;
-        wait_for("repair pass completes", || core.diff_sync.is_settled()).await;
+        wait_for(&core.diff_sync, "repair pass completes", || core.diff_sync.is_settled()).await;
     }
     let harness = git_spawn_count() - harness_before;
     let gate = git_gate::spawn_count() - gate_before;
@@ -120,12 +124,11 @@ async fn idle_repair_ticks_stay_within_budget_and_a_head_change_is_still_seen() 
     // A commit moves HEAD: the next repair pass must publish a new diff for
     // that checkout only.
     let before = checksums(&core.diff_sync);
-    tokio::time::sleep(Duration::from_millis(1100)).await; // distinct mtimes
     git(&repos[3], &["commit", "-q", "-a", "-m", "second"]);
     let moved = std::fs::canonicalize(&repos[3]).unwrap().to_string_lossy().into_owned();
     core.diff_sync.repair_now().await;
-    wait_for("repair pass completes", || core.diff_sync.is_settled()).await;
-    wait_for("HEAD change is published", || {
+    wait_for(&core.diff_sync, "repair pass completes", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "HEAD change is published", || {
         let now = checksums(&core.diff_sync);
         now.iter().any(|(cwd, sum)| {
             *cwd == moved && before.iter().any(|(c, s)| c == cwd && s != sum)

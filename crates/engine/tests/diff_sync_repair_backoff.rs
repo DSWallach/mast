@@ -39,14 +39,13 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    // Hang guard only (the assertions are the git-spawn budget and the bound). Watch attach
-    // for 50 checkouts takes ~45-55 s alone and longer under a parallel release run.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-    while !ready() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+async fn wait_for(sync: &CheckoutDiffSync, what: &str, mut ready: impl FnMut() -> bool) {
+    let mut changes = sync.watch_completion_for_test();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !ready() {
+            changes.changed().await.expect("diff-sync completion channel closed");
+        }
+    }).await.unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
 fn checksum_of(sync: &CheckoutDiffSync, cwd: &str) -> Option<String> {
@@ -86,17 +85,17 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
         repos.push(repo);
     }
     core.diff_sync.reconcile_now().await;
-    wait_for("every checkout publishes a diff", || {
+    wait_for(&core.diff_sync, "every checkout publishes a diff", || {
         core.diff_sync.watch_diffs().borrow().len() == CHECKOUTS
     })
     .await;
-    wait_for("startup settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "startup settles", || core.diff_sync.is_settled()).await;
 
     let stride = CheckoutDiffSync::max_repair_gap_ticks();
     let before = git_spawn_count();
     for _ in 0..TICKS {
         core.diff_sync.repair_now().await;
-        wait_for("repair tick completes", || core.diff_sync.is_settled()).await;
+        wait_for(&core.diff_sync, "repair tick completes", || core.diff_sync.is_settled()).await;
     }
     let spawns = git_spawn_count() - before;
     let backed_off_ticks = TICKS - QUIET_TICKS;
@@ -114,11 +113,11 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     let watched_before = checksum_of(&core.diff_sync, &watched).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await; // distinct mtimes
     git(&repos[5], &["commit", "-q", "-a", "-m", "watched"]);
-    wait_for("watcher-driven change is published", || {
+    wait_for(&core.diff_sync, "watcher-driven change is published", || {
         checksum_of(&core.diff_sync, &watched).is_some_and(|sum| sum != watched_before)
     })
     .await;
-    wait_for("settles", || core.diff_sync.is_settled()).await;
+    wait_for(&core.diff_sync, "settles", || core.diff_sync.is_settled()).await;
 
     // Events the OS never delivered: HEAD moves, nothing kicks. The repair tick
     // must still publish it within `stride` ticks.
@@ -130,7 +129,7 @@ async fn idle_checkouts_back_off_and_a_missed_head_change_is_caught_within_the_b
     let mut caught_after = None;
     for tick in 1..=stride {
         core.diff_sync.repair_now().await;
-        wait_for("repair tick completes", || core.diff_sync.is_settled()).await;
+        wait_for(&core.diff_sync, "repair tick completes", || core.diff_sync.is_settled()).await;
         if checksum_of(&core.diff_sync, &missed).is_some_and(|sum| sum != missed_before) {
             caught_after = Some(tick);
             break;
