@@ -370,7 +370,9 @@ impl OverviewRow {
     }
 
     fn is_stalled(&self) -> bool {
-        self.status == ChatIndicator::Errored || self.tool_failures.is_some()
+        // Tool failures can be handled within a successful turn and do not
+        // establish that the session itself has stopped on an error.
+        self.status == ChatIndicator::Errored
     }
 }
 
@@ -1557,7 +1559,7 @@ pub struct Overview {
     attention_filter: AttentionFilter,
     /// Pre-attention-filter count of rows needing user interaction.
     needs_interaction_count: usize,
-    /// Pre-attention-filter count of stalled rows (errored or failed tool calls).
+    /// Pre-attention-filter count of errored rows.
     stalled_count: usize,
     /// The chat the List should scroll into view on the next render (opening
     /// the link editor) — consumed by the List body
@@ -2632,9 +2634,7 @@ impl Overview {
                         AttentionFilter::NeedsInteraction => {
                             status == ChatIndicator::AwaitingInput || user_action_required
                         }
-                        AttentionFilter::Stalled => {
-                            status == ChatIndicator::Errored || tool_failures.is_some()
-                        }
+                        AttentionFilter::Stalled => status == ChatIndicator::Errored,
                     };
                 let pr_number = row.and_then(|r| r.pr_number).or_else(|| {
                     self.link_status.get(&chat.id).and_then(|entry| {
@@ -5658,7 +5658,7 @@ impl Overview {
             } else {
                 format!("{} tool calls failed", failures.count)
             };
-            let selector = format!("overview-row-stalled-{chat_id}");
+            let selector = format!("overview-row-tool-failures-{chat_id}");
             let mut pill = div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
@@ -5976,6 +5976,7 @@ impl Overview {
             chats: (*self.outline_chats).clone(),
             options: OutlineOptions {
                 hide_completed: self.hide_stale && !self.outline_show_completed,
+                attention_only: self.attention_filter != AttentionFilter::All,
                 show_archived: self.show_archived,
                 query: self.search.read(cx).text().trim().to_lowercase(),
                 all_spaces: true,
@@ -9264,11 +9265,16 @@ mod logic_tests {
     #[test]
     #[ignore = "requires macOS Metal and access to macOS services"]
     fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
-        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+        for (name, appearance) in [
+            ("light", crate::theme::Appearance::Light),
+            ("dark", crate::theme::Appearance::Dark),
+        ] {
             for width in [640.0, 1440.0] {
                 crate::snapshot::render_to_png(
                     &format!("scheduled-task-rows-{name}-{}", width as u32),
-                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    gpui::size(px(width), px(480.0)),
+                    crate::ui_style::UiStyleId::Default,
+                    appearance,
                     |_, cx| {
                         let _ = crate::typography::register_fonts(cx);
                         let state = cx.new(|_| AppState::new());
@@ -9280,7 +9286,8 @@ mod logic_tests {
                             })).unwrap()];
                         });
                         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        let composer =
+                            cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
                         let overview = cx.new(|cx| {
                             let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
                             overview.view_mode = OverviewMode::List;
@@ -9564,7 +9571,11 @@ mod logic_tests {
             state.chats = vec![
                 row("c-awaiting", "/work/alpha", None).chat,
                 row("c-failed-tools", "/work/alpha", None).chat,
-                row("c-errored", "/work/alpha", None).chat,
+                {
+                    let mut chat = row("c-errored", "/work/alpha", None).chat;
+                    chat.last_message_at = Some(now);
+                    chat
+                },
                 row("c-idle", "/work/alpha", None).chat,
             ];
             state.sessions = vec![
@@ -9630,19 +9641,22 @@ mod logic_tests {
                 .is_some()
         );
         assert!(
-            vcx.debug_bounds("overview-row-stalled-c-failed-tools")
+            vcx.debug_bounds("overview-row-tool-failures-c-failed-tools")
                 .is_some()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         assert!(
             vcx.debug_bounds("overview-row-needs-input-c-idle")
                 .is_none()
         );
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_none());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_none()
+        );
 
+        assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.needs_interaction_count, 1);
-            assert_eq!(o.stalled_count, 2);
+            assert_eq!(o.stalled_count, 1);
             assert_eq!(o.list_order.len(), 4);
         });
 
@@ -9658,13 +9672,34 @@ mod logic_tests {
             assert_eq!(o.list_order[0].0, "c-awaiting");
         });
 
-        // Clicking the "stalled" pill switches to the 2 stalled sessions.
+        // Clicking the "stalled" pill shows the errored session only.
         let stalled_pill = vcx.debug_bounds("overview-filter-stalled").unwrap();
         vcx.simulate_click(stalled_pill.center(), gpui::Modifiers::default());
         draw(vcx);
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.attention_filter, AttentionFilter::Stalled);
-            assert_eq!(o.list_order.len(), 2);
+            assert_eq!(o.list_order.len(), 1);
+            assert_eq!(o.list_order[0].0, "c-errored");
+            assert!(
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-errored")
+                    .unwrap()
+                    .visible
+            );
+            assert!(
+                !o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-failed-tools")
+                    .unwrap()
+                    .visible
+            );
+        });
+
+        overview.update(vcx, |o, cx| {
+            let ids = o.sidebar_filter_ids(cx).unwrap();
+            assert!(ids.contains("c-errored"));
+            assert!(!ids.contains("c-failed-tools"));
         });
 
         // Clicking "stalled" again clears the filter.
@@ -9694,9 +9729,12 @@ mod logic_tests {
             cx.notify();
         });
         draw(vcx);
-        assert!(vcx.debug_bounds("overview-row-stalled-c-idle").is_some());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_some()
+        );
         overview.read_with(vcx, |o, _| {
-            assert_eq!(o.stalled_count, 3);
+            assert_eq!(o.stalled_count, 1);
         });
     }
 
@@ -10148,6 +10186,47 @@ mod logic_tests {
             vcx.debug_bounds("work-item-artifacts-register-input")
                 .is_some()
         );
+    }
+
+    #[gpui::test]
+    fn attention_filter_reaches_outline(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (overview, state, vcx) = outline_overview(cx, dir.path());
+        let now = Utc::now();
+        state.update(vcx, |state, cx| {
+            state.sessions.push(mast_proto::Session {
+                chat_id: CHAT_AUTH.into(),
+                device_id: "d".into(),
+                status: mast_proto::SessionStatus::AwaitingInput,
+                started_at: Some(now),
+                updated_at: now,
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
+            });
+            cx.notify();
+        });
+        overview.update(vcx, |o, cx| o.set_mode(OverviewMode::Outline, cx));
+        for filter in [AttentionFilter::NeedsInteraction, AttentionFilter::Stalled] {
+            if filter == AttentionFilter::Stalled {
+                state.update(vcx, |state, cx| {
+                    state.sessions[0].status = mast_proto::SessionStatus::Errored;
+                    cx.notify();
+                });
+            }
+            overview.update(vcx, |o, cx| {
+                o.attention_filter = filter;
+                o.rows_dirty = true;
+                cx.notify();
+            });
+            draw(vcx);
+            overview.read_with(vcx, |o, cx| {
+                let model = o.outline.read(cx).model();
+                assert!(model.row(&row_key::item("s1", API_AUTH)).is_some());
+                assert!(model.row(&row_key::chat(CHAT_AUTH)).is_some());
+                assert!(model.row(&row_key::item("s1", HOUSEKEEPING)).is_none());
+            });
+        }
     }
 
     /// Acceptance 30: only the visible slice of a large outline renders.
