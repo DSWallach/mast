@@ -2917,6 +2917,7 @@ impl Shell {
                 self.stop_tracker_sync();
             }
         }
+        self.refresh_tracker_source_if_changed(cx);
         self.prewarm_workspace_search(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
@@ -3077,6 +3078,7 @@ impl Shell {
             self.right_pane_expanded = false;
         } else if self.resolved_right_active(cx) == RightSurface::Team {
             let chat_id = self.active_chat.clone();
+            self.invalidate_tracker_review();
             self.load_tracker_project(&chat_id, false, cx);
             self.watch_tracker_sync(&chat_id, cx);
         }
@@ -3299,6 +3301,7 @@ impl Shell {
             RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::Artifact(_) => {}
             RightSurface::Team => {
                 let chat_id = self.active_chat.clone();
+                self.invalidate_tracker_review();
                 self.load_tracker_project(&chat_id, false, cx);
                 self.watch_tracker_sync(&chat_id, cx);
             }

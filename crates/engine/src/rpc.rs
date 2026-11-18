@@ -2685,6 +2685,9 @@ impl RpcService for EngineRpc {
             }
             methods::WATCH_LINEAR_SYNC => {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
+                if self.workspace.space(&p.space_id).map_err(|_| RpcError::Failed("Could not read Space".into()))?.is_none() {
+                    return Err(RpcError::Failed("linear/notFound: Space not found".into()));
+                }
                 Ok(RpcReply::Stream(watch_stream(self.linear.watch_sync(&p.space_id))))
             }
             methods::WORKFLOW_PACK_EXPORT_PREVIEW => {

@@ -23,6 +23,16 @@ enum TrackerFilter {
     Stage(LifecycleStage),
 }
 
+#[derive(Clone)]
+struct TrackerSourceObservation {
+    chat_id: String,
+    space_id: String,
+    snapshot_revision: u64,
+    account: String,
+    account_revision: u64,
+    project_id: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64, u64)>,
@@ -30,6 +40,7 @@ pub(super) struct TrackerState {
     all_workers: TeamFacts,
     not_started: Vec<crate::board::BoardItem>,
     completed_items: Vec<crate::board::BoardItem>,
+    linear_completed_items: std::collections::HashSet<String>,
     other_chats: Vec<WorkerFacts>,
     additional_chats: std::collections::HashMap<String, Vec<WorkerFacts>>,
     expanded_chats: std::collections::HashSet<String>,
@@ -41,10 +52,18 @@ pub(super) struct TrackerState {
     linear_errors: std::collections::HashMap<(String, String, u64), crate::linear::client::LinearUiError>,
     linear_sync_task: Option<Task<()>>,
     linear_project_linked: bool,
+    can_link_linear_project: bool,
+    available_project_context: Option<(String, String, String, u64)>,
+    project_picker: Option<(String, String, String, u64)>,
+    project_choices: Option<std::sync::Arc<Vec<mast_proto::linear::LinearProjectSummary>>>,
+    project_picker_error: Option<String>,
+    project_linking: bool,
+    source_observation: Option<TrackerSourceObservation>,
     source_label: String,
     source_notice: Option<String>,
     other_expanded: bool,
     stale_expanded: bool,
+    done_expanded: bool,
     counts: [usize; 6],
     needs_you: usize,
     metadata: std::collections::HashMap<String, (String, String, Option<String>)>,
@@ -347,7 +366,7 @@ impl Shell {
         self.tracker.not_started.iter().chain(&self.tracker.completed_items).any(|item| item.id == id)
     }
 
-    fn tracker_linear_project(&self, chat_id: &str, cx: &App) -> Option<(String, String, String, u64)> {
+    fn tracker_linear_project(&self, chat_id: &str, cx: &App) -> Option<(String, String, mast_proto::WorkItemExternalReferenceView, u64)> {
         let state = self.state.read(cx);
         let space = state.chats.iter().find(|chat| chat.id == chat_id)?.space_id.as_deref()?;
         let outline = state.work_outline(space);
@@ -358,20 +377,148 @@ impl Shell {
         if project.external_id.is_empty() { return None; }
         let account = crate::linear::store::account_scope(snapshot).to_owned();
         let revision = state.linear.revision(&account);
-        Some((space.to_owned(), account, project.external_id.clone(), revision))
+        Some((space.to_owned(), account, project.clone(), revision))
+    }
+
+    fn tracker_project_link_context(&self, chat_id: &str, cx: &App) -> Option<(String, String, String, u64)> {
+        let state = self.state.read(cx);
+        let space = state.chats.iter().find(|chat| chat.id == chat_id)?.space_id.as_deref()?;
+        let outline = state.work_outline(space);
+        let snapshot = outline.snapshot()?;
+        if !crate::linear::space_enabled(Some(snapshot)) { return None; }
+        let item = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
+        if snapshot.item(item).is_none_or(|item| item.archived_at.is_some()) || snapshot.linear_project_reference(item).is_some() { return None; }
+        let account = crate::linear::store::account_scope(snapshot).to_owned();
+        let revision = state.linear.revision(&account);
+        Some((space.to_owned(), item.to_owned(), account, revision))
+    }
+
+    fn open_tracker_project_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self.tracker_project_link_context(&self.active_chat, cx) else { return; };
+        if self.tracker.project_picker.as_ref() == Some(&context) {
+            self.tracker.project_picker = None;
+            cx.notify();
+            return;
+        }
+        self.tracker.project_picker = Some(context.clone());
+        self.tracker.project_choices = None;
+        self.tracker.project_picker_error = None;
+        let task = self.state.read(cx).work_outline_actions().linear_my_projects(&context.0, &context.2, crate::linear::client::ListRead::Cached);
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            shell.update(cx, |shell, cx| {
+                if shell.tracker.project_picker.as_ref() != Some(&context) { return; }
+                match result {
+                    Ok(projects) => shell.tracker.project_choices = Some(std::sync::Arc::new(projects)),
+                    Err(error) => shell.tracker.project_picker_error = Some(error.user_text()),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    fn link_tracker_project(&mut self, project: mast_proto::linear::LinearProjectSummary, cx: &mut Context<Self>) {
+        if self.tracker.project_linking { return; }
+        let Some(context) = self.tracker.project_picker.clone() else { return; };
+        if self.tracker_project_link_context(&self.active_chat, cx).as_ref() != Some(&context) {
+            self.tracker.project_picker = None;
+            cx.notify();
+            return;
+        }
+        self.tracker.project_linking = true;
+        self.tracker.project_picker_error = None;
+        let task = self.state.read(cx).work_outline_actions().link_linear_project(mast_proto::LinkLinearProjectParams {
+            work_item_id: context.1.clone(), project: project.to_ref(), operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            shell.update(cx, |shell, cx| {
+                shell.tracker.project_linking = false;
+                let same_picker = shell.tracker.project_picker.as_ref() == Some(&context);
+                match result {
+                    Ok(_) => {
+                        if same_picker { shell.tracker.project_picker = None; }
+                    }
+                    Err(error) if same_picker => shell.tracker.project_picker_error = Some(error.user_text()),
+                    Err(_) => {}
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+
+    pub(super) fn refresh_tracker_source_if_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.tracker.source_observation.clone() else { return; };
+        if self.active_chat != previous.chat_id || !self.right_pane_open(cx) || self.resolved_right_active(cx) != RightSurface::Team { return; }
+        let state = self.state.read(cx);
+        let outline = state.work_outline(&previous.space_id);
+        let Some(snapshot) = outline.snapshot() else { return; };
+        let account = crate::linear::store::account_scope(snapshot).to_owned();
+        let revision = state.linear.revision(&account);
+        if snapshot.revision == previous.snapshot_revision && account == previous.account && revision == previous.account_revision { return; }
+        let snapshot_revision = snapshot.revision;
+        let project = self.tracker_linear_project(&previous.chat_id, cx).map(|(_, _, reference, _)| reference.external_id);
+        self.tracker.source_observation = Some(TrackerSourceObservation {
+            chat_id: previous.chat_id.clone(), space_id: previous.space_id, snapshot_revision,
+            account: account.clone(), account_revision: revision, project_id: project.clone(),
+        });
+        if project != previous.project_id || account != previous.account || revision != previous.account_revision {
+            self.tracker.key = None;
+            if project.is_some() {
+                self.load_tracker_project(&previous.chat_id, false, cx);
+                self.watch_tracker_sync(&previous.chat_id, cx);
+            } else {
+                self.stop_tracker_sync();
+            }
+        }
     }
 
     pub(super) fn load_tracker_project(&mut self, chat_id: &str, force: bool, cx: &mut Context<Self>) {
-        let Some((space, account, project, revision)) = self.tracker_linear_project(chat_id, cx) else { return; };
-        let key = (account.clone(), project.clone(), revision);
+        let Some((space, account, reference, revision)) = self.tracker_linear_project(chat_id, cx) else { return; };
+        let key = (account.clone(), reference.external_id.clone(), revision);
         if !self.tracker.linear_loading.insert(key.clone()) { return; }
         self.tracker.key = None;
         let actions = self.state.read(cx).work_outline_actions();
-        let stored = (!self.tracker.linear_projects.contains_key(&key)).then(|| actions.linear_project_issue_list(
-            &space, &account, &project, true, crate::linear::client::ListRead::Stored));
         let read = if force { crate::linear::client::ListRead::Force } else { crate::linear::client::ListRead::Cached };
-        let task = actions.linear_project_issue_list(&space, &account, &project, true, read);
+        let cached_projects = self.state.read(cx).linear.projects.get(&account).cloned();
+        let cached_match = cached_projects.as_ref().is_some_and(|projects| projects.iter().any(|project| project.id == reference.external_id)
+            || crate::linear::project_links::repair_target(&reference, projects).is_some());
+        let lookup = (!crate::linear::project_picker::looks_like_uuid(&reference.external_id) && !cached_match)
+            .then(|| actions.linear_my_projects(&space, &account, crate::linear::client::ListRead::Cached));
+        let needs_stored = !self.tracker.linear_projects.contains_key(&key);
         cx.spawn(async move |shell, cx| {
+            let projects = match lookup {
+                Some(task) => match task.await {
+                    Ok(projects) => Some(projects),
+                    Err(error) => {
+                        shell.update(cx, |shell, cx| {
+                            shell.tracker.linear_loading.remove(&key);
+                            if shell.tracker.linear_errors.len() >= 32 && !shell.tracker.linear_errors.contains_key(&key)
+                                && let Some(evicted) = shell.tracker.linear_errors.keys().next().cloned() { shell.tracker.linear_errors.remove(&evicted); }
+                            shell.tracker.linear_errors.insert(key.clone(), error);
+                            shell.tracker.key = None;
+                            cx.notify();
+                        }).ok();
+                        return;
+                    }
+                },
+                None => cached_projects,
+            };
+            if let Some(projects) = &projects {
+                shell.update(cx, |shell, cx| {
+                    shell.state.update(cx, |state, cx| {
+                        if state.linear.revision(&account) == revision && state.linear.projects.get(&account) != Some(projects) {
+                            state.linear.projects.insert(account.clone(), projects.clone());
+                            cx.notify();
+                        }
+                    });
+                }).ok();
+            }
+            let project = crate::linear::project_links::resolved_project_id(&reference, projects.as_deref());
+            let stored = needs_stored.then(|| actions.linear_project_issue_list(&space, &account, &project, true, crate::linear::client::ListRead::Stored));
+            let task = actions.linear_project_issue_list(&space, &account, &project, true, read);
             if let Some(stored) = stored && let Ok(issues) = stored.await {
                 shell.update(cx, |shell, cx| {
                     shell.tracker.linear_projects.entry(key.clone()).or_insert(issues);
@@ -420,7 +567,10 @@ impl Shell {
                 let mut subscription = match engine.client().subscribe_checked(mast_rpc::methods::WATCH_LINEAR_SYNC, params).await {
                     Ok(subscription) => subscription,
                     Err(mast_rpc::RpcError::UnknownMethod(_)) => return,
-                    Err(_) => {
+                    Err(error) => {
+                        let message = error.to_string();
+                        if message.find("linear/").and_then(|at| mast_proto::linear::LinearError::from_wire_message(&message[at..]))
+                            .is_some_and(|error| matches!(error.code, mast_proto::linear::LinearErrorCode::NotFound | mast_proto::linear::LinearErrorCode::Invalid)) { return; }
                         let delay = mast_harness::backoff::delay_for_attempt(std::time::Duration::from_secs(5), std::time::Duration::from_secs(300), attempt);
                         attempt = attempt.saturating_add(1);
                         cx.background_executor().timer(mast_harness::backoff::jittered(delay)).await;
@@ -658,9 +808,8 @@ impl Shell {
     /// repaints when they land.
     pub(super) fn team_facts(&mut self, chat_id: &str, cx: &mut Context<Self>) -> TeamFacts {
         let state = self.state.read(cx);
-        let snapshot = state.chats.iter().find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.space_id.as_deref())
-            .and_then(|id| state.work_outline(id).snapshot().cloned());
+        let chat_space = state.chats.iter().find(|chat| chat.id == chat_id).and_then(|chat| chat.space_id.clone());
+        let snapshot = chat_space.as_deref().and_then(|id| state.work_outline(id).snapshot().cloned());
         let account_revision = snapshot.as_deref().map(|snapshot| state.linear.revision(crate::linear::store::account_scope(snapshot))).unwrap_or_default();
         let key = (chat_id.to_owned(), snapshot.as_ref().map(|s| s.revision),
             state.board_status_revision, self.board_links_revision, account_revision);
@@ -747,6 +896,11 @@ impl Shell {
             let project = snapshot.linear_project_reference(root)?;
             Some(((crate::linear::store::account_scope(snapshot).to_owned(), project.external_id.clone(), account_revision), project.cached_title.clone()))
         });
+        let project_link_context = snapshot.as_deref().filter(|snapshot| crate::linear::space_enabled(Some(snapshot))).and_then(|snapshot| {
+            let root = crate::chat_work_context::assigned_item(snapshot, chat_id)?;
+            if snapshot.item(root).is_none_or(|item| item.archived_at.is_some()) || snapshot.linear_project_reference(root).is_some() { return None; }
+            Some((snapshot.space_id.clone(), root.to_owned(), crate::linear::store::account_scope(snapshot).to_owned(), account_revision))
+        });
         let mut empty: Vec<_> = items.iter().filter(|(_, unassigned)| *unassigned).map(|(item, _)| item.clone()).collect();
         let mut completion = std::collections::HashMap::new();
         if let Some(snapshot) = snapshot.as_deref()
@@ -758,13 +912,25 @@ impl Shell {
         }
         let not_started: Vec<_> = empty.iter().filter(|item| item.status != crate::board::BoardStatus::Done).cloned().collect();
         let completed_items: Vec<_> = empty.into_iter().filter(|item| item.status == crate::board::BoardStatus::Done).collect();
+        let closed_issues: std::collections::HashSet<_> = project.as_ref().and_then(|(key, _)| self.tracker.linear_projects.get(key)).into_iter().flatten()
+            .filter(|issue| issue.state.state_type.is_closed()).map(|issue| issue.identifier.to_ascii_uppercase()).collect();
+        let linear_completed_items = completed_items.iter().filter(|item| item.ticket.as_ref().is_some_and(|id| closed_issues.contains(&id.to_ascii_uppercase())))
+            .map(|item| item.id.clone()).collect();
         let now = chrono::Utc::now();
+        let live_chat_ids: std::collections::HashSet<_> = state.chats.iter().filter(|chat| !chat.archived).map(|chat| chat.id.as_str()).collect();
         let lifecycle_rows: std::collections::HashMap<_, _> = facts.workers.iter().map(|worker| {
             let mut workers = vec![worker];
             workers.extend(additional_chats.get(&worker.chat_id).into_iter().flatten());
             let (completed, linear_completed) = completion.get(&worker.chat_id).copied().unwrap_or_else(||
                 (worker.work_item_title.as_ref().map(|_| worker.state == crate::team::WorkerState::Done && !worker.archived), None));
-            (worker.chat_id.clone(), crate::team::ticket_lifecycle(&workers, completed, linear_completed, false, now))
+            let branch_review = snapshot.as_ref().is_some_and(|snapshot| workers.iter().any(|chat| {
+                self.branch_review_targets.get(&chat.chat_id).is_some_and(|target| {
+                    matches!(target, mast_proto::ReviewTarget::Branch { branch: Some(branch), .. } if chat.branch.as_deref() == Some(branch.as_str()))
+                        && self.branch_review_chats.get(&format!("{}\0{}", snapshot.space_id, target.state_key()))
+                            .is_some_and(|review| live_chat_ids.contains(review.as_str()))
+                })
+            }));
+            (worker.chat_id.clone(), crate::team::ticket_lifecycle(&workers, completed, linear_completed, branch_review, now))
         }).collect();
         let mut grouped_rows = std::collections::HashMap::<_, Vec<usize>>::new();
         let mut stale_rows = std::collections::HashMap::<_, Vec<usize>>::new();
@@ -819,10 +985,24 @@ impl Shell {
         self.tracker.all_workers = all_workers;
         self.tracker.not_started = not_started;
         self.tracker.completed_items = completed_items;
+        self.tracker.linear_completed_items = linear_completed_items;
         self.tracker.other_chats = other_chats;
         self.tracker.additional_chats = additional_chats;
         self.tracker.lifecycle_rows = lifecycle_rows;
         self.tracker.linear_project_linked = project.is_some();
+        self.tracker.can_link_linear_project = project_link_context.is_some();
+        self.tracker.source_observation = snapshot.as_deref().map(|snapshot| TrackerSourceObservation {
+            chat_id: chat_id.to_owned(), space_id: snapshot.space_id.clone(), snapshot_revision: snapshot.revision,
+            account: crate::linear::store::account_scope(snapshot).to_owned(), account_revision,
+            project_id: project.as_ref().map(|(key, _)| key.1.clone()),
+        }).or_else(|| chat_space.map(|space_id| TrackerSourceObservation { chat_id: chat_id.to_owned(), space_id,
+            snapshot_revision: u64::MAX, account: String::new(), account_revision: 0, project_id: None }));
+        if self.tracker.project_picker.is_some() && self.tracker.project_picker != project_link_context {
+            self.tracker.project_picker = None;
+            self.tracker.project_choices = None;
+            self.tracker.project_picker_error = None;
+        }
+        self.tracker.available_project_context = project_link_context;
         self.tracker.source_label = project.as_ref().map(|(key, title)| {
             let name = title.as_deref().map_or_else(|| "Linear project".to_owned(), |title| format!("Linear project · {title}"));
             self.tracker.linear_projects.get(key).map_or(name.clone(), |issues| {
@@ -885,7 +1065,7 @@ impl Shell {
         }
         let chat_id = self.active_chat.clone();
         let facts = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty() || self.tracker.linear_project_linked) {
+        if !self.settings.team_tab_visibility.visible(!facts.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project) {
             return;
         }
         self.leave_overview_for_chat(cx);
@@ -905,7 +1085,7 @@ impl Shell {
     pub(super) fn render_team_tab_chip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.active_chat.clone();
         let team = self.team_facts(&chat_id, cx);
-        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty() || self.tracker.linear_project_linked) {
+        if !self.settings.team_tab_visibility.visible(!team.is_empty() || !self.tracker.other_chats.is_empty() || !self.tracker.not_started.is_empty() || !self.tracker.completed_items.is_empty() || self.tracker.linear_project_linked || self.tracker.can_link_linear_project) {
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -956,8 +1136,36 @@ impl Shell {
                     let chat_id = this.active_chat.clone();
                     this.load_tracker_project(&chat_id, true, cx);
                 })));
+        } else if self.tracker.can_link_linear_project {
+            source = source.child(team_button(&theme, "tracker-link-project", "Link Linear project".into(), false)
+                .on_click(cx.listener(|this, _, _, cx| this.open_tracker_project_picker(cx))));
         }
         col = col.child(source);
+        if self.tracker.project_picker.is_some() && self.tracker.project_picker == self.tracker.available_project_context {
+            let mut picker = div().flex().flex_col().gap(px(Theme::SPACE_XS));
+            if self.tracker.project_linking { picker = picker.child(crate::components::shell_parts::tracker_metadata(&theme, "Linking…".into())); }
+            if let Some(error) = &self.tracker.project_picker_error {
+                picker = picker.child(crate::components::shell_parts::tracker_metadata(&theme, error.clone()));
+            } else if let Some(projects) = &self.tracker.project_choices {
+                if projects.is_empty() { picker = picker.child(crate::components::shell_parts::tracker_metadata(&theme, "No projects found".into())); }
+                if !projects.is_empty() {
+                    let rows = projects.clone();
+                    let entity = cx.entity();
+                    let row_theme = theme.clone();
+                    picker = picker.child(gpui::uniform_list("tracker-project-picker", projects.len(), move |range, _, app| {
+                        entity.update(app, |_, cx| range.filter_map(|index| rows.get(index)).map(|project| {
+                            let selected = project.clone();
+                            team_button(&row_theme, format!("tracker-project-{}", project.id), project.name.clone(), false)
+                                .h(px(28.0)).on_click(cx.listener(move |this, _, _, cx| this.link_tracker_project(selected.clone(), cx)))
+                                .into_any_element()
+                        }).collect::<Vec<_>>())
+                    }).w_full().h(px(projects.len().min(7) as f32 * 28.0)));
+                }
+            } else {
+                picker = picker.child(crate::components::shell_parts::tracker_metadata(&theme, "Loading projects…".into()));
+            }
+            col = col.child(picker);
+        }
         if let Some(notice) = &self.tracker.source_notice {
             col = col.child(crate::components::shell_parts::tracker_metadata(&theme, notice.clone()));
         }
@@ -1024,7 +1232,16 @@ impl Shell {
                 if matching.is_empty() && !show_not_started && !show_completed { continue; }
                 let group_count = matching.len() + if show_not_started { self.tracker.not_started.len() } else { 0 }
                     + if show_completed { self.tracker.completed_items.len() } else { 0 };
-                col = col.child(crate::components::shell_parts::tracker_group_heading(&theme, label, group_count));
+                let collapsible = group == LifecycleStage::Done && group_count > 5;
+                let heading_label = if collapsible { format!("{} {label}", if self.tracker.done_expanded { "▾" } else { "▸" }) } else { label.to_owned() };
+                let heading = crate::components::shell_parts::tracker_group_heading(&theme, &heading_label, group_count);
+                if collapsible {
+                    col = col.child(div().id("tracker-done-toggle").debug_selector(|| "tracker-done-toggle".into()).cursor_pointer().child(heading)
+                        .on_click(cx.listener(|this, _, _, cx| { this.tracker.done_expanded = !this.tracker.done_expanded; cx.notify(); })));
+                    if !self.tracker.done_expanded { continue; }
+                } else {
+                    col = col.child(heading);
+                }
                 for &index in matching { let worker = &team.workers[index]; col = col.child(self.render_tracker_worker(worker, reports.get(&worker.chat_id), unseen.get(&worker.chat_id), &theme, cx)); }
                 if show_not_started {
                     for item in &self.tracker.not_started {
@@ -1044,7 +1261,8 @@ impl Shell {
                                 .child(div().size(px(7.0)).rounded_full().bg(theme.success))
                                 .children(self.tracker.linear_project_linked.then(|| item.ticket.clone()).flatten().map(|ticket| crate::components::shell_parts::tracker_mono(&theme, ticket, theme.text_faint)))
                                 .children((self.tracker.linear_project_linked && item.ticket.is_none()).then(|| crate::components::shell_parts::tracker_metadata(&theme, "local".into())))
-                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone())))
+                                .child(crate::components::shell_parts::worker_title(&theme, item.title.clone()))
+                                .children(self.tracker.linear_completed_items.contains(&item.id).then(|| crate::components::shell_parts::tracker_metadata(&theme, "Linear completed".into()))))
                             .child(tracker_stage_track(&item.id, [true; 6], &theme)));
                     }
                 }
@@ -1071,6 +1289,16 @@ impl Shell {
         let menu_id = id.clone();
         let (_, harness, model) = self.tracker.metadata.get(&id).cloned().unwrap_or_default();
         let identity = model.filter(|model| !model.is_empty()).unwrap_or(harness);
+        if !self.tracker.lifecycle_rows.contains_key(&id) {
+            let title = self.tracker.metadata.get(&id).map(|metadata| metadata.0.clone()).unwrap_or_else(|| worker.title.clone());
+            return crate::components::shell_parts::tracker_row(theme, format!("team-worker-{id}"))
+                .child(div().flex().items_center().gap(px(Theme::SPACE_SM))
+                    .child(crate::components::shell_parts::worker_title(theme, title))
+                    .child(crate::components::shell_parts::tracker_metadata(theme, worker.state.label().into()))
+                    .children((!identity.is_empty()).then(|| crate::components::shell_parts::tracker_metadata(theme, identity))))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
+                .into_any_element();
+        }
         let group = worker.tracker_group();
         let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
@@ -1110,6 +1338,9 @@ impl Shell {
         if let Some(row) = self.tracker.lifecycle_rows.get(&id) {
             if row.linear_completed_with_open_pr {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Linear says done".into()));
+            }
+            if row.linear_completed_without_pr {
+                header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Linear completed".into()));
             }
             if row.merged_with_open_ticket {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
@@ -1232,10 +1463,14 @@ impl Shell {
             row = row.child(crate::components::shell_parts::worker_archive_hint(theme, format!("team-archivable-{id}"), &verdict.reason));
         }
         if self.tracker.expanded_chats.contains(&id) && let Some(chats) = self.tracker.additional_chats.get(&id) {
-            for chat in chats {
+            for chat in std::iter::once(worker).chain(chats.iter()) {
                 let chat_id = chat.chat_id.clone();
                 let title = self.tracker.metadata.get(&chat_id).map(|metadata| metadata.0.clone()).unwrap_or_else(|| chat.title.clone());
-                row = row.child(div().id(SharedString::from(format!("tracker-additional-chat-{chat_id}"))).pl(px(16.0)).cursor_pointer().child(title)
+                let branch = chat.branch.clone();
+                row = row.child(div().id(SharedString::from(format!("tracker-additional-chat-{chat_id}"))).pl(px(16.0)).flex().items_center().gap(px(Theme::SPACE_SM)).cursor_pointer()
+                    .child(title)
+                    .child(crate::components::shell_parts::tracker_metadata(theme, chat.state.label().into()))
+                    .children(branch.map(|branch| crate::components::shell_parts::tracker_mono(theme, branch, theme.text_faint)))
                     .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.open_chat(chat_id.clone(), cx); })));
             }
         }
