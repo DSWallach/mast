@@ -8274,7 +8274,14 @@ impl Composer {
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    window.focus(&this.wizard_focus, cx);
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if crate::markdown::selection::selected_text().is_none() {
+                        this.wizard_select(ix, cx);
+                    }
+                }))
                 .child(
                     div()
                         .flex_1()
@@ -8286,7 +8293,7 @@ impl Composer {
                         } else {
                             theme.text.opacity(0.9)
                         })
-                        .child(SharedString::from(label.clone())),
+                        .child(crate::markdown::render::plain_text(label.clone(), &theme)),
                 )
                 .when(ix < 9, |el| {
                     el.child(
@@ -8316,7 +8323,13 @@ impl Composer {
 
         crate::components::conversation_wizard_surface(div()
             .id("question-panel")
+            .key_context(GENERIC_COMPOSER_CONTEXT)
             .track_focus(&self.wizard_focus)
+            .on_action(cx.listener(|_, _: &Copy, _, cx| {
+                if let Some(text) = crate::markdown::selection::selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             })), &theme, COMPOSER_RADIUS)
@@ -8342,12 +8355,15 @@ impl Composer {
                             .gap(px(10.0))
                             .child(
                                 div()
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                                        window.focus(&this.wizard_focus, cx);
+                                    }))
                                     .text_size(crate::typography::ui_rems(10.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
-                                    ))),
+                                    .child(crate::markdown::render::plain_text(
+                                        crate::popover::tracked_upper(&question.header), &theme,
+                                    )),
                             )
                             .when(wizard.questions.len() > 1, |el| {
                                 el.child(
@@ -8368,6 +8384,10 @@ impl Composer {
                     .child(
                         div()
                             .id(("wizard-question", page))
+                            .debug_selector(|| "wizard-question".into())
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                                window.focus(&this.wizard_focus, cx);
+                            }))
                             // A long command gets its own viewport so the
                             // approval choices stay close at hand.
                             .max_h(window.viewport_size().height * 0.25)
@@ -8378,7 +8398,7 @@ impl Composer {
                             .line_height(px(20.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
+                            .child(crate::markdown::render::plain_text(question.question.clone(), &theme)),
                     )
                     .when(question.multi_select, |el| {
                         el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))
@@ -10825,6 +10845,28 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
         }
+    }
+
+    #[gpui::test]
+    fn wizard_question_selection_copies_with_keyboard(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            init(cx, ComposerSendBehavior::Enter);
+        });
+        let state = cx.new(|_| AppState::new());
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            let mut composer = Composer::new(state, cx);
+            composer.wizard = Some(Wizard::new("req".into(), vec![question("q", &["answer"], false)]));
+            composer
+        });
+        cx.simulate_resize(size(px(640.0), px(480.0)));
+        cx.run_until_parked();
+        let position = cx.debug_bounds("wizard-question").unwrap().origin + point(px(5.0), px(10.0));
+        cx.simulate_event(MouseDownEvent { position, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.simulate_event(MouseUpEvent { position, button: MouseButton::Left, ..Default::default() });
+        cx.simulate_keystrokes("cmd-c");
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("Question")));
     }
 
     #[test]
