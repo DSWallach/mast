@@ -8151,7 +8151,7 @@ mod tests {
         // model's own `agent` option shows as its choice label instead.
         assert_eq!(
             traits_summary(Some(&model), None, &with_agent),
-            Some("Standard · Normal · Agent pr-review".to_string())
+            Some("1M · Normal · Agent pr-review".to_string())
         );
         assert!(traits_customized(
             Some(&model),
@@ -8161,7 +8161,7 @@ mod tests {
         ));
         assert_eq!(
             traits_summary(Some(&agents), None, &with_agent),
-            Some("Standard · Normal".to_string())
+            Some("1M · Normal".to_string())
         );
         // Reasoning shows without a model too.
         assert_eq!(

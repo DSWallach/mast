@@ -186,7 +186,7 @@ impl StartChatDialog {
 }
 
 impl Shell {
-    fn start_chat_dialog(&mut self) -> Option<&mut StartChatDialog> {
+    pub(super) fn start_chat_dialog(&mut self) -> Option<&mut StartChatDialog> {
         match self.work_outline_modal.as_mut() {
             Some(WorkOutlineModal::StartChat(dialog)) => Some(dialog),
             _ => None,

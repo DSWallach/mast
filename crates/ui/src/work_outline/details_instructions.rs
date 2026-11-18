@@ -1195,6 +1195,35 @@ pub(crate) fn review_launch_summary(defaults: &mast_proto::PrReviewLaunchDefault
     )
 }
 
+#[cfg(test)]
+mod review_launch_tests {
+    use super::review_launch_summary;
+    use mast_proto::{HarnessId, PrReviewLaunchDefaults};
+
+    #[test]
+    fn the_summary_names_the_agent_harness_and_models() {
+        assert_eq!(
+            review_launch_summary(&PrReviewLaunchDefaults::default()),
+            "Not set: reviews use the launch dialog's agent pick."
+        );
+        let defaults = PrReviewLaunchDefaults {
+            agent: Some("pr-review".into()),
+            harness: Some(HarnessId::Codex),
+            draft_model: Some("gpt-5-mini".into()),
+            gate_model: None,
+        };
+        assert_eq!(
+            review_launch_summary(&defaults),
+            "Agent: pr-review \u{b7} Codex \u{b7} Draft: gpt-5-mini \u{b7} Merge gate: usual pick"
+        );
+        let claude = PrReviewLaunchDefaults {
+            harness: None,
+            ..defaults
+        };
+        assert!(review_launch_summary(&claude).contains("\u{b7} Claude Code \u{b7}"));
+    }
+}
+
 /// Approval-rule settings actions use the shared secondary button.
 fn approval_rule_button(
     id: impl Into<gpui::ElementId>,

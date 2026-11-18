@@ -235,6 +235,112 @@ mod tests {
         assert!(calls[0]["config"].is_object());
     }
 
+    /// A branch review on a host that runs review agents starts on the
+    /// Space's review harness and draft model, names the agent in the trait
+    /// summary, and the merge-gate toggle swaps in the gate model.
+    #[gpui::test]
+    fn branch_review_takes_the_spaces_review_defaults(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = test_shell(cx, directory.path());
+        let calls: Calls = Arc::default();
+        let sink = calls.clone();
+        let target = mast_proto::ReviewTarget::Branch {
+            repo: Some("acme/repo".into()),
+            checkout_path: Some("/repo/worktree".into()),
+            branch: Some("feature".into()),
+            base_ref: Some("main".into()),
+            base_sha: Some("base".into()),
+            head_sha: "head".into(),
+        };
+        let reply_target = target.clone();
+        let setup = |shell: &mut Shell, capable: bool, cx: &mut Context<Shell>| {
+            let pickers = shell.composer.read(cx).pickers().clone();
+            pickers.update(cx, |pickers, cx| {
+                let harnesses = serde_json::from_value(serde_json::json!([
+                    {"id":"claude-code", "name":"Claude Code", "supportsSteering":true, "steeringMode":"step-boundary", "reasoningLevels":[]},
+                    {"id":"codex", "name":"Codex", "supportsSteering":true, "steeringMode":"step-boundary", "reasoningLevels":[]}
+                ])).unwrap();
+                let codex = serde_json::from_value(serde_json::json!([
+                    {"id":"gpt-5-mini", "label":"GPT-5 mini", "reasoningLevels":[]},
+                    {"id":"gpt-5", "label":"GPT-5", "reasoningLevels":[]}
+                ])).unwrap();
+                let claude = serde_json::from_value(serde_json::json!([
+                    {"id":"claude-opus-5-5", "label":"Opus", "reasoningLevels":[]}
+                ])).unwrap();
+                pickers.seed_catalog_for_tests(harnesses, vec![(mast_proto::HarnessId::Codex, codex), (mast_proto::HarnessId::ClaudeCode, claude)], cx);
+                pickers.defaults_mut_for_tests().remember_model(mast_proto::HarnessId::ClaudeCode, "claude-opus-5-5".into(), "Opus".into());
+            });
+            shell.state.update(cx, |state, _| {
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id": "space", "deviceId": "d", "path": "/repo", "createdAt": "2026-01-01T00:00:00Z"
+                })).unwrap()];
+                let capabilities: Vec<&str> = if capable { vec![mast_proto::capabilities::REVIEW_LAUNCH_AGENT_V1] } else { Vec::new() };
+                state.devices = vec![serde_json::from_value(serde_json::json!({
+                    "id": "d", "name": "Studio", "platform": "macos", "lastSeenAt": null, "capabilities": capabilities,
+                })).unwrap()];
+                let mut snapshot = crate::work_outline::store::fixture_snapshot("space");
+                snapshot.space_settings.pr_review_launch = Some(mast_proto::PrReviewLaunchDefaults {
+                    agent: Some("pr-review".into()),
+                    harness: Some(mast_proto::HarnessId::Codex),
+                    draft_model: Some("gpt-5-mini".into()),
+                    gate_model: Some("gpt-5".into()),
+                });
+                state.set_work_outline_for_test(snapshot);
+            });
+        };
+        // An older host: no toggle, no agent, the user's own pick.
+        shell.update(cx, |shell, cx| {
+            setup(shell, false, cx);
+            shell.open_start_chat_for_branch_review("space".into(), None, target.clone(), cx).unwrap();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-branch").is_some());
+        assert!(cx.debug_bounds("start-chat-merge-gate").is_none());
+        shell.update(cx, |shell, cx| {
+            let dialog = shell.start_chat_dialog().unwrap();
+            let config = dialog.pickers.read(cx).resolved(cx).chat_config().unwrap();
+            assert_eq!(config.harness, mast_proto::HarnessId::ClaudeCode);
+            assert!(!config.model_options.contains_key(mast_proto::AGENT_OPTION));
+            shell.work_outline_modal = None;
+        });
+
+        shell.update(cx, |shell, cx| {
+            setup(shell, true, cx);
+            shell.branch_review_script = Some(Arc::new(move |params| {
+                sink.lock().unwrap().push(params.clone());
+                Ok(serde_json::json!({"chatId":"review", "spaceId":"space", "checkoutPath":"/repo/worktree", "target":reply_target, "prompt":"review"}))
+            }));
+            shell.open_start_chat_for_branch_review("space".into(), None, target, cx).unwrap();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("start-chat-merge-gate").is_some());
+        assert!(cx.debug_bounds("start-chat-review-agent").is_some());
+        shell.update(cx, |shell, cx| {
+            let dialog = shell.start_chat_dialog().unwrap();
+            let pickers = dialog.pickers.read(cx);
+            let config = pickers.resolved(cx).chat_config().unwrap();
+            assert_eq!(config.harness, mast_proto::HarnessId::Codex);
+            assert_eq!(config.model.as_deref(), Some("gpt-5-mini"));
+            assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+            let summary = crate::pickers::traits_summary(None, None, &config.model_options);
+            assert_eq!(summary.as_deref(), Some("Agent pr-review"));
+        });
+        click(cx, "start-chat-merge-gate");
+        click(cx, "start-chat-start");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["mergeGate"], true);
+        assert_eq!(calls[0]["config"]["harness"], "codex");
+        assert_eq!(calls[0]["config"]["model"], "gpt-5");
+        assert_eq!(calls[0]["config"]["modelOptions"]["agent"], "pr-review");
+        // The Space's pick never becomes the composer's sticky pick.
+        shell.update(cx, |shell, cx| {
+            let composer = shell.composer.read(cx).pickers().read(cx).resolved(cx);
+            assert_eq!(composer.harness, Some(mast_proto::HarnessId::ClaudeCode));
+            assert!(!composer.model_options.contains_key(mast_proto::AGENT_OPTION));
+        });
+    }
+
     #[gpui::test]
     fn branch_review_opens_existing_review_without_launching(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
