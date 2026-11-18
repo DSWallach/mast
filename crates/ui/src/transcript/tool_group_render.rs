@@ -1,5 +1,30 @@
 use super::*;
 
+struct ToolGroupFrame<'a> {
+    tools: &'a [ToolItem],
+    details: Vec<Option<Arc<ToolDetail>>>,
+    invocations: Vec<Option<Arc<ToolDetail>>>,
+    affordances: Vec<Option<ChipAffordance>>,
+    detail_folds: Vec<FoldState>,
+    detail_opens: Vec<bool>,
+    detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>>,
+    row_heights: Vec<f32>,
+    reveal_progress: Vec<f32>,
+    connector_progress: Vec<f32>,
+    fold: FoldState,
+    collapses: bool,
+    effective_auto_open: bool,
+    base_row_height: f32,
+    reduce_motion: bool,
+    now: Instant,
+    motion_active: bool,
+    header_reveal: f32,
+    viewport_height: f32,
+    target: f32,
+    shimmer_phase: Option<f32>,
+    disclosure_progress: f32,
+}
+
 impl Transcript {
     pub(super) fn render_tool_group(
         &mut self,
@@ -10,6 +35,86 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let frame = self.tool_group_frame(row_id, tools, auto_open, cx);
+        let header = self.render_tool_group_header(row_id, summary, theme, &frame, cx);
+        let chips = self.render_tool_chips(row_id, theme, &frame, cx);
+        let fold = frame.fold;
+        let target = frame.target;
+        let now = frame.now;
+        let reduce_motion = frame.reduce_motion;
+        let mut motion_active = frame.motion_active;
+        let collapses = frame.collapses;
+        let header_reveal = frame.header_reveal;
+
+        // Evaluate the group on the same clock as its disclosure. This also
+        // gives completion a gentle close after the last arrival finishes,
+        // without restarting an element animation when the list remounts it.
+        let body_height = if !reduce_motion {
+            fold.toggled_at
+                .map(|at| {
+                    let t = TOOL_FOLD.curve.eval(
+                        now.saturating_duration_since(at).as_secs_f32()
+                            / TOOL_FOLD.total().as_secs_f32(),
+                    );
+                    if t < 1.0 {
+                        motion_active = true;
+                    }
+                    motion::lerp(fold.from, target, t)
+                })
+                .unwrap_or(target)
+        } else {
+            target
+        };
+        if let Some(reveal) = self.tool_group_reveals.get_mut(row_id) {
+            reveal.rendered_height = body_height;
+        }
+        let body: AnyElement = if !collapses {
+            chips.into_any_element()
+        } else {
+            div()
+                .overflow_hidden()
+                .h(px(body_height))
+                .child(chips)
+                .into_any_element()
+        };
+
+        let view = cx.entity_id();
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            // Tool summaries and cards are code-adjacent chrome. Detail bodies
+            // retain their explicit mono/diff typography below this boundary.
+            .font_family(theme.font_sans_fixed.clone())
+            .when(collapses, |el| {
+                el.child(reveal_tool_row(
+                    header,
+                    TOOL_GROUP_HEADER_HEIGHT,
+                    header_reveal,
+                ))
+            })
+            .child(body)
+            .when(motion_active, |group| {
+                group.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            window.on_next_frame(move |_, cx| cx.notify(view));
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
+            .into_any_element()
+    }
+    fn tool_group_frame<'a>(
+        &mut self,
+        row_id: &SharedString,
+        tools: &'a Arc<Vec<ToolItem>>,
+        auto_open: bool,
+        cx: &mut Context<Self>,
+    ) -> ToolGroupFrame<'a> {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
@@ -279,10 +384,31 @@ impl Transcript {
             tool_disclosure_progress(open, fold, now)
         };
 
+        ToolGroupFrame {
+            tools, details, invocations, affordances, detail_folds, detail_opens,
+            detail_highlights, row_heights, reveal_progress, connector_progress,
+            fold, collapses, effective_auto_open, base_row_height, reduce_motion,
+            now, motion_active, header_reveal, viewport_height, target, shimmer_phase,
+            disclosure_progress,
+        }
+    }
+
+    fn render_tool_group_header(
+        &mut self,
+        row_id: &SharedString,
+        summary: &SharedString,
+        theme: &Theme,
+        frame: &ToolGroupFrame<'_>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let viewport_height = frame.viewport_height;
+        let effective_auto_open = frame.effective_auto_open;
+        let disclosure_progress = frame.disclosure_progress;
+        let shimmer_phase = frame.shimmer_phase;
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        let header = crate::components::conversation_tool_group_header(
+        crate::components::conversation_tool_group_header(
             theme, SharedString::from(format!("{row_id}-hdr")), TOOL_GROUP_HEADER_HEIGHT,
             TOOL_LABEL_SIZE, TOOL_LABEL_LINE_HEIGHT,
         )
@@ -323,8 +449,29 @@ impl Transcript {
                     .items_center()
                     .truncate()
                     .child(tool_group_title(summary.clone(), shimmer_phase, theme)),
-            );
+            )
+            .into_any_element()
+    }
 
+    fn render_tool_chips(
+        &mut self,
+        row_id: &SharedString,
+        theme: &Theme,
+        frame: &ToolGroupFrame<'_>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tools = frame.tools;
+        let details = &frame.details;
+        let invocations = &frame.invocations;
+        let affordances = &frame.affordances;
+        let detail_folds = &frame.detail_folds;
+        let detail_opens = &frame.detail_opens;
+        let detail_highlights = &frame.detail_highlights;
+        let row_heights = &frame.row_heights;
+        let reveal_progress = &frame.reveal_progress;
+        let connector_progress = &frame.connector_progress;
+        let base_row_height = frame.base_row_height;
+        let collapses = frame.collapses;
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -554,68 +701,7 @@ impl Transcript {
                 reveal_tool_row(row, row_height, reveal)
             }));
 
-        let chips = chips.into_any_element();
-
-        // Evaluate the group on the same clock as its disclosure. This also
-        // gives completion a gentle close after the last arrival finishes,
-        // without restarting an element animation when the list remounts it.
-        let body_height = if !reduce_motion {
-            fold.toggled_at
-                .map(|at| {
-                    let t = TOOL_FOLD.curve.eval(
-                        now.saturating_duration_since(at).as_secs_f32()
-                            / TOOL_FOLD.total().as_secs_f32(),
-                    );
-                    if t < 1.0 {
-                        motion_active = true;
-                    }
-                    motion::lerp(fold.from, target, t)
-                })
-                .unwrap_or(target)
-        } else {
-            target
-        };
-        if let Some(reveal) = self.tool_group_reveals.get_mut(row_id) {
-            reveal.rendered_height = body_height;
-        }
-        let body: AnyElement = if !collapses {
-            chips.into_any_element()
-        } else {
-            div()
-                .overflow_hidden()
-                .h(px(body_height))
-                .child(chips)
-                .into_any_element()
-        };
-
-        let view = cx.entity_id();
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            // Tool summaries and cards are code-adjacent chrome. Detail bodies
-            // retain their explicit mono/diff typography below this boundary.
-            .font_family(theme.font_sans_fixed.clone())
-            .when(collapses, |el| {
-                el.child(reveal_tool_row(
-                    header.into_any_element(),
-                    TOOL_GROUP_HEADER_HEIGHT,
-                    header_reveal,
-                ))
-            })
-            .child(body)
-            .when(motion_active, |group| {
-                group.child(
-                    canvas(
-                        |_, _, _| (),
-                        move |_, _, window, _| {
-                            window.on_next_frame(move |_, cx| cx.notify(view));
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-            })
-            .into_any_element()
+        chips.into_any_element()
     }
+
 }
