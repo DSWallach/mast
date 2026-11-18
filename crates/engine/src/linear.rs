@@ -140,6 +140,7 @@ struct Inner {
     /// Stale-while-revalidate stores for the panel's lists (persisted when a
     /// cache directory is set). Keys: `my`, `project:<id>`.
     issue_lists: SwrStore<Vec<LinearIssueSummary>, LinearError>,
+    project_issue_pages: SwrStore<mast_proto::linear::LinearProjectIssuePage, LinearError>,
     project_issue_failures: Mutex<HashMap<String, ProjectIssueFailure>>,
     sync_watches: Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
     project_lists: SwrStore<Vec<LinearProjectSummary>, LinearError>,
@@ -207,6 +208,7 @@ impl LinearService {
                 attachments: Mutex::new(HashMap::new()),
                 inflight: Mutex::new(HashMap::new()),
                 issue_lists: SwrStore::new(LIST_CACHE_TTL),
+                project_issue_pages: SwrStore::new(LIST_CACHE_TTL),
                 project_issue_failures: Mutex::new(HashMap::new()),
                 sync_watches: Mutex::new(HashMap::new()),
                 project_lists: SwrStore::new(LIST_CACHE_TTL),
@@ -292,6 +294,7 @@ impl LinearService {
         lock(&self.inner.attachments).clear();
         lock(&self.inner.project_issue_failures).clear();
         self.inner.issue_lists.clear();
+        self.inner.project_issue_pages.clear();
         self.inner.project_lists.clear();
         self.inner.project_details.clear();
     }
@@ -407,6 +410,7 @@ impl LinearService {
         self.inner
             .issue_lists
             .attach_file(dir.join("linear-issue-lists.json"));
+        self.inner.project_issue_pages.attach_file(dir.join("linear-project-issue-pages.json"));
         self.inner
             .project_lists
             .attach_file(dir.join("linear-project-lists.json"));
@@ -700,9 +704,17 @@ impl LinearService {
         path: &str,
         cap: usize,
     ) -> Result<(Vec<Value>, bool), LinearError> {
+        let (nodes, found, _) = self.paginate_with_more(query, extra, path, cap).await?;
+        Ok((nodes, found))
+    }
+
+    async fn paginate_with_more(
+        &self, query: &str, extra: Value, path: &str, cap: usize,
+    ) -> Result<(Vec<Value>, bool, bool), LinearError> {
         let mut nodes = Vec::new();
         let mut after: Option<String> = None;
         let mut found = false;
+        let mut has_more = false;
         for _ in 0..cap.div_ceil(queries::PAGE_SIZE) {
             let data = self
                 .call(
@@ -714,13 +726,14 @@ impl LinearService {
             found |= connection.is_some_and(|c| !c.is_null());
             let (page, next) = queries::connection_page(connection);
             nodes.extend(page);
+            has_more = next.is_some() || connection.and_then(|connection| connection.pointer("/pageInfo/hasNextPage")).and_then(Value::as_bool).unwrap_or(false) || nodes.len() > cap;
             match next {
                 Some(cursor) if nodes.len() < cap && after.as_deref() != Some(cursor.as_str()) => after = Some(cursor),
                 _ => break,
             }
         }
         nodes.truncate(cap);
-        Ok((nodes, found))
+        Ok((nodes, found, has_more))
     }
 
     fn cache_issues(&self, issues: &[LinearIssueSummary]) {
@@ -869,6 +882,9 @@ impl LinearService {
         force: bool,
         cached_only: bool,
     ) -> Result<Vec<LinearIssueSummary>, LinearError> {
+        if include_completed {
+            return self.project_issue_page(project_id, force, cached_only).await.map(|page| page.issues);
+        }
         let project_id = project_id.trim().to_owned();
         if project_id.is_empty() {
             return Err(LinearError::new(
@@ -876,23 +892,16 @@ impl LinearService {
                 "projectId is required",
             ));
         }
-        if include_completed && !force && !cached_only {
-            let failures = lock(&self.inner.project_issue_failures);
-            if let Some(failure) = failures.get(&project_id).filter(|failure| failure.suppress_retry(Instant::now())) {
-                return Err(failure.error.clone());
-            }
-        }
-        let credential_revision = self.credential_revision();
         let this = self.clone();
         let id = project_id.clone();
-        let result = self.issue_list(
-            &if include_completed { format!("project:{project_id}:all") } else { format!("project:{project_id}") },
+        self.issue_list(
+            &format!("project:{project_id}"),
             force,
             cached_only,
             move || async move {
                 let (nodes, found) = this
                     .paginate(
-                        &if include_completed { queries::project_issues_including_completed() } else { queries::project_issues() },
+                        &queries::project_issues(),
                         json!({ "id": id }),
                         "/project/issues",
                         MAX_LIST_ISSUES,
@@ -904,19 +913,48 @@ impl LinearService {
                         "That Linear project was not found",
                     ));
                 }
-                Ok(if include_completed { nodes.iter().filter_map(queries::issue_summary).collect() } else { open_issues(&nodes) })
+                Ok(open_issues(&nodes))
             },
         )
-        .await;
-        if include_completed && !cached_only && credential_revision == self.credential_revision() {
+        .await
+    }
+
+    /// Completed-inclusive project issues, retaining whether the bounded
+    /// pagination stopped before the connection ended.
+    pub async fn project_issue_page(
+        &self, project_id: &str, force: bool, cached_only: bool,
+    ) -> Result<mast_proto::linear::LinearProjectIssuePage, LinearError> {
+        let id = project_id.trim().to_owned();
+        if id.is_empty() { return Err(LinearError::new(LinearErrorCode::Invalid, "projectId is required")); }
+        if !force && !cached_only {
+            let failures = lock(&self.inner.project_issue_failures);
+            if let Some(failure) = failures.get(&id).filter(|failure| failure.suppress_retry(Instant::now())) {
+                return Err(failure.error.clone());
+            }
+        }
+        let revision = self.credential_revision();
+        let this = self.clone();
+        let query_id = id.clone();
+        let store = &self.inner.project_issue_pages;
+        let result = if cached_only {
+            store.peek(&id).map(|entry| entry.value).ok_or_else(not_cached)
+        } else {
+            store.get(&id, force, move || async move {
+                let (nodes, found, has_more) = this.paginate_with_more(&queries::project_issues_including_completed(),
+                    json!({ "id": query_id }), "/project/issues", MAX_LIST_ISSUES).await?;
+                if !found { return Err(LinearError::new(LinearErrorCode::NotFound, "That Linear project was not found")); }
+                Ok(mast_proto::linear::LinearProjectIssuePage { issues: nodes.iter().filter_map(queries::issue_summary).collect(), has_more })
+            }.boxed()).await.map(|entry| entry.value)
+        };
+        if !cached_only && revision == self.credential_revision() {
             let mut failures = lock(&self.inner.project_issue_failures);
             match &result {
-                Ok(_) => { failures.remove(&project_id); }
+                Ok(page) => { failures.remove(&id); self.cache_issues(&page.issues); }
                 Err(error) => {
-                    let attempts = failures.get(&project_id).map_or(1, |failure| failure.attempts.saturating_add(1));
-                    if failures.len() >= 128 && !failures.contains_key(&project_id)
+                    let attempts = failures.get(&id).map_or(1, |failure| failure.attempts.saturating_add(1));
+                    if failures.len() >= 128 && !failures.contains_key(&id)
                         && let Some(key) = failures.keys().next().cloned() { failures.remove(&key); }
-                    failures.insert(project_id, ProjectIssueFailure { error: error.clone(), at: Instant::now(), attempts });
+                    failures.insert(id, ProjectIssueFailure { error: error.clone(), at: Instant::now(), attempts });
                 }
             }
         }

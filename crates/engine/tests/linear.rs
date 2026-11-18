@@ -601,6 +601,32 @@ async fn list_queries_limit_the_number_of_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tracker_project_page_reports_when_the_bounded_result_has_more() {
+    let rig = rig().await;
+    for index in 0..5 {
+        let nodes = (0..50).map(|offset| issue_node(&format!("ENG-{}", index * 50 + offset + 1), "Ticket", None, "started")).collect();
+        let cursor = format!("page-{}", index + 1);
+        rig.mock.script(Reply::ok(json!({ "project": { "issues": page(nodes, Some(&cursor)) } })));
+    }
+    let result = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "large", "includeCompleted": true })).await.unwrap();
+    assert_eq!(result["issues"].as_array().unwrap().len(), 250);
+    assert_eq!(result["hasMore"], true);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 5);
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "large", "cachedOnly": true })).await.unwrap();
+    assert_eq!(cached["hasMore"], true);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 5);
+    for index in 0..5 {
+        let nodes = (0..50).map(|offset| issue_node(&format!("FIX-{}", index * 50 + offset + 1), "Ticket", None, "started")).collect();
+        let cursor = (index < 4).then(|| format!("exact-{}", index + 1));
+        rig.mock.script(Reply::ok(json!({ "project": { "issues": page(nodes, cursor.as_deref()) } })));
+    }
+    let exact = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "exact" })).await.unwrap();
+    assert_eq!(exact["issues"].as_array().unwrap().len(), 250);
+    assert_eq!(exact["hasMore"], false);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
     let rig = rig().await;
     for _ in 0..2 {

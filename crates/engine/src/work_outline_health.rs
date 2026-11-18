@@ -155,13 +155,14 @@ pub fn reconcile_health_chats(
     let mut issue_items = HashMap::<String, usize>::new();
     let item_indexes: HashMap<_, _> = items.iter().enumerate().map(|(index, item)| (item.id.clone(), index)).collect();
     let mut effective_issues = item_issues.clone();
+    let explicit_issues: std::collections::HashSet<_> = item_issues.values().collect();
     for item in items.iter().filter(|item| !item.container && !item_issues.contains_key(&item.id)) {
-        if let Some(issue) = item.chat_ids.iter().filter_map(|id| chat_issues.get(id)).find(|issue| issues.contains_key(*issue)) {
+        if let Some(issue) = item.chat_ids.iter().filter_map(|id| chat_issues.get(id)).find(|issue| issues.contains_key(*issue) || explicit_issues.contains(*issue)) {
             effective_issues.insert(item.id.clone(), issue.clone());
         }
     }
     for (index, item) in items.iter().enumerate().filter(|(_, item)| !item.container) {
-        if let Some(issue) = effective_issues.get(&item.id).filter(|issue| issues.contains_key(*issue)) {
+        if let Some(issue) = effective_issues.get(&item.id) {
             issue_items.entry(issue.clone()).or_insert(index);
         }
     }
@@ -169,8 +170,9 @@ pub fn reconcile_health_chats(
     for chat in chats.iter_mut() {
         let source = chat.item_id.as_ref().and_then(|id| item_indexes.get(id)).copied();
         if source.is_some_and(|index| items[index].container) { continue; }
-        let issue = chat.item_id.as_ref().and_then(|id| effective_issues.get(id)).or_else(|| chat_issues.get(&chat.id));
-        let Some(issue) = issue.filter(|issue| issues.contains_key(*issue)) else { continue; };
+        let issue = chat.item_id.as_ref().and_then(|id| effective_issues.get(id))
+            .or_else(|| chat_issues.get(&chat.id).filter(|issue| issues.contains_key(*issue) || issue_items.contains_key(*issue)));
+        let Some(issue) = issue else { continue; };
         let target = *issue_items.entry(issue.clone()).or_insert_with(|| {
             let index = items.len();
             items.push(HealthItem { id: format!("linear:{issue}"), container: false, completed: false,
@@ -369,6 +371,12 @@ mod tests {
         let both = [("EX-1".into(), false), ("EX-2".into(), false)].into_iter().collect();
         reconcile_health_chats(&mut shared, &mut workers, &HashMap::new(), &branches, &both);
         assert!(matches!(&check_health(&shared, &workers, &[])[..], [HealthEntry::SeveralLiveChats { item_id, .. }] if item_id == "shared"));
+        let mut outside = vec![item("x", "one"), item("y", "two"), item("z", "three")];
+        let mut outside_chats = vec![chat("one", "x"), chat("two", "y"), chat("three", "z")];
+        let refs = [("x".into(), "OUT-900".into()), ("y".into(), "OUT-900".into())].into_iter().collect();
+        let branches = [("three".into(), "OUT-900".into())].into_iter().collect();
+        reconcile_health_chats(&mut outside, &mut outside_chats, &refs, &branches, &issues);
+        assert!(matches!(&check_health(&outside, &outside_chats, &[])[..], [HealthEntry::SeveralLiveChats { item_id, .. }] if item_id == "x"));
     }
 
     #[test]

@@ -2994,6 +2994,11 @@ impl RpcService for EngineRpc {
                 )
                 .await
             }
+            methods::LINEAR_PROJECT_ISSUE_PAGE => {
+                let p: mast_proto::LinearProjectIssuesParams = parse_params(params)?;
+                Self::linear_reply(self.linear_for_space(p.space_id.as_deref(), p.expected_account_id.as_deref())?
+                    .project_issue_page(&p.project_id, p.force, p.cached_only).await).await
+            }
             methods::LINEAR_PROJECT_DETAIL => {
                 let p: mast_proto::LinearProjectDetailParams = parse_params(params)?;
                 Self::linear_reply(

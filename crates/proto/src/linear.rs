@@ -442,6 +442,14 @@ pub struct LinearProjectIssuesParams {
     pub cached_only: bool,
 }
 
+/// A bounded project issue list and whether more issues remain on Linear.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearProjectIssuePage {
+    pub issues: Vec<LinearIssueSummary>,
+    pub has_more: bool,
+}
+
 /// `LinearProjectDetail {projectId}` → [`LinearProjectDetail`]: one project's
 /// state, progress, target date, lead and latest updates (read-only; the
 /// canonical plan panel). Cached like the lists.

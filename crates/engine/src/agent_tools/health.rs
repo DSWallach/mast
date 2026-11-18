@@ -54,6 +54,7 @@ impl AgentToolsService {
         let item_issues: HashMap<_, _> = item_references.into_iter().map(|(id, reference)| (id.to_owned(), reference.external_id.to_ascii_uppercase())).collect();
         let project = snapshot.linear_project_reference(root);
         let mut unknown_linear = project.is_some() && snapshot.space_settings.linear_enabled;
+        let mut project_page_loaded = false;
         let linear = lock(&self.linear).clone().map(|linear| {
             let account = self.workspace.space_linear_account_id(&snapshot.space_id);
             linear.for_account(account.as_deref())
@@ -65,15 +66,16 @@ impl AgentToolsService {
                 candidate.id == project.external_id || (!project.url.is_empty() && candidate.url.trim_end_matches('/') == project.url.trim_end_matches('/'))
                     || candidate.url.trim_end_matches('/').rsplit('/').next() == Some(project.external_id.as_str())
             })).map_or(project.external_id.as_str(), |candidate| candidate.id.as_str());
-            if let Ok(issues) = linear.project_issues(project_id, true, false, true).await {
-                linear_states = issues.iter().map(|issue| (issue.identifier.to_ascii_uppercase(), issue.state.state_type.is_closed())).collect();
+            if let Ok(page) = linear.project_issue_page(project_id, false, true).await {
+                linear_states = page.issues.iter().map(|issue| (issue.identifier.to_ascii_uppercase(), issue.state.state_type.is_closed())).collect();
                 ticket_ids.extend(linear_states.keys().cloned());
                 for (item_id, issue) in &item_issues {
                     if let Some(completed) = linear_states.get(issue) {
                         linear_completion.insert(item_id.clone(), *completed);
                     }
                 }
-                unknown_linear = false;
+                unknown_linear = page.has_more;
+                project_page_loaded = true;
             }
         }
         let mut items = health_items(snapshot, root, &linear_completion);
@@ -245,7 +247,7 @@ impl AgentToolsService {
                 on_default_branch: default_branch.as_deref().zip(chat.branch.as_deref()).is_some_and(|(a, b)| a == b),
                 has_bound_worktree: bound });
         }
-        if project.is_some() && !unknown_linear {
+        if project_page_loaded {
             reconcile_health_chats(&mut items, &mut facts, &item_issues, &chat_issues, &linear_states);
         }
         let entries = check_health(&items, &facts, &prs);
