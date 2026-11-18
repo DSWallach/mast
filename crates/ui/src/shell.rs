@@ -3168,6 +3168,7 @@ impl Shell {
         self.board_link_versions.insert(chat_id.to_owned(), self.board_links_revision);
     }
 
+    /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(
         &mut self,
         section: SettingsSection,
@@ -4084,6 +4085,15 @@ impl Shell {
     /// two, and source metadata below. Working uses the live thread glyph in
     /// the status corner. Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
+    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
+    /// section (folder + device rows, add-space), the global Active sessions
+    /// list, the notice strip, and the UserMenu (§1.6).
+    /// The global connection line. `None` while healthy (`Connected`) or on
+    /// local profiles (`Disabled`) — and the engine's degrade grace means it
+    /// only exists during REAL outages, never join/wake blips. No surface,
+    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
+    /// reconnecting; an amber dot only when the OS says offline. The
+    /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use mast_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
@@ -4108,6 +4118,11 @@ impl Shell {
         Some(crate::components::shell_parts::connection_line(theme, label, glyph))
     }
 
+    /// Update strip: shown above the user menu whenever the engine's
+    /// UpdateStatus stream reports a newer release. On a macOS bundle install
+    /// it drives the whole flow — click to download, then click to restart into
+    /// the staged bundle. Elsewhere (managed/source installs) it is advisory
+    /// (`zeron update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {

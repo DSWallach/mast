@@ -765,13 +765,4 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
-    /// section (folder + device rows, add-space), the global Active sessions
-    /// list, the notice strip, and the UserMenu (§1.6).
-    /// The global connection line. `None` while healthy (`Connected`) or on
-    /// local profiles (`Disabled`) — and the engine's degrade grace means it
-    /// only exists during REAL outages, never join/wake blips. No surface,
-    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
-    /// reconnecting; an amber dot only when the OS says offline. The
-    /// transport error belongs in logs, not the sidebar.
 }

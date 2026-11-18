@@ -285,5 +285,4 @@ impl Shell {
         cx.notify();
     }
 
-    /// Lazily create the entity for a settings section and return it renderable.
 }
