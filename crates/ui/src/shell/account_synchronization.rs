@@ -862,6 +862,8 @@ impl Shell {
 
     // ---- render pieces ----
 
+    /// Scope-aware sidebar identity and account menu. Local runtimes advertise
+    /// their storage boundary and offer sync; synced runtimes offer sign-out.
     pub(super) fn render_user_menu(
         &mut self,
         user_line: SharedString,
