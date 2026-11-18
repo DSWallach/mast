@@ -10,6 +10,20 @@ impl Render for EmptyFixture {
 
 struct RowFixture(Entity<Transcript>);
 
+struct ToolGroupFixture {
+    transcript: Entity<Transcript>,
+    tools: Arc<Vec<ToolItem>>,
+}
+
+impl Render for ToolGroupFixture {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = self.transcript.update(cx, |transcript, cx| {
+            transcript.render_tool_group(&"group".into(), &self.tools, &"Tools".into(), false, &Theme::dark(), cx)
+        });
+        div().w(px(500.0)).debug_selector(|| "tool-group".into()).child(body)
+    }
+}
+
 impl Render for RowFixture {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |transcript, cx| {
@@ -185,4 +199,39 @@ fn tool_group_displays_the_most_recently_selected_fetched_detail(cx: &mut gpui::
             assert_eq!(this.tool_group_reveals[&id].rendered_height, short);
         });
     });
+}
+
+#[gpui::test]
+fn subagent_chip_opens_its_document(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let transcript = cx.new(|cx| Transcript::new(state, cx));
+    transcript.update(cx, |this, _| this.chat_id = Some("chat".into()));
+    let opened = Rc::new(RefCell::new(None));
+    let captured = opened.clone();
+    let _subscription = cx.update(|cx| cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+        if let TranscriptEvent::OpenSubagent { chat_id, doc_id, .. } = event {
+            *captured.borrow_mut() = Some((chat_id.clone(), doc_id.clone()));
+        }
+    }));
+    let tools = Arc::new(vec![ToolItem {
+        part_id: "spawn".into(),
+        call: ToolCall::Unknown { name: "Agent: inspect".into(), input: Some(serde_json::json!({"description": "inspect"})) },
+        is_error: false, resolved: true, detail: None, invocation: None,
+        output_ref: None, output_bytes: None, diff_ref: None,
+        subagent_ref: Some("document".into()), subagent_status: Some(SubagentStatus::Running),
+        subagent_tail: None, is_thought: false,
+    }]);
+    let (_, vcx) = cx.add_window_view(|_, _| ToolGroupFixture { transcript: transcript.clone(), tools });
+    vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("tool-group").unwrap();
+    let center = gpui::point(bounds.origin.x + px(50.0), bounds.origin.y + px(CHIPS_TOP_PAD + CHIP_HEIGHT / 2.0));
+    vcx.simulate_click(center, gpui::Modifiers::default());
+    assert_eq!(*opened.borrow(), Some(("chat".into(), "document".into())));
+    transcript.read_with(vcx, |this, _| assert!(this.folds.is_empty()));
 }
