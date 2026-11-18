@@ -18,27 +18,53 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     Ok(bytes)
 }
 fn registries() -> Vec<PathBuf> {
+    discover_registries().0
+}
+
+fn discover_registries() -> (Vec<PathBuf>, bool) {
+    fn directories(path: &Path, complete: &mut bool) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => match entry.path().metadata() {
+                            Ok(metadata) if metadata.is_dir() => paths.push(entry.path()),
+                            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                                *complete = false;
+                            }
+                            _ => {}
+                        },
+                        Err(_) => *complete = false,
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => *complete = false,
+        }
+        paths
+    }
+
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return vec![];
+        return (Vec::new(), false);
     };
     let root = home.join("Library/Application Support/Claude");
-    let mut out = Vec::new();
+    let mut paths = Vec::new();
+    let mut complete = true;
     for kind in ["claude-code-sessions", "local-agent-mode-sessions"] {
-        if let Ok(accounts) = std::fs::read_dir(root.join(kind)) {
-            for account in accounts.flatten() {
-                if let Ok(orgs) = std::fs::read_dir(account.path()) {
-                    for org in orgs.flatten() {
-                        let p = org.path().join("scheduled-tasks.json");
-                        if p.is_file() {
-                            out.push(p)
-                        }
-                    }
+        for account in directories(&root.join(kind), &mut complete) {
+            for org in directories(&account, &mut complete) {
+                let path = org.join("scheduled-tasks.json");
+                match path.metadata() {
+                    Ok(metadata) if metadata.is_file() => paths.push(path),
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => complete = false,
+                    _ => {}
                 }
             }
         }
     }
-    out.sort();
-    out
+    paths.sort();
+    (paths, complete)
 }
 
 /// The `filePath` of the registry row an import source (`…json#id`) names,
@@ -74,17 +100,13 @@ pub(crate) fn imported_identity(
     task_id(scope, device, &source)
 }
 
-/// An absent definition is evidence of retirement only if the registries
-/// we found could be read. A transiently unreadable registry is inconclusive.
-pub(super) fn desktop_source_retired(file: &str, name: &str) -> bool {
-    let (sources, all_read) = desktop_sources(file, name);
-    all_read && sources.is_empty()
-}
-
-fn desktop_sources(file: &str, name: &str) -> (Vec<String>, bool) {
+/// Exact source matches and whether the search was conclusive. Missing or
+/// unreadable registries cannot prove a definition has been retired.
+pub(super) fn desktop_sources(file: &str, name: &str) -> (Vec<String>, bool) {
     let mut sources = Vec::new();
-    let mut all_read = true;
-    for path in registries() {
+    let (paths, complete) = discover_registries();
+    let mut all_read = complete && !paths.is_empty();
+    for path in paths {
         let rows = read(&path, 2 * 1024 * 1024)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());

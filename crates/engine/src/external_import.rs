@@ -296,22 +296,27 @@ impl ExternalSessionImporter {
         let archived = desktop_runs.is_some_and(|desktop| {
             scheduled.as_ref().is_some_and(|info| desktop.should_archive(&self.device_id, info))
         });
-        self.workspace.create_external_chat(
-            chat_id,
-            &space_id,
-            ChatConfig {
-                approval_rules: false,
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-                auto_approve: false,
-            },
-            cwd.clone(),
-            scheduled,
-            archived,
-        )?;
+        let config = ChatConfig {
+            approval_rules: false,
+            harness: HarnessId::ClaudeCode,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        };
+        if archived {
+            self.workspace.create_archived_external_chat(
+                chat_id, &space_id, config, cwd.clone(), scheduled,
+            )?;
+        } else {
+            self.workspace.create_chat(
+                chat_id, Some(&space_id), Some(&self.device_id), Some(config), Some(cwd.clone()),
+            )?;
+            if let Some(task) = scheduled {
+                self.workspace.set_chat_scheduled_task_info(chat_id, &task)?;
+            }
+        }
         // Priority chain ported from `agent-mode-tools/session_canvas_server.py`
         // (its own multi-source name resolution): a human-chosen agent-mode
         // task name beats the transcript's own `ai-title`, which beats a

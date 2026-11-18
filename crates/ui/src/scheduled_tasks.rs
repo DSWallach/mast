@@ -152,6 +152,7 @@ impl ScheduledTasksPage {
         cx.notify();
     }
     pub fn show_tasks(&mut self, cx: &mut Context<Self>) {
+        self.cleanup = None;
         self.editor = None;
         self.requested_task = None;
         self.choices = None;
@@ -237,16 +238,7 @@ impl ScheduledTasksPage {
                     Ok(snapshot) => {
                         if is_cleanup {
                             if let Some(cleanup) = snapshot.cleanup {
-                                if cleanup.applied {
-                                    p.cleanup = None;
-                                    let count = cleanup.chat_ids().count();
-                                    p.message = Some(format!("Archived {count} {}.", run_label(count)));
-                                } else {
-                                    p.cleanup = Some(cleanup);
-                                    if is_cleanup_apply {
-                                        p.message = Some("Eligible runs changed. Review the updated preview.".into());
-                                    }
-                                }
+                                p.show_cleanup_result(cleanup, is_cleanup_apply);
                             }
                         } else if is_preview {
                             p.snapshot.preview = snapshot.preview;
@@ -279,6 +271,19 @@ impl ScheduledTasksPage {
         }));
         cx.notify();
     }
+    fn show_cleanup_result(&mut self, cleanup: ScheduledRunCleanup, attempted_apply: bool) {
+        if cleanup.applied {
+            self.cleanup = None;
+            let count = cleanup.chat_ids().count();
+            self.message = Some(format!("Archived {count} {}.", run_label(count)));
+        } else if self.active && self.editor.is_none() && self.requested_task.is_none() {
+            self.cleanup = Some(cleanup);
+            if attempted_apply {
+                self.message = Some("Eligible runs changed. Review the updated preview.".into());
+            }
+        }
+    }
+
     fn finish_task_load(&mut self, saved_id: Option<&str>, cx: &mut Context<Self>) {
         if let Some(id) = saved_id {
             if self.editor.as_ref().is_some_and(|e| e.id == id) {
@@ -681,6 +686,7 @@ impl ScheduledTasksPage {
                 .child(
                     popover::btn_ghost(theme, if count == 0 { "Done" } else { "Cancel" }, "tasks-cleanup-cancel")
                         .id("tasks-cleanup-cancel")
+                        .debug_selector(|| "tasks-cleanup-cancel".into())
                         .on_click(cx.listener(|p, _, _, cx| {
                             if !p.busy {
                                 p.cleanup = None;
@@ -692,6 +698,7 @@ impl ScheduledTasksPage {
                     el.child(
                         popover::btn_primary(theme, "Archive runs")
                             .id("tasks-cleanup-apply")
+                            .debug_selector(|| "tasks-cleanup-apply".into())
                             .on_click(cx.listener(move |p, _, _, cx| {
                                 p.call(ScheduledTasksRequest::Cleanup {
                                     mode: ScheduledRunCleanupMode::Apply { expected_chat_ids: expected_chat_ids.clone() },
@@ -2011,6 +2018,56 @@ mod tests {
             assert!(e.prompt.read(cx).measured_content_height() > 100.0);
             assert!(e.cwd.read(cx).measured_width().unwrap() < 640.0);
         });
+    }
+
+    #[gpui::test]
+    fn cleanup_confirmation_refreshes_cancels_and_closes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| ScheduledTasksPage::new(state, cx));
+        let preview = |id: &str| ScheduledRunCleanup {
+            tasks: vec![ScheduledRunCleanupTask {
+                task_id: "task".into(),
+                task_name: "Briefing".into(),
+                space_id: None,
+                count: 1,
+                chat_ids: vec![id.into()],
+            }],
+            applied: false,
+        };
+        page.update(cx, |p, cx| {
+            p.error = None;
+            p.show_cleanup_result(preview("original"), false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_some());
+
+        page.update(cx, |p, cx| {
+            p.show_cleanup_result(preview("replacement"), true);
+            assert_eq!(p.cleanup.as_ref().unwrap().chat_ids().next().unwrap(), "replacement");
+            assert!(p.message.as_deref().unwrap().contains("Eligible runs changed"));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let cancel = cx.debug_bounds("tasks-cleanup-cancel").unwrap().center();
+        cx.simulate_click(cancel, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_none());
+
+        page.update(cx, |p, cx| {
+            p.show_cleanup_result(preview("replacement"), false);
+            p.set_active(false);
+            p.show_cleanup_result(preview("late"), false);
+            assert!(p.cleanup.is_none());
+            p.set_active(true);
+            p.show_cleanup_result(ScheduledRunCleanup { applied: true, ..preview("replacement") }, true);
+            assert!(p.cleanup.is_none());
+            assert_eq!(p.message.as_deref(), Some("Archived 1 run."));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tasks-cleanup-apply").is_none());
     }
 
     #[cfg(all(feature = "snapshot", target_os = "macos"))]

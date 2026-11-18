@@ -91,8 +91,9 @@ assistant runs. Archived runs remain in **Run history** and can be restored
 from the archive.
 
 The background import sweep archives newly discovered Desktop runs from
-handed-off or retired schedules as it imports them. Hosts that predate this
-feature do not offer the cleanup action.
+handed-off or retired schedules as it imports them. When Mast cannot verify
+retirement from the source registries, it leaves that run's import visible.
+Hosts that predate this feature do not offer the cleanup action.
 
 ## Import Claude schedules
 

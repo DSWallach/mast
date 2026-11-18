@@ -1267,10 +1267,23 @@ async fn cleanup_previews_and_archives_only_confirmed_idle_runs_on_the_host() {
     add_run("peer-new", "briefing", 150, None, "peer");
     add_run("assistant-old", "assistant-task", 1, Some(ITEM_SPACE), ITEM_DEVICE);
     add_run("assistant-new", "assistant-task", 2, Some(ITEM_SPACE), ITEM_DEVICE);
-    add_run("retired-desktop", "retired-source", 1, Some(ITEM_SPACE), ITEM_DEVICE);
+    let retired = core.scheduled_tasks.request(ScheduledTasksRequest::Import {
+        candidate: ScheduledImportCandidate {
+            source: format!("{}#retired-source", root.join("scheduled-tasks.json").display()),
+            source_enabled: false,
+            draft: item_draft(&root, None),
+            warnings: vec![],
+        },
+        operation_id: "import-retired-source".into(),
+    }).await.unwrap().tasks.remove(0);
+    core.scheduled_tasks.request(ScheduledTasksRequest::Delete {
+        id: retired.id.clone(),
+        expected_revision: retired.revision,
+        operation_id: "delete-retired-source".into(),
+    }).await.unwrap();
+    add_run("retired-desktop", &retired.id, 1, Some(ITEM_SPACE), ITEM_DEVICE);
     let mut desktop = core.workspace.chat("retired-desktop").unwrap().unwrap().scheduled_task_info.unwrap();
     desktop.source_file = Some(root.join("retired.md").to_string_lossy().into_owned());
-    desktop.retired = true;
     core.workspace.set_chat_scheduled_task_info("retired-desktop", &desktop).unwrap();
     core.workspace.set_chat_archived("already-archived", true).unwrap();
     core.workspace.create_chat("ordinary", Some(ITEM_SPACE), None, None, None).unwrap();

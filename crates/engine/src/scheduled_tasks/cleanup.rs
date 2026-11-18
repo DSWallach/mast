@@ -24,27 +24,39 @@ impl DesktopRuns {
     }
 
     pub(crate) fn should_archive(&self, device: &str, info: &ScheduledChat) -> bool {
-        if let Some(task) = self
+        let task = self
             .tasks
             .iter()
-            .find(|t| t.device_id == device && t.id == info.task_id)
-        {
-            return task.deleted || task.source_handoff_at.is_some();
-        }
+            .find(|t| t.device_id == device && t.id == info.task_id);
+        let handed_off_or_deleted =
+            |task: &ScheduledTask| task.deleted || task.source_handoff_at.is_some();
         let Some(file) = &info.source_file else {
-            return info.retired;
+            return task.map_or(info.retired, handed_off_or_deleted);
         };
+        if let Some(task) = task.filter(|_| info.legacy_task_id.is_none()) {
+            return handed_off_or_deleted(task);
+        }
+        let (sources, conclusive) = import::desktop_sources(file, &info.task_name);
+        if sources.len() > 1 {
+            return false;
+        }
+        if let Some(task) = task {
+            return handed_off_or_deleted(task);
+        }
         // Older provisional ids may not have been rewritten yet, and a
         // deleted task is no longer a candidate for identity reconciliation.
         let mut claims = self.tasks.iter().filter(|task| {
             task.device_id == device
                 && identity::source_name(task) == Some(info.task_name.as_str())
                 && self.task_files.get(&task.id) == Some(file)
+                && sources
+                    .first()
+                    .is_none_or(|source| task.import_source.as_ref() == Some(source))
         });
         match (claims.next(), claims.next()) {
-            (Some(task), None) => task.deleted || task.source_handoff_at.is_some(),
+            (Some(task), None) => handed_off_or_deleted(task),
             // An unclaimed Desktop run is retired when its definition is gone.
-            (None, _) => import::desktop_source_retired(file, &info.task_name),
+            (None, _) => conclusive && sources.is_empty(),
             (Some(_), Some(_)) => false,
         }
     }
@@ -77,12 +89,9 @@ impl ScheduledTasks {
         mode: ScheduledRunCleanupMode,
     ) -> Result<ScheduledRunCleanup, EngineError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _guard = this.0.gate.blocking_lock();
-            this.clean_up_runs_blocking(mode)
-        })
-        .await
-        .map_err(super::fail)?
+        tokio::task::spawn_blocking(move || this.clean_up_runs_blocking(mode))
+            .await
+            .map_err(super::fail)?
     }
 
     fn should_archive_desktop_run(
@@ -98,6 +107,16 @@ impl ScheduledTasks {
                 &chat.id,
             );
         imported && desktop.should_archive(&chat.device_id, info)
+    }
+
+    fn active_chat_ids(&self) -> Result<HashSet<String>, EngineError> {
+        Ok(self
+            .0
+            .store
+            .active()?
+            .into_iter()
+            .filter_map(|run| run.chat_id)
+            .collect())
     }
 
     fn clean_up_runs_blocking(
@@ -122,13 +141,7 @@ impl ScheduledTasks {
         let covers = assistant
             .as_ref()
             .map(|assistant| assistant.coverage(&chats));
-        let active: HashSet<_> = self
-            .0
-            .store
-            .active()?
-            .into_iter()
-            .filter_map(|run| run.chat_id)
-            .collect();
+        let active = self.active_chat_ids()?;
         let actions = workspace.open_user_action_origin_chats();
         let mut groups = BTreeMap::<_, Vec<&Chat>>::new();
         for chat in &chats {
@@ -186,16 +199,26 @@ impl ScheduledTasks {
         if let ScheduledRunCleanupMode::Apply { expected_chat_ids } = mode {
             let expected: HashSet<_> = expected_chat_ids.iter().collect();
             let ids: HashSet<_> = result.chat_ids().collect();
-            if expected == ids {
-                if ids.is_empty() {
-                    result.applied = true;
-                } else if workspace
+            if expected != ids {
+                return Ok(result);
+            }
+            if ids.is_empty() {
+                result.applied = true;
+                return Ok(result);
+            }
+
+            let _guard = self.0.gate.blocking_lock();
+            if self.0.store.tasks()? == desktop.tasks
+                && self.active_chat_ids()? == active
+                && self.0.sessions.agent_tokens().personal_assistant().get() == assistant
+                && !ids.iter().any(|id| self.0.sessions.turn_in_flight(id))
+                && workspace
                     .archive_scheduled_runs(marker, result.chat_ids().map(String::as_str))?
-                {
-                    result.applied = true;
-                } else {
-                    return self.clean_up_runs_blocking(ScheduledRunCleanupMode::Preview);
-                }
+            {
+                result.applied = true;
+            } else {
+                drop(_guard);
+                return self.clean_up_runs_blocking(ScheduledRunCleanupMode::Preview);
             }
         }
         Ok(result)

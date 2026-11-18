@@ -1835,18 +1835,17 @@ impl WorkspaceHost {
         )
     }
 
-    pub(crate) fn create_external_chat(
+    pub(crate) fn create_archived_external_chat(
         &self,
         chat_id: &str,
         space_id: &str,
         config: ChatConfig,
         cwd: String,
         scheduled: Option<mast_proto::ScheduledChat>,
-        archived: bool,
     ) -> Result<(), EngineError> {
         self.create_chat_row(
             chat_id, Some(space_id), Some(self.device_id()), Some(config), Some(cwd),
-            NewChatMetadata { scheduled, archived, ..Default::default() },
+            NewChatMetadata { scheduled, archived: true, ..Default::default() },
         )
     }
 

@@ -68,13 +68,6 @@ impl ScheduledTasks {
         &self,
         request: ScheduledTasksRequest,
     ) -> Result<ScheduledTasksSnapshot, EngineError> {
-        if let ScheduledTasksRequest::Cleanup { mode } = request {
-            return Ok(ScheduledTasksSnapshot {
-                device_id: self.0.workspace.device_id().into(),
-                cleanup: Some(self.clean_up_runs(mode).await?),
-                ..Default::default()
-            });
-        }
         let _guard = self.0.gate.lock().await;
         let now = crate::now_ms();
         let input = serde_json::to_string(&request).map_err(fail)?;
@@ -105,7 +98,13 @@ impl ScheduledTasks {
         }
         match request {
             ScheduledTasksRequest::List => {}
-            ScheduledTasksRequest::Cleanup { .. } => unreachable!("handled off the async worker"),
+            ScheduledTasksRequest::Cleanup { mode } => {
+                // Cleanup takes its own short lock at commit, after inspecting
+                // the transcript queues off the async worker.
+                drop(_guard);
+                response.cleanup = Some(self.clean_up_runs(mode).await?);
+                return Ok(response);
+            }
             ScheduledTasksRequest::History { id, before } => {
                 response.runs = self.0.store.runs(Some(&id), before)?;
                 return Ok(response);

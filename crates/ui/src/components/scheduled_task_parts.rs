@@ -20,7 +20,6 @@ pub(crate) fn task_history() -> Div {
     div().text_size(crate::typography::ui_rems(10.0)).rounded(px(4.0))
 }
 
-
 pub(crate) fn cleanup_panel(theme: &crate::theme::Theme) -> Div {
     div()
         .flex()

@@ -211,6 +211,25 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
     );
     assert_eq!(core.workspace.read_chats().unwrap().len(), 3);
 
+    let cwd = data_dir.path().to_str().unwrap();
+    let write_scheduled = |session, task, file: &Path| {
+        let wrapper = format!(
+            "<scheduled-task name=\"{task}\" file=\"{}\">\nSummarize the day's work.\n</scheduled-task>",
+            file.display(),
+        );
+        write_aged(&proj, session, cwd, &wrapper, HOUR);
+    };
+    let archived = |session| {
+        core.workspace.read_chats().unwrap().into_iter()
+            .find(|c| c.harness_session_id.as_deref() == Some(session))
+            .unwrap().archived
+    };
+    let unknown = data_dir.path().join("unknown.md");
+    std::fs::write(&unknown, "Summarize the day's work.").unwrap();
+    write_scheduled("missing-registry", "unknown", &unknown);
+    assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 1);
+    assert!(!archived("missing-registry"), "no registry does not prove retirement");
+
     // The same sweep archives handed-off and retired Desktop runs on arrival.
     use mast_proto::ScheduledTasksRequest as Request;
     let schedules = fake_home.path().join(
@@ -226,7 +245,8 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
     let registry = schedules.join("scheduled-tasks.json");
     std::fs::write(&registry, serde_json::to_vec(&serde_json::json!({"scheduledTasks":[
         {"id":"handoff", "filePath":cutover, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()},
-        {"id":"paused", "filePath":paused, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()}
+        {"id":"paused", "filePath":paused, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()},
+        {"id":"unknown", "filePath":unknown, "enabled":false, "cronExpression":"0 8 * * *", "cwd":data_dir.path()}
     ]})).unwrap()).unwrap();
     let candidates = core.scheduled_tasks.request(Request::ImportPreview {
         registry_path: Some(registry.to_string_lossy().into_owned()),
@@ -246,7 +266,6 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
     // A backlog chat from the same source is selected even as the only
     // edition in its Space. Explicit import still leaves it visible.
     let backlog = data_dir.path().join("backlog.jsonl");
-    let cwd = data_dir.path().to_str().unwrap();
     let wrapper = format!(
         "<scheduled-task name=\"handoff\" file=\"{}\">\nSummarize the day's work.\n</scheduled-task>",
         cutover.display(),
@@ -259,16 +278,34 @@ async fn auto_adopt_sweep_adopts_settled_external_sessions_only() {
     }).await.unwrap().cleanup.unwrap();
     assert_eq!(preview.chat_ids().map(String::as_str).collect::<Vec<_>>(), ["backlog"]);
 
-    for (name, file) in [("handoff", cutover), ("paused", paused), ("retired", retired)] {
-        let msg = format!("<scheduled-task name=\"{name}\" file=\"{}\">\nSummarize the day's work.\n</scheduled-task>", file.display());
-        write_aged(&proj, name, data_dir.path().to_str().unwrap(), &msg, HOUR);
+    for (name, file) in [("handoff", &cutover), ("paused", &paused), ("retired", &retired)] {
+        write_scheduled(name, name, file);
     }
     assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 3);
-    let chats = core.workspace.read_chats().unwrap();
-    for (session, archived) in [("handoff", true), ("retired", true), ("paused", false), ("sess-settled", false)] {
-        let chat = chats.iter().find(|c| c.harness_session_id.as_deref() == Some(session)).unwrap();
-        assert_eq!(chat.archived, archived, "{session}");
+    for (session, expected) in [("handoff", true), ("retired", true), ("paused", false), ("sess-settled", false)] {
+        assert_eq!(archived(session), expected, "{session}");
     }
+
+    let other = schedules.parent().unwrap().join("another-org");
+    std::fs::create_dir_all(&other).unwrap();
+    let other_registry = other.join("scheduled-tasks.json");
+    std::fs::copy(&registry, &other_registry).unwrap();
+    let second = core.scheduled_tasks.request(Request::ImportPreview {
+        registry_path: Some(other_registry.to_string_lossy().into_owned()),
+        timezone: "UTC".into(), space_id: None,
+    }).await.unwrap().candidates;
+    core.scheduled_tasks.request(Request::Import {
+        candidate: second.into_iter().find(|c| c.source.ends_with("#handoff")).unwrap(),
+        operation_id: "second-source".into(),
+    }).await.unwrap();
+    write_scheduled("ambiguous", "handoff", &cutover);
+    assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 1);
+    assert!(!archived("ambiguous"), "two exact source claims leave the import visible");
+
+    std::fs::write(&registry, "incomplete registry").unwrap();
+    write_scheduled("unreadable-registry", "unknown", &schedules.join("unknown.md"));
+    assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 1);
+    assert!(!archived("unreadable-registry"), "an unreadable registry does not prove retirement");
     assert_eq!(core.external_import.auto_adopt_external_sessions().unwrap(), 0);
 
     core.shutdown().await;
