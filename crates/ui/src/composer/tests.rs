@@ -730,6 +730,120 @@ fn queue_command_timeout_restores_draft_to_selected_chat(cx: &mut gpui::TestAppC
 }
 
 #[gpui::test]
+fn failure_after_chat_creation_deletes_chat_before_restoring_canvas(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| state.set_test_engine(
+        crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)),
+    ));
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, cx| {
+        composer.fail_send_before_dispatch = true;
+        composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+        composer.send("draft text".into(), false, cx);
+    });
+    let mut operations = Vec::new();
+    let mut delete_id = None;
+    for _ in 0..1000 {
+        cx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_ne!(frame["method"], methods::QUEUE_COMMAND);
+            if frame["method"] == methods::MUTATE {
+                let operation = frame["params"]["op"].as_str().unwrap().to_string();
+                operations.push(operation.clone());
+                if operation == "deleteChat" { delete_id = Some(frame["id"].clone()); }
+                else { replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap(); }
+            }
+        }
+        if delete_id.is_some() { break; }
+    }
+    assert_eq!(operations, ["createChat", "deleteChat"]);
+    assert!(state.read_with(cx, |state, _| state.selected_chat.is_some()));
+    assert!(composer.read_with(cx, |composer, _| composer.failure.is_none()));
+    replies.try_send(serde_json::json!({"id": delete_id.unwrap(), "ok": {}}).to_string()).unwrap();
+    for _ in 0..1000 {
+        runtime.block_on(tokio::task::yield_now());
+        cx.run_until_parked();
+        if composer.read_with(cx, |composer, _| composer.failure.is_some()) { break; }
+    }
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.failure.as_deref(), Some("Injected pre-dispatch failure"));
+        assert!(composer.state.read(cx).selected_chat.is_none());
+        assert_eq!(composer.input.read(cx).text(), "draft text");
+    });
+}
+
+#[gpui::test]
+fn worktree_setup_poll_does_not_hold_send_open(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::app_menus::init(cx);
+        crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+    });
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(32);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(32);
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, cx| {
+        state.set_test_engine(crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)));
+        state.local_device_id = Some("local".into());
+        state.apply_spaces(vec![mast_proto::Space {
+            id: "repo".into(), device_id: "local".into(), path: "/repo".into(), name: None,
+            git_detected: true, git_checked_at: None, checkout_id: None, created_at: chrono::Utc::now(),
+        }]);
+        state.select_space(Some("repo".into()), cx);
+    });
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    struct CheckoutFixture(Entity<Pickers>);
+    impl Render for CheckoutFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let selectors = self.0.update(cx, |pickers, cx| pickers.render_new_thread_git_selectors(cx));
+            div().debug_selector(|| "checkout-fixture".into()).children(selectors)
+        }
+    }
+    let pickers = composer.read_with(cx, |composer, _| composer.pickers.clone());
+    let (_, vcx) = cx.add_window_view(|_, _| CheckoutFixture(pickers));
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear());
+    assert!(state.read_with(vcx, |state, _| state.selected_space_row().is_some_and(|space| space.git_detected)), "git space selected");
+    let checkout = vcx.debug_bounds("checkout-fixture").expect("checkout picker");
+    vcx.simulate_click(gpui::point(checkout.origin.x + px(40.0), checkout.origin.y + px(10.0)), gpui::Modifiers::default());
+    vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+    vcx.simulate_keystrokes("down enter");
+    composer.update(vcx, |composer, cx| {
+        assert!(matches!(composer.pickers.read(cx).checkout_plan(), crate::pickers::CheckoutPlan::NewWorktree { .. }));
+        composer.input.update(cx, |input, cx| input.set_text("draft text", cx));
+        composer.send("draft text".into(), false, cx);
+    });
+    let mut poll_received = false;
+    for _ in 0..1000 {
+        vcx.run_until_parked();
+        runtime.block_on(tokio::task::yield_now());
+        while let Ok(frame) = requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            match frame["method"].as_str() {
+                Some(methods::MUTATE) => replies.try_send(serde_json::json!({"id": frame["id"], "ok": {}}).to_string()).unwrap(),
+                Some(methods::QUEUE_COMMAND) => replies.try_send(serde_json::json!({"id": frame["id"], "ok": {"commandId": "command"}}).to_string()).unwrap(),
+                Some(methods::TAKE_PROJECT_ACTION_SETUP) => { poll_received = true; },
+                _ => {}
+            }
+        }
+        if poll_received && !composer.read_with(vcx, |composer, _| composer.sending) { break; }
+    }
+    assert!(poll_received, "setup polling started");
+    assert!(!composer.read_with(vcx, |composer, _| composer.sending), "send completed while setup is pending");
+}
+
+#[gpui::test]
 fn queue_rpc_failure_shows_error_and_restores_text(cx: &mut gpui::TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let _guard = runtime.enter();

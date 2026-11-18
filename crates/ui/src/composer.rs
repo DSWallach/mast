@@ -617,6 +617,8 @@ pub struct Composer {
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
+    #[cfg(test)]
+    fail_send_before_dispatch: bool,
     /// The queued message being edited in the composer (see
     /// [`Composer::begin_queue_edit`]).
     pub(crate) editing_queued: Option<String>,
@@ -929,6 +931,8 @@ impl Composer {
             action_task: None,
             advance_task: None,
             send_task: None,
+            #[cfg(test)]
+            fail_send_before_dispatch: false,
             interrupting: HashSet::new(),
             interrupt_tasks: HashMap::new(),
             editing_queued: None,
@@ -1711,6 +1715,8 @@ impl Composer {
         let restore_text = typed;
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
+        #[cfg(test)]
+        let fail_send_before_dispatch = self.fail_send_before_dispatch;
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let mut dispatch_attempted = false;
             let result: Result<Option<String>, String> = async {
@@ -2041,6 +2047,10 @@ impl Composer {
                     }
                 }
 
+                #[cfg(test)]
+                if fail_send_before_dispatch {
+                    return Err("Injected pre-dispatch failure".into());
+                }
                 if queue {
                     // A queue row is editable UI state, so its text must stay
                     // free of the internal attachment-path trailer. The host
