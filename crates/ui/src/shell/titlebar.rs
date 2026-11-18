@@ -1,5 +1,34 @@
 use super::*;
 
+pub(super) fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f32 {
+    if is_chat_route && has_selected_chat {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
+    // Match the padded flex row's center, not the raw titlebar center.
+    // Keep the native 24px controls untouched and give them 4px of air.
+    let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
+    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    (center - height * 0.5, height)
+}
+
+/// Right padding for titlebar content: past the native Windows caption
+/// cluster, or past zeron's own Linux caption buttons (10px edge inset +
+/// the button row) when the layout puts any on the right.
+pub(super) fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f32) -> f32 {
+    base + if is_windows {
+        WINDOWS_CAPTION_WIDTH
+    } else if linux_right_captions > 0 {
+        10.0 + caption_buttons_width(linux_right_captions)
+    } else {
+        0.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------

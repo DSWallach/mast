@@ -119,6 +119,7 @@ pub(crate) mod spaces;
 mod start_chat_ui;
 mod tabs;
 mod titlebar;
+use titlebar::{titlebar_new_session_alpha, titlebar_island_vertical_geometry, titlebar_right_padding};
 use titlebar::TITLEBAR_CLUSTER_PAD;
 pub use titlebar::{titlebar_cluster_start, titlebar_spacer_width, caption_buttons_width, cluster_buttons_start, cluster_clearance, TITLEBAR_CONTROL_GAP, TITLEBAR_GROUP_GAP, TITLEBAR_IDENTITY_GAP, TITLEBAR_ACTION_EDGE_INSET, CLUSTER_BUTTONS_WIDTH, TITLEBAR_ACTION_SLOT_WIDTH, TITLEBAR_TRAILING_SLOTS_WIDTH};
 mod team_ui;
@@ -291,14 +292,6 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
-fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f32 {
-    if is_chat_route && has_selected_chat {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
 #[derive(Clone, PartialEq, Action)]
@@ -370,14 +363,6 @@ const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
 const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
 const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
-
-fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
-    // Match the padded flex row's center, not the raw titlebar center.
-    // Keep the native 24px controls untouched and give them 4px of air.
-    let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
-    (center - height * 0.5, height)
-}
 
 fn bottom_stack_measurement_matches(
     measured_has_composer: bool,
@@ -3695,19 +3680,6 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
-
-/// Right padding for titlebar content: past the native Windows caption
-/// cluster, or past zeron's own Linux caption buttons (10px edge inset +
-/// the button row) when the layout puts any on the right.
-fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f32) -> f32 {
-    base + if is_windows {
-        WINDOWS_CAPTION_WIDTH
-    } else if linux_right_captions > 0 {
-        10.0 + caption_buttons_width(linux_right_captions)
-    } else {
-        0.0
-    }
-}
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
