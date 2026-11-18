@@ -80,6 +80,40 @@ fn bench_width_transitions(cx: &mut gpui::TestAppContext, patch: &str) {
     }
     eprintln!("BENCH diff | width max single UI update ms={max_ms:.2}");
     let (changes, state, vcx) = diff_pane_with_state(cx, patch.to_owned());
+    let mut max_frame_ms = 0.0f64;
+    for (label, highlight) in [("pending", None), ("excerpt", Some(excerpt)), ("ready", Some(ready))] {
+        SHAPED_LINES.with(|c| c.set(0));
+        let start = std::time::Instant::now();
+        changes.update(vcx, |c, cx| {
+            let parsed = c.parsed.as_ref().unwrap();
+            let path = parsed.files[0].path.clone();
+            let fingerprint = hash64(&[&parsed.key, &path]);
+            if label == "pending" { *parsed.horizontal[0].measured.borrow_mut() = None; }
+            c.highlights.insert(path, HighlightSlot {
+                fingerprint,
+                state: match highlight {
+                    None => DiffHighlightState::Pending,
+                    Some(highlight) if label == "excerpt" => DiffHighlightState::Excerpt(highlight),
+                    Some(highlight) => DiffHighlightState::Ready(highlight),
+                },
+                _excerpt_task: None,
+                _fetch_task: None,
+            });
+            cx.notify();
+        });
+        vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        max_frame_ms = max_frame_ms.max(ms);
+        eprintln!("BENCH diff | {label} frame | ms={ms:.2} lines={}", SHAPED_LINES.with(|c| c.get()));
+    }
+    vcx.update(|_, cx| cx.set_global(theme));
+    SHAPED_LINES.with(|c| c.set(0));
+    let start = std::time::Instant::now();
+    vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    max_frame_ms = max_frame_ms.max(ms);
+    eprintln!("BENCH diff | font change frame | ms={ms:.2} lines={}", SHAPED_LINES.with(|c| c.get()));
+    eprintln!("BENCH diff | transition max frame ms={max_frame_ms:.2}");
     let before = changes.read_with(vcx, |c, _| (c.benchmark_sync_count, c.benchmark_render_count));
     for _ in 0..10 {
         state.update(vcx, |_, cx| cx.notify());
