@@ -2632,9 +2632,7 @@ impl Overview {
                         AttentionFilter::NeedsInteraction => {
                             status == ChatIndicator::AwaitingInput || user_action_required
                         }
-                        AttentionFilter::Stalled => {
-                            status == ChatIndicator::Errored
-                        }
+                        AttentionFilter::Stalled => status == ChatIndicator::Errored,
                     };
                 let pr_number = row.and_then(|r| r.pr_number).or_else(|| {
                     self.link_status.get(&chat.id).and_then(|entry| {
@@ -9245,11 +9243,16 @@ mod logic_tests {
     #[test]
     #[ignore = "requires macOS Metal and access to macOS services"]
     fn scheduled_task_rows_snapshot() -> anyhow::Result<()> {
-        for (name, appearance) in [("light", crate::theme::Appearance::Light), ("dark", crate::theme::Appearance::Dark)] {
+        for (name, appearance) in [
+            ("light", crate::theme::Appearance::Light),
+            ("dark", crate::theme::Appearance::Dark),
+        ] {
             for width in [640.0, 1440.0] {
                 crate::snapshot::render_to_png(
                     &format!("scheduled-task-rows-{name}-{}", width as u32),
-                    gpui::size(px(width), px(480.0)), crate::ui_style::UiStyleId::Default, appearance,
+                    gpui::size(px(width), px(480.0)),
+                    crate::ui_style::UiStyleId::Default,
+                    appearance,
                     |_, cx| {
                         let _ = crate::typography::register_fonts(cx);
                         let state = cx.new(|_| AppState::new());
@@ -9261,7 +9264,8 @@ mod logic_tests {
                             })).unwrap()];
                         });
                         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-                        let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+                        let composer =
+                            cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
                         cx.new(|cx| {
                             let mut overview = Overview::new(state, gpui::WeakEntity::new_invalid(), transcript, composer, cx);
                             overview.view_mode = OverviewMode::List;
@@ -9553,7 +9557,10 @@ mod logic_tests {
             vcx.debug_bounds("overview-row-needs-input-c-idle")
                 .is_none()
         );
-        assert!(vcx.debug_bounds("overview-row-tool-failures-c-idle").is_none());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_none()
+        );
 
         assert!(vcx.debug_bounds("overview-row-stalled-c-errored").is_some());
         overview.read_with(vcx, |o, _| {
@@ -9582,8 +9589,20 @@ mod logic_tests {
             assert_eq!(o.attention_filter, AttentionFilter::Stalled);
             assert_eq!(o.list_order.len(), 1);
             assert_eq!(o.list_order[0].0, "c-errored");
-            assert!(o.outline_chats.iter().find(|c| c.id == "c-errored").unwrap().visible);
-            assert!(!o.outline_chats.iter().find(|c| c.id == "c-failed-tools").unwrap().visible);
+            assert!(
+                o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-errored")
+                    .unwrap()
+                    .visible
+            );
+            assert!(
+                !o.outline_chats
+                    .iter()
+                    .find(|c| c.id == "c-failed-tools")
+                    .unwrap()
+                    .visible
+            );
         });
 
         overview.update(vcx, |o, cx| {
@@ -9619,7 +9638,10 @@ mod logic_tests {
             cx.notify();
         });
         draw(vcx);
-        assert!(vcx.debug_bounds("overview-row-tool-failures-c-idle").is_some());
+        assert!(
+            vcx.debug_bounds("overview-row-tool-failures-c-idle")
+                .is_some()
+        );
         overview.read_with(vcx, |o, _| {
             assert_eq!(o.stalled_count, 1);
         });
@@ -10082,10 +10104,14 @@ mod logic_tests {
         let now = Utc::now();
         state.update(vcx, |state, cx| {
             state.sessions.push(mast_proto::Session {
-                chat_id: CHAT_AUTH.into(), device_id: "d".into(),
+                chat_id: CHAT_AUTH.into(),
+                device_id: "d".into(),
                 status: mast_proto::SessionStatus::AwaitingInput,
-                started_at: Some(now), updated_at: now, last_completed_turn: None,
-                awaiting_input: None, last_turn_tool_failures: None,
+                started_at: Some(now),
+                updated_at: now,
+                last_completed_turn: None,
+                awaiting_input: None,
+                last_turn_tool_failures: None,
             });
             cx.notify();
         });

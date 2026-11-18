@@ -85,8 +85,7 @@ impl Overview {
                         {
                             return false;
                         }
-                        AttentionFilter::Stalled if status != ChatIndicator::Errored =>
-                        {
+                        AttentionFilter::Stalled if status != ChatIndicator::Errored => {
                             return false;
                         }
                         _ => {}
