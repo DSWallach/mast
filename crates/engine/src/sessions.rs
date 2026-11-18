@@ -653,6 +653,16 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
+    /// Run a synchronous delivery decision while input status cannot change.
+    pub(crate) fn unless_awaiting_input<T>(&self, chat_id: &str, f: impl FnOnce() -> T) -> Option<T> {
+        let statuses = lock(&self.inner.statuses);
+        if statuses.get(chat_id).is_some_and(|session| session.status == SessionStatus::AwaitingInput) {
+            None
+        } else {
+            Some(f())
+        }
+    }
+
     /// Whether this engine holds a live run (in-flight turn OR a warm
     /// persistent child parked between turns) for the chat. Close-out uses
     /// this: tearing down a worktree under a warm child would pull its cwd
@@ -897,6 +907,20 @@ impl SessionsEngine {
             .await
     }
 
+    /// Serialize an automatic delivery decision with every new dispatch.
+    pub(crate) async fn lock_dispatch(&self, chat_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        dispatch_lock.lock_owned().await
+    }
+
+    pub(crate) fn dispatch_with_guard<'a>(
+        &'a self, chat_id: &'a str, harness_id: HarnessId, request: RunRequest,
+        message_id: Option<String>, _guard: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
+        Box::pin(self.dispatch_locked(chat_id, harness_id, request, message_id, false, None, false))
+    }
+
     /// [`Self::dispatch`] with the startup-crash retry marker: the retry
     /// re-dispatches with `startup_retry = true`, which makes that attempt
     /// final (its own startup death surfaces instead of retrying again).
@@ -925,15 +949,26 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         harness_id: HarnessId,
+        request: RunRequest,
+        message_id: Option<String>,
+        startup_retry: bool,
+        retry_error: Option<String>,
+        force_fresh: bool,
+    ) -> Result<String, EngineError> {
+        let _dispatch_guard = self.lock_dispatch(chat_id).await;
+        self.dispatch_locked(chat_id, harness_id, request, message_id, startup_retry, retry_error, force_fresh).await
+    }
+
+    async fn dispatch_locked(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
         mut request: RunRequest,
         mut message_id: Option<String>,
         startup_retry: bool,
         retry_error: Option<String>,
         force_fresh: bool,
     ) -> Result<String, EngineError> {
-        let dispatch_lock = lock(&self.inner.dispatch_locks).entry(chat_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
-        let _dispatch_guard = dispatch_lock.lock().await;
         let user_retry = retry_error.is_some();
         if let Some(error_id) = retry_error {
             let entries = self.doc_handle(chat_id)?.doc().read_entries()?;
@@ -1252,6 +1287,18 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, false).await
+    }
+
+    pub(crate) async fn steer_automatic(
+        &self, chat_id: &str, prompt: &str, message_id: Option<String>,
+    ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, true).await
+    }
+
+    async fn steer_inner(
+        &self, chat_id: &str, prompt: &str, message_id: Option<String>, forbid_input: bool,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -1274,14 +1321,22 @@ impl SessionsEngine {
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
-            let mut pending = lock(&ledger);
-            if steer_tx.try_send(message).is_err() {
+            let send = || {
+                let mut pending = lock(&ledger);
+                if steer_tx.try_send(message).is_err() { return false; }
+                pending.push_back(RoutedSteer {
+                    prompt: delivered_prompt,
+                    message_id: user_id.clone(),
+                });
+                true
+            };
+            let accepted = if forbid_input {
+                self.unless_awaiting_input(chat_id, send).ok_or_else(||
+                    EngineError::Other("chat is waiting for an answer; use respond_to_input".into()))?
+            } else { send() };
+            if !accepted {
                 return Ok(SteerOutcome::NotSteerable);
             }
-            pending.push_back(RoutedSteer {
-                prompt: delivered_prompt,
-                message_id: user_id.clone(),
-            });
         }
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;

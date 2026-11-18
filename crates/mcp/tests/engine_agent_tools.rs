@@ -274,6 +274,7 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     Box::pin(check_link_work_item(&core, &tools, &item, &linked_id)).await;
     let launched_id = Box::pin(check_item_chat_title(&core, &tools, &linked_id)).await;
     Box::pin(check_chat_reuse(&core, &tools, &linked_id, &launched_id)).await;
+    Box::pin(check_concurrent_chat_reuse(&core, &tools, &linked_id, &launched_id)).await;
     Box::pin(check_reuse_without_prompt(&tools, &linked_id, &launched_id)).await;
     Box::pin(check_force_chat(&core, &tools, &linked_id, &launched_id)).await;
     Box::pin(check_unlinked_item_title(&core, &tools)).await;
@@ -420,7 +421,7 @@ async fn check_chat_reuse(core: &EngineCore, tools: &Tools, item_id: &str, chat_
     let command = commands.iter().find(|command| command.id == command_id).unwrap();
     assert_eq!(commands.iter().filter(|command| command.id == command_id).count(), 1);
     match &command.payload {
-        mast_doc::SessionCommandPayload::Run { request, .. } => assert!(request.prompt.contains("Follow up")),
+        mast_doc::SessionCommandPayload::AutoMessage { request, .. } => assert!(request.prompt.contains("Follow up")),
         other => panic!("unexpected command: {other:?}"),
     }
 }
@@ -431,6 +432,45 @@ async fn check_reuse_without_prompt(tools: &Tools, item_id: &str, chat_id: &str)
     assert_eq!(result["reusedExisting"], true);
     let err = tools.call("create_chat", json!({"workItemId": item_id, "prompt": "Different", "idempotencyKey": "reuse-without-prompt"})).await.unwrap_err();
     assert!(err.contains("operationConflict"), "{err}");
+}
+
+async fn check_concurrent_chat_reuse(core: &EngineCore, tools: &Tools, item_id: &str, chat_id: &str) {
+    let first = json!({"workItemId": item_id, "prompt": "Concurrent first", "idempotencyKey": "concurrent-first"});
+    let second = json!({"workItemId": item_id, "prompt": "Concurrent second", "idempotencyKey": "concurrent-second"});
+    let (a, b) = tokio::join!(tools.call("create_chat", first.clone()), tools.call("create_chat", second.clone()));
+    for reply in [a.unwrap(), b.unwrap()] {
+        assert_eq!(reply["chatId"], chat_id);
+        assert_eq!(reply["reusedExisting"], true);
+    }
+    tools.call("create_chat", first).await.unwrap();
+    tools.call("create_chat", second).await.unwrap();
+    let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
+    for (key, prompt) in [("concurrent-first", "Concurrent first"), ("concurrent-second", "Concurrent second")] {
+        let operation = mast_proto::agent_tools::operation_id(PARENT, key);
+        let command_id = derive_id(&operation, roles::COMMAND);
+        let message_id = derive_id(&operation, roles::MESSAGE);
+        let matching: Vec<_> = commands.iter().filter(|command| command.id == command_id).collect();
+        assert_eq!(matching.len(), 1);
+        assert!(matches!(&matching[0].payload,
+            mast_doc::SessionCommandPayload::AutoMessage { request, message_id: id, .. }
+                if request.prompt.contains(prompt) && id == &message_id));
+    }
+    wait_for(|| {
+        let entries = core.doc_host.open(chat_id).unwrap().doc().read_entries().unwrap();
+        ["Concurrent first", "Concurrent second"].iter().all(|prompt|
+            entries.iter().filter(|entry| entry.role == mast_doc::MessageRole::User
+                && entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains(prompt)))).count() == 1)
+    }, "each reused prompt to be delivered once").await;
+    wait_for(|| {
+        let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
+        ["concurrent-first", "concurrent-second"].iter().all(|key| {
+            let operation = mast_proto::agent_tools::operation_id(PARENT, key);
+            let id = derive_id(&operation, roles::COMMAND);
+            commands.iter().any(|command| command.id == id
+                && command.status == mast_doc::SessionCommandStatus::Applied
+                && matches!(command.resolution.as_deref(), Some("run" | "steer" | "queue")))
+        })
+    }, "automatic delivery modes").await;
 }
 
 async fn check_force_chat(core: &EngineCore, tools: &Tools, item_id: &str, chat_id: &str) {

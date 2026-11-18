@@ -470,6 +470,31 @@ async fn a_queued_turn_is_delivered_with_its_captured_revision() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn automatic_message_retains_its_selected_revision_at_turn_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path());
+    let a = rig.registry.add("rev-a", "Prefer small commits");
+    let b = rig.registry.add("rev-b", "Write tests first");
+    let c = rig.registry.add("rev-c", "Review the diff");
+    rig.registry.select(&a);
+    queue(&rig.core, pinned("[hold] working", "m-1", &a));
+    wait_for(|| rig.mock.turns().len() == 1, "the held Turn").await;
+    rig.registry.select(&b);
+    let command = queue(&rig.core, SessionCommandPayload::AutoMessage {
+        request: run_request("follow up"), message_id: "auto-message".into(), instructions: None,
+    });
+    let resolved = wait_resolved(&rig.core, &command).await;
+    assert_eq!(resolved.status, SessionCommandStatus::Applied);
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    assert_eq!(handle.doc().queued_instructions("auto-message"), Some(b.clone()));
+    rig.registry.select(&c);
+    rig.mock.release();
+    wait_turns(&rig, 2, "the automatic message").await;
+    assert_eq!(revision_of(&rig.mock.turns()[1]), Some("rev-b"));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_revision_applied_during_a_running_turn_starts_the_next_turn() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path());
@@ -1167,6 +1192,29 @@ async fn a_restart_before_session_start_keeps_the_context_reset_confirmation() {
 // ---------------------------------------------------------------------------
 // Ingestion: a remote host must advertise the per-harness token
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn automatic_message_refuses_a_remote_host_without_command_support() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = assemble(tmp.path(), InstructionMockHarness::default(), Arc::new(FakeRegistry::default()));
+    rig.core.workspace.create_chat(CHAT, None, Some("device-b"), None, Some("/tmp".into())).unwrap();
+    let mut device: mast_proto::Device = serde_json::from_value(serde_json::json!({
+        "id": "device-b", "name": "Studio", "platform": "macos", "lastSeenAt": null,
+        "version": "0.2.81"
+    })).unwrap();
+    rig.core.workspace.upsert_device_row(&device);
+    let message = || SessionCommandPayload::AutoMessage {
+        request: run_request("follow up"), message_id: "remote-auto".into(), instructions: None,
+    };
+    let error = rig.core.doc_host.queue_command(CHAT, message()).unwrap_err();
+    assert!(error.to_string().contains("does not support automatic message delivery"));
+    assert!(rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().is_empty());
+    device.capabilities.push(mast_proto::capabilities::AUTO_MESSAGE_V1.into());
+    rig.core.workspace.upsert_device_row(&device);
+    rig.core.doc_host.queue_command(CHAT, message()).unwrap();
+    assert_eq!(rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().len(), 1);
+    rig.core.shutdown().await;
+}
 
 fn host_rejection(error: mast_engine::EngineError) -> mast_proto::InstructionDeliveryRejection {
     let wire = error.to_string();
