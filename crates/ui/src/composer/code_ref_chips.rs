@@ -35,7 +35,7 @@ impl Composer {
             .flex_row()
             .items_center()
             .tab_group()
-            .gap(px(6.0))
+            .gap(px(Theme::SPACE_SM))
             .overflow_hidden()
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));

@@ -3,9 +3,9 @@ use crate::theme::Theme;
 use gpui::{div, prelude::*, px};
 
 pub(crate) fn changed_reference_badge(theme: &Theme) -> gpui::Div {
-    div().debug_selector(|| "pinned-changed-badge".into()).px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
-        .rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12))
-        .text_color(theme.warning_muted).text_size(crate::typography::ui_rems(11.0)).child("Changed")
+    super::badge(theme, "Changed").debug_selector(|| "pinned-changed-badge".into())
+        .bg(theme.warning.opacity(0.12)).border_color(gpui::transparent_black())
+        .text_color(theme.warning_muted)
 }
 
 pub(crate) fn changed_reference_banner(theme: &Theme) -> gpui::Div {
@@ -16,10 +16,10 @@ pub(crate) fn changed_reference_banner(theme: &Theme) -> gpui::Div {
 }
 
 pub(crate) fn moved_reference_badge(theme: &Theme, range: mast_proto::CodeRefRange) -> gpui::Div {
-    div().debug_selector(|| "pinned-moved-badge".into()).px(px(Theme::SPACE_SM)).py(px(Theme::SPACE_XS))
-        .rounded(px(Theme::SPACE_XS)).bg(theme.accent.opacity(0.12))
-        .text_color(theme.accent).text_size(crate::typography::ui_rems(11.0))
-        .child(format!("Moved to L{}–{}", range.start_line, range.end_line))
+    super::badge(theme, format!("Moved to L{}–{}", range.start_line, range.end_line))
+        .debug_selector(|| "pinned-moved-badge".into())
+        .bg(theme.accent.opacity(0.12)).border_color(gpui::transparent_black())
+        .text_color(theme.accent)
 }
 
 pub(crate) fn pinned_reference_notice(theme: &Theme) -> gpui::Div {
@@ -127,8 +127,8 @@ impl gpui::Render for ReferenceCard {
             .border_1().border_color(theme.border).bg(theme.surface_raised).text_color(theme.text)
             .child(div().flex().gap(px(Theme::SPACE_SM)).text_color(theme.text_muted).child(self.label.clone())
                 .children(match self.resolution {
-                    Some(crate::code_ref::Resolution::Moved(range)) => Some(div().px(px(Theme::SPACE_SM)).rounded(px(Theme::SPACE_XS)).bg(theme.accent.opacity(0.12)).text_color(theme.accent).child(format!("Moved to L{}–{}", range.start_line, range.end_line))),
-                    Some(crate::code_ref::Resolution::Changed) => Some(div().px(px(Theme::SPACE_SM)).rounded(px(Theme::SPACE_XS)).bg(theme.warning.opacity(0.12)).text_color(theme.warning_muted).child("Changed")),
+                    Some(crate::code_ref::Resolution::Moved(range)) => Some(moved_reference_badge(theme, range)),
+                    Some(crate::code_ref::Resolution::Changed) => Some(changed_reference_badge(theme)),
                     _ => None,
                 }))
             .when(!self.source.is_empty(), |card| card.child(super::code_block::code_block(&self.source, self.first_line, self.highlight.as_deref(), theme, crate::typography::ui_rems(12.0).into())))
