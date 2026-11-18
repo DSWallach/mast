@@ -71,6 +71,9 @@ pub(crate) fn decode_modified_fields(row: &RegistryRow) -> Vec<String> {
 /// The snapshot view of a Space's settings row (defaults when absent).
 pub(crate) fn decode_space_settings(row: Option<&RegistryRow>) -> WorkOutlineSpaceSettings {
     WorkOutlineSpaceSettings {
+        worker_worktrees: row.and_then(|r| r.fields.get("workerWorktrees")).and_then(Value::as_bool).unwrap_or(false),
+        merged_pr_completion: row.and_then(|r| r.fields.get("mergedPrCompletion")).and_then(|v| serde_json::from_value(v.clone()).ok()),
+        archive_workers_after_days: row.and_then(|r| r.fields.get("archiveWorkersAfterDays")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0),
         resolve_merged_handoffs: row
             .and_then(|row| row.fields.get("resolveMergedHandoffs"))
             .and_then(Value::as_bool)
@@ -110,6 +113,32 @@ pub(crate) fn merge_modified_fields(current: &[String], add: &[&str]) -> Option<
 }
 
 impl RegistryDoc {
+    pub fn set_worker_automation(
+        &mut self,
+        p: &mast_proto::work_outline::SetWorkerAutomationParams,
+        now_ms: i64,
+    ) -> Outcome<()> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        if p.archive_workers_after_days == Some(0) {
+            return Err(invalid("The archive delay must be at least one day"));
+        }
+        let fields = BTreeMap::from([
+            ("spaceId".to_owned(), json!(p.space_id)),
+            ("workerWorktrees".to_owned(), json!(p.worker_worktrees)),
+            ("mergedPrCompletion".to_owned(), json!(p.merged_pr_completion)),
+            ("archiveWorkersAfterDays".to_owned(), json!(p.archive_workers_after_days)),
+            ("updatedAt".to_owned(), json!(now_ms)),
+            ("v".to_owned(), json!(WORK_OUTLINE_ROW_VERSION)),
+        ]);
+        let planned = match self.row_state(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id) {
+            RowState::Live => Planned::update(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Absent => Planned::upsert(KIND_WORK_OUTLINE_SPACE_SETTINGS, &p.space_id, fields),
+            RowState::Tombstoned => return Err(not_found("This Space's settings were deleted")),
+        };
+        self.commit(vec![planned], &[(super::KIND_SPACES, p.space_id.as_str())])
+    }
+
     pub fn set_resolve_merged_handoffs(
         &mut self,
         p: &mast_proto::work_outline::SetResolveMergedHandoffsParams,
