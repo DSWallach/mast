@@ -1219,6 +1219,33 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 03:45; coordinator 544369c6, overnight run)
+
+- **Installed: release 107** (1929473e1), full perf gate. Soak vs 106: CPU 4.7 vs 4.9 %, footprint 562 vs 665 MB,
+  git/min 117 vs 113 (noise). Contents:
+  - tracker-lifecycle: tickets grouped by derived stage (Not started → Building → Code review → PR review → Ready
+    to merge → Done) from a linked Linear project (completed included, per-Space account, capped at 250 with a
+    "more not loaded" note) or local child items; cleanup list (collapsed) + `work_outline_health` MCP tool;
+    `work_outline_link linearProject` and a "Link Linear project" picker.
+  - board-removal (Board/Table gone, −1,655 lines; cached worker chips on outline rows open the Tracker or the
+    item's details).
+  - review-fixes (Linear sync writes fenced on account change; reused-chat delivery mode chosen atomically;
+    create_chat validates before claiming its idempotency key; registry allows agent Linear-project links only in
+    the caller's subtree).
+  - perf: session publication (coalesced Working updates, incremental merged state) and sidebar rows (hover ≤2 row
+    rebuilds per move, 930→59 over 30 moves; no per-row chat scans; 2.4 M→272 k session comparisons).
+  - tests: flaky-harness, flaky-instruction-delivery, flaky-queue-stream (7 tests back from quarantine; tokio
+    `test-util` dev-only in mast-engine); history search: an abbreviated SHA returns only prefix matches.
+  - docs-refresh (README, guide, mcp.md, pr-review.md, developer docs).
+- Measured and dropped (no code change): transcript incremental rows (0.52 ms p95 sync at 17k rows), shared FSEvents
+  stream (27–102 s vs 1.3 s; diff-sync settle slowness is machine load). Reports: perf audit
+  mast-artifact:16024d9d2e87924e0e513ee5a731308e, flaky tests mast-artifact:f9655ec82a1be489408e37123f80b07b, reviews
+  mast-artifact:e4aa3065599c9345432c3a0f9b0c6eec and mast-artifact:107858f99f6c7689b8604386717c32f8.
+- Standing OK from Mikey (2026-11-18): perf, refactor and cleanup work without asking; gate still applies.
+- In progress: style-token-pass (tokens across Changes, code refs, Tracker, diagram card). Queued: worker hygiene
+  (opt-in), flaky build 3 (diff-sync readiness), perf Changes widths (#2/F1) and diff sidecar (#4), refactor Phase B
+  (B10 rpc routing test first), cleanup pass 3, sidebar ordered-model cache + `session_for` index.
+
 ## In flight (snapshot 2026-11-17 22:30; coordinator 544369c6)
 
 - **Installed: release 106** (a34b03500), full perf gate. Soak vs 105: CPU 4.5 vs 5.0 %, footprint 474 vs 524 MB,
