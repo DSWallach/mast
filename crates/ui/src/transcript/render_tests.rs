@@ -235,3 +235,39 @@ fn subagent_chip_opens_its_document(cx: &mut gpui::TestAppContext) {
     assert_eq!(*opened.borrow(), Some(("chat".into(), "document".into())));
     transcript.read_with(vcx, |this, _| assert!(this.folds.is_empty()));
 }
+
+#[gpui::test]
+fn tool_group_clicks_toggle_group_and_detail(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        cx.set_reduce_motion(true);
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let transcript = cx.new(|cx| Transcript::new(state, cx));
+    let tools = Arc::new(vec![ToolItem {
+        part_id: "call".into(), call: ToolCall::Exec { command: "pwd".into() },
+        is_error: false, resolved: true,
+        detail: Some(Arc::new(ToolDetail::Output { lines: vec!["output".into()], truncated_by: 0 })),
+        invocation: None, output_ref: None, output_bytes: None, diff_ref: None,
+        subagent_ref: None, subagent_status: None, subagent_tail: None, is_thought: false,
+    }]);
+    let (_, vcx) = cx.add_window_view(|_, _| ToolGroupFixture { transcript: transcript.clone(), tools });
+    vcx.run_until_parked();
+    let origin = vcx.debug_bounds("tool-group").unwrap().origin;
+    let click = |vcx: &mut gpui::VisualTestContext, y: f32| {
+        vcx.simulate_click(gpui::point(origin.x + px(100.0), origin.y + px(y)), gpui::Modifiers::default());
+        vcx.run_until_parked();
+    };
+    click(vcx, TOOL_GROUP_HEADER_HEIGHT / 2.0);
+    transcript.read_with(vcx, |this, _| assert_eq!(this.folds["group"].open, Some(true)));
+    click(vcx, TOOL_GROUP_HEADER_HEIGHT + CHIPS_TOP_PAD + TOOL_TREE_ROW_HEIGHT / 2.0);
+    transcript.read_with(vcx, |this, _| assert_eq!(this.tool_details["group#d0"].open, Some(true)));
+    click(vcx, TOOL_GROUP_HEADER_HEIGHT / 2.0);
+    transcript.read_with(vcx, |this, _| {
+        assert_eq!(this.folds["group"].open, Some(false));
+        assert_eq!(this.list.logical_scroll_top().item_ix, 0);
+    });
+}
