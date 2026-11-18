@@ -86,7 +86,9 @@ impl Drop for WatchPreparation {
 
 mod engine_handle;
 pub use engine_handle::{EngineBootConfig, EngineHandle, EngineMode};
-use engine_handle::{DeferredEngineState, query_engine_info, wait_for_deferred_engine};
+use engine_handle::wait_for_deferred_engine;
+#[cfg(test)]
+use engine_handle::{DeferredEngineState, query_engine_info};
 
 // ---------------------------------------------------------------------------
 // Pure state + reducers

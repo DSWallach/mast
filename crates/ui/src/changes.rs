@@ -88,7 +88,6 @@ pub(crate) use diff_painters::{render_file_body_with_syntax, COMMENT_ADDER_SIZE}
 use split_pairing::*;
 pub use split_pairing::{line_anchor, split_pairs, split_pairs_upto, LinePair};
 use syntax_excerpts::*;
-use patch_parser::*;
 pub use patch_parser::{file_notices, parse_patch, truncate_file_lines};
 use horizontal_geometry::*;
 #[cfg(test)]
