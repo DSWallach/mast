@@ -687,26 +687,16 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
     ) -> Result<Option<DoneStatus>, EngineError> {
-        let mut outcome = None;
-        self.inner.journal.find_rev(chat_id, |_, event| {
-            if outcome == Some(DoneStatus::Interrupted) {
-                // Shutdown may close a warm child immediately after its
-                // successful turn. A second Done with no intervening turn
-                // events records teardown of the parked child.
-                if matches!(event, AgentEvent::Done { status: DoneStatus::Completed, .. }) {
-                    outcome = Some(DoneStatus::Completed);
-                }
-                return Some(());
-            }
-            if let AgentEvent::Done { status, .. } = event {
-                outcome = Some(status);
-                if status == DoneStatus::Interrupted {
-                    return None;
-                }
-            }
-            Some(())
-        })?;
-        Ok(outcome)
+        Ok(self
+            .inner
+            .journal
+            .find_rev(chat_id, |_, event| {
+                Some(match event {
+                    AgentEvent::Done { status, .. } => Some(status),
+                    _ => None,
+                })
+            })?
+            .flatten())
     }
 
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
@@ -3736,6 +3726,13 @@ async fn drive_run(
         // self-continued turn starts a whole new agent round trip (seconds
         // at minimum, minutes in the incident). Inside the gate everything
         // non-boundary stays inert, exactly as before.
+        if idle_since.is_some()
+            && matches!(&event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+        {
+            // Closing a parked child ends its process. The completed turn
+            // already has a journal outcome and has no stream to finalize.
+            break SessionStatus::Idle;
+        }
         let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {

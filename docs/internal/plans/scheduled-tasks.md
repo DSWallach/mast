@@ -134,6 +134,8 @@ turns, pins and the personal assistant. The registry records a completed
 automatic archive in the same write as the archive flag so a crash replay
 cannot undo a user's restore. Background failures, interruptions, cancellations
 and input waits update a task-scoped Required Action. Success resolves it.
+A user pause or deletion before a run chat exists records the cancellation
+without filing an action.
 
 The proposed retention policy keeps run history and defaults to 14 days. It
 protects the latest run, restored chats, chats with open Required Actions and
