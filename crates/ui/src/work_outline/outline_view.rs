@@ -772,6 +772,7 @@ impl OutlineView {
     pub(crate) fn set_pinned_chats(&mut self, pins: HashSet<String>, cx: &mut Context<Self>) {
         if self.pinned_chats != pins {
             self.pinned_chats = pins;
+            self.reflatten();
             cx.notify();
         }
     }
@@ -812,6 +813,7 @@ impl OutlineView {
     /// (unless revealed).
     fn flatten_inputs(&self, collapsed: &HashSet<String>) -> OutlineModel {
         let options = OutlineOptions {
+            pinned_chats: self.pinned_chats.clone(),
             show_hidden_spaces: self.show_hidden_spaces,
             compact_single_chat: self.compact_single_chat && !self.sidebar,
             ..self.inputs.options.clone()

@@ -99,6 +99,7 @@ pub(crate) struct OutlineChat {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OutlineOptions {
+    pub pinned_chats: HashSet<String>,
     pub hide_completed: bool,
     pub show_archived: bool,
     /// Trimmed, lowercased search text; empty matches everything.
@@ -367,7 +368,7 @@ pub(crate) fn flatten(
         }
     }
     for list in by_home.values_mut() {
-        list.sort_by(|a, b| b.activity.cmp(&a.activity).then_with(|| a.id.cmp(&b.id)));
+        list.sort_by(|a, b| options.pinned_chats.contains(&b.id).cmp(&options.pinned_chats.contains(&a.id)).then_with(|| b.activity.cmp(&a.activity)).then_with(|| a.id.cmp(&b.id)));
     }
 
     let mut ctx = Ctx {
@@ -622,7 +623,7 @@ fn item_node<'s>(
             .entry(row_key::unassociated(Some(space_id)))
             .or_default();
         unassociated.extend(std::mem::take(&mut homed));
-        unassociated.sort_by(|a, b| b.activity.cmp(&a.activity).then_with(|| a.id.cmp(&b.id)));
+        unassociated.sort_by(|a, b| options.pinned_chats.contains(&b.id).cmp(&options.pinned_chats.contains(&a.id)).then_with(|| b.activity.cmp(&a.activity)).then_with(|| a.id.cmp(&b.id)));
     }
     let mut chat_nodes: Vec<Node> = homed
         .into_iter()
@@ -1010,6 +1011,20 @@ pub(crate) mod tests {
             all_spaces: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn pinned_chats_sort_first_among_siblings_without_moving_children() {
+        let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
+        let mut chats = vec![chat("older", Some("s1")), chat("newer", Some("s1")), chat("child", Some("s1"))];
+        chats[1].activity = 10;
+        chats[2].parent_chat_id = Some("older".into());
+        let options = OutlineOptions { pinned_chats: ["older".to_string()].into_iter().collect(), ..opts() };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        let older = model.position(&row_key::chat("older")).unwrap();
+        let child = model.position(&row_key::chat("child")).unwrap();
+        let newer = model.position(&row_key::chat("newer")).unwrap();
+        assert!(older < child && child < newer);
     }
 
     #[test]
