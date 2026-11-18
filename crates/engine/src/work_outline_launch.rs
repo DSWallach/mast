@@ -460,6 +460,9 @@ impl WorkItemLaunchService {
                     if !pinned {
                         return Err(conflict("The item's execution setup changed while creating the worker worktree"));
                     }
+                    resolved.source_scope = mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem {
+                        work_item_id: item.id.clone(),
+                    };
                 }
                 resolved
             },

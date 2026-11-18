@@ -109,6 +109,10 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
     assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*rig.repo.to_string_lossy()));
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"setWorkerAutomation",
         "spaceId":SPACE, "workerWorktrees":true, "operationId":"enable-worker-worktrees"})).await.unwrap();
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    git(&rig.repo, &["checkout", "-b", "local-work"]);
+    git(&rig.repo, &["branch", "-D", "main"]);
     git(&rig.repo, &["branch", "launch-me"]);
     let occupied = rig.repo.join(".worktrees/workspace/launch-me-2");
     std::fs::create_dir_all(&occupied).unwrap();
@@ -119,6 +123,9 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
     let path = rig.repo.join(".worktrees/workspace/launch-me-3");
     assert_eq!(rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap().cwd.as_deref(), Some(&*path.to_string_lossy()));
     assert_eq!(git(&path, &["branch", "--show-current"]), "launch-me-3");
+    assert!(matches!(rig.core.workspace.chat_execution_binding(&reply.chat_id).unwrap().resolved.source_scope,
+        mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { ref work_item_id } if work_item_id == &rig.item));
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), git(&rig.repo, &["rev-parse", "refs/remotes/origin/main"]));
     assert_eq!(std::fs::read_to_string(occupied.join("keep")).unwrap(), "untouched");
     assert_eq!(launch(&rig, &on).await.unwrap().chat_id, reply.chat_id);
     let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));

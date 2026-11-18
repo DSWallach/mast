@@ -1096,7 +1096,11 @@ fn default_branch(repo_path: &Path) -> Option<String> {
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
         && let Some((_, branch)) = short.trim().split_once('/') {
-            return Some(branch.to_string());
+            return Some(if local_branch_exists(repo_path, branch) {
+                branch.to_string()
+            } else {
+                short.trim().to_string()
+            });
         }
     run_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()
