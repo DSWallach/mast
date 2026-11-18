@@ -1752,7 +1752,9 @@ impl RegistryDoc {
     /// - `proposeWorkItemInstruction` targeting the assigned item, its
     ///   parent, or the Space root, with no other origin Chat.
     ///
-    /// Everything else (move, archive, restore, remove, references, repair,
+    /// - GitHub pull requests and Linear issues on the assigned item or its descendants.
+    ///
+    /// Everything else (move, archive, restore, remove, other references, repair,
     /// instruction writes, revisions, applications, execution
     /// configuration, approve / reject) is denied. Mechanism checks (live
     /// rows, archived targets, open requests) still run in the mutator.
@@ -1848,7 +1850,16 @@ impl RegistryDoc {
                 in_project_scope(parent)
             }
             WorkOutlineMutation::CreateWorkItemExternalReference(p) => {
-                in_project_scope(&p.work_item_id)
+                if !matches!(
+                    (p.provider.as_str(), p.reference_type.as_str()),
+                    (mast_proto::pr_review_sync::GITHUB_PROVIDER, mast_proto::pr_review_sync::GITHUB_PULL_REQUEST_REFERENCE)
+                        | (mast_proto::linear::LINEAR_PROVIDER, mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                ) {
+                    return Err(unauthorized(
+                        "Agents may only link GitHub pull requests and Linear issues",
+                    ));
+                }
+                in_scope(&p.work_item_id)
             }
             WorkOutlineMutation::AssignChatToWorkItem(p) => {
                 if p.chat_id != chat_id {

@@ -504,7 +504,7 @@ struct BindWorktreeArgs {
     path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateChildArgs {
     title: String,
@@ -1521,7 +1521,10 @@ impl AgentToolsService {
         // its reference are separate idempotent mutations, so a retry can
         // finish an interrupted link without accepting different inputs.
         {
-            let input_hash = derive_id(&arguments.to_string(), "create-child-inputs");
+            let input_hash = derive_id(
+                &serde_json::to_string(&args).expect("create child arguments serialize"),
+                "create-child-inputs",
+            );
             let operation_key = format!("agent-child-item:op:{operation_id}");
             let input_key = format!("agent-child-item:in:{operation_id}:{input_hash}");
             let _serial = lock(&self.child_claims);

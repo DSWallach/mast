@@ -2199,6 +2199,13 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(retry["workItemId"], child["workItemId"]);
+    let null_reference = call(
+        "work_outline_create_child",
+        json!({ "title": "Child", "parent": root, "idempotencyKey": "child-1", "linearIssue": null }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(null_reference["workItemId"], child["workItemId"]);
 }
 
 // ---- project scope and worker destination ------------------------------------
