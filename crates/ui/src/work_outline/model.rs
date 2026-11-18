@@ -682,7 +682,15 @@ fn item_node<'s>(
     if compact_chat.is_some() {
         chat_nodes.clear();
     }
-    children.extend(chat_nodes);
+    // Keep pinned chats at the top of their own generation, before child
+    // work items, without disturbing either group's existing order.
+    let (pinned, other): (Vec<_>, Vec<_>) = chat_nodes.into_iter().partition(|node| {
+        matches!(&node.kind, OutlineRowKind::Chat(row) if options.pinned_chats.contains(&row.chat.id))
+    });
+    let mut ordered = pinned;
+    ordered.extend(children);
+    ordered.extend(other);
+    let children = ordered;
     Some(Node {
         key: row_key::item(space_id, &item.id),
         kind: OutlineRowKind::Item(ItemRow {
@@ -1051,6 +1059,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn pinned_chat_precedes_sibling_items_but_stays_under_its_parent() {
+        let mut snapshot = fixture_snapshot("s1");
+        let assignment = snapshot
+            .assignments
+            .iter_mut()
+            .find(|a| a.chat_id == CHAT_API)
+            .unwrap();
+        assignment.work_item_id = Some(LAUNCH.into());
+        snapshot
+            .items
+            .iter_mut()
+            .find(|i| i.id == API)
+            .unwrap()
+            .chat_ids
+            .retain(|id| id != CHAT_API);
+        snapshot
+            .items
+            .iter_mut()
+            .find(|i| i.id == LAUNCH)
+            .unwrap()
+            .chat_ids
+            .push(CHAT_API.into());
+        let spaces = [ready("s1", "Repo", snapshot)];
+        let options = OutlineOptions {
+            pinned_chats: [CHAT_API.to_string()].into_iter().collect(),
+            ..opts()
+        };
+        let model = flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &options);
+        let parent = model.position(&row_key::item("s1", LAUNCH)).unwrap();
+        let pinned = model.position(&row_key::chat(CHAT_API)).unwrap();
+        let item = model.position(&row_key::item("s1", API)).unwrap();
+        assert!(parent < pinned && pinned < item);
+        assert_eq!(model.rows[pinned].parent, Some(parent));
+        assert_eq!(model.rows[item].parent, Some(parent));
+
+        let unpinned = flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &opts());
+        assert!(
+            unpinned.position(&row_key::item("s1", API)).unwrap()
+                < unpinned.position(&row_key::chat(CHAT_API)).unwrap()
+        );
+    }
+
+    #[test]
     fn pinned_chats_sort_first_among_siblings_without_moving_children() {
         let spaces = [ready("s1", "Repo", fixture_snapshot("s1"))];
         let mut chats = vec![
@@ -1097,7 +1148,11 @@ pub(crate) mod tests {
     #[test]
     fn pinned_chat_from_hidden_archived_item_sorts_first_when_unassociated() {
         let (spaces, mut chats) = archived_synced_pr_spaces();
-        chats.iter_mut().find(|c| c.id == CHAT_LOOSE_A).unwrap().activity = 100;
+        chats
+            .iter_mut()
+            .find(|c| c.id == CHAT_LOOSE_A)
+            .unwrap()
+            .activity = 100;
         let options = OutlineOptions {
             pinned_chats: [CHAT_PR.to_string()].into_iter().collect(),
             ..opts()
