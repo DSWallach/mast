@@ -2,6 +2,8 @@
 use super::*;
 
 const STARVE_GRACE: Duration = Duration::from_secs(2);
+const BUSY_RECENT: Duration = Duration::from_secs(3);
+const CANCEL_FLUSH: Duration = Duration::from_secs(2);
 
 #[cfg(unix)]
 type SignalTarget = i32;
@@ -585,6 +587,82 @@ impl AcpSessionState {
         LoopControl::Continue
     }
 
+    async fn accept_steer(
+        &mut self,
+        steer: Option<crate::SteerMessage>,
+        prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
+        reasoning: Option<ReasoningLevel>,
+        steer_ext: bool,
+    ) -> LoopControl {
+        match steer {
+            Some(msg) => {
+                // Same transform as the initial prompt: Claude's
+                // Ultrathink prefix rides every steer too.
+                let text = prompt_transform(reasoning, &msg.prompt);
+                if self.turn.is_none() && self.cancel_flush_deadline.is_some() {
+                    // A busy-session cancel is already in flight: this
+                    // steer lines up behind it and dispatches at flush.
+                    self.queued_steers.push_back(text);
+                } else if self.turn.is_none()
+                    && (!self.open_tools.is_empty()
+                        || self.last_update_at.elapsed() < BUSY_RECENT)
+                {
+                    // Mid self-continued turn (see BUSY_RECENT above):
+                    // cancel it rather than prompt into the starve.
+                    //
+                    tracing::info!(
+                        target: "mast_harness::acp",
+                        "steer into a self-continuing session; cancelling \
+                         the unowned turn before prompting"
+                    );
+                    self.client.notify(
+                        "session/cancel",
+                        Some(json!({ "sessionId": self.session_id })),
+                    );
+                    self.queued_steers.push_back(text);
+                    self.cancel_flush_deadline =
+                        Some(tokio::time::Instant::now() + CANCEL_FLUSH);
+                } else if self.turn.is_none() {
+                    // Idle between turns: a steer is simply the next turn.
+                    let (prev, next) = rotate(&mut self.assistant_message_id);
+                    if !send(
+                        &self.event_tx,
+                        AgentEvent::Steered {
+                            assistant_message_id: Some(prev),
+                            next_assistant_message_id: Some(next),
+                        },
+                    )
+                    .await
+                    {
+                        return LoopControl::Stop;
+                    }
+                    self.begin_prompt(text);
+                } else if steer_ext {
+                    // Mid-turn injection via the `_session/steering`
+                    // extension: start the call, resolved by its own
+                    // select branch. One call in flight at a time;
+                    // followers wait in the backlog.
+                    if self.steering_call.is_some() {
+                        self.steer_backlog.push_back(text);
+                    } else {
+                        let fut = steering_call_future(&self.client, &self.session_id, &text);
+                        self.steering_call = Some((text, fut));
+                    }
+                } else {
+                    // No extension (Grok today): turn-boundary delivery.
+                    self.queued_steers.push_back(text);
+                }
+            }
+            None => {
+                self.steering_open = false;
+                if self.turn.is_none() && self.queued_steers.is_empty() {
+                    return LoopControl::Stop;
+                }
+            }
+        }
+        LoopControl::Continue
+    }
+
     fn observe_child_exit(
         &mut self,
         status: std::io::Result<std::process::ExitStatus>,
@@ -1160,8 +1238,6 @@ pub(super) async fn run_session(session: Session) {
     // unowned turn, give it CANCEL_FLUSH to die and drain, then prompt.
     // This makes the interactive path starve-free; the settle layers below
     // remain for the notification race a client cannot see coming.
-    const BUSY_RECENT: Duration = Duration::from_secs(3);
-    const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
     let mut state = AcpSessionState {
@@ -1247,70 +1323,9 @@ pub(super) async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if state.steering_open && !state.interrupted => match steer {
-                Some(msg) => {
-                    // Same transform as the initial prompt: Claude's
-                    // Ultrathink prefix rides every steer too.
-                    let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if state.turn.is_none() && state.cancel_flush_deadline.is_some() {
-                        // A busy-session cancel is already in flight: this
-                        // steer lines up behind it and dispatches at flush.
-                        state.queued_steers.push_back(text);
-                    } else if state.turn.is_none()
-                        && (!state.open_tools.is_empty()
-                            || state.last_update_at.elapsed() < BUSY_RECENT)
-                    {
-                        // Mid self-continued turn (see BUSY_RECENT above):
-                        // cancel it rather than prompt into the starve.
-                        //
-                        tracing::info!(
-                            target: "mast_harness::acp",
-                            "steer into a self-continuing session; cancelling \
-                             the unowned turn before prompting"
-                        );
-                        state.client.notify(
-                            "session/cancel",
-                            Some(json!({ "sessionId": state.session_id })),
-                        );
-                        state.queued_steers.push_back(text);
-                        state.cancel_flush_deadline =
-                            Some(tokio::time::Instant::now() + CANCEL_FLUSH);
-                    } else if state.turn.is_none() {
-                        // Idle between turns: a steer is simply the next turn.
-                        let (prev, next) = rotate(&mut state.assistant_message_id);
-                        if !send(
-                            &state.event_tx,
-                            AgentEvent::Steered {
-                                assistant_message_id: Some(prev),
-                                next_assistant_message_id: Some(next),
-                            },
-                        )
-                        .await
-                        {
-                            break 'main;
-                        }
-                        state.begin_prompt(text);
-                    } else if steer_ext {
-                        // Mid-turn injection via the `_session/steering`
-                        // extension: start the call, resolved by its own
-                        // select branch. One call in flight at a time;
-                        // followers wait in the backlog.
-                        if state.steering_call.is_some() {
-                            state.steer_backlog.push_back(text);
-                        } else {
-                            let fut = steering_call_future(&state.client, &state.session_id, &text);
-                            state.steering_call = Some((text, fut));
-                        }
-                    } else {
-                        // No extension (Grok today): turn-boundary delivery.
-                        state.queued_steers.push_back(text);
-                    }
-                }
-                None => {
-                    state.steering_open = false;
-                    if state.turn.is_none() && state.queued_steers.is_empty() {
-                        break 'main;
-                    }
+            steer = steering.recv(), if state.steering_open && !state.interrupted => {
+                if state.accept_steer(steer, prompt_transform, request.reasoning, steer_ext).await == LoopControl::Stop {
+                    break 'main;
                 }
             },
 
