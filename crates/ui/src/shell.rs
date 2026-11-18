@@ -104,8 +104,7 @@ mod sidebar_pins;
 mod sidebar_resort;
 mod sidebar_chat_rows;
 use sidebar_chat_rows::{ChatRowArgs, ChatRowView, SidebarPane};
-#[cfg(test)]
-pub(crate) use sidebar_chat_rows::perf_counts;
+#[cfg(test)] pub(crate) use sidebar_chat_rows::perf_counts;
 mod sidebar_sections;
 pub(crate) mod spaces;
 mod start_chat_ui;
