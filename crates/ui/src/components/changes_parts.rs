@@ -56,6 +56,10 @@ pub(crate) fn hunk_header<T: Styled + FluentBuilder>(element: T) -> T {
     element.text_size(crate::typography::ui_rems(11.0))
 }
 
+pub(crate) fn review_body<T: Styled>(element: T) -> T {
+    element.text_size(crate::typography::ui_rems(12.0))
+}
+
 pub(crate) fn review_action_label(label: &'static str, theme: &Theme) -> gpui::SharedString {
     if super::is_industrial(theme) {
         crate::popover::tracked_upper(label).into()
