@@ -1742,7 +1742,7 @@ pub(crate) fn tracker_checklist(theme: &Theme, progress: mast_proto::TodoProgres
         bar = bar.child(div().w(px(5.0)).h(px(5.0)).rounded_full()
             .bg(if completed { theme.accent } else { theme.border }));
     }
-    bar.child(tracker_mono(theme, label, theme.text_faint))
+    bar.child(tracker_metadata(theme, label))
 }
 
 pub(crate) fn tracker_pr_line(theme: &Theme, id: String) -> gpui::Stateful<gpui::Div> {

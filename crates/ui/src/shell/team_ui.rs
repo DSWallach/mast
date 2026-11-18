@@ -848,8 +848,8 @@ impl Shell {
             }
             if let Some(review) = pr.review { line = line.child(SharedString::from(format!(" · {review}"))); }
             if let (Some(added), Some(removed)) = (pr.additions, pr.deletions) {
-                line = line.child(" · ").child(crate::components::shell_parts::tracker_mono(theme, format!("+{added}"), theme.success))
-                    .child(crate::components::shell_parts::tracker_mono(theme, format!("−{removed}"), theme.danger));
+                line = line.child(" · ").child(crate::components::shell_parts::worker_metadata(theme, format!("+{added}"), theme.success))
+                    .child(crate::components::shell_parts::worker_metadata(theme, format!("−{removed}"), theme.danger));
             }
             if index == 0 && let Some((viewed, drafts)) = self.tracker.review_targets.get(&id).and_then(|target| self.tracker.review_progress.get(target)) {
                 line = line.child(Self::chip(theme, format!("tracker-review-progress-{id}"), format!("Review {viewed} viewed · {drafts} drafts"), ChipTone::Dim));
