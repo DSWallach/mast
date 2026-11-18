@@ -39,7 +39,55 @@ fn bench_diff_pane_5000_lines(cx: &mut gpui::TestAppContext) {
     for line in 0..5000 {
         patch.push_str(&format!("+let value_{line} = {line};\n"));
     }
+    bench_width_transitions(cx, &patch);
     bench_diff_pane(cx, "one file 5000 lines", patch);
+}
+
+/// Measure the width work itself on the UI thread for each highlight state.
+fn bench_width_transitions(cx: &mut gpui::TestAppContext, patch: &str) {
+    let files = parse_patch(patch);
+    let file = &files[0];
+    let excerpt = Arc::new(excerpt_highlights(file, Lang::Rust).unwrap());
+    let ready = Arc::new(excerpt_highlights(file, Lang::Rust).unwrap());
+    let horizontal = FileHorizontalState::new(file);
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let (_, vcx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        Changes::for_checkout(state, "/work/repo".into(), cx)
+    });
+    let mut theme = Theme::dark();
+    let mut max_ms = 0.0f64;
+    for (label, highlight, font_change) in [
+        ("pending", None, false),
+        ("excerpt", Some(&excerpt), false),
+        ("ready", Some(&ready), false),
+        ("font change", Some(&ready), true),
+    ] {
+        if font_change { theme.code_font_size += 2.0; }
+        SHAPED_LINES.with(|c| c.set(0));
+        let start = std::time::Instant::now();
+        vcx.update(|window, _| {
+            std::hint::black_box(horizontal.metrics(file, highlight, &theme, window.text_system(), 0));
+        });
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        max_ms = max_ms.max(ms);
+        eprintln!("BENCH diff | width {label} | ui_ms={ms:.2} lines={}", SHAPED_LINES.with(|c| c.get()));
+    }
+    eprintln!("BENCH diff | width max single UI update ms={max_ms:.2}");
+    let (changes, state, vcx) = diff_pane_with_state(cx, patch.to_owned());
+    let before = changes.read_with(vcx, |c, _| (c.benchmark_sync_count, c.benchmark_render_count));
+    for _ in 0..10 {
+        state.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear());
+    }
+    let after = changes.read_with(vcx, |c, _| (c.benchmark_sync_count, c.benchmark_render_count));
+    eprintln!("BENCH diff | unrelated state notifies=10 syncs={} renders={}", after.0 - before.0, after.1 - before.1);
 }
 
 fn bench_diff_pane(cx: &mut gpui::TestAppContext, label: &str, patch: String) {
