@@ -1021,6 +1021,52 @@ async fn stale_prompt_complete_never_settles_a_newer_turn() {
 }
 
 #[tokio::test]
+async fn prior_prompt_completion_does_not_settle_the_following_turn() {
+    let (controls, steer, _) = controls();
+    let mut stream = harness()
+        .run(request("scenario:prompt-complete-prior-turn"), controls)
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut steer = Some(steer);
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(event, AgentEvent::Done { .. }) && steer.is_some() {
+                steer
+                    .take()
+                    .unwrap()
+                    .send(SteerMessage {
+                        prompt: "followup".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    let second = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::TextDelta { text } if text == "second"))
+        .unwrap();
+    let terminals: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| matches!(event, AgentEvent::Done { .. }).then_some(index))
+        .collect();
+    assert_eq!(terminals.len(), 2, "{events:?}");
+    assert!(terminals[0] < second && second < terminals[1], "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)]
+    );
+}
+
+#[tokio::test]
 async fn grok_subagent_lifecycle_tails_the_disk_transcript_into_tagged_events() {
     // The child session's chat_history.jsonl, one level under the sessions
     // root exactly like grok's `<root>/<urlencoded-cwd>/<session-id>/` layout
@@ -1710,6 +1756,35 @@ async fn interrupt_during_handshake_emits_one_terminal_event() {
         !events
             .iter()
             .any(|event| matches!(event, AgentEvent::SessionStarted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn handshake_timeout_emits_one_error_and_reaps_child() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("hold-handshake"), "").unwrap();
+    let (ctl, _steer, _) = controls();
+    let mut req = request("unused");
+    req.model = None;
+    req.cwd = directory.path().display().to_string();
+    let adapter = robust_harness()
+        .with_handshake_timeout(Duration::from_millis(300))
+        .with_graces(Duration::from_millis(50), Duration::from_millis(50));
+    let events = run_to_end(&adapter, req, ctl).await;
+    let pid: libc::pid_t = std::fs::read_to_string(directory.path().join("handshake-received"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(dones(&events).len(), 1, "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Done { status: DoneStatus::Errored, error: Some(error), .. }) if error.contains("handshake")),
+        "{events:?}"
+    );
+    // Signal zero only queries whether this child still exists.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
     );
 }
 

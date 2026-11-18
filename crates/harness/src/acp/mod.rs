@@ -3188,5 +3188,107 @@ async fn run_session(session: Session) {
     child.shutdown(kill_grace).await;
 }
 
+#[cfg(all(test, unix))]
+mod session_lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scratch_survives_until_the_child_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let scratch = ScratchDir::new("acp-test").unwrap();
+        let scratch_path = scratch.path().to_path_buf();
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py");
+        let mut command = Command::new(fixture);
+        child::configure(&mut command);
+        scratch.apply(&mut command);
+        command.current_dir(directory.path());
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = Child::new(command.spawn().unwrap());
+        let pid = child.id().unwrap() as libc::pid_t;
+        let (client, incoming) =
+            RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (_steer_tx, steering) = mpsc::channel(8);
+        let controls = RunControls {
+            request_input: Box::new(|_| {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(Vec::new());
+                rx
+            }),
+            steering,
+            interrupt: crate::CancellationToken::new(),
+        };
+        let request = RunRequest {
+            prompt: "scratch-lifecycle".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: directory.path().display().to_string(),
+            sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: true,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            instructions: None,
+        };
+        let spec = grok_spec();
+        let task = tokio::spawn(run_session(Session {
+            child,
+            scratch: Some(scratch),
+            client,
+            incoming,
+            event_tx,
+            controls,
+            request,
+            harness: spec.id,
+            agent_name: spec.display_name,
+            prompt_complete_extension: spec.prompt_complete_extension,
+            prompt_stall: spec.prompt_stall,
+            stall_hint: spec.stall_hint,
+            effort_in_model_id: spec.effort_in_model_id,
+            auth_method: spec.auth_method,
+            sessions_root: None,
+            prompt_transform: spec.prompt_transform,
+            effort_values: spec.effort_values,
+            interrupt_grace: Duration::from_millis(50),
+            kill_grace: Duration::from_millis(500),
+            handshake_timeout: Duration::from_secs(5),
+            stderr_tail: crate::StderrTail::default(),
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await.expect("event stream closed").unwrap() {
+                    AgentEvent::TextDelta { text } if text == "ready" => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(scratch_path.is_dir());
+        drop(event_rx);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("scratch-at-exit")).unwrap(),
+            "True"
+        );
+        assert!(!scratch_path.exists());
+        // Signal zero only queries whether the child has been reaped.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests;

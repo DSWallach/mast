@@ -62,6 +62,14 @@ for line in sys.stdin:
             update(prompt)
         if prompt == "idle-pid":
             update(str(os.getpid()))
+        if prompt == "scratch-lifecycle":
+            def record_scratch(_signal, _frame):
+                with open("scratch-at-exit", "w") as marker:
+                    marker.write(str(os.path.isdir(os.environ["TMPDIR"])))
+                sys.exit(0)
+            signal.signal(signal.SIGTERM, record_scratch)
+            update("ready")
+            continue
         if prompt == "consumer-close":
             update(str(os.getpid()))
             continue

@@ -142,6 +142,21 @@ case "$promptline" in
   exec sleep 60
   ;;
 
+*scenario:prompt-complete-prior-turn*)
+  first_prompt_id=$(printf '%s' "$promptline" | sed 's/.*"promptId":"\([^"]*\)".*/\1/')
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  read -r followline || exit 1
+  if has "$followline" '"method":"session/cancel"'; then
+    read -r followline || exit 1
+  fi
+  fid=$(rid "$followline")
+  has "$followline" '"method":"session/prompt"' || exit 1
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"$first_prompt_id\",\"stopReason\":\"cancelled\"}}"
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second"}}'
+  emit "{\"id\":$fid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
 *scenario:prompt-complete-stale*)
   # A STALE completion (wrong prompt id — a replay of an already-settled
   # prompt) must not settle the live turn; the real response follows.
