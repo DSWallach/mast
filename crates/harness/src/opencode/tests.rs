@@ -1861,9 +1861,10 @@ async fn stalled_prompt_post_has_a_bounded_timeout() {
     .await;
     wire.request("/prompt_async").await;
     wire.status("busy");
-    tokio::task::yield_now().await;
+    // Receiving the complete request proves reqwest has polled send and armed its timeout.
     tokio::time::pause();
     tokio::time::advance(CALL_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::time::resume();
     assert_eq!(wire.done().await.0, DoneStatus::Errored);
 }
 

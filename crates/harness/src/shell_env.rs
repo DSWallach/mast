@@ -138,9 +138,18 @@ mod unix {
     /// Run `<shell> <flags> 'echo BEGIN; env; echo END'` per flag set until one
     /// yields a parseable PATH.
     pub(super) fn snapshot_path(shell: &Path, timeout: Duration) -> Option<OsString> {
+        snapshot_path_with(shell, |flags, script| {
+            run_and_capture(shell, flags, script, timeout)
+        })
+    }
+
+    fn snapshot_path_with(
+        shell: &Path,
+        mut run: impl FnMut(&[&str], &str) -> Vec<u8>,
+    ) -> Option<OsString> {
         let script = format!("echo {BEGIN_MARKER}; env; echo {END_MARKER}");
         for flags in attempt_flag_sets(shell) {
-            let output = run_and_capture(shell, &flags, &script, timeout);
+            let output = run(&flags, &script);
             if let Some(path) = parse_snapshot_path(&output) {
                 return Some(path);
             }
@@ -154,6 +163,15 @@ mod unix {
     /// blocks after printing — or a grandchild that inherits the pipe and
     /// never closes it — can't hang us on EOF.
     fn run_and_capture(shell: &Path, flags: &[&str], script: &str, timeout: Duration) -> Vec<u8> {
+        run_and_capture_with(shell, flags, script, |start| start.elapsed() >= timeout)
+    }
+
+    fn run_and_capture_with(
+        shell: &Path,
+        flags: &[&str],
+        script: &str,
+        mut expired: impl FnMut(Instant) -> bool,
+    ) -> Vec<u8> {
         let mut cmd = std::process::Command::new(shell);
         cmd.args(flags)
             .arg(script)
@@ -190,7 +208,7 @@ mod unix {
                     }
                 });
         }
-        let deadline = Instant::now() + timeout;
+        let start = Instant::now();
         let mut exited_at: Option<Instant> = None;
         let mut scanned = 0usize;
         loop {
@@ -210,7 +228,7 @@ mod unix {
                 Some(_) => {}
                 None => match child.try_wait() {
                     Ok(Some(_)) => exited_at = Some(Instant::now()),
-                    Ok(None) if Instant::now() >= deadline => {
+                    Ok(None) if expired(start) => {
                         let _ = child.kill();
                         let _ = child.wait();
                         break;
@@ -318,34 +336,60 @@ exit 1
         #[test]
         fn falls_back_when_interactive_attempt_hangs() {
             let dir = tempfile::tempdir().unwrap();
-            // Simulates rc files that wedge only in interactive mode (`exec
-            // tmux` and friends): sleep forever when -i is present.
+            let ready = dir.path().join("ready");
             let shell = fake_shell(
                 dir.path(),
                 &format!(
-                    "#!/bin/sh\ncase \" $* \" in *\" -i \"*) sleep 60;; esac\nPATH=\"/zeron-test/fallback/bin:/usr/bin:/bin\"; export PATH\n{RUN_PAYLOAD}"
+                    "#!/bin/sh\ncase \" $* \" in *\" -i \"*) echo $$ > '{}'; exec sleep 60;; esac\nPATH=\"/zeron-test/fallback/bin:/usr/bin:/bin\"; export PATH\n{RUN_PAYLOAD}",
+                    ready.display()
                 ),
             );
-            let start = Instant::now();
-            let path = snapshot_path(&shell, Duration::from_millis(400)).unwrap();
+            let mut attempts = 0;
+            let path = snapshot_path_with(&shell, |flags, script| {
+                attempts += 1;
+                if flags.contains(&"-i") {
+                    let guard = Instant::now();
+                    run_and_capture_with(&shell, flags, script, |_| {
+                        assert!(
+                            guard.elapsed() < Duration::from_secs(30),
+                            "shell did not start"
+                        );
+                        std::fs::read_to_string(&ready).is_ok_and(|pid| pid.trim().parse::<i32>().is_ok())
+                    })
+                } else {
+                    run_and_capture(&shell, flags, script, Duration::from_secs(30))
+                }
+            })
+            .unwrap();
             assert!(
                 path.to_string_lossy()
-                    .starts_with("/zeron-test/fallback/bin"),
-                "got: {}",
-                path.to_string_lossy()
+                    .starts_with("/zeron-test/fallback/bin")
             );
-            // First attempt burned ~400ms then was killed; the whole resolve
-            // must not have waited out the sleep.
-            assert!(start.elapsed() < Duration::from_secs(5));
+            assert_eq!(attempts, 2);
+            let pid: i32 = std::fs::read_to_string(ready)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "timed-out shell must be reaped"
+            );
         }
 
         #[test]
         fn gives_up_on_a_shell_that_never_answers() {
             let dir = tempfile::tempdir().unwrap();
-            let shell = fake_shell(dir.path(), "#!/bin/sh\nsleep 60\n");
-            let start = Instant::now();
-            assert!(snapshot_path(&shell, Duration::from_millis(300)).is_none());
-            assert!(start.elapsed() < Duration::from_secs(5));
+            let shell = fake_shell(dir.path(), "#!/bin/sh\nexec sleep 60\n");
+            let mut attempts = 0;
+            let result = snapshot_path_with(&shell, |flags, script| {
+                attempts += 1;
+                // A running child reaches the timeout branch before being killed.
+                run_and_capture_with(&shell, flags, script, |_| true)
+            });
+            assert!(result.is_none());
+            assert_eq!(attempts, 2);
         }
     }
 }
