@@ -153,6 +153,7 @@ async fn hand_off_config(
         }
     }
     if target != config.harness {
+        config.model_options = options_across_harness_switch(std::mem::take(&mut config.model_options), config.harness, target);
         config.harness = target;
         let default = models.iter().find(|m| target.default_model() == Some(m.id.as_str())).or_else(|| models.first());
         config.model = default.map(|m| m.id.clone()).or_else(|| target.default_model().map(str::to_owned));
@@ -160,11 +161,28 @@ async fn hand_off_config(
             let levels = &m.reasoning_levels;
             [mast_proto::ReasoningLevel::High, mast_proto::ReasoningLevel::Medium].into_iter().find(|l| levels.contains(l)).or_else(|| levels.first().copied())
         });
-        config.model_options.clear();
     }
     if let Some(model) = model { config.model = Some(model); }
     if let Some(reasoning) = reasoning { config.reasoning = Some(reasoning); }
     Ok(Some(config))
+}
+
+/// Model options are harness-specific, so a harness switch drops them. The
+/// named agent is not a model option: it survives a switch between harnesses
+/// that run agent definitions (a review handed from Claude Code to Codex
+/// stays that review), and is dropped otherwise.
+fn options_across_harness_switch(
+    mut options: serde_json::Map<String, serde_json::Value>,
+    from: HarnessId,
+    to: HarnessId,
+) -> serde_json::Map<String, serde_json::Value> {
+    let keep = from.runs_agent_definitions() && to.runs_agent_definitions();
+    let agent = options.remove(mast_proto::AGENT_OPTION).filter(|_| keep);
+    options.clear();
+    if let Some(agent) = agent {
+        options.insert(mast_proto::AGENT_OPTION.into(), agent);
+    }
+    options
 }
 
 async fn update_harness_enabled(
@@ -5903,6 +5921,30 @@ mod tests {
         assert_eq!(changed.sandbox, source.sandbox);
         assert!(changed.auto_approve);
         assert!(hand_off_config(&registry, dir.path(), Some(source), HarnessId::Codex, Some(HarnessId::Mock), Some("unknown".into()), None).await.is_err());
+    }
+
+    #[test]
+    fn a_harness_switch_keeps_the_named_agent_only_between_agent_harnesses() {
+        let mut options = serde_json::Map::new();
+        options.insert("contextWindow".into(), serde_json::json!("1m"));
+        options.insert(mast_proto::AGENT_OPTION.into(), serde_json::json!("pr-review"));
+        let mut kept = serde_json::Map::new();
+        kept.insert(mast_proto::AGENT_OPTION.into(), serde_json::json!("pr-review"));
+        for (from, to) in [
+            (HarnessId::ClaudeCode, HarnessId::Codex),
+            (HarnessId::Codex, HarnessId::Antigravity),
+            (HarnessId::Antigravity, HarnessId::ClaudeCode),
+        ] {
+            assert_eq!(options_across_harness_switch(options.clone(), from, to), kept, "{from:?} -> {to:?}");
+        }
+        for (from, to) in [
+            (HarnessId::ClaudeCode, HarnessId::Cursor),
+            (HarnessId::ClaudeCode, HarnessId::Opencode),
+            (HarnessId::Opencode, HarnessId::ClaudeCode),
+            (HarnessId::Codex, HarnessId::Mock),
+        ] {
+            assert!(options_across_harness_switch(options.clone(), from, to).is_empty(), "{from:?} -> {to:?}");
+        }
     }
     use super::*;
 

@@ -1047,6 +1047,32 @@ async fn fix_ci_and_unset_defaults_keep_the_launcher_default() {
     assert_eq!(config, mast_engine::pr_review_launch::default_config());
 }
 
+#[tokio::test]
+async fn a_codex_review_default_never_sends_its_models_to_claude_code() {
+    let rig = rig().await;
+    set_launch_defaults(
+        &rig,
+        json!({"agent": "pr-review", "harness": "codex", "draftModel": "gpt-5-mini", "gateModel": "gpt-5"}),
+    )
+    .await;
+    let mut gate = params("codex-gate", 7, PrReviewAction::CodeReview);
+    gate.config = None;
+    gate.merge_gate = true;
+    let config = chat_config(&rig, &start(&rig, &gate).await.unwrap().chat_id);
+    assert_eq!(config.harness, HarnessId::Codex);
+    assert_eq!(config.model.as_deref(), Some("gpt-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+
+    // A Claude Code pick keeps its own model and still gets the agent.
+    let mut picked = params("codex-defaults-claude-pick", 7, PrReviewAction::CodeReview);
+    picked.config = Some(claude_config("claude-sonnet-5"));
+    picked.fresh = true;
+    let config = chat_config(&rig, &start(&rig, &picked).await.unwrap().chat_id);
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn branch_reviews_take_the_space_launch_defaults() {
     let rig = rig().await;

@@ -558,27 +558,34 @@ pub fn default_config() -> ChatConfig {
 }
 
 /// The config a code review (PR or branch) runs with. With no caller config
-/// it is [`default_config`] with the Space's draft model (gate model for a
-/// merge gate) and the Space's review agent. A caller config is kept as sent,
-/// except that a Claude Code config without an `agent` option gets the
-/// Space's agent. Other harnesses never get one: the option means something
-/// else to them, or nothing.
+/// it starts on the Space's review harness (Claude Code when unset) with the
+/// Space's draft model, or its gate model for a merge gate, falling back to
+/// [`default_config`]. A caller config keeps its harness and model. Either
+/// way a harness that [runs agent definitions](HarnessId::runs_agent_definitions)
+/// gets the Space's agent unless the config names its own; other harnesses
+/// never get one, since the option means something else to them or nothing.
 pub fn review_config(
     caller: Option<ChatConfig>,
     defaults: Option<&mast_proto::PrReviewLaunchDefaults>,
     merge_gate: bool,
 ) -> ChatConfig {
-    let defaults = defaults.map(mast_proto::PrReviewLaunchDefaults::normalized);
-    let explicit = caller.is_some();
-    let mut config = caller.unwrap_or_else(default_config);
-    let Some(defaults) = defaults else {
-        return config;
+    let Some(defaults) = defaults.map(mast_proto::PrReviewLaunchDefaults::normalized) else {
+        return caller.unwrap_or_else(default_config);
     };
-    if !explicit && let Some(model) = defaults.model_for(merge_gate) {
-        config.model = Some(model.to_owned());
-    }
-    if config.harness == HarnessId::ClaudeCode
-        && !config.model_options.contains_key(mast_proto::AGENT_OPTION)
+    let mut config = caller.unwrap_or_else(|| {
+        let harness = defaults.harness_or_default();
+        let mut config = default_config();
+        if harness != config.harness {
+            config.harness = harness;
+            config.model = None;
+        }
+        if let Some(model) = defaults.model_for(merge_gate) {
+            config.model = Some(model.to_owned());
+        }
+        config
+    });
+    if config.harness.runs_agent_definitions()
+        && mast_proto::agent_option(&config.model_options).is_none()
         && let Some(agent) = defaults.agent
     {
         config
@@ -594,7 +601,7 @@ pub fn review_config(
 pub fn needs_review_agent_host(config: Option<&ChatConfig>, merge_gate: bool) -> bool {
     merge_gate
         || config.is_some_and(|config| {
-            config.harness == HarnessId::ClaudeCode
+            config.harness.runs_agent_definitions()
                 && mast_proto::agent_option(&config.model_options).is_some()
         })
 }
@@ -1560,6 +1567,7 @@ mod default_model_tests {
     fn launch_defaults() -> mast_proto::PrReviewLaunchDefaults {
         mast_proto::PrReviewLaunchDefaults {
             agent: Some("pr-review".into()),
+            harness: None,
             draft_model: Some("claude-haiku-4-5".into()),
             gate_model: Some("claude-opus-5-5".into()),
         }
@@ -1592,12 +1600,47 @@ mod default_model_tests {
             .insert(mast_proto::AGENT_OPTION.into(), "other".into());
         assert_eq!(review_config(Some(own_agent.clone()), Some(&defaults), false), own_agent);
 
-        let codex = ChatConfig {
-            harness: HarnessId::Codex,
-            model: Some("gpt-5".into()),
-            ..default_config()
+        // A Codex or Antigravity pick keeps its model and gains the agent; the
+        // Space's Claude Code models never reach another harness.
+        for harness in [HarnessId::Codex, HarnessId::Antigravity] {
+            let picked = ChatConfig {
+                harness,
+                model: Some("their-model".into()),
+                ..default_config()
+            };
+            let config = review_config(Some(picked.clone()), Some(&defaults), true);
+            assert_eq!(config.harness, harness);
+            assert_eq!(config.model.as_deref(), Some("their-model"));
+            assert_eq!(mast_proto::agent_option(&config.model_options), Some("pr-review"));
+        }
+
+        // Other harnesses never get an agent.
+        for harness in [HarnessId::Cursor, HarnessId::Opencode, HarnessId::Mock] {
+            let other = ChatConfig {
+                harness,
+                model: Some("m".into()),
+                ..default_config()
+            };
+            assert_eq!(review_config(Some(other.clone()), Some(&defaults), true), other);
+        }
+    }
+
+    #[test]
+    fn review_config_starts_on_the_spaces_review_harness() {
+        let codex = mast_proto::PrReviewLaunchDefaults {
+            agent: Some("pr-review".into()),
+            harness: Some(HarnessId::Codex),
+            draft_model: Some("gpt-5-mini".into()),
+            gate_model: None,
         };
-        assert_eq!(review_config(Some(codex.clone()), Some(&defaults), true), codex);
+        let draft = review_config(None, Some(&codex), false);
+        assert_eq!(draft.harness, HarnessId::Codex);
+        assert_eq!(draft.model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(mast_proto::agent_option(&draft.model_options), Some("pr-review"));
+        // No gate model: the Claude Code default model is never sent to Codex.
+        let gate = review_config(None, Some(&codex), true);
+        assert_eq!(gate.harness, HarnessId::Codex);
+        assert_eq!(gate.model, None);
     }
 
     #[test]
@@ -1611,6 +1654,8 @@ mod default_model_tests {
             .insert(mast_proto::AGENT_OPTION.into(), "pr-review".into());
         assert!(needs_review_agent_host(Some(&config), false));
         config.harness = HarnessId::Codex;
+        assert!(needs_review_agent_host(Some(&config), false));
+        config.harness = HarnessId::Opencode;
         assert!(!needs_review_agent_host(Some(&config), false));
     }
 
