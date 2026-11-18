@@ -1219,6 +1219,22 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-18 15:50; coordinator d7779d53)
+
+- **Installed: release 112** (68de4092a), full perf gate (soak vs 111: CPU 5.5 vs 5.7 %, footprint 448 vs 538 MB,
+  git flat). Refactor Phase C1 slices 1–4 (design mast-artifact:4bde59e77d7c0f96bd529dbc7969ffcf), each with
+  characterization tests committed first and an independent equivalence review:
+  - C1.1 `Shell::render` 767 → ~380 lines (`shell/frame_state.rs`, `shell/action_bindings.rs`).
+  - C1.2 `Composer::send` 902 → 34 lines (`composer/send.rs`; `#[cfg(test)]`-only pre-dispatch failure hook).
+  - C1.3 ACP `run_session` 1,203 → 359 lines (`acp/session.rs`, `AcpSessionState`, per-arm methods).
+  - C1.4 `Transcript::sync` 562 → 12 lines (`transcript/sync.rs`, tests in `transcript/sync_tests.rs`).
+- First release run had two diff_sync timeouts (attach_reprobe, repair_backoff) while fseventsd sat at ~200 % right
+  after deleting three worktree `target/` dirs; both passed alone and the full rerun passed (non-UI 9 min vs 31).
+  **Lesson:** delete worktree targets after the release run, or wait for fseventsd to settle before starting one.
+- Mikey is on 110 until he restarts; one restart picks up 111 and 112.
+- Next: C1 slice 5 (transcript row and tool-group rendering). Open for Mikey: proposed approval rules (ui-preview;
+  `cargo test` outside the sandbox in worktrees, which would stop ~15 ACP-worker approval wakes per slice).
+
 ## In flight (snapshot 2026-11-18 11:00; coordinator 544369c6 handing off)
 
 - **Installed: release 111** (2c02e2c3c), full perf gate (soak vs 110: CPU 4.7 vs 4.7 %, footprint 458 vs 526 MB).
