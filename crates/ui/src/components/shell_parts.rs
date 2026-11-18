@@ -1712,9 +1712,9 @@ pub(crate) fn tracker_stage_label(theme: &Theme, label: &'static str) -> gpui::D
     div().text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(label)
 }
 
-pub(crate) fn tracker_stage_indicator(theme: &Theme, id: SharedString, lit: bool) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn tracker_stage_indicator(id: SharedString, color: gpui::Hsla) -> gpui::Stateful<gpui::Div> {
     div().id(id).w(px(14.0)).h(px(5.0)).rounded(px(2.0))
-        .bg(if lit { theme.accent } else { theme.border })
+        .bg(color)
 }
 
 pub(crate) fn tracker_mono(theme: &Theme, text: String, color: gpui::Hsla) -> gpui::Div {

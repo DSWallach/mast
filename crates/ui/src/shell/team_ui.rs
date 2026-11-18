@@ -33,6 +33,13 @@ struct TrackerSourceObservation {
     project_id: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrackerCleanup {
+    LinkIssue { item_id: String, identifier: String },
+    PossibleDuplicate { item_id: String, identifier: String },
+    StaleRequest { request_id: String },
+}
+
 #[derive(Default)]
 pub(super) struct TrackerState {
     key: Option<(String, Option<u64>, u64, u64, u64)>,
@@ -42,6 +49,7 @@ pub(super) struct TrackerState {
     health_watch_task: Option<Task<()>>,
     health_item_prs: std::collections::HashMap<String, Vec<mast_engine::pr_ticket_cache::PrStatus>>,
     health_entries: Vec<mast_engine::work_outline_health::HealthEntry>,
+    local_cleanup: Vec<TrackerCleanup>,
     health_incomplete: bool,
     health_expanded: std::collections::HashSet<String>,
     health_targets: std::sync::Arc<Vec<(String, String)>>,
@@ -118,6 +126,12 @@ fn tracker_headline(ticket: Option<&crate::chat_metadata::HeaderTicket>, fallbac
     ticket.and_then(|ticket| ticket.title.as_deref()).filter(|title| !title.is_empty()).unwrap_or(fallback).to_owned()
 }
 
+fn stale_review_request(request: &mast_proto::UserActionRequestView) -> bool {
+    let text = request.text.trim_start().to_ascii_lowercase();
+    request.is_unresolved() && (request.effective_kind() == mast_proto::work_outline_user_actions::UserActionKind::Handoff
+        || text.starts_with("ready for review") || text.starts_with("ready to merge"))
+}
+
 fn tracker_todo_label(progress: mast_proto::TodoProgress) -> String {
     format!("{}/{}", progress.done, progress.total)
 }
@@ -187,7 +201,8 @@ fn tracker_reconcile_project(
     }
     let local: Vec<_> = items.iter().filter_map(|(item, _)| {
         let source = snapshot_items.get(item.id.as_str())?;
-        Some(LocalTicket { item_id: item.id.clone(), issue_identifier: references.get(item.id.as_str()).map(|reference| reference.external_id.clone()),
+        Some(LocalTicket { item_id: item.id.clone(), issue_identifier: references.get(item.id.as_str()).map(|reference| reference.external_id.clone())
+            .or_else(|| crate::tracker_tickets::title_issue_identifier(&item.title).filter(|id| issues.iter().any(|issue| issue.identifier == *id)).map(str::to_owned)),
             chat_ids: source.chat_ids.iter().filter(|id| worker_map.get(id.as_str()).is_some_and(|(_, worker)| !worker.archived)).cloned().collect() })
     }).collect();
     let branches: Vec<_> = workers.live().filter(|worker| assignments.get(worker.chat_id.as_str())
@@ -222,7 +237,9 @@ fn tracker_reconcile_project(
                     title: reference.and_then(|reference| reference.cached_title.clone()),
                     url: reference.map(|reference| reference.url.clone()).filter(|url| !url.is_empty()), state: None });
             } else {
-                primary.ticket = None;
+                primary.ticket = row.item_ids.iter().find_map(|id| item_map.get(id.as_str()))
+                    .and_then(|item| crate::tracker_tickets::title_issue_identifier(&item.title))
+                    .map(|identifier| crate::chat_metadata::HeaderTicket { identifier: identifier.into(), title: None, url: None, state: None });
             }
             let item_done = (!row.item_ids.is_empty()).then(|| row.item_ids.iter().any(|id|
                 snapshot_items.get(id.as_str()).is_some_and(|item| item.effective_status == mast_proto::WorkItemEffectiveStatus::Completed)));
@@ -240,7 +257,7 @@ fn tracker_reconcile_project(
                 item.ticket = Some(issue.identifier.clone());
                 if issue.state.state_type.is_closed() { item.status = crate::board::BoardStatus::Done; }
             } else {
-                item.ticket = row.issue_identifier.clone();
+                item.ticket = row.issue_identifier.clone().or_else(|| crate::tracker_tickets::title_issue_identifier(&item.title).map(str::to_owned));
             }
             if row.item_ids.iter().any(|id| item_map.get(id.as_str()).is_some_and(|item| item.status == crate::board::BoardStatus::Done)) {
                 item.status = crate::board::BoardStatus::Done;
@@ -266,18 +283,24 @@ fn reviewed_files_at_head(state: Option<mast_proto::DiffReviewState>, head: Opti
         .map_or(0, |state| state.viewed_files.len())
 }
 
-fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement {
+fn tracker_stage_color(stage: LifecycleStage, index: usize, theme: &Theme) -> gpui::Hsla {
+    if stage == LifecycleStage::NotStarted || index > stage.index() { theme.border }
+    else if stage == LifecycleStage::Done || index < stage.index() { theme.success }
+    else { theme.accent }
+}
+
+fn tracker_stage_track(id: &str, stage: LifecycleStage, theme: &Theme) -> AnyElement {
     let labels = ["Not started", "Building", "Code review", "PR review", "Ready to merge", "Done"];
     let mut track = div().flex().items_center().gap(px(Theme::SPACE_XS));
-    for (index, (label, lit)) in labels.into_iter().zip(stages).enumerate() {
+    for (index, label) in labels.into_iter().enumerate() {
+        let lit = stage != LifecycleStage::NotStarted && index <= stage.index();
+        let color = tracker_stage_color(stage, index, theme);
         let tip = SharedString::from(format!("{label}: {}", if lit { "observed" } else { "not observed" }));
-        track = track.child(crate::components::shell_parts::tracker_stage_indicator(theme, SharedString::from(format!("tracker-stage-{id}-{index}")), lit)
+        track = track.child(crate::components::shell_parts::tracker_stage_indicator(SharedString::from(format!("tracker-stage-{id}-{index}")), color)
             .debug_selector(move || format!("tracker-stage-{label}-{lit}"))
             .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: tip.clone() }).into()));
     }
-    if let Some(label) = labels.into_iter().zip(stages).filter(|(_, lit)| *lit).map(|(label, _)| label).last() {
-        track = track.child(crate::components::shell_parts::tracker_stage_label(theme, if stages[5] { "Done" } else { label }));
-    }
+    track = track.child(crate::components::shell_parts::tracker_stage_label(theme, stage.label()));
     track.into_any_element()
 }
 
@@ -285,6 +308,34 @@ fn tracker_stage_track(id: &str, stages: [bool; 6], theme: &Theme) -> AnyElement
 mod tracker_tests {
     use super::*;
     use crate::team::WorkerState;
+
+    #[test]
+    fn stale_review_classification_preserves_questions() {
+        let request = |text: &str, kind: &str| -> mast_proto::UserActionRequestView {
+            serde_json::from_value(serde_json::json!({ "id":"request", "text":text, "kind":kind })).unwrap()
+        };
+        assert!(stale_review_request(&request("Ready for review: example", "ask")));
+        assert!(stale_review_request(&request("Ready to merge: example", "ask")));
+        assert!(stale_review_request(&request("Please review", "handoff")));
+        assert!(!stale_review_request(&request("How should holidays be loaded?", "ask")));
+    }
+
+    #[test]
+    fn stage_track_uses_theme_colors() {
+        for (appearance, variant) in [
+            (crate::theme::Appearance::Light, "mast-light"), (crate::theme::Appearance::Dark, "mast-dark"),
+            (crate::theme::Appearance::Light, "industrial-light"), (crate::theme::Appearance::Dark, "industrial-dark"),
+            (crate::theme::Appearance::Light, "horizon-light"), (crate::theme::Appearance::Dark, "horizon-dark"),
+        ] {
+            let theme = Theme::for_selection(appearance, variant, mast_theme::AccentSelection::ThemeDefault, mast_theme::SurfacePreference::default());
+            for index in 0..6 {
+                assert_eq!(tracker_stage_color(LifecycleStage::NotStarted, index, &theme), theme.border);
+                assert_eq!(tracker_stage_color(LifecycleStage::Done, index, &theme), theme.success);
+                assert_eq!(tracker_stage_color(LifecycleStage::PrReview, index, &theme),
+                    if index < 3 { theme.success } else if index == 3 { theme.accent } else { theme.border });
+            }
+        }
+    }
 
     fn worker(id: &str, state: WorkerState) -> WorkerFacts {
         WorkerFacts { chat_id: id.into(), title: id.into(), work_item_title: Some(id.into()), state, last_active: None, activity: None,
@@ -379,6 +430,26 @@ mod tracker_tests {
         assert_eq!(empty.len(), 2);
         assert!(empty.iter().any(|item| item.ticket.as_deref() == Some("EX-2") && item.status == crate::board::BoardStatus::Done));
         assert!(empty.iter().any(|item| item.id == "b"));
+    }
+
+    #[test]
+    fn titled_items_join_loaded_tickets_and_keep_unmatched_ids() {
+        let snapshot: mast_proto::WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"fixture", "items":[
+                {"id":"root", "spaceId":"fixture", "childIds":["a", "b"]},
+                {"id":"a", "spaceId":"fixture", "parentWorkItemId":"root", "chatIds":["one"]},
+                {"id":"b", "spaceId":"fixture", "parentWorkItemId":"root"}]
+        })).unwrap();
+        let item = |id: &str, title: &str| crate::board::BoardItem { id: id.into(), title: title.into(), status: crate::board::BoardStatus::Todo,
+            updated_at: 0, created_at: 0, worker: None, worker_title: None, report: None, ticket: None, request_id: None };
+        let items = vec![(item("a", "EX-1 Release notes"), false), (item("b", "EX-999 Calendar"), true)];
+        let workers = TeamFacts { workers: vec![worker("one", WorkerState::Working)] };
+        let issues = vec![mast_proto::linear::LinearIssueSummary { identifier:"EX-1".into(), title:"Release notes".into(), ..Default::default() }];
+        let (rows, _, _, empty, _) = tracker_reconcile_project(&snapshot, "root", &items, &workers, &issues);
+        assert_eq!(rows.workers.len(), 1);
+        assert_eq!(rows.workers[0].ticket.as_ref().unwrap().identifier, "EX-1");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].ticket.as_deref(), Some("EX-999"));
     }
 
     #[test]
@@ -689,6 +760,39 @@ impl Shell {
         }).detach();
     }
 
+    fn link_tracker_issue(&mut self, item_id: String, identifier: String, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().link_linear_issue(mast_proto::CreateWorkItemExternalReferenceParams {
+            work_item_id: item_id, provider: mast_proto::linear::LINEAR_PROVIDER.into(),
+            reference_type: mast_proto::linear::LINEAR_ISSUE_REFERENCE.into(), external_id: identifier.clone(),
+            url: format!("https://linear.app/issue/{identifier}"), cached_title: None,
+            operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
+                shell.tracker.key = None;
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn resolve_tracker_stale_request(&mut self, request_id: String, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().resolve_user_action_request(mast_proto::ResolveUserActionRequestParams {
+            user_action_request_id: request_id, outcome: Some("done".into()),
+            note: Some("PR merged".into()), answer: None, values: None, via: Some("tracker".into()),
+            operation_id: crate::work_outline::actions::new_operation_id(),
+        });
+        cx.spawn(async move |shell, cx| {
+            let result = task.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result { shell.sidebar_notice = Some(error.message.into()); }
+                shell.tracker.key = None;
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn load_tracker_project(&mut self, chat_id: &str, force: bool, cx: &mut Context<Self>) {
         self.load_tracker_health(chat_id, cx);
         let Some((space, account, reference, revision)) = self.tracker_linear_project(chat_id, cx) else { return; };
@@ -926,7 +1030,7 @@ impl Shell {
         self.state.update(cx, |state, _| {
             let titles = ["Validate the release", "Implement tracker rows", "Update the cache", "Review accessibility",
                 "Add filtering", "Verify light themes", "Inspect status facts", "Test the expanded view",
-                "Update documentation", "Check keyboard navigation", "Measure rendering", "Prepare handoff",
+                "EX-100 Validate the release", "EX-999 Draft release notes", "T4 Validate the release", "Prepare handoff",
                 "Check exports", "Improve search", "Verify sorting", "Update labels", "Review tests", "Check errors", "Document setup"];
             for (index, title) in titles.into_iter().enumerate() {
                 let id = format!("fixture-worker-{index}");
@@ -1004,6 +1108,22 @@ impl Shell {
                 state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
             });
             snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
+                id: "fixture-stale-review".into(), space_id: "fixture-space".into(), work_item_id: "fixture-item-3".into(),
+                chat_id: "fixture-worker-3".into(), text: "Ready for review: https://github.com/example/project/pull/23".into(),
+                kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
+                origin_kind: Default::default(), message_id: None, tool_call_id: None, info: None, options: Vec::new(),
+                links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
+                state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
+            });
+            snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
+                id: "fixture-merged-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-item-2".into(),
+                chat_id: "fixture-worker-2".into(), text: "Which calendar should the report use?".into(),
+                kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
+                origin_kind: Default::default(), message_id: None, tool_call_id: None, info: None, options: Vec::new(),
+                links: Vec::new(), facts: Vec::new(), dedupe_key: None, created_by: None, created_at: 1,
+                state: mast_proto::UserActionRequestState::Open, resolution: None, deduped: false, origin_chat_available: true,
+            });
+            snapshot.user_action_requests.push(mast_proto::UserActionRequestView {
                 id: "fixture-question".into(), space_id: "fixture-space".into(), work_item_id: "fixture-root".into(),
                 chat_id: "fixture-worker-5".into(), text: "Use the compact layout first?".into(),
                 kind: Some(mast_proto::work_outline_user_actions::UserActionKind::Ask), priority: None,
@@ -1040,7 +1160,7 @@ impl Shell {
             let url = format!("https://github.com/example/project/pull/{}", index + 20);
             let pr = (index < 4 || index == 7).then(|| PrStatus {
                 additions: Some(312), deletions: Some(48),
-                number: index + 20, url: Some(url), state: if index == 3 { "MERGED" } else { "OPEN" }.into(),
+                number: index + 20, url: Some(url), state: if index == 2 || index == 3 { "MERGED" } else { "OPEN" }.into(),
                 is_draft: false, review_decision: (index == 0).then(|| "APPROVED".into()), reviewers: Vec::new(),
                 checks: Some(if index == 1 { ChecksStatus::Failing } else { ChecksStatus::Passing }),
                 title: None, branch: Some(format!("tracker/task-{index}")), head_sha: Some("fixture-head".into()), mergeable: String::new(),
@@ -1182,6 +1302,23 @@ impl Shell {
         }
         let issue_states: std::collections::HashMap<_, _> = project.as_ref().and_then(|(key, _)| self.tracker.linear_projects.get(key)).into_iter().flatten()
             .map(|issue| (issue.identifier.to_ascii_uppercase(), issue.state.state_type.is_closed())).collect();
+        let mut local_cleanup = Vec::new();
+        if let (Some(snapshot), Some(issues)) = (snapshot.as_deref(), project.as_ref().and_then(|(key, _)| self.tracker.linear_projects.get(key))) {
+            let linked: std::collections::HashSet<_> = snapshot.external_references.iter().filter(|reference|
+                reference.provider == mast_proto::linear::LINEAR_PROVIDER && reference.reference_type == mast_proto::linear::LINEAR_ISSUE_REFERENCE)
+                .map(|reference| reference.work_item_id.as_str()).collect();
+            for (item, _) in &items {
+                if linked.contains(item.id.as_str()) { continue; }
+                let identifier = crate::tracker_tickets::title_issue_identifier(&item.title);
+                if identifier.is_some_and(|id| issue_states.contains_key(id)) { continue; }
+                if let Some(identifier) = identifier {
+                    local_cleanup.push(TrackerCleanup::LinkIssue { item_id: item.id.clone(), identifier: identifier.into() });
+                }
+                for issue in issues.iter().filter(|issue| crate::tracker_tickets::titles_match(&item.title, &issue.title)) {
+                    local_cleanup.push(TrackerCleanup::PossibleDuplicate { item_id: item.id.clone(), identifier: issue.identifier.clone() });
+                }
+            }
+        }
         let closed_issues: std::collections::HashSet<_> = issue_states.iter().filter(|(_, closed)| **closed).map(|(id, _)| id.clone()).collect();
         let mut issue_prs = std::collections::HashMap::<String, Vec<mast_engine::pr_ticket_cache::PrStatus>>::new();
         let mut pending_items = std::collections::HashSet::new();
@@ -1251,7 +1388,7 @@ impl Shell {
                 review_ranges.entry((range.path.clone(), range.head_branch.clone())).or_default().push(&review.id);
             }
         }
-        let lifecycle_rows: std::collections::HashMap<_, _> = facts.workers.iter().map(|worker| {
+        let mut lifecycle_rows: std::collections::HashMap<_, _> = facts.workers.iter().map(|worker| {
             let mut workers = vec![worker];
             workers.extend(additional_chats.get(&worker.chat_id).into_iter().flatten());
             let (completed, linear_completed) = completion.get(&worker.chat_id).copied().unwrap_or_else(||
@@ -1270,6 +1407,30 @@ impl Shell {
             }));
             (worker.chat_id.clone(), crate::team::ticket_lifecycle(&workers, completed, linear_completed, branch_review, now))
         }).collect();
+        if let Some(snapshot) = snapshot.as_deref() {
+            for worker in &facts.workers {
+                let chats: Vec<_> = std::iter::once(worker).chain(additional_chats.get(&worker.chat_id).into_iter().flatten()).collect();
+                if !chats.iter().flat_map(|chat| &chat.prs).any(|pr| pr.state.eq_ignore_ascii_case("merged")) { continue; }
+                let chat_ids: std::collections::HashSet<_> = chats.iter().map(|chat| chat.chat_id.as_str()).collect();
+                let relevant: Vec<_> = snapshot.user_action_requests.iter().filter(|request| chat_ids.contains(request.chat_id.as_str())
+                    && request.is_unresolved() && request.effective_kind() != mast_proto::work_outline_user_actions::UserActionKind::Notice
+                    && request.priority != Some(mast_proto::work_outline_user_actions::UserActionPriority::Fyi)).collect();
+                let stale: Vec<_> = relevant.iter().copied().filter(|request| stale_review_request(request)).collect();
+                for request in &stale {
+                    local_cleanup.push(TrackerCleanup::StaleRequest { request_id: request.id.clone() });
+                    requests.remove(&request.chat_id);
+                }
+                for request in relevant.iter().copied().filter(|request| !stale_review_request(request)) {
+                    requests.entry(request.chat_id.clone()).or_insert_with(|| crate::team::activity_line(&request.text).unwrap_or_default());
+                }
+                let awaiting = state.sessions.iter().any(|session| chat_ids.contains(session.chat_id.as_str())
+                    && session.status == mast_proto::SessionStatus::AwaitingInput);
+                let changes_requested = chats.iter().flat_map(|chat| &chat.prs).any(|pr| pr.state.eq_ignore_ascii_case("open") && pr.review == Some("changes requested"));
+                if let Some(row) = lifecycle_rows.get_mut(&worker.chat_id) {
+                    row.needs_you = awaiting || changes_requested || relevant.iter().any(|request| !stale_review_request(request));
+                }
+            }
+        }
         let mut grouped_rows = std::collections::HashMap::<_, Vec<usize>>::new();
         let mut stale_rows = std::collections::HashMap::<_, Vec<usize>>::new();
         for (index, worker) in facts.workers.iter().enumerate().filter(|(_, worker)| !worker.archived) {
@@ -1334,6 +1495,7 @@ impl Shell {
         self.tracker.other_chats = other_chats;
         self.tracker.additional_chats = additional_chats;
         self.tracker.lifecycle_rows = lifecycle_rows;
+        self.tracker.local_cleanup = local_cleanup;
         self.tracker.linear_project_linked = project.is_some();
         self.tracker.can_link_linear_project = project_link_context.is_some();
         self.tracker.source_observation = snapshot.as_deref().map(|snapshot| TrackerSourceObservation {
@@ -1561,7 +1723,7 @@ impl Shell {
                 rollup = rollup.child(Self::chip(&theme, "tracker-pr-pending".into(), format!("{} PR details unavailable", self.tracker.unassigned_pending.len()), ChipTone::Dim)
                     .debug_selector(|| "tracker-pr-pending".into()));
             }
-            rollup = rollup.child(Self::chip(&theme, "tracker-cleanup-toggle".into(), format!("{} cleanup", self.tracker.health_entries.len()), ChipTone::Dim)
+            rollup = rollup.child(Self::chip(&theme, "tracker-cleanup-toggle".into(), format!("{} cleanup", self.tracker.health_entries.len() + self.tracker.local_cleanup.len()), ChipTone::Dim)
                 .debug_selector(|| "tracker-cleanup-toggle".into())
                 .cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                     let id = this.active_chat.clone();
@@ -1651,7 +1813,7 @@ impl Shell {
             header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
         }
         let mut row = crate::components::shell_parts::tracker_row(theme, format!("tracker-item-{}", item.id))
-            .child(header).child(tracker_stage_track(&item.id, std::array::from_fn(|index| index <= stage.index()), theme));
+            .child(header).child(tracker_stage_track(&item.id, stage, theme));
         if let Some(pr) = self.tracker.unassigned_prs.get(&item.id) {
             let url = pr.url.clone().unwrap_or_default();
             let mut label = format!("PR #{} · {}", pr.number, pr.state.to_lowercase());
@@ -1671,8 +1833,32 @@ impl Shell {
         if self.tracker.health_incomplete {
             list = list.child(crate::components::shell_parts::tracker_metadata(theme, "Some PR, project or branch details are unavailable".into()));
         }
-        if self.tracker.health_entries.is_empty() {
+        if self.tracker.health_entries.is_empty() && self.tracker.local_cleanup.is_empty() {
             list = list.child(crate::components::shell_parts::tracker_metadata(theme, if self.tracker.health_incomplete { "No cleanup found in available details" } else { "No cleanup found" }.into()));
+        }
+        for (index, entry) in self.tracker.local_cleanup.iter().enumerate() {
+            let mut row = div().flex().items_center().gap(px(Theme::SPACE_SM));
+            match entry {
+                TrackerCleanup::LinkIssue { item_id, identifier } => {
+                    let item_id = item_id.clone();
+                    let identifier = identifier.clone();
+                    row = row.child(format!("Link {identifier}"));
+                    row = row.child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-link-issue-{index}"), "Link", false)
+                        .on_click(cx.listener(move |this, _, _, cx| this.link_tracker_issue(item_id.clone(), identifier.clone(), cx))));
+                }
+                TrackerCleanup::PossibleDuplicate { item_id, identifier } => {
+                    let title = self.tracker.health_titles.get(item_id).cloned().unwrap_or_default();
+                    row = row.child(format!("{title} · Possible duplicate of {identifier}"));
+                }
+                TrackerCleanup::StaleRequest { request_id } => {
+                    let request_id = request_id.clone();
+                    row = row.child("Resolve stale request — PR merged")
+                        .child(crate::components::shell_parts::tracker_action(theme, format!("cleanup-resolve-request-{index}"), "Resolve", false)
+                            .debug_selector(move || format!("cleanup-resolve-request-{index}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.resolve_tracker_stale_request(request_id.clone(), cx))));
+                }
+            }
+            list = list.child(row);
         }
         for (index, entry) in self.tracker.health_entries.iter().enumerate() {
             let title = |id: &str| self.tracker.health_titles.get(id).cloned().unwrap_or_else(|| "Work item".into());
@@ -1764,8 +1950,8 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_id.clone(), cx)))
                 .into_any_element();
         }
-        let group = worker.tracker_group();
         let stage = self.tracker.lifecycle_rows.get(&id).map(|row| row.stage).unwrap_or(LifecycleStage::Building);
+        let group = worker.tracker_group();
         let open_pr = worker.prs.iter().find(|pr| pr.state.eq_ignore_ascii_case("open") && !pr.url.is_empty()
             && pr.branch.as_deref().zip(worker.branch.as_deref()).is_some_and(|(pr_branch, branch)| pr_branch == branch));
         let status = if stage == LifecycleStage::ReadyToMerge { crate::status_style::Status::Ready } else { worker.state.into() };
@@ -1789,7 +1975,8 @@ impl Shell {
         header = header.child(crate::components::shell_parts::worker_title(theme, title));
         if let Some(chats) = self.tracker.additional_chats.get(&id) {
             let toggle_id = id.clone();
-            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer().child(format!("{} chats", chats.len() + 1))
+            header = header.child(div().id(SharedString::from(format!("tracker-chats-{id}"))).cursor_pointer()
+                .child(crate::components::shell_parts::tracker_metadata(theme, format!("{} chats", chats.len() + 1)))
                 .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); if !this.tracker.expanded_chats.remove(&toggle_id) { this.tracker.expanded_chats.insert(toggle_id.clone()); } cx.notify(); })));
         }
         if let Some(unseen) = unseen.filter(|unseen| !unseen.is_empty()) {
@@ -1814,7 +2001,7 @@ impl Shell {
                 header = header.child(crate::components::shell_parts::tracker_metadata(theme, "Merged, ticket still open".into()));
             }
         }
-        let track = tracker_stage_track(&id, std::array::from_fn(|index| index <= stage.index()), theme);
+        let track = tracker_stage_track(&id, stage, theme);
         let mut progress = div().flex().items_center().gap(px(Theme::SPACE_SM)).child(track)
             .debug_selector({ let id = id.clone(); move || format!("tracker-progress-{id}") });
         if let Some(todo) = self.tracker.todos.get(&id) {
@@ -1875,7 +2062,7 @@ impl Shell {
         }
         let age = worker.last_active.map(|at| mast_proto::view::format_time_ago(at, chrono::Utc::now())).unwrap_or_default();
         let request = self.tracker.requests.get(&id);
-        let activity = request.map(|request| if group == TrackerGroup::NeedsYou { format!("Asked: {request}") } else { request.clone() })
+        let activity = request.map(|request| if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you) { format!("Asked: {request}") } else { request.clone() })
             .or_else(|| worker.activity.clone())
             .or_else(|| stalled.as_ref().map(|(label, _)| label.clone())).unwrap_or_default();
         let activity = [activity, age.clone()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -1892,7 +2079,8 @@ impl Shell {
         }
         let mut actions = div().flex().items_center().gap(px(Theme::SPACE_SM))
             .debug_selector({ let id = id.clone(); move || format!("tracker-actions-{id}") });
-        if group == TrackerGroup::NeedsYou {
+        if self.tracker.lifecycle_rows.get(&id).is_some_and(|row| row.needs_you)
+            && (group == TrackerGroup::NeedsYou || stage == LifecycleStage::Done) {
             let answer_id = id.clone();
             actions = actions.child(crate::components::shell_parts::tracker_action(theme, format!("tracker-answer-{id}"), "Answer", true)
                 .debug_selector({ let id = id.clone(); move || format!("tracker-answer-{id}") })
