@@ -1,7 +1,7 @@
 //! `chat_archive_info` / `chat_archive`: the engine side of the MCP
 //! `archive_chat`, `list_chats` and `get_chat` "finished worker" support.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use mast_proto::{Chat, ChatIndicator, ChatPrLink, WorkOutlineSnapshot, chat_indicator};
@@ -91,16 +91,27 @@ impl AgentToolsService {
         let chats = self.workspace.read_chats().map_err(|e| e.to_string())?;
         let cache = lock(&self.pr_ticket_cache).clone();
         let mut archived = 0;
+        let mut candidates = 0;
         for space in self.workspace.read_spaces().map_err(|e| e.to_string())? {
             if space.device_id != self.workspace.device_id() { continue; }
             let snapshot = self.work_outline.snapshot(&space.id);
             let Some(days) = snapshot.space_settings.archive_workers_after_days else { continue; };
+            let assignments: HashMap<&str, &str> = snapshot.assignments.iter()
+                .filter(|a| a.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated)
+                .filter_map(|a| a.work_item_id.as_deref().map(|item| (a.chat_id.as_str(), item))).collect();
+            let open_items: HashSet<&str> = snapshot.user_action_requests.iter()
+                .filter(|request| request.is_open()).map(|request| request.work_item_id.as_str()).collect();
             for chat in chats.iter().filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()) && chat.parent_chat_id.is_some()) {
                 if now.signed_duration_since(chat.last_message_at.unwrap_or(chat.created_at)) <= chrono::Duration::days(i64::from(days)) { continue; }
-                if !snapshot.assignments.iter().any(|assignment| assignment.chat_id == chat.id && assignment.state == mast_proto::work_outline::WorkItemChatAssignmentState::Associated) { continue; }
+                let Some(item_id) = assignments.get(chat.id.as_str()) else { continue; };
+                if open_items.contains(item_id) { continue; }
                 let links = self.workspace.chat_pr_links(&chat.id).map_err(|e| e.to_string())?;
                 let states = owned_pr_states(&links, |url| cache.as_ref().and_then(|cache| cache.cached_pr_state(url)));
                 if !self.archivable_verdict_with_states(chat, &snapshot, states, now).archivable { continue; }
+                // Bound the work (including registry re-materialization) in
+                // one daily pass; remaining eligible workers wait for the next.
+                if candidates == 50 { return Ok(archived); }
+                candidates += 1;
                 let sessions = lock(&self.sessions).clone();
                 let _dispatch_guard = match sessions.as_ref() {
                     Some(sessions) => match sessions.try_lock_dispatch(&chat.id) {
