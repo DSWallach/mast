@@ -1,6 +1,18 @@
 //! Reconcile project issues, local items and worker branches into ticket rows.
 use std::collections::{HashMap, HashSet};
 
+pub(crate) fn title_issue_identifier(title: &str) -> Option<&str> {
+    let bytes = title.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() && bytes[end].is_ascii_uppercase() { end += 1; }
+    if !(2..=10).contains(&end) || bytes.get(end) != Some(&b'-') { return None; }
+    let digits = end + 1;
+    end = digits;
+    while end < bytes.len() && bytes[end].is_ascii_digit() { end += 1; }
+    if end == digits || (end < bytes.len() && !bytes[end].is_ascii_whitespace()) { return None; }
+    Some(&title[..end])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalTicket {
     pub item_id: String,
@@ -98,6 +110,14 @@ fn branch_issue(branch: &str, issues: &HashMap<String, usize>) -> Option<usize> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_identifier_requires_exact_team_key() {
+        assert_eq!(title_issue_identifier("ENG-3409 Arrival"), Some("ENG-3409"));
+        for title in ["eng-3409 Arrival", "E-1 Title", "ABCDEFGHIJK-1 Title", "ENG-1suffix", " ENG-1 Title", "ENG- Title"] {
+            assert_eq!(title_issue_identifier(title), None);
+        }
+    }
 
     #[test]
     fn combines_issue_links_and_branch_matches_without_duplicate_chats() {

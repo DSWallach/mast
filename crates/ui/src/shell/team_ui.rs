@@ -187,7 +187,8 @@ fn tracker_reconcile_project(
     }
     let local: Vec<_> = items.iter().filter_map(|(item, _)| {
         let source = snapshot_items.get(item.id.as_str())?;
-        Some(LocalTicket { item_id: item.id.clone(), issue_identifier: references.get(item.id.as_str()).map(|reference| reference.external_id.clone()),
+        Some(LocalTicket { item_id: item.id.clone(), issue_identifier: references.get(item.id.as_str()).map(|reference| reference.external_id.clone())
+            .or_else(|| crate::tracker_tickets::title_issue_identifier(&item.title).filter(|id| issues.iter().any(|issue| issue.identifier == *id)).map(str::to_owned)),
             chat_ids: source.chat_ids.iter().filter(|id| worker_map.get(id.as_str()).is_some_and(|(_, worker)| !worker.archived)).cloned().collect() })
     }).collect();
     let branches: Vec<_> = workers.live().filter(|worker| assignments.get(worker.chat_id.as_str())
