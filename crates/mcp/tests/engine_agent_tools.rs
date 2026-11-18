@@ -275,7 +275,8 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     let launched_id = Box::pin(check_item_chat_title(&core, &tools, &linked_id)).await;
     Box::pin(check_chat_reuse(&core, &tools, &linked_id, &launched_id)).await;
     Box::pin(check_reuse_without_prompt(&tools, &linked_id, &launched_id)).await;
-    Box::pin(check_force_chat(&tools, &linked_id, &launched_id)).await;
+    Box::pin(check_force_chat(&core, &tools, &linked_id, &launched_id)).await;
+    Box::pin(check_unlinked_item_title(&core, &tools)).await;
 
     let args = json!({ "project": SPACE, "harness": "claude-code", "title": "Reviewer",
                        "prompt": "review the diff", "idempotency_key": "spawn-reviewer" });
@@ -308,7 +309,7 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
         .iter()
         .filter(|c| c.parent_chat_id.as_deref() == Some(PARENT))
         .collect();
-    assert_eq!(children.len(), 3);
+    assert_eq!(children.len(), 4);
     assert!(children.iter().any(|c| c.id == child));
     let operation = mast_proto::agent_tools::operation_id(PARENT, "spawn-reviewer");
     let command_id = derive_id(&operation, roles::COMMAND);
@@ -419,10 +420,19 @@ async fn check_reuse_without_prompt(tools: &Tools, item_id: &str, chat_id: &str)
     assert!(err.contains("operationConflict"), "{err}");
 }
 
-async fn check_force_chat(tools: &Tools, item_id: &str, chat_id: &str) {
+async fn check_force_chat(core: &EngineCore, tools: &Tools, item_id: &str, chat_id: &str) {
     let forced = tools.call("create_chat", json!({"workItemId": item_id,
         "prompt": "Independent work", "newChat": true, "idempotencyKey": "force-chat"})).await.unwrap();
     assert_ne!(forced["chatId"], chat_id);
+    let chat = core.workspace.chat(forced["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(chat.title.as_deref(), Some("ENG-123 Implement feature"));
+}
+
+async fn check_unlinked_item_title(core: &EngineCore, tools: &Tools) {
+    let item = tools.call("work_outline_create_child", json!({"title": "Review behavior", "idempotencyKey": "create-unlinked"})).await.unwrap();
+    let chat = tools.call("create_chat", json!({"workItemId": item["workItemId"], "prompt": "Review the change", "idempotencyKey": "launch-unlinked"})).await.unwrap();
+    let stored = core.workspace.chat(chat["chatId"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(stored.title.as_deref(), Some("Review behavior"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
