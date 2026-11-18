@@ -358,6 +358,9 @@ impl Shell {
             effective: effective.entries,
             instructions_changed,
             instructions_open: instructions_changed,
+            review_defaults: None,
+            merge_gate: false,
+            review_model_seeded: false,
             launch_blocker,
             op: OperationSlot::default(),
             starting: false,
@@ -1519,7 +1522,6 @@ pub(super) fn start_chat_card(
             )
         });
 
-    let review_rows = review_launch_rows(dialog, theme, cx);
     let failure = dialog.failure.clone().map(|failure| {
         div()
             .debug_selector(|| "start-chat-failure".into())
@@ -1760,6 +1762,7 @@ fn pr_start_chat_card(
         .flex_row()
         .items_center()
         .child(dialog.pickers.clone());
+    let review_rows = review_launch_rows(dialog, theme, cx);
     let failure = dialog.failure.clone().map(|failure| {
         div()
             .debug_selector(|| "start-chat-failure".into())
