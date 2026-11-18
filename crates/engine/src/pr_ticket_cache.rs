@@ -346,7 +346,9 @@ impl PrTicketCache {
     /// Read a cached PR state without scheduling a refresh or a git probe.
     pub(crate) fn cached_pr_state(&self, url: &str) -> Option<String> {
         lock(&self.inner.pr_cache).get(&PrKey::Url(url.to_owned()))
-            .filter(|entry| entry.fresh_pr())
+            // A merged PR cannot reopen; closed and open states still need a
+            // fresh observation before they influence an archive decision.
+            .filter(|entry| entry.fresh_pr() || entry.data.as_ref().is_some_and(|status| status.state.eq_ignore_ascii_case("merged")))
             .and_then(|entry| entry.data.as_ref().map(|status| status.state.clone()))
     }
     /// Read a fresh durable-link result without scheduling any work. The outer
@@ -1563,6 +1565,23 @@ mod tests {
         );
         cache.status_for(Some("/tmp/repo"), Some("feature-without-pr"), None, None);
         assert_eq!(lock(&cache.inner.pending_pr).len(), 1);
+    }
+
+    #[test]
+    fn archive_cache_uses_stale_merged_but_not_stale_closed_prs() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/acme/repo/pull/1";
+        let mut status = pr_json_to_status(&serde_json::json!({"number": 1, "state": "MERGED"}));
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status.clone()), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert_eq!(cache.cached_pr_state(url).as_deref(), Some("MERGED"));
+        status.state = "CLOSED".into();
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(status), fetched_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        });
+        assert_eq!(cache.cached_pr_state(url), None);
+        assert!(lock(&cache.inner.pending_pr).is_empty());
     }
 
     #[test]
