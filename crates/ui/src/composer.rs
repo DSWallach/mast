@@ -1680,6 +1680,9 @@ fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBind
 
 /// Bind the composer keymap. Call once at app boot.
 pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
+    for prefix in ["cmd", "ctrl"] {
+        cx.bind_keys([KeyBinding::new(&format!("{prefix}-c"), Copy, Some("QuestionPanel"))]);
+    }
     let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, false);
     generic_bindings.push(KeyBinding::new(
         "enter",
@@ -8316,7 +8319,14 @@ impl Composer {
 
         crate::components::conversation_wizard_surface(div()
             .id("question-panel")
+            .key_context("QuestionPanel")
             .track_focus(&self.wizard_focus)
+            .on_action(cx.listener(|this, _: &Copy, window, cx| {
+                if let Some(text) = crate::markdown::selection::selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    window.focus(&this.input.focus_handle(cx), cx);
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             })), &theme, COMPOSER_RADIUS)
@@ -8368,6 +8378,10 @@ impl Composer {
                     .child(
                         div()
                             .id(("wizard-question", page))
+                            .debug_selector(|| "wizard-question".into())
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                                window.focus(&this.wizard_focus, cx);
+                            }))
                             // A long command gets its own viewport so the
                             // approval choices stay close at hand.
                             .max_h(window.viewport_size().height * 0.25)
@@ -8378,7 +8392,7 @@ impl Composer {
                             .line_height(px(20.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
+                            .child(crate::markdown::render::plain_text(question.question.clone(), &theme)),
                     )
                     .when(question.multi_select, |el| {
                         el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))
@@ -10825,6 +10839,30 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
         }
+    }
+
+    #[gpui::test]
+    fn wizard_question_selection_copies_with_keyboard(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            init(cx, ComposerSendBehavior::Enter);
+        });
+        let state = cx.new(|_| AppState::new());
+        let (composer, cx) = cx.add_window_view(|_, cx| {
+            let mut composer = Composer::new(state, cx);
+            composer.wizard = Some(Wizard::new("req".into(), vec![question("q", &["answer"], false)]));
+            composer
+        });
+        cx.simulate_resize(size(px(640.0), px(480.0)));
+        cx.run_until_parked();
+        let position = cx.debug_bounds("wizard-question").unwrap().origin + point(px(5.0), px(10.0));
+        cx.simulate_event(MouseDownEvent { position, button: MouseButton::Left, click_count: 2, ..Default::default() });
+        cx.simulate_event(MouseUpEvent { position, button: MouseButton::Left, ..Default::default() });
+        cx.simulate_keystrokes("cmd-c");
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("Question")));
+        cx.simulate_keystrokes("x");
+        assert_eq!(composer.read_with(cx, |composer, cx| composer.input.read(cx).text().to_string()), "x");
     }
 
     #[test]
