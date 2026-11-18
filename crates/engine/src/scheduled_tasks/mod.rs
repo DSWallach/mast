@@ -5,6 +5,8 @@ pub mod evaluator;
 mod identity;
 pub(crate) mod import;
 mod lifecycle;
+mod notion;
+pub(crate) use notion::run_prompt;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
@@ -176,6 +178,10 @@ impl ScheduledTasks {
                     && (!after_success_provided || draft.output == ScheduledTaskOutput::Interactive)
                 {
                     draft.after_success = task.draft.after_success;
+                }
+                // A client that predates the setting omits it; keep the stored one.
+                if draft.write_to_notion.is_none() && let Some(task) = &old {
+                    draft.write_to_notion = task.draft.write_to_notion;
                 }
                 self.validate(&draft)?;
                 if draft.enabled {

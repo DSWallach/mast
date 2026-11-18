@@ -7691,7 +7691,7 @@ impl Composer {
                     .and_then(|spec| spec.space_id.as_ref())
                     .is_some();
                 let command = SessionCommandPayload::Run {
-                    request: RunRequest { scheduled_task: None, approval_rules: resolved.approval_rules,
+                    request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: resolved.approval_rules,
                         prompt: content.clone(),
                         harness: resolved.harness,
                         model: resolved.model.clone(),

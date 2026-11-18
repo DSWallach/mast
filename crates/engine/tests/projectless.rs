@@ -173,7 +173,7 @@ async fn exercise_projectless(command_first: bool) {
             .queue_command(
                 CHAT,
                 SessionCommandPayload::Run {
-                    request: RunRequest { scheduled_task: None, approval_rules: false,
+                    request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
                         prompt: "hello from no project".into(),
                         harness: None,
                         model: None,

@@ -24,6 +24,9 @@ pub struct ScheduledChat {
     /// Captured from the task's run snapshot when the chat is created.
     #[serde(default, skip_serializing_if = "ScheduledTaskOutput::is_interactive")]
     pub output: ScheduledTaskOutput,
+    /// The run snapshot's Write to Notion setting, for the agent environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_to_notion: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,6 +102,11 @@ pub struct ScheduledTaskDraft {
     /// Applies only to Background runs and is captured in each run snapshot.
     #[serde(default, skip_serializing_if = "ScheduledTaskAfterSuccess::is_archive")]
     pub after_success: ScheduledTaskAfterSuccess,
+    /// Whether the task's procedure may write to Notion. `None` is a task
+    /// saved before the setting existed: runs carry no Notion instruction and
+    /// keep their prior behavior. New and imported tasks start `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_to_notion: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

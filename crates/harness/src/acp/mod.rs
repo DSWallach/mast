@@ -1354,7 +1354,7 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-        scheduled_task: Option<&str>,
+        scheduled: Option<crate::ScheduledEnv<'_>>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
@@ -1363,7 +1363,7 @@ impl AcpHarness {
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
-        crate::export_scheduled_task(&mut cmd, scheduled_task);
+        crate::export_scheduled_task(&mut cmd, scheduled);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -1991,7 +1991,7 @@ impl AcpHarness {
             }
         }
         let (scratch, mut child, stderr_tail) =
-            self.spawn_agent(Some(&request.cwd), true, &[], request.scheduled_task.as_deref()).await?;
+            self.spawn_agent(Some(&request.cwd), true, &[], crate::ScheduledEnv::of(&request)).await?;
         let stdin = child
             .stdin
             .take()

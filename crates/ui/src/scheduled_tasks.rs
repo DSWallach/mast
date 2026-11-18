@@ -203,6 +203,14 @@ impl ScheduledTasksPage {
         })
     }
 
+    fn notion_writes_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_TASK_NOTION_WRITES_V1)
+        })
+    }
+
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -258,6 +266,10 @@ impl ScheduledTasksPage {
                 draft.entry("afterSuccess").or_insert(serde_json::json!(ScheduledTaskAfterSuccess::Archive));
             } else {
                 draft.remove("afterSuccess");
+            }
+            // An older host would drop the field, so it is never sent to one.
+            if !self.notion_writes_supported(cx) {
+                draft.remove("writeToNotion");
             }
         }
         params["targetDeviceId"] = serde_json::json!(target);
@@ -516,6 +528,7 @@ impl ScheduledTasksPage {
                         ScheduledTaskOutput::Interactive
                     },
                     after_success: Default::default(),
+                    write_to_notion: self.notion_writes_supported(cx).then_some(false),
                 },
             )
         };
@@ -1443,6 +1456,9 @@ impl Render for ScheduledTasksPage {
                 );
             }
             let enabled = e.draft.enabled;
+            // A task saved before the setting existed already runs unrestricted.
+            let notion_writes = e.draft.write_to_notion.unwrap_or(true);
+            let notion_writes_supported = self.notion_writes_supported(cx);
             let mode = crate::pickers::approval::ApprovalMode::from_config(&e.draft.config);
             content = content.child(
                 div()
@@ -1467,6 +1483,28 @@ impl Render for ScheduledTasksPage {
                             cx.notify();
                         })),
                     )
+                    .when(notion_writes_supported, |row| {
+                        row.child(
+                            popover::btn_ghost(
+                                &theme,
+                                if notion_writes {
+                                    "✓ Write to Notion on"
+                                } else {
+                                    "○ Write to Notion off"
+                                },
+                                "task-notion-writes",
+                            )
+                            .id("task-notion-writes")
+                            .debug_selector(|| "task-notion-writes".into())
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                if let Some(e) = p.editor.as_mut() {
+                                    e.draft.write_to_notion =
+                                        Some(!e.draft.write_to_notion.unwrap_or(true));
+                                }
+                                cx.notify();
+                            })),
+                        )
+                    })
                     .child(
                         popover::btn_ghost(
                             &theme,
@@ -1799,6 +1837,7 @@ mod tests {
                         capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
                         capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
                     ],
                 ),
                 ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
@@ -1824,7 +1863,9 @@ mod tests {
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_some());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_some());
+        assert!(cx.debug_bounds("task-notion-writes").is_some());
         page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, Some(false));
             assert_eq!(
                 p.editor_draft(cx).unwrap().output,
                 ScheduledTaskOutput::Background
@@ -1854,6 +1895,10 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, None);
+        });
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_none());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_none());

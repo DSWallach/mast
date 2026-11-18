@@ -279,7 +279,7 @@ impl ClaudeHarness {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         self.apply_home(&mut cmd);
-        crate::export_scheduled_task(&mut cmd, request.scheduled_task.as_deref());
+        crate::export_scheduled_task(&mut cmd, crate::ScheduledEnv::of(request));
         cmd.args([
             "--print",
             "--input-format",

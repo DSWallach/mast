@@ -47,6 +47,9 @@ pub mod capabilities {
     pub const SCHEDULED_TASK_OUTPUT_V1: &str = "scheduled-task-output-v1";
     /// The host supports the after-success policy for Background runs.
     pub const SCHEDULED_TASK_AFTER_SUCCESS_V1: &str = "scheduled-task-after-success-v1";
+    /// The host stores a scheduled task's `writeToNotion` setting and passes it
+    /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
+    pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
     /// The host previews and applies scheduled-run chat cleanup.
     pub const SCHEDULED_RUN_CLEANUP_V1: &str = "scheduled-run-cleanup-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
@@ -95,6 +98,7 @@ pub mod capabilities {
         SCHEDULED_TASK_WORK_ITEM_V1,
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
+        SCHEDULED_TASK_NOTION_WRITES_V1,
         SCHEDULED_RUN_CLEANUP_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
