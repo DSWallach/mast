@@ -300,7 +300,6 @@ pub(super) fn sync_flow_after_auth(
     }
 }
 
-/// The "Create your workspace" gate (feature-inventory §1.2 OrgGate).
 impl Shell {
     pub(super) fn request_sign_out(&mut self, cx: &mut Context<Self>) {
         self.close_user_menu(cx);

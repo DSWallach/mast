@@ -737,6 +737,7 @@ struct RenameChatDialog {
     _events: Subscription,
 }
 
+/// The "Create your workspace" gate (feature-inventory §1.2 OrgGate).
 struct OrgGateUi {
     name_input: Entity<ComposerInput>,
     orgs: Loadable<Vec<OrgRow>>,
