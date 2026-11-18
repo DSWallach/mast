@@ -132,6 +132,14 @@ impl ScheduledTasksPage {
         }));
         page
     }
+    /// Offline new-task editor for the preview renderer.
+    pub(crate) fn offline_editor_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.target = Some("local".into());
+        page.edit(None, cx);
+        page.error = None;
+        page
+    }
     pub fn show_task(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
         if let Some(device) = device {
             if self.target.as_ref() != Some(&device) {
