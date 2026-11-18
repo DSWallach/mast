@@ -816,4 +816,3 @@ pub(super) fn spawn_subagent_watch(
         }
     })
 }
-

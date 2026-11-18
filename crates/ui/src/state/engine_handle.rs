@@ -490,4 +490,3 @@ pub(super) async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, 
         Err(err) => Err(err),
     }
 }
-
