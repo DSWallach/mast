@@ -4548,3 +4548,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod session_publication_bench {
+    use super::*;
+    include!("../tests/session_publication_bench.rs");
+    session_publication_benchmark!();
+}
