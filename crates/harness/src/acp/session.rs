@@ -20,6 +20,42 @@ impl AcpSessionState {
         // Descendants may hold stdout open after the adapter exits.
         self.exit_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
     }
+
+    async fn expire_prompt_stall(
+        &mut self,
+        event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+        session_id: &str,
+        agent_name: &str,
+        stall_hint: &str,
+        prompt_stall: Option<Duration>,
+        done_current: &mut bool,
+    ) {
+        let _ = send(
+            event_tx,
+            AgentEvent::Error {
+                code: None, resets_at: None, message: format!(
+                    "{agent_name} did not respond to the prompt at all \
+                     (no wire activity for {}s). {}",
+                    prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
+                    stall_hint,
+                ),
+            },
+        )
+        .await;
+        *done_current = true;
+        let _ = send(
+            event_tx,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                result: None,
+                error: Some(format!(
+                    "{agent_name} is unresponsive — the run was closed."
+                )),
+                session_id: Some(session_id.to_owned()),
+            },
+        )
+        .await;
+    }
 }
 
 struct EstablishedSession {
@@ -1149,31 +1185,9 @@ pub(super) async fn run_session(session: Session) {
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
-                let _ = send(
-                    &event_tx,
-                    AgentEvent::Error {
-                        code: None, resets_at: None, message: format!(
-                            "{agent_name} did not respond to the prompt at all \
-                             (no wire activity for {}s). {}",
-                            prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
-                            stall_hint,
-                        ),
-                    },
-                )
-                .await;
-                done_current = true;
-                let _ = send(
-                    &event_tx,
-                    AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some(format!(
-                            "{agent_name} is unresponsive — the run was closed."
-                        )),
-                        session_id: Some(session_id.clone()),
-                    },
-                )
-                .await;
+                state.expire_prompt_stall(
+                    &event_tx, &session_id, agent_name, stall_hint, prompt_stall, &mut done_current,
+                ).await;
                 break 'main;
             },
 
