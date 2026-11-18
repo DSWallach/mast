@@ -342,6 +342,16 @@ pub struct PrTicketCache {
 }
 
 impl PrTicketCache {
+    /// Read a fresh durable-link result without scheduling any work. The outer
+    /// option is absent when the result is unknown; the inner option is absent
+    /// when a lookup completed and found no PR.
+    pub fn peek_pr_url(&self, url: &str) -> Option<Option<PrStatus>> {
+        let cache = lock(&self.inner.pr_cache);
+        cache.get(&PrKey::Url(url.to_owned()))
+            .filter(|entry| entry.fresh_pr())
+            .map(|entry| entry.data.clone())
+    }
+
     pub fn new() -> Self {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
         Self {
@@ -1603,6 +1613,20 @@ mod tests {
         );
         assert_eq!(status.pr_links.len(), 1);
         assert_eq!(status.pr_links[0].url, links[0].url);
+    }
+
+    #[test]
+    fn peek_pr_url_does_not_queue_work_and_distinguishes_a_cached_miss() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/1";
+        assert!(cache.peek_pr_url(url).is_none());
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: None,
+            fetched_at: Instant::now(),
+        });
+        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
     }
 
     #[test]
