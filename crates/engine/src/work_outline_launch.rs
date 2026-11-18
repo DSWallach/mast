@@ -827,6 +827,9 @@ impl WorkItemLaunchService {
             if !occupied || self.workspace.ledger_holds(&ledger_worktree_key(operation_id, &path)) {
                 break candidate;
             }
+            if suffix >= 100 {
+                return Err(error(WorkOutlineErrorCode::Invalid, "No available worktree name after 100 attempts"));
+            }
             suffix = suffix.checked_add(1).ok_or_else(|| error(WorkOutlineErrorCode::Invalid, "No available worktree name"))?;
         };
         self.apply_worktree_choice_internal(resolved, &WorktreeChoice::CreateNew { name: selected }, operation_id, true).await
