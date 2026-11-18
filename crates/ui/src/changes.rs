@@ -5102,7 +5102,7 @@ impl Changes {
             )),
             _ => None,
         };
-        let left_pad = Theme::SPACE_MD + group.nesting_depth as f32 * 16.0;
+        let left_pad = Theme::SPACE_MD + group.nesting_depth as f32 * Theme::SPACE_LG;
         div()
             .id(("submodule-hdr", group_ix))
             .w_full()
@@ -5111,7 +5111,7 @@ impl Changes {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(Theme::SPACE_SM))
             .pl(px(left_pad))
             .pr(px(Theme::SPACE_MD))
             .bg(theme.ink(0.025))
@@ -5524,7 +5524,7 @@ impl Changes {
                     div()
                         .flex_none()
                         .h(px(crate::surface_chrome::CONTROL_SIZE))
-                        .px(px(6.0))
+                        .px(px(Theme::SPACE_SM))
                         .when(true, |el| crate::components::changes_revision_label(el, &theme))
                         .flex()
                         .items_center()
@@ -6284,7 +6284,7 @@ impl Changes {
                 .debug_selector(|| "changes-diff-target-error".into())
                 .flex_none()
                 .px(px(Theme::SPACE_LG))
-                .py(px(4.0))
+                .py(px(Theme::SPACE_XS))
                 .child(
                     crate::error_notice::ErrorNotice::from_text(
                         "changes-diff-target-error",
@@ -6311,7 +6311,7 @@ impl Changes {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(Theme::SPACE_SM))
                 .px(px(Theme::SPACE_LG))
                 .border_b_1()
                 .border_color(crate::theme::hairline(0.06))
