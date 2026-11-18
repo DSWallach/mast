@@ -1610,6 +1610,7 @@ mod tests {
     #[test]
     fn completion_observation_queue_is_bounded_and_rotates() {
         use crate::pr_merged_wakes::CompletionObservation;
+        assert!(COMPLETION_SCAN_INTERVAL >= Duration::from_secs(60));
         let cache = PrTicketCache::new();
         let observations: Vec<_> = (0..20).map(|n| CompletionObservation::Url(format!("https://github.com/acme/repo/pull/{n}"))).collect();
         cache.queue_completion_observations(&observations);

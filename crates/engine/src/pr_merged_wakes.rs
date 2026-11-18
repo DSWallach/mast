@@ -97,7 +97,6 @@ impl PrMergedWakes {
                 .filter(|request| request.is_open() && request.dedupe_key.as_deref().is_some_and(|key| key.starts_with("merged-pr-completion:")))
                 .map(|request| request.work_item_id.as_str()).collect();
             let pending_prs: HashSet<(&str, &str)> = snapshot.user_action_requests.iter()
-                .filter(|request| request.is_open())
                 .filter_map(|request| request.dedupe_key.as_deref().map(|key| (request.work_item_id.as_str(), key))).collect();
             for reference in &snapshot.external_references {
                 if active.contains(reference.work_item_id.as_str())
