@@ -61,6 +61,20 @@ pub(crate) fn long_chat(messages: usize) -> Vec<SessionMessageEntry> {
         .collect()
 }
 
+fn begin_sync_measurements() {
+    crate::transcript::SYNC_MEASUREMENTS.with(|measurements| *measurements.borrow_mut() = Some(Vec::new()));
+}
+
+fn report_sync_measurements() {
+    let mut measurements = crate::transcript::SYNC_MEASUREMENTS.with(|measurements| measurements.borrow_mut().take().unwrap());
+    measurements.retain(|(_, visited, _)| *visited > 0);
+    measurements.sort_by_key(|(duration, _, _)| *duration);
+    let count = measurements.len();
+    assert!(count > 0, "no populated sync measurements");
+    let (duration, visited, cloned) = measurements[(count * 95 / 100).min(count - 1)];
+    eprintln!("BENCH transcript | sync samples={count} p95_ms={:.2} prepared_rows_visited={visited} prepared_rows_cloned={cloned}", duration.as_secs_f64() * 1000.0);
+}
+
 struct Cached(Entity<Transcript>);
 
 impl Render for Cached {
@@ -318,6 +332,7 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
         updates.push(frame(&update));
     }
     RENDERED_ROW_COUNT.with(|count| count.set(0));
+    begin_sync_measurements();
     measure_n(
         "transcript",
         "subscription chunk through preparation and draw",
@@ -329,6 +344,7 @@ fn bench_subscribed_transcript_stream(cx: &mut gpui::TestAppContext) {
             draw(vcx);
         },
     );
+    report_sync_measurements();
     let rendered = RENDERED_ROW_COUNT.with(|count| count.get());
     let rows = transcript.read_with(vcx, |transcript, _| transcript.rows.len());
     let reused = state.read_with(vcx, |state, _| {

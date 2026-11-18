@@ -1537,7 +1537,39 @@ impl Transcript {
 thread_local! {
     /// Rows visited by `sync`'s tool-group passes (previous-tool map and live
     /// group loop).
+    pub(crate) static SYNC_MEASUREMENTS: std::cell::RefCell<Option<Vec<(std::time::Duration, usize, usize)>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static SYNC_TOOL_SCAN_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static SYNC_ROW_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+struct SyncMeasurement(Option<std::time::Instant>);
+
+#[cfg(test)]
+impl SyncMeasurement {
+    fn start() -> Self {
+        let enabled = SYNC_MEASUREMENTS.with(|measurements| measurements.borrow().is_some());
+        if enabled { SYNC_ROW_COUNTS.with(|counts| counts.set((0, 0))); }
+        Self(enabled.then(std::time::Instant::now))
+    }
+}
+
+#[cfg(test)]
+impl Drop for SyncMeasurement {
+    fn drop(&mut self) {
+        if let Some(started) = self.0 {
+            let (visited, cloned) = SYNC_ROW_COUNTS.with(|counts| counts.get());
+            SYNC_MEASUREMENTS.with(|measurements| {
+                if let Some(measurements) = measurements.borrow_mut().as_mut() {
+                    measurements.push((started.elapsed(), visited, cloned));
+                }
+            });
+        }
+    }
 }
 
 #[inline]
@@ -4712,6 +4744,8 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        let _measurement = SyncMeasurement::start();
                 if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -4884,6 +4918,8 @@ impl Transcript {
                 .and_then(|id| state.prepared_transcripts.get(id));
             for entry in entries {
                 if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
+                    #[cfg(test)]
+                    SYNC_ROW_COUNTS.with(|counts| { let (visited, cloned) = counts.get(); counts.set((visited + rows.len(), cloned + rows.len())); });
                     new_rows.extend(rows.iter().cloned());
                 } else {
                     new_rows.extend(self.rows_for(entry, false));
