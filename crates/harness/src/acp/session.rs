@@ -216,6 +216,145 @@ impl AcpSessionState {
         LoopControl::Continue
     }
 
+    async fn accept_incoming(&mut self, inc: Option<Incoming>) -> LoopControl {
+        match inc {
+            Some(Incoming::Notification { method, params }) => {
+                if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != self.session_id) {
+                    return LoopControl::Continue;
+                }
+                self.last_update_at = tokio::time::Instant::now();
+                // Wire traffic is a sign of life for the prompt-stall
+                // watchdog — EXCEPT session boilerplate: opencode emits
+                // available_commands_update right after session/new on
+                // every session, including ones whose provider is down
+                // (where it then retries the provider stream forever
+                // with nothing further on the wire — verified live,
+                // 1.18.18). One such frame must not disarm the watchdog
+                // for the whole turn; only turn progress counts.
+                let boilerplate = method == "session/update"
+                    && matches!(
+                        params
+                            .get("update")
+                            .and_then(|u| u.get("sessionUpdate"))
+                            .and_then(Value::as_str),
+                        Some("available_commands_update")
+                            | Some("config_option_update")
+                            | Some("current_mode_update")
+                    );
+                if !boilerplate {
+                    self.prompt_stall_deadline = None;
+                }
+                // `_x.ai/session/prompt_complete` — the AUTHORITATIVE
+                // turn end for agents advertising it (grok): the
+                // `session/prompt` RPC can hang after the turn really
+                // finished. Settle through the SAME response arm by
+                // swapping the in-flight future for the synthesized
+                // response; the abandoned RPC future drains in the
+                // background and its late result is discarded. Guards:
+                // session match, an outstanding prompt, and an exact
+                // prompt-id match (a stale replay of an already-settled
+                // prompt must never settle a newer turn; grok echoes the
+                // `_meta.promptId` we mint — verified live, 1.0.4).
+                if self.prompt_complete_extension
+                    && method == "_x.ai/session/prompt_complete"
+                    && !self.interrupted
+                    && self.turn.is_some()
+                    && params.get("sessionId").and_then(Value::as_str)
+                        == Some(self.session_id.as_str())
+                {
+                    let pid = params
+                        .get("promptId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let stale = pid.as_deref().is_some_and(|p| {
+                        self.completed_prompts.iter().any(|c| c == p)
+                    }) || (pid.is_some() && pid != self.current_prompt_id);
+                    if !stale {
+                        let stop = params
+                            .get("stopReason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("end_turn")
+                            .to_owned();
+                        if let Some(old) = self.turn.take() {
+                            tokio::spawn(async move {
+                                let _ = old.await;
+                            });
+                        }
+                        self.turn = Some(Box::pin(async move {
+                            Ok(json!({ "stopReason": stop }))
+                        }));
+                    }
+                }
+                // Other notifications (other sessions, agent noise) are
+                // tolerated by design.
+                let events =
+                    session_update_events(&method, &params, &self.session_id, &mut self.subagents);
+                for ev in events {
+                    track_open_tools(&ev, &mut self.open_tools);
+                    if !send(&self.event_tx, ev).await {
+                        return LoopControl::Stop;
+                    }
+                }
+            }
+            Some(Incoming::Request { id, method, params }) => {
+                self.prompt_stall_deadline = None;
+                for ev in handle_server_request_live(
+                    &self.client,
+                    id,
+                    &method,
+                    &params,
+                    &self.request_input,
+                    &self.session_id,
+                ) {
+                    if !send(&self.event_tx, ev).await {
+                        return LoopControl::Stop;
+                    }
+                }
+            }
+            Some(Incoming::Eof) | None => {
+                // The turn ends via a request RESPONSE, which races EOF
+                // through a different channel than notifications: an agent
+                // exiting right after its final response must read as a
+                // clean finish, not a crash. The response (if any) is
+                // already resolved by the reader before it sends Eof.
+                // Only a RESOLVED response is a clean finish; a request
+                // failed by the reader's EOF cleanup falls through to the
+                // crash-message bookkeeping below (stderr tail intact).
+                if let Some(mut fut) = self.turn.take()
+                    && let Ok(res @ Ok(_)) =
+                        tokio::time::timeout(Duration::from_millis(50), &mut fut).await
+                {
+                    let (prev, _next) = rotate(&mut self.assistant_message_id);
+                    let _ = send(
+                        &self.event_tx,
+                        AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                    )
+                    .await;
+                    if let Some(usage) = usage_from_response(&res) {
+                        let _ = send(&self.event_tx, usage).await;
+                    }
+                    let (status, error) = stop_outcome(&res, self.interrupted);
+                    self.done_current = true;
+                    if self.interrupted {
+                        self.done_after_interrupt = true;
+                    }
+                    let _ = send(
+                        &self.event_tx,
+                        AgentEvent::Done {
+                            status,
+                            result: None,
+                            error,
+                            session_id: Some(self.session_id.clone()),
+                        },
+                    )
+                    .await;
+                }
+                return LoopControl::Stop;
+            }
+        }
+        LoopControl::Continue
+    }
+
     fn observe_child_exit(
         &mut self,
         status: std::io::Result<std::process::ExitStatus>,
@@ -840,138 +979,8 @@ pub(super) async fn run_session(session: Session) {
                 }
             },
 
-            inc = incoming.recv() => match inc {
-                Some(Incoming::Notification { method, params }) => {
-                    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != state.session_id) {
-                        continue;
-                    }
-                    state.last_update_at = tokio::time::Instant::now();
-                    // Wire traffic is a sign of life for the prompt-stall
-                    // watchdog — EXCEPT session boilerplate: opencode emits
-                    // available_commands_update right after session/new on
-                    // every session, including ones whose provider is down
-                    // (where it then retries the provider stream forever
-                    // with nothing further on the wire — verified live,
-                    // 1.18.18). One such frame must not disarm the watchdog
-                    // for the whole turn; only turn progress counts.
-                    let boilerplate = method == "session/update"
-                        && matches!(
-                            params
-                                .get("update")
-                                .and_then(|u| u.get("sessionUpdate"))
-                                .and_then(Value::as_str),
-                            Some("available_commands_update")
-                                | Some("config_option_update")
-                                | Some("current_mode_update")
-                        );
-                    if !boilerplate {
-                        state.prompt_stall_deadline = None;
-                    }
-                    // `_x.ai/session/prompt_complete` — the AUTHORITATIVE
-                    // turn end for agents advertising it (grok): the
-                    // `session/prompt` RPC can hang after the turn really
-                    // finished. Settle through the SAME response arm by
-                    // swapping the in-flight future for the synthesized
-                    // response; the abandoned RPC future drains in the
-                    // background and its late result is discarded. Guards:
-                    // session match, an outstanding prompt, and an exact
-                    // prompt-id match (a stale replay of an already-settled
-                    // prompt must never settle a newer turn; grok echoes the
-                    // `_meta.promptId` we mint — verified live, 1.0.4).
-                    if state.prompt_complete_extension
-                        && method == "_x.ai/session/prompt_complete"
-                        && !state.interrupted
-                        && state.turn.is_some()
-                        && params.get("sessionId").and_then(Value::as_str)
-                            == Some(state.session_id.as_str())
-                    {
-                        let pid = params
-                            .get("promptId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
-                        let stale = pid.as_deref().is_some_and(|p| {
-                            state.completed_prompts.iter().any(|c| c == p)
-                        }) || (pid.is_some() && pid != state.current_prompt_id);
-                        if !stale {
-                            let stop = params
-                                .get("stopReason")
-                                .and_then(Value::as_str)
-                                .unwrap_or("end_turn")
-                                .to_owned();
-                            if let Some(old) = state.turn.take() {
-                                tokio::spawn(async move {
-                                    let _ = old.await;
-                                });
-                            }
-                            state.turn = Some(Box::pin(async move {
-                                Ok(json!({ "stopReason": stop }))
-                            }));
-                        }
-                    }
-                    // Other notifications (other sessions, agent noise) are
-                    // tolerated by design.
-                    let events =
-                        session_update_events(&method, &params, &state.session_id, &mut state.subagents);
-                    for ev in events {
-                        track_open_tools(&ev, &mut state.open_tools);
-                        if !send(&state.event_tx, ev).await {
-                            break 'main;
-                        }
-                    }
-                }
-                Some(Incoming::Request { id, method, params }) => {
-                    state.prompt_stall_deadline = None;
-                    for ev in handle_server_request_live(
-                        &state.client,
-                        id,
-                        &method,
-                        &params,
-                        &state.request_input,
-                        &state.session_id,
-                    ) {
-                        if !send(&state.event_tx, ev).await {
-                            break 'main;
-                        }
-                    }
-                }
-                Some(Incoming::Eof) | None => {
-                    // The turn ends via a request RESPONSE, which races EOF
-                    // through a different channel than notifications: an agent
-                    // exiting right after its final response must read as a
-                    // clean finish, not a crash. The response (if any) is
-                    // already resolved by the reader before it sends Eof.
-                    // Only a RESOLVED response is a clean finish; a request
-                    // failed by the reader's EOF cleanup falls through to the
-                    // crash-message bookkeeping below (stderr tail intact).
-                    if let Some(mut fut) = state.turn.take()
-                        && let Ok(res @ Ok(_)) =
-                            tokio::time::timeout(Duration::from_millis(50), &mut fut).await
-                    {
-                        let (prev, _next) = rotate(&mut state.assistant_message_id);
-                        let _ = send(
-                            &state.event_tx,
-                            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
-                        )
-                        .await;
-                        if let Some(usage) = usage_from_response(&res) {
-                            let _ = send(&state.event_tx, usage).await;
-                        }
-                        let (status, error) = stop_outcome(&res, state.interrupted);
-                        state.done_current = true;
-                        if state.interrupted {
-                            state.done_after_interrupt = true;
-                        }
-                        let _ = send(
-                            &state.event_tx,
-                            AgentEvent::Done {
-                                status,
-                                result: None,
-                                error,
-                                session_id: Some(state.session_id.clone()),
-                            },
-                        )
-                        .await;
-                    }
+            inc = incoming.recv() => {
+                if state.accept_incoming(inc).await == LoopControl::Stop {
                     break 'main;
                 }
             },
