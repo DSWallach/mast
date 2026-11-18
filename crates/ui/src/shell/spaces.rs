@@ -2583,7 +2583,7 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let mut chats: Vec<mast_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats_unsorted(Utc::now(), filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
@@ -2739,7 +2739,7 @@ impl Shell {
         let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
+                .sidebar_chats_unsorted(now, filter.as_deref())
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
@@ -3117,7 +3117,7 @@ impl Shell {
                     )
                     .into();
                     if is_moving {
-                        self.render_chat_row(
+                        self.render_chat_row_with_chat(
                             chat.id.clone(),
                             title,
                             time_ago,
@@ -3132,12 +3132,14 @@ impl Shell {
                             None,
                             jump_label,
                             None,
+                            Some(&chat),
                             theme,
                             cx,
                         )
                     } else {
                         self.cached_chat_row(
                             ChatRowArgs {
+                                chat: chat.clone(),
                                 id: chat.id.clone(),
                                 title,
                                 time_ago,
@@ -3644,7 +3646,7 @@ impl Shell {
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
                 list = list.child(
-                    self.render_chat_row(
+                    self.render_chat_row_with_chat(
                         chat.id.clone(),
                         transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
@@ -3663,6 +3665,7 @@ impl Shell {
                         None,
                         None,
                         None,
+                        Some(&chat),
                         theme,
                         cx,
                     ),

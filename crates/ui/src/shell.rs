@@ -1583,6 +1583,7 @@ pub(crate) mod perf_counts {
 /// Everything `render_chat_row` needs that the sidebar computes per row.
 #[derive(Clone, PartialEq)]
 struct ChatRowArgs {
+    chat: mast_proto::Chat,
     id: String,
     title: SharedString,
     time_ago: SharedString,
@@ -1615,7 +1616,7 @@ impl Render for ChatRowView {
         // restore the full-width stretch the row had as a direct flex child.
         let row = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            shell.render_chat_row(
+            shell.render_chat_row_with_chat(
                 args.id,
                 args.title,
                 args.time_ago,
@@ -1630,6 +1631,7 @@ impl Render for ChatRowView {
                 args.drag,
                 args.jump_label,
                 None,
+                Some(&args.chat),
                 &theme,
                 cx,
             )
@@ -7429,12 +7431,39 @@ impl Shell {
         archived: bool,
         preview: bool,
         drag: Option<SidebarSessionDrag>,
+        jump_label: Option<SharedString>,
+        search_query: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat = self.state.read(cx).chats.iter().find(|chat| chat.id == id).cloned();
+        self.render_chat_row_with_chat(id, title, time_ago, space_name, branch, change_request,
+            harness, status, selected, archived, preview, drag, jump_label, search_query,
+            chat.as_ref(), theme, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_chat_row_with_chat(
+        &self,
+        id: String,
+        title: SharedString,
+        time_ago: SharedString,
+        space_name: SharedString,
+        branch: Option<SharedString>,
+        change_request: Option<mast_proto::ChangeRequestSummary>,
+        harness: Option<mast_proto::HarnessId>,
+        status: mast_proto::ChatIndicator,
+        selected: bool,
+        archived: bool,
+        preview: bool,
+        drag: Option<SidebarSessionDrag>,
         // This row's jump combo while the hint overlay is up. It takes the
         // corner outright — above hover and above the status word — so all
         // nine chips appear together instead of leaving a hole on whichever
         // row is busy or under the pointer.
         jump_label: Option<SharedString>,
         search_query: Option<&str>,
+        chat: Option<&mast_proto::Chat>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7490,12 +7519,6 @@ impl Shell {
         };
         let resolved_status = if undelivered { crate::status_style::Status::Errored } else if queued { crate::status_style::Status::Waiting } else { status.into() };
         let identity = {
-            let state = self.state.read(cx);
-            let chat = state.chats.iter().find(|chat| {
-                #[cfg(test)]
-                perf_counts::CHAT_ROW_SCANS.with(|c| c.set(c.get() + 1));
-                chat.id == id
-            });
             let config = chat.and_then(|chat| chat.config.as_ref());
             theme.agent_identity_color(config.map(|config| config.harness).or(harness), config.and_then(|config| config.model.as_deref()).or_else(|| chat.and_then(|chat| chat.actual_model.as_deref())))
         };
@@ -7542,19 +7565,7 @@ impl Shell {
         }
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
-        let remote = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| {
-                #[cfg(test)]
-                perf_counts::CHAT_ROW_SCANS.with(|c| c.set(c.get() + 1));
-                chat.id == id
-            })
-            .is_some_and(|chat| {
-                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
-            });
+        let remote = chat.is_some_and(|chat| self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str()));
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());

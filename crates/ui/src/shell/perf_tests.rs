@@ -944,6 +944,48 @@ fn sidebar_spinner_frames_rerender_only_spinners(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn sidebar_batch_status_matches_individual_lookup() {
+    let now = Utc::now();
+    let mut state = AppState::new();
+    state.chats = (0..3).map(chat_row).collect();
+    let session = |chat_id: &str, status, updated_at| mast_proto::Session {
+        chat_id: chat_id.into(), device_id: "local".into(), status, started_at: None,
+        updated_at, last_completed_turn: None, awaiting_input: None,
+        last_turn_tool_failures: None, todo_progress: None,
+    };
+    state.sessions = vec![
+        session("c0", mast_proto::SessionStatus::Working, now),
+        session("c0", mast_proto::SessionStatus::Errored, now),
+        session("c1", mast_proto::SessionStatus::Working, now - chrono::TimeDelta::minutes(5)),
+    ];
+    for (status, chat) in state.overview_chats(now) {
+        assert_eq!(status, state.display_status_for(chat, now), "chat {}", chat.id);
+    }
+}
+
+#[test]
+fn model_options_hash_cost() {
+    use std::hash::{Hash, Hasher};
+    let options = serde_json::json!({"effort": "high", "features": {"search": true, "limit": 32}, "tools": ["shell", "edit"]});
+    let options = options.as_object().unwrap();
+    let iterations = BUDGET_CHATS * BUDGET_FRAMES as usize;
+    let started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        serde_json::Value::Object(options.clone()).to_string().hash(&mut hash);
+        std::hint::black_box(hash.finish());
+    }
+    let serialized = started.elapsed();
+    let started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        options.hash(&mut hash);
+        std::hint::black_box(hash.finish());
+    }
+    eprintln!("BUDGET model options ({iterations} hashes): serialized={serialized:?}, reference={:?}", started.elapsed());
+}
+
 #[gpui::test]
 fn sidebar_hover_frame_cost(cx: &mut TestAppContext) {
     let (_shell, sidebar, _state, vcx) = sidebar_budget_fixture(cx);
