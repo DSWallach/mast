@@ -342,6 +342,14 @@ impl AppState {
     }
 
     /// One diff target RPC: the engine, or the test transport.
+    /// The UI is attached to another process's engine over the local port. That connection is
+    /// not the app's own, so the engine refuses human-only methods (posting a review) on it.
+    pub(crate) fn engine_is_remote(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| matches!(engine.mode(), crate::state::EngineMode::Remote { .. }))
+    }
+
     pub(crate) fn chat_diff_rpc(
         &self,
         method: &'static str,

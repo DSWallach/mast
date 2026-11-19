@@ -75,6 +75,7 @@ mod ref_picker;
 mod ref_and_checkout_menus;
 mod review_state;
 mod review_drafts;
+mod review_submit;
 mod row_renderer;
 mod syntax_excerpts;
 mod split_pairing;
@@ -1331,6 +1332,16 @@ pub struct Changes {
     local_draft_comments: HashMap<String, Vec<ReviewComment>>,
     local_draft_ids: std::collections::HashSet<String>,
     local_outdated_drafts: Vec<mast_proto::ReviewDraft>,
+    submit_dialog: Option<review_submit::SubmitDialog>,
+    /// The in-flight prepare/post/check lives here, not on the dialog, so closing or
+    /// replacing the dialog never drops a reply.
+    submit_task: Option<Task<()>>,
+    submit_prepare_task: Option<Task<()>>,
+    /// Review target with a post or check running.
+    submit_inflight: Option<String>,
+    /// The params of the post in flight, kept with the task so an unknown result is always
+    /// checked even if the dialog was closed and reopened meanwhile.
+    submit_params: Option<mast_proto::SubmitReviewParams>,
     comment_index: HashMap<String, Vec<ReviewComment>>,
     comment_sync_key: Option<CommentSyncKey>,
     draft_anchor_index: review_drafts::DraftAnchorIndex,
@@ -1630,6 +1641,11 @@ impl Changes {
             local_draft_comments: HashMap::new(),
             local_draft_ids: std::collections::HashSet::new(),
             local_outdated_drafts: Vec::new(),
+            submit_dialog: None,
+            submit_task: None,
+            submit_prepare_task: None,
+            submit_inflight: None,
+            submit_params: None,
             comment_index: HashMap::new(),
             comment_sync_key: None,
             draft_anchor_index: review_drafts::DraftAnchorIndex::default(),

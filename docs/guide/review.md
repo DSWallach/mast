@@ -18,3 +18,11 @@ Keys can be rebound and do not apply while typing. If the head changes, heed the
 Changes shows the enclosing function in hunk headers when available. Click the one-line gap control to reveal more context; Option-click expands the whole gap. Review threads appear as cards in the diff.
 
 Use **Add to chat** on a code selection or hunk to attach a code reference. Its chip can show **Moved** or **Changed** and has a hover card. Open the reference to see the pinned snippet. If the code changed, **Show diff vs current** compares it with the current file; a moved reference offers a reanchor action.
+
+## Submit a review
+
+Nothing reaches GitHub until you click **Submit** in **Submit review…** (Changes context bar, PR reviews only). Drafts, accepted suggestions, edits and dismissals stay on your machine until then. Agents can read your drafts but cannot post: the app's own connection is the only one that can.
+
+Choose **Comment**, **Approve** or **Request changes**, edit the optional summary, and check the count of draft comments. Mast checks each draft against GitHub's version of the PR (its head commit), not your working tree, then sends them as one review through your own `gh` login. Accepted suggestions arrive as GitHub suggestion blocks. Drafts GitHub can't place are listed as "can't be placed" with the reason (not pushed, changed locally, no diff on GitHub, or a range that spans hunks). Mast checks the drafted line and two lines of context either side; they are not posted and stay as local drafts. If the PR gets new commits first, the post is refused and you check again.
+
+On success the sent drafts are cleared (Mast keeps a local record with the review link), threads refresh, and the dialog links to the review. If posting fails, nothing is lost and **Retry** is safe: Mast looks for a review it may already have posted, even after a timeout or a restart, and says **Already posted** instead of sending twice. If you already have a pending review on the PR from github.com, Mast tells you and offers **Open pull request** instead of replacing it.

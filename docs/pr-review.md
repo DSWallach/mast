@@ -20,7 +20,88 @@ republishing a suggestion so a dismissal remains dismissed even if its text
 changes. Older suggestions without an id get a derived id. Suggestions are
 local until accepted, edited, or dismissed; accepting creates a local draft.
 Existing GitHub review threads are fetched on demand and shown read-only.
-No draft, suggestion, or thread action posts to GitHub.
+Adding, editing, accepting or dismissing a draft or suggestion, and viewing
+threads, never posts to GitHub.
+
+## Submit review
+
+The only thing that writes to GitHub is **Submit review…**, in the Changes
+pane's context bar for a PR review (it appears once the PR's local drafts have
+loaded). It posts only when you click **Submit** in its dialog.
+
+**Only your click posts.** `SubmitReview` (and its read-only companion
+`PrepareReviewSubmit`) are served only on the app's own in-process connection.
+The engine wraps the localhost WebSocket port that agents are given, and every
+relay connection, in a gate that refuses them (`HUMAN_ONLY_METHODS`, applied
+where each transport is built, not per tool). They are also never forwardable
+to another device. A viewport attached over the local port, such as a terminal
+UI or a Mast window attached to another process's engine, therefore cannot submit
+either; there the button is shown disabled ("Submit from the Mac running Mast"). Agents still have `gh` on their own, which
+Mast does not control.
+
+The dialog has a **Comment / Approve / Request changes** choice, an optional
+summary, and a count of the draft comments that will be sent. One click sends
+one batched `POST /repos/{owner}/{repo}/pulls/{number}/reviews` through your own
+`gh` login (the same runner as the PR page; tokens are never read or shown).
+Each comment carries `path`, `line`, `side` and, for a range, `start_line` /
+`start_side`. An accepted suggestion's body already holds its ```suggestion
+block, so it posts as a suggestion.
+
+- **Lines come from GitHub's diff, not your working tree.** When the dialog
+  opens, Mast asks GitHub for the PR's head commit and its file patches and
+  checks each draft's line (and its text) against them. The review is pinned to
+  that head (`commit_id`); if the PR gains commits before you post, the post is
+  refused and you re-check. If the head can't be read, Submit is off.
+- **Can't be placed.** A draft is held back, with the engine's own reason, when
+  GitHub's diff at that head doesn't agree with it: the drafted line and up to
+  two lines of context either side (where the local hunk has them) must read the
+  same on GitHub. Reasons: **not pushed** (the local checkout is ahead of the PR),
+  **changed locally**, **no diff on GitHub** (the file isn't in the PR's diff, or
+  GitHub has no patch for it) and **spans hunks** (a range whose ends fall in
+  different hunks; it is never sent). Held drafts are never posted and stay local
+  drafts. So do drafts added or moved after the check, until you reopen the dialog.
+- **Click time.** On Submit, Mast re-reads the drafts and sends exactly what
+  exists then, with current text. Only the drafts actually sent are removed.
+- **Pinned PR.** Submit and Retry use the PR, head and review target the dialog
+  opened on. Switching to another review closes the dialog without posting. A
+  post already running always finishes and applies to its own PR; Esc, the
+  trigger and Cancel do nothing while it shows "Posting…". The engine runs at
+  most one submit per PR and answers a second with "Already posting".
+- **Success.** The sent drafts leave the draft list and are kept as a local
+  record (`PostedReview`: GitHub review id, URL, event, summary, the comments
+  sent), readable with `GetPostedReviews {target}`. Cached review threads for the
+  PR are dropped and reloaded, and the dialog shows **Open on GitHub**. If the
+  local record can't be written, the dialog says so, the drafts stay, and the
+  next attempt finds the posted review and records it.
+- **Failure.** Nothing is removed; the dialog shows the error (including
+  GitHub's validation message) and **Retry**.
+- **Retry and restart are safe.** Every review body ends with an invisible
+  marker, `<!-- mast-review:<nonce> -->`. The nonce is per review target, saved
+  in the registry, and kept until a post is confirmed and recorded, so it
+  survives a lost response and an engine restart. Just before the POST, Mast also
+  saves the comments being sent, with their text, next to the nonce (durably). Every
+  submit, the first included, lists the PR's reviews first; if one carries this
+  marker, Mast records the review as posted, treats exactly the saved comments as
+  sent (the review's comments are never used to decide that, so a comment GitHub
+  reports differently can't cause a repost), sends nothing, and says
+  **Already posted** with the link. The attempt saves each comment's text as sent,
+  and the local record keeps that text. A saved draft is removed only if it still
+  reads as it did when sent; one edited since stays a draft (a new comment next
+  time) and the dialog says "N drafts were edited after posting and kept". Only an older attempt with
+  nothing saved falls back to matching comment text (every page, outdated
+  comments by their original line, a failed read is an error); a partial match
+  there keeps the unmatched drafts. A check never renews the nonce. A submit
+  retires a nonce that already belongs to a recorded review and starts a new one,
+  all inside the per-PR lock (compare-and-set), so concurrent submits can't swap
+  the nonce under an in-flight post. A `gh` call that times out is killed, not
+  left running.
+- **Unknown result.** If a post ends without a clear answer (timeout, lost
+  connection), the dialog says "Result unknown; checking…" and runs the same
+  check before any new post is allowed. A clear GitHub rejection (an HTTP 4xx)
+  skips the check.
+- **Pending review.** GitHub allows one pending review per user per PR. If you
+  already have one (started in the browser), Mast detects it before posting (or
+  from GitHub's rejection), sends nothing, and offers **Open pull request**.
 
 Mast can check out a pull request and start a review chat.
 
@@ -139,7 +220,7 @@ worktree `<path>` (`/workspace/.worktrees/<dir>` in the devcontainer)`` (under
 commit(s) behind origin/<b> — pull before you start` when behind. Mast adds
 the devcontainer note only when the Space has a `.devcontainer` folder.
 
-Nothing is posted to GitHub.
+Starting a review posts nothing to GitHub.
 
 A start with `fresh: true` (what the dialog's Start sends, since the user just
 picked an agent for it) never reuses a live review chat for the same PR and

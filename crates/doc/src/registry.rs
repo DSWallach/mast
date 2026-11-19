@@ -45,6 +45,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 pub mod artifacts;
 mod chat_diff_targets;
 mod review_drafts;
+pub use review_drafts::PostedRecord;
 mod diff_review;
 pub mod friction;
 mod sidebar_pins;

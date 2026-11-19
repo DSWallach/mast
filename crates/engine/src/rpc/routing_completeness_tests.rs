@@ -40,3 +40,34 @@ fn every_rpc_method_has_a_route_and_consistent_forwarding_policy() {
         assert!(!routed.contains(name) && !auth_routed.contains(name));
     }
 }
+
+/// Only a human click may post a review. The post path must not be
+/// device-forwardable, and no agent-facing surface may name it or call into it.
+#[test]
+fn agent_surfaces_cannot_reach_the_review_post_path() {
+    for method in [methods::SUBMIT_REVIEW, methods::GET_POSTED_REVIEWS] {
+        assert!(!forwardable(method), "{method} must not be forwardable");
+    }
+    // `submit_review` / `SUBMIT_REVIEW` / the wire type may appear only in the
+    // human RPC route, the pr_dash post path, and the proto/rpc declarations.
+    let agent_surfaces: [(&str, &str); 7] = [
+        ("engine agent_tools.rs", include_str!("../agent_tools.rs")),
+        ("agent_tools/admin_tool.rs", include_str!("../agent_tools/admin_tool.rs")),
+        ("agent_tools/archive.rs", include_str!("../agent_tools/archive.rs")),
+        ("agent_tools/health.rs", include_str!("../agent_tools/health.rs")),
+        ("agent_tools/workflow_pack_tool.rs", include_str!("../agent_tools/workflow_pack_tool.rs")),
+        ("mcp mast.rs", include_str!("../../../mcp/src/mast.rs")),
+        ("mcp tool_catalog.rs", include_str!("../../../mcp/src/tools/tool_catalog.rs")),
+    ];
+    let mut surfaces = agent_surfaces.to_vec();
+    surfaces.push(("proto agent.rs", include_str!("../../../proto/src/agent.rs")));
+    for (name, text) in surfaces {
+        for needle in ["submit_review", "SUBMIT_REVIEW", "SubmitReview", "SubmitReviewParams", "\"SubmitReview\"", "pulls/", "/reviews"] {
+            assert!(!text.contains(needle), "{name} must not reference the review post path ({needle})");
+        }
+    }
+    // The only caller of PrDash::submit_review in the engine is the RPC arm.
+    let rpc = include_str!("../rpc.rs");
+    assert_eq!(rpc.matches(".submit_review(").count(), 1);
+    assert!(rpc.contains("methods::SUBMIT_REVIEW =>"));
+}

@@ -3278,6 +3278,60 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&threads)
             }
+            methods::PREPARE_REVIEW_SUBMIT => {
+                let p: mast_proto::PrepareReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                RpcReply::value(&dash.prepare_review(&p).await.map_err(RpcError::Failed)?)
+            }
+            methods::SUBMIT_REVIEW => {
+                let p: mast_proto::SubmitReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                // The per-PR lock, the marker nonce (persisted per review target, kept until a post
+                // is confirmed and recorded) and its renewal are all handled inside `submit_review`.
+                let (mut reply, nonce) = dash.submit_review(&p, &self.workspace).await.map_err(RpcError::Failed)?;
+                if matches!(
+                    reply.outcome,
+                    mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
+                ) && let Some(review_id) = reply.review_id
+                {
+                    let sent: std::collections::HashSet<&String> = reply.sent_comments.iter().map(|c| &c.draft_id).collect();
+                    // A fresh post, or the comments saved before the POST, account for the whole attempt;
+                    // only the text-match fallback can be partial, and it then keeps the nonce.
+                    let full = reply.sent_exact || p.comments.iter().all(|c| sent.contains(&c.draft_id));
+                    let posted = mast_proto::PostedReview {
+                        review_id,
+                        url: reply.url.clone(),
+                        event: p.event,
+                        body: p.body.clone(),
+                        posted_at: chrono::Utc::now().timestamp_millis(),
+                        // The text GitHub has, even when the draft was edited since.
+                        comments: reply.sent_comments.clone(),
+                        nonce: Some(nonce),
+                    };
+                    // The review is on GitHub already. If the local record cannot be written the
+                    // drafts and the nonce stay, so the next attempt finds the review and records it.
+                    match self.workspace.record_posted_review(&p.target, &posted, full) {
+                        Ok(record) => reply.edited_kept = record.edited_kept,
+                        Err(error) => {
+                            tracing::warn!("could not record posted review locally: {error}");
+                            reply.local_record_error = Some(error.to_string());
+                        }
+                    }
+                }
+                RpcReply::value(&reply)
+            }
+            methods::GET_POSTED_REVIEWS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.posted_reviews(target))
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {

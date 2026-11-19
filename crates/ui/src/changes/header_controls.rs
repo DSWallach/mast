@@ -1110,6 +1110,7 @@ impl Changes {
         let (repo, worktree, branch, tooltip) = self.context_details(cx)?;
         let picker = self.render_checkout_picker(theme, cx);
         let ref_picker = self.render_ref_target_picker(theme, cx);
+        let submit_review = self.render_submit_review(theme, cx);
         let freshness = tooltip
             .rsplit_once('\n')
             .map(|(_, freshness)| freshness)
@@ -1152,6 +1153,7 @@ impl Changes {
                         .text_color(theme.text_faint)
                         .child(SharedString::from(freshness)),
                 )
+                .children(submit_review)
                 .children(ref_picker)
                 .children(picker)
                 .into_any_element(),

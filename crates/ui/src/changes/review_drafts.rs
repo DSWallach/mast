@@ -777,12 +777,11 @@ impl Changes {
         let mut comments = Vec::new();
         self.local_draft_ids.clear();
         self.local_outdated_drafts.clear();
-        for draft in self.local_review_drafts.get(&target).into_iter().flatten() {
-            self.local_draft_ids.insert(draft.id.clone());
-            let Some((_, line)) = self.draft_anchor_index.resolve(draft) else {
-                self.local_outdated_drafts.push(draft.clone());
-                continue;
-            };
+        let drafts = self.local_review_drafts.get(&target).map(Vec::as_slice).unwrap_or_default();
+        let (placed, unplaced) = self.draft_anchor_index.partition_drafts(drafts);
+        self.local_outdated_drafts.extend(unplaced.into_iter().cloned());
+        self.local_draft_ids.extend(drafts.iter().map(|draft| draft.id.clone()));
+        for (draft, (_, line)) in placed {
             let side = match draft.anchor.side {
                 ReviewSide::Left => CommentSide::Old,
                 ReviewSide::Right => CommentSide::New,
@@ -1220,7 +1219,7 @@ pub(super) struct DraftAnchorIndex {
     positions: HashMap<(String, String, CommentSide, u32), String>,
 }
 
-fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
+pub(super) fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
     let tag = match side {
         CommentSide::Old => b'-',
         CommentSide::New => b'+',
@@ -1229,6 +1228,22 @@ fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
 }
 
 impl DraftAnchorIndex {
+    /// Partition once per revision so unplaceable drafts remain available locally.
+    pub(super) fn partition_drafts<'a>(
+        &self,
+        drafts: &'a [ReviewDraft],
+    ) -> (Vec<(&'a ReviewDraft, (u32, u32))>, Vec<&'a ReviewDraft>) {
+        let mut placed = Vec::new();
+        let mut unplaced = Vec::new();
+        for draft in drafts {
+            match self.resolve(draft) {
+                Some(range) => placed.push((draft, range)),
+                None => unplaced.push(draft),
+            }
+        }
+        (placed, unplaced)
+    }
+
     pub(super) fn new(
         files: &[super::FileDiff],
         identities: &[Vec<String>],
@@ -1375,7 +1390,7 @@ impl ThreadIndex {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     struct ReviewCardFixture {
@@ -1406,7 +1421,7 @@ mod tests {
         }
     }
 
-    fn install_diff(changes: &mut Changes) -> String {
+    pub(in crate::changes) fn install_diff(changes: &mut Changes) -> String {
         use super::super::*;
         let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
         let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
@@ -1665,6 +1680,17 @@ mod tests {
             .resolve(&draft),
             None
         );
+        let mut outdated = draft.clone();
+        outdated.id = "outdated".into();
+        outdated.line_hash = Some("missing".into());
+        let drafts = vec![draft, outdated];
+        let index = DraftAnchorIndex::new(&moved, &identities, &drafts, &[]);
+        let (placed, unplaced) = index.partition_drafts(&drafts);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].0.id, "one");
+        assert_eq!(placed[0].1, (10, 10));
+        assert_eq!(unplaced.len(), 1);
+        assert_eq!(unplaced[0].id, "outdated");
     }
     #[test]
     fn many_threads_have_direct_anchor_lookups() {
