@@ -1964,6 +1964,17 @@ impl RegistryDoc {
                         "Agents may only raise requests from their own Chat",
                     ));
                 }
+                // Under a live admin scope (a user grant, or a manager's
+                // guarded write, both checked by the engine) the request may
+                // sit on any item of that Space, such as a manager's project.
+                if self.admin_space.as_deref() == Some(space.as_str()) {
+                    return match self.live_item(&p.work_item_id) {
+                        Ok(item) if item.space_id != space => Err(unauthorized(
+                            "Agents may only raise requests on an item of their Space",
+                        )),
+                        _ => Ok(()),
+                    };
+                }
                 if require_assigned()? != p.work_item_id {
                     return Err(unauthorized(
                         "Agents may only raise requests on their own work item",
