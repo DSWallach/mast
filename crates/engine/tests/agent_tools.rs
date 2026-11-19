@@ -5307,7 +5307,7 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_la
         .workspace
         .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
         .unwrap();
-    assign_chat(&rig, "status-successor-assignment", successor, &item).await;
+    assign_chat(&rig, "status-successor-chat-assignment", successor, &item).await;
     rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-handoff", None).unwrap();
 
     // The successor's first turn runs while the old manager still holds the role.
@@ -5348,7 +5348,7 @@ async fn many_turns_before_adoption_keep_their_obligation_and_ask_once() {
         .workspace
         .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
         .unwrap();
-    assign_chat(&rig, "status-many-assignment", successor, &item).await;
+    assign_chat(&rig, "status-many-chat-assignment", successor, &item).await;
     rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-many", None).unwrap();
     let tokens = rig.core.sessions.agent_tokens();
     tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
