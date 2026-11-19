@@ -119,22 +119,43 @@ cancels server-side, exactly what the sidebar does on attach.
 every task in the caller's Space, so a chat on any work item can see what a
 briefing found without `read_chat` or Notion. It takes optional `task` (a task
 name, task id or results artifact id; omitted means all) and `index` (run times
-only, no content). It replies `{briefings: [{task, artifactId, title, revision,
-runAt, runAtLocal, runId, workItemId, content, contentTruncated,
-contentAvailable}], needYou}`. `runAt` is when the newest revision was
-published, in epoch milliseconds. `needYou` counts open Required Actions that
-scheduled tasks raised on those items. Content is capped (128 KB for one
-briefing, 32 KB each for several) and `contentAvailable` is false when the file
-lives on another device. An unknown task is an error that lists the tasks that
-do have results. Hosts that predate the tool answer `unknown agent tool`.
+only, no content). It replies `{briefings: [{task, taskId, artifactId, title,
+revision, runAt, runAtLocal, runId, workItemId, content, contentTruncated,
+contentAvailable}], needYou}`.
+
+- `task` is the task's current name when this device knows the task, so a
+  renamed task is found under its new name, its old name and its id.
+- `runAt` is when the newest revision was published, in epoch milliseconds, and
+  is the same on every device. `runAtLocal` and the chat-start index show it in
+  the time zone of the device hosting the chat.
+- `content` is the newest revision exactly as recorded, never a later edit of
+  the file. It is capped at 128 KB for one briefing and 32 KB each for several,
+  with `contentTruncated` set when cut.
+- `contentAvailable` depends on the request. With content, it is true only when
+  the content was read. With `index: true`, it is true when the file is on the
+  device answering, so a follow-up read will succeed. It is false when the file
+  lives on another device; open the artifact in Mast instead.
+- `needYou` counts open Required Actions from scheduled tasks. For all tasks it
+  is every one in the Space, including failed runs and tasks that have yet to
+  publish. For a named task it is only that task's own, found by task identity,
+  so another task sharing the work item is not counted; a failed run is
+  included when the task is named by its id or its current name.
+- Only a Background run of the task can have written a result. An ordinary chat
+  cannot publish the reserved `scheduled-results:` role, and a result whose
+  newest revision did not come from such a run is not returned.
+- An unknown task is an error that lists the tasks that do have results. Hosts
+  that predate the tool answer `unknown agent tool`.
 
 The lookup is `crates/engine/src/briefing.rs` and is built to be reused. A caller
-names a `BriefingKind` (which artifacts count) and passes a `BriefingScope`
-whose `permits` runs on every candidate before it is listed or its bytes are
-read. A candidate the scope refuses looks the same as one that does not exist.
-Scheduled results use `SpaceScope`. Manager sessions add a
-`BriefingKind::ManagerStatus` for its status artifact and a scope that permits
-only artifacts on items inside the manager's project subtree.
+builds a `BriefingQuery` for a `BriefingKind` (which artifacts count) and passes a
+`BriefingScope`. Its `permits` runs on every candidate before it is listed or its
+bytes are read, and a candidate it refuses looks the same as one that does not
+exist; `permits_work_item` does the same for Required Action counts. Each kind
+also names who may have written its artifacts (scheduled results use
+`run_provenance`); a candidate that fails is treated as absent. Scheduled results
+use `SpaceScope`. Manager sessions add a `BriefingKind::ManagerStatus` for its
+status artifact, its own provenance, and a scope that permits only artifacts and
+work items inside the manager's project subtree.
 
 A message to the parent chat (and `report_to_parent`) is not a direct send: the
 engine queues a "worker report" wake event (text capped at 4 KB, cut text marked)

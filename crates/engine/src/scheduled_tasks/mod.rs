@@ -62,6 +62,23 @@ impl ScheduledTasks {
     }
     /// The same setting without holding the scheduler (which holds the
     /// sessions engine), for callbacks the sessions engine itself stores.
+    /// `(task id, current name)` of every live task, read without holding the
+    /// scheduler, for the same kind of callback.
+    pub fn task_names_reader(&self) -> impl Fn() -> Vec<(String, String)> + Send + Sync + 'static {
+        let store = self.0.store.clone();
+        move || {
+            store
+                .tasks()
+                .map(|tasks| {
+                    tasks
+                        .into_iter()
+                        .filter(|task| !task.deleted)
+                        .map(|task| (task.id, task.draft.name))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
     pub fn briefing_index_reader(&self) -> impl Fn() -> bool + Send + Sync + 'static {
         let store = self.0.store.clone();
         move || store.briefing_index().unwrap_or(false)

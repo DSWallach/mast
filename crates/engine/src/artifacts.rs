@@ -1433,6 +1433,24 @@ impl ArtifactsService {
         })
     }
 
+    /// The bytes of the newest revision exactly as recorded: its stored
+    /// snapshot, else the live file when that still hashes to the revision.
+    /// Never a newer file paired with an older revision's metadata.
+    pub(crate) fn revision_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
+        let current = artifact
+            .current()
+            .ok_or_else(|| ArtifactError::not_found("the artifact has no revisions"))?;
+        if let Ok(bytes) = std::fs::read(self.snapshot_path(&artifact.id, &current.hash)) {
+            return Ok(bytes);
+        }
+        let live = read_file(Path::new(&artifact.stored_path))?;
+        if content_hash(&live) == current.hash {
+            Ok(live)
+        } else {
+            Err(ArtifactError::not_found("the revision's content is not available"))
+        }
+    }
+
     fn normalize_review_hashes(&self, chat_id: &str, review: &mut mast_proto::ReviewSidecar) {
         let checkout = match &review.target {
             Some(mast_proto::ReviewTarget::Branch { checkout_path, .. }) => checkout_path.clone(),
@@ -2798,17 +2816,28 @@ impl ArtifactsService {
         args: &PublishArgs,
         operation_id: &str,
     ) -> Outcome<()> {
-        let Some(item) = caller.work_item_id.as_deref() else {
-            return Ok(());
-        };
-        let Some(info) = self
+        let background = self
             .workspace()
             .chat(&caller.chat_id)
             .ok()
             .flatten()
             .and_then(|chat| chat.scheduled_task_info)
-            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)
-        else {
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background);
+        // The results role is how readers recognise a scheduled result, so only
+        // a Background run may write it, whatever the chat's work item.
+        if background.is_none()
+            && mast_proto::ScheduledRunResults::is_results_role(
+                args.role.as_deref().unwrap_or_default(),
+            )
+        {
+            return Err(ArtifactError::invalid(
+                "the scheduled-results role is reserved for Background scheduled runs",
+            ));
+        }
+        let Some(item) = caller.work_item_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(info) = background else {
             return Ok(());
         };
         let expected = crate::scheduled_tasks::results::resolve(

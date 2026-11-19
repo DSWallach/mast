@@ -178,6 +178,9 @@ fn token_key(token: &str) -> TokenKey {
 /// driver is alive (generous: a renewal lands every heartbeat).
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Reads `(task id, current name)` of the device's scheduled tasks.
+pub type ScheduledTaskNames = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+
 /// The engine's live per-Run tokens (one registry per engine).
 #[derive(Default)]
 pub struct AgentTokens {
@@ -830,6 +833,9 @@ pub struct AgentToolsService {
     linear: Mutex<Option<crate::linear::LinearService>>,
     /// Planning artifacts (`artifact_*` tools).
     artifacts: Mutex<Option<crate::artifacts::ArtifactsService>>,
+    /// `(task id, current name)` of this device's scheduled tasks, for
+    /// `briefing_read`; a plain reader, so it never retains the scheduler.
+    scheduled_task_names: Mutex<Option<ScheduledTaskNames>>,
     /// Chat diff targets (`bind_chat_worktree`).
     diff_targets: Mutex<Option<crate::diff_targets::DiffTargets>>,
     /// PR state for the finished-worker rule.
@@ -854,6 +860,7 @@ impl AgentToolsService {
             child_claims: Mutex::new(()),
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
+            scheduled_task_names: Mutex::new(None),
             pr_ticket_cache: Mutex::new(None),
             archive_log: crate::archivable::AgentArchiveLog::default(),
             diff_targets: Mutex::new(None),
@@ -863,6 +870,11 @@ impl AgentToolsService {
     /// Attach the sessions engine (live Chat status in subtree reads).
     pub fn set_sessions(&self, sessions: SessionsEngine) {
         *lock(&self.sessions) = Some(sessions);
+    }
+
+    /// Attach the scheduled-task name reader (engine assembly).
+    pub fn set_scheduled_task_names(&self, names: ScheduledTaskNames) {
+        *lock(&self.scheduled_task_names) = Some(names);
     }
 
     /// Attach the engine's artifact service (engine assembly).
@@ -885,22 +897,23 @@ impl AgentToolsService {
             .map(str::trim)
             .filter(|task| !task.is_empty());
         let index_only = arguments.get("index").and_then(Value::as_bool).unwrap_or(false);
+        let names = lock(&self.scheduled_task_names).clone();
+        let tasks = names.map(|names| names()).unwrap_or_default();
         let scope = crate::briefing::SpaceScope(&caller.space_id);
-        let entries = crate::briefing::read(
-            &service,
-            &scope,
-            &crate::briefing::BriefingQuery {
-                kind: crate::briefing::BriefingKind::ScheduledResults,
-                task,
-                include_content: !index_only,
-            },
-            &caller.space_id,
-        )?;
-        let items: Vec<String> = entries.iter().filter_map(|e| e.work_item_id.clone()).collect();
-        let snapshot = self.work_outline.snapshot(&caller.space_id);
+        let query = crate::briefing::BriefingQuery::new(crate::briefing::BriefingKind::ScheduledResults)
+            .task(task)
+            .index_only(index_only)
+            .tasks(&tasks);
+        let entries = crate::briefing::read(&service, &scope, &query, &caller.space_id)?;
+        let requests = self.work_outline.snapshot(&caller.space_id).user_action_requests;
+        let need_you = if task.is_some() {
+            crate::briefing::need_you_for(&requests, &scope, &caller.space_id, &entries)
+        } else {
+            crate::briefing::need_you_in_space(&requests, &scope, &caller.space_id)
+        };
         Ok(json!({
             "briefings": entries.iter().map(crate::briefing::BriefingEntry::to_json).collect::<Vec<_>>(),
-            "needYou": crate::briefing::need_you_count(&snapshot.user_action_requests, &items),
+            "needYou": need_you,
         }))
     }
 

@@ -234,6 +234,21 @@ impl ScheduledRunResults {
     /// Start of every Required Action dedupe key a scheduled run raises.
     pub const NEED_DEDUPE_PREFIX: &'static str = "scheduled-need:";
 
+    /// Start of the dedupe key of the Required Action the scheduler raises for a
+    /// failed run; the task id follows.
+    pub const FAILED_DEDUPE_PREFIX: &'static str = "scheduled-run-failed:";
+
+    /// The task identity inside a results role (the same hash its Required
+    /// Action keys carry), for a normalized role.
+    pub fn key_of_role(role: &str) -> Option<String> {
+        role.strip_prefix(RESULTS_ROLE_PREFIX).map(str::to_owned)
+    }
+
+    /// [`Self::dedupe_prefix`] from [`Self::key_of_role`]'s key.
+    pub fn need_prefix_for_key(key: &str) -> String {
+        format!("{}{key}:", Self::NEED_DEDUPE_PREFIX)
+    }
+
     /// Prefix of the Required Action dedupe keys this task's runs raise.
     pub fn dedupe_prefix(task_id: &str) -> String {
         format!(
@@ -697,6 +712,13 @@ mod tests {
 
     #[test]
     fn need_keys_share_the_published_prefix() {
+        let role = ScheduledRunResults::role_for("task");
+        let key = ScheduledRunResults::key_of_role(&role).unwrap();
+        assert_eq!(
+            ScheduledRunResults::need_prefix_for_key(&key),
+            ScheduledRunResults::dedupe_prefix("task")
+        );
+        assert_eq!(ScheduledRunResults::key_of_role("plan"), None);
         assert!(ScheduledRunResults::dedupe_prefix("task").starts_with(ScheduledRunResults::NEED_DEDUPE_PREFIX));
     }
 }

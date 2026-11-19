@@ -849,10 +849,12 @@ impl EngineCore {
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         {
+            // Everything captured here is a plain reader: the sessions engine
+            // stores this callback, so nothing in it may lead back to sessions.
             let index_enabled = self.scheduled_tasks.briefing_index_reader();
+            let task_names = self.scheduled_tasks.task_names_reader();
             let artifacts = self.artifacts.clone();
             let workspace = self.workspace.clone();
-            let outline = rpc.work_outline();
             self.sessions.set_chat_start_notice(Arc::new(move |chat_id: &str| {
                 if !index_enabled() {
                     return None;
@@ -862,19 +864,19 @@ impl EngineCore {
                     return None;
                 }
                 let space = chat.space_id?;
+                let scope = briefing::SpaceScope(&space);
+                let tasks = task_names();
                 let entries = briefing::read(
                     &artifacts,
-                    &briefing::SpaceScope(&space),
-                    &briefing::BriefingQuery {
-                        kind: briefing::BriefingKind::ScheduledResults,
-                        task: None,
-                        include_content: false,
-                    },
+                    &scope,
+                    &briefing::BriefingQuery::new(briefing::BriefingKind::ScheduledResults)
+                        .index_only(true)
+                        .tasks(&tasks),
                     &space,
                 )
                 .ok()?;
-                let items: Vec<String> = entries.iter().filter_map(|e| e.work_item_id.clone()).collect();
-                let need = briefing::need_you_count(&outline.snapshot(&space).user_action_requests, &items);
+                let outline = mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space));
+                let need = briefing::need_you_in_space(&outline.user_action_requests, &scope, &space);
                 briefing::index_line(&entries, need, now_ms()).map(|line| briefing::chat_start_notice(&line))
             }));
         }
