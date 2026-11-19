@@ -1971,7 +1971,16 @@ impl EngineRpc {
                         &source,
                         &requested,
                         request.archive,
-                    );
+                    )
+                    .map(|intent| {
+                        (
+                            intent,
+                            crate::handoff_roles::RoleObservations::capture(
+                                &self.sessions.agent_tokens(),
+                                &source,
+                            ),
+                        )
+                    });
                 }
             }
         }
@@ -2020,15 +2029,15 @@ impl EngineRpc {
             return Ok(RpcReply::Stream(stream.boxed()));
         }
         let tokens = self.sessions.agent_tokens();
-        if let Some(intent) = &handoff_intent {
-            tokens.pending_handoffs.prepare(intent).map_err(|err| {
+        if let Some((intent, roles)) = &handoff_intent {
+            tokens.pending_handoffs.prepare(intent, roles).map_err(|err| {
                 RpcError::Failed(format!("Could not record the forwarded hand-off: {err}"))
             })?;
         }
         let deadline = forward_deadline(method);
         match tokio::time::timeout(deadline, client.call(method, params)).await {
             Ok(Ok(value)) => {
-                if let Some(intent) = handoff_intent {
+                if let Some((intent, _)) = handoff_intent {
                     let reply: mast_proto::CreateChatForWorkItemReply =
                         serde_json::from_value(value.clone()).map_err(|e| {
                             RpcError::Failed(format!("Invalid hand-off reply: {e}"))
@@ -3948,6 +3957,10 @@ impl RpcService for EngineRpc {
                         .ensure_chat_work_item(&p.chat_id)
                         .map_err(|e| RpcError::Failed(e.to_string()))?
                 };
+                let observed_roles = crate::handoff_roles::RoleObservations::capture(
+                    &self.sessions.agent_tokens(),
+                    &source,
+                );
                 let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
@@ -3963,7 +3976,7 @@ impl RpcService for EngineRpc {
                 };
                 let reply = self.launch.create_orchestrator_successor(
                     &launch, &self.orchestrator_wakes, &p.chat_id,
-                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive },
+                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive, observed_roles: &observed_roles },
                 )
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)

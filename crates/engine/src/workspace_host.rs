@@ -372,6 +372,11 @@ impl WorkspaceHost {
         let (spaces_tx, _) = watch::channel(state.spaces);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
+            local_handoffs: if local_authority {
+                doc.completed_sidebar_handoffs()
+            } else {
+                Vec::new()
+            },
             revision: 0,
             synced: false,
             initialized: preferences.is_some(),
@@ -3069,6 +3074,11 @@ impl WorkspaceHostInner {
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
+        let local_handoffs = if self.config.edge.is_some() {
+            Vec::new()
+        } else {
+            doc.completed_sidebar_handoffs()
+        };
         self.sidebar_preferences_tx.send_if_modified(|current| {
             // Readiness is sticky for this host. A caller that sampled stats
             // before another publisher acquired the lock must not regress it.
@@ -3077,6 +3087,7 @@ impl WorkspaceHostInner {
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
                 && current.sections == sections
+                && current.local_handoffs == local_handoffs
             {
                 return false;
             }
@@ -3086,6 +3097,7 @@ impl WorkspaceHostInner {
                 initialized,
                 pinned_session_ids: pins,
                 sections,
+                local_handoffs,
             };
             true
         });

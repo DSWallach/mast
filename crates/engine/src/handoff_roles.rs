@@ -24,6 +24,32 @@ pub(crate) struct PendingHandoff {
     archive: Option<bool>,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(crate) struct RoleObservations {
+    admin: Option<crate::admin::StoredGrant>,
+    assistant: Option<crate::personal_assistant::StoredAssistant>,
+}
+
+impl RoleObservations {
+    pub(crate) fn capture(tokens: &AgentTokens, source: &Chat) -> Self {
+        Self {
+            admin: source
+                .space_id
+                .as_deref()
+                .and_then(|space| tokens.admin().observe_hand_off(&source.id, space)),
+            assistant: tokens.personal_assistant().observe_hand_off(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct PendingRoleTransfer {
+    #[serde(flatten)]
+    intent: PendingHandoff,
+    #[serde(default)]
+    roles: RoleObservations,
+}
+
 impl PendingHandoff {
     pub(crate) fn new(
         source: &Chat,
@@ -43,11 +69,11 @@ impl PendingHandoff {
 #[derive(Default)]
 struct State {
     path: Option<PathBuf>,
-    pending: Vec<PendingHandoff>,
+    pending: Vec<PendingRoleTransfer>,
 }
 
 impl State {
-    fn replace(&mut self, pending: Vec<PendingHandoff>) -> io::Result<()> {
+    fn replace(&mut self, pending: Vec<PendingRoleTransfer>) -> io::Result<()> {
         if let Some(path) = &self.path {
             write_json(path, &pending)?;
         }
@@ -71,11 +97,18 @@ impl PendingHandoffs {
         Ok(())
     }
 
-    pub(crate) fn prepare(&self, intent: &PendingHandoff) -> io::Result<()> {
+    pub(crate) fn prepare(
+        &self,
+        intent: &PendingHandoff,
+        roles: &RoleObservations,
+    ) -> io::Result<()> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.pending.contains(intent) {
+        if !state.pending.iter().any(|entry| &entry.intent == intent) {
             let mut pending = state.pending.clone();
-            pending.push(intent.clone());
+            pending.push(PendingRoleTransfer {
+                intent: intent.clone(),
+                roles: roles.clone(),
+            });
             state.replace(pending)?;
         }
         Ok(())
@@ -89,9 +122,9 @@ impl PendingHandoffs {
         successor: &str,
     ) -> Result<(), EngineError> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.pending.contains(intent) {
+        let Some(entry) = state.pending.iter().find(|entry| &entry.intent == intent) else {
             return Ok(());
-        }
+        };
         let Some(source) = workspace.chat(&intent.source)?.filter(|chat| {
             chat.device_id == intent.device
                 && chat.space_id.as_deref() == Some(intent.space.as_str())
@@ -107,20 +140,25 @@ impl PendingHandoffs {
         };
         tokens
             .admin()
-            .transfer_for_hand_off(&source.id, successor, &intent.space)
+            .transfer_for_hand_off(
+                &source.id,
+                successor,
+                &intent.space,
+                entry.roles.admin.as_ref(),
+            )
             .map_err(|err| {
                 EngineError::Other(format!("Could not save the admin hand-off: {err}"))
             })?;
         tokens
             .personal_assistant()
-            .transfer_for_hand_off(&source, successor, &chats)
+            .transfer_for_hand_off(&source, successor, &chats, entry.roles.assistant.as_ref())
             .map_err(|err| {
                 EngineError::Other(format!(
                     "Could not save the personal assistant hand-off: {err}"
                 ))
             })?;
         let mut pending = state.pending.clone();
-        pending.retain(|entry| entry != intent);
+        pending.retain(|entry| &entry.intent != intent);
         state.replace(pending)?;
         Ok(())
     }
@@ -133,7 +171,7 @@ impl PendingHandoffs {
             .unwrap_or_else(|e| e.into_inner())
             .pending
             .clone();
-        for intent in pending {
+        for PendingRoleTransfer { intent, .. } in pending {
             let Some(successor) = workspace.completed_user_hand_off_to(
                 &intent.source,
                 &intent.requested_successor,

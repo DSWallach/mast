@@ -31,6 +31,45 @@ impl RegistryDoc {
             .then_some(successor)
     }
 
+    pub fn completed_sidebar_handoffs(&self) -> Vec<mast_proto::CompletedSidebarHandoff> {
+        let mut completed: Vec<_> = self
+            .overlay_rows(KIND_CHATS)
+            .into_iter()
+            .filter_map(|row| {
+                if row
+                    .fields
+                    .get("userHandOffCompleted")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                {
+                    return None;
+                }
+                let source = row
+                    .fields
+                    .get("orchestratorHandOff")?
+                    .get("fromChatId")?
+                    .as_str()?
+                    .to_owned();
+                let retry_chat_ids = row
+                    .fields
+                    .get("userHandOffRetryChatIds")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                Some(mast_proto::CompletedSidebarHandoff {
+                    source,
+                    successor: row.id,
+                    retry_chat_ids,
+                })
+            })
+            .collect();
+        completed.sort_by(|a, b| a.successor.cmp(&b.successor));
+        completed
+    }
+
     /// Move the pin in place and record completion in the same registry batch.
     /// A replay must leave later pin and archive edits alone.
     pub fn complete_user_chat_hand_off(

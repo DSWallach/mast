@@ -539,30 +539,36 @@ pub enum ComposerSendBehavior {
 
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
-    if !cx.has_global::<SettingsStore>() {
-        return;
+    if let Err(error) = flush_checked(cx) {
+        tracing::warn!(%error, "failed to persist ui settings");
     }
-    let pending = cx.global_mut::<SettingsStore>().save_task.take();
-    drop(pending);
-    flush_latest(cx);
+}
+
+pub(crate) fn flush_checked(cx: &mut App) -> io::Result<()> {
+    if cx.has_global::<SettingsStore>() {
+        let pending = cx.global_mut::<SettingsStore>().save_task.take();
+        drop(pending);
+    }
+    save_latest(cx)
 }
 
 fn flush_latest(cx: &mut App) {
+    if let Err(error) = save_latest(cx) {
+        tracing::warn!(%error, "failed to persist ui settings");
+    }
+}
+
+fn save_latest(cx: &mut App) -> io::Result<()> {
     let Some(store) = cx.try_global::<SettingsStore>() else {
-        return;
+        return Ok(());
     };
-    if store.saved_revision == store.revision {
-        return;
+    if store.saved_revision != store.revision {
+        let (settings, revision) = store.snapshot();
+        settings.save(&store.data_dir)?;
+        let current = cx.global_mut::<SettingsStore>().mark_saved(revision);
+        debug_assert!(current, "foreground settings write cannot be overtaken");
     }
-    let (settings, revision) = store.snapshot();
-    let data_dir = store.data_dir.clone();
-    match settings.save(&data_dir) {
-        Ok(()) => {
-            let current = cx.global_mut::<SettingsStore>().mark_saved(revision);
-            debug_assert!(current, "foreground settings write cannot be overtaken");
-        }
-        Err(err) => tracing::warn!(error = %err, revision, "failed to persist ui settings"),
-    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -743,6 +749,9 @@ pub struct UiSettings {
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
+    /// Pin intents for hand-offs issued in the device-local workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) local_pin_handoffs: Vec<LocalPinHandoff>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -947,6 +956,7 @@ impl Default for UiSettings {
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
+            local_pin_handoffs: Vec::new(),
             artifact_compare_modes: HashMap::new(),
             artifact_last_viewed: HashMap::new(),
             artifact_decision_drafts: HashMap::new(),
@@ -1964,6 +1974,23 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
         out.push_str(chars.as_str());
     }
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocalPinHandoff {
+    pub source: String,
+    pub requested_successor: String,
+    pub cancelled: bool,
+}
+
+impl LocalPinHandoff {
+    pub(crate) fn matches(&self, completion: &mast_proto::CompletedSidebarHandoff) -> bool {
+        self.source == completion.source
+            && (self.requested_successor == completion.successor
+                || completion
+                    .retry_chat_ids
+                    .contains(&self.requested_successor))
+    }
 }
 
 impl UiSettings {

@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 use mast_proto::{
     AdminAuditAction, AdminAuditTurn, AdminGrant, ADMIN_DEFAULT_DURATION_SECS, WorkOutlineMutation,
 };
@@ -38,9 +40,17 @@ struct Approval {
     used: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct StoredGrant {
+    #[serde(flatten)]
+    grant: AdminGrant,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
 #[derive(Default)]
 struct State {
-    grants: HashMap<String, AdminGrant>,
+    grants: HashMap<String, StoredGrant>,
     store: HandoffRoleFile,
     audit: Vec<TurnRecord>,
     approvals: HashMap<String, Approval>,
@@ -70,9 +80,9 @@ impl AdminGrants {
     pub fn set_store(&self, path: PathBuf) {
         let now = self.now_ms();
         let mut state = lock(&self.state);
-        if let Some(saved) = state.store.load::<Vec<AdminGrant>>(path) {
-            for grant in saved.into_iter().filter(|g| g.is_live(now)) {
-                state.grants.insert(grant.chat_id.clone(), grant);
+        if let Some(saved) = state.store.load::<Vec<StoredGrant>>(path) {
+            for grant in saved.into_iter().filter(|g| g.grant.is_live(now)) {
+                state.grants.insert(grant.grant.chat_id.clone(), grant);
             }
         }
     }
@@ -102,9 +112,23 @@ impl AdminGrants {
             skip_bulk_confirmation,
         };
         let mut state = lock(&self.state);
-        state.grants.insert(chat_id.to_owned(), grant.clone());
+        state.grants.insert(
+            chat_id.to_owned(),
+            StoredGrant {
+                grant: grant.clone(),
+                revision: Some(crate::new_id()),
+            },
+        );
         Self::persist(&state);
         grant
+    }
+
+    pub(crate) fn observe_hand_off(&self, from: &str, space_id: &str) -> Option<StoredGrant> {
+        lock(&self.state)
+            .grants
+            .get(from)
+            .filter(|entry| entry.grant.space_id == space_id && entry.grant.is_live(self.now_ms()))
+            .cloned()
     }
 
     /// Reassign a live grant within its original Space. A direct grant to
@@ -114,6 +138,7 @@ impl AdminGrants {
         from: &str,
         to: &str,
         space_id: &str,
+        observed: Option<&StoredGrant>,
     ) -> io::Result<()> {
         let now = self.now_ms();
         let mut state = lock(&self.state);
@@ -123,13 +148,18 @@ impl AdminGrants {
         let mut grants = state.grants.clone();
         if let Some(mut grant) = grants
             .get(from)
-            .filter(|grant| grant.is_live(now) && grant.space_id == space_id)
+            .filter(|entry| {
+                Some(*entry) == observed
+                    && entry.grant.is_live(now)
+                    && entry.grant.space_id == space_id
+            })
             .cloned()
         {
             grants.remove(from);
-            if !grants.get(to).is_some_and(|grant| grant.is_live(now)) {
-                grant.chat_id = to.to_owned();
-                grants.insert(grant.chat_id.clone(), grant);
+            if !grants.get(to).is_some_and(|entry| entry.grant.is_live(now)) {
+                grant.grant.chat_id = to.to_owned();
+                grant.revision = Some(crate::new_id());
+                grants.insert(to.to_owned(), grant);
             }
         }
         state
@@ -158,7 +188,7 @@ impl AdminGrants {
         let now = self.now_ms();
         let mut state = lock(&self.state);
         match state.grants.get(chat_id) {
-            Some(g) if g.is_live(now) => Some(g.clone()),
+            Some(g) if g.grant.is_live(now) => Some(g.grant.clone()),
             Some(_) => {
                 state.grants.remove(chat_id);
                 Self::persist(&state);
@@ -172,11 +202,15 @@ impl AdminGrants {
         let now = self.now_ms();
         let mut state = lock(&self.state);
         let before = state.grants.len();
-        state.grants.retain(|_, g| g.is_live(now));
+        state.grants.retain(|_, g| g.grant.is_live(now));
         if state.grants.len() != before {
             Self::persist(&state);
         }
-        let mut list: Vec<AdminGrant> = state.grants.values().cloned().collect();
+        let mut list: Vec<AdminGrant> = state
+            .grants
+            .values()
+            .map(|entry| entry.grant.clone())
+            .collect();
         list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         list
     }

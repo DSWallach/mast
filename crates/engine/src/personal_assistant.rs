@@ -10,10 +10,19 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use mast_proto::{Chat, PersonalAssistant};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct StoredAssistant {
+    #[serde(flatten)]
+    assistant: PersonalAssistant,
+    #[serde(default)]
+    revision: Option<String>,
+}
 
 #[derive(Default)]
 struct State {
-    current: Option<PersonalAssistant>,
+    current: Option<StoredAssistant>,
     store: HandoffRoleFile,
 }
 
@@ -30,7 +39,7 @@ impl PersonalAssistantStore {
     /// Persist at `path` (device-local) and load the saved designation.
     pub fn set_store(&self, path: PathBuf) {
         let mut state = lock(&self.state);
-        if let Some(saved) = state.store.load::<Option<PersonalAssistant>>(path) {
+        if let Some(saved) = state.store.load::<Option<StoredAssistant>>(path) {
             state.current = saved;
         }
     }
@@ -47,9 +56,16 @@ impl PersonalAssistantStore {
         let assistant =
             PersonalAssistant::for_chat(chat, chrono::Utc::now().timestamp_millis());
         let mut state = lock(&self.state);
-        state.current = Some(assistant.clone());
+        state.current = Some(StoredAssistant {
+            assistant: assistant.clone(),
+            revision: Some(crate::new_id()),
+        });
         Self::persist(&state);
         assistant
+    }
+
+    pub(crate) fn observe_hand_off(&self) -> Option<StoredAssistant> {
+        lock(&self.state).current.clone()
     }
 
     pub(crate) fn transfer_for_hand_off(
@@ -57,17 +73,20 @@ impl PersonalAssistantStore {
         from: &Chat,
         successor: &str,
         chats: &[Chat],
+        observed: Option<&StoredAssistant>,
     ) -> io::Result<()> {
         let mut state = lock(&self.state);
         if state.store.contains(successor) {
             return Ok(());
         }
         let mut current = state.current.clone();
-        if let Some(assistant) = &mut current
-            && assistant.covers(from, chats)
+        if current.as_ref() == observed
+            && let Some(current) = &mut current
+            && current.assistant.covers(from, chats)
         {
-            assistant.chat_id = successor.to_owned();
-            assistant.scheduled_task = None;
+            current.assistant.chat_id = successor.to_owned();
+            current.assistant.scheduled_task = None;
+            current.revision = Some(crate::new_id());
         }
         state.store.complete(successor, &current)?;
         state.current = current;
@@ -82,7 +101,10 @@ impl PersonalAssistantStore {
     }
 
     pub fn get(&self) -> Option<PersonalAssistant> {
-        lock(&self.state).current.clone()
+        lock(&self.state)
+            .current
+            .as_ref()
+            .map(|entry| entry.assistant.clone())
     }
 
     /// `chat` is the assistant. `chats` is read only for a scheduled run the

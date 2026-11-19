@@ -381,15 +381,18 @@ struct LaunchInputs<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum HandOffOrigin {
-    User { archive: Option<bool> },
+pub(crate) enum HandOffOrigin<'a> {
+    User {
+        archive: Option<bool>,
+        observed_roles: &'a crate::handoff_roles::RoleObservations,
+    },
     Agent,
 }
 
-impl HandOffOrigin {
+impl HandOffOrigin<'_> {
     fn archive_choice(self) -> Option<bool> {
         match self {
-            Self::User { archive } => archive,
+            Self::User { archive, .. } => archive,
             Self::Agent => None,
         }
     }
@@ -504,7 +507,7 @@ impl WorkItemLaunchService {
         p: &CreateChatForWorkItemParams,
         wakes: &crate::orchestrator_wakes::OrchestratorWakes,
         source: &str,
-        origin: HandOffOrigin,
+        origin: HandOffOrigin<'_>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let source_chat = self
             .workspace
@@ -571,7 +574,7 @@ impl WorkItemLaunchService {
         hand_off: Option<(
             &crate::orchestrator_wakes::OrchestratorWakes,
             &str,
-            HandOffOrigin,
+            HandOffOrigin<'_>,
             &str,
         )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
@@ -748,6 +751,38 @@ impl WorkItemLaunchService {
         }
 
         self.claim_inputs(op, &inputs_hash)?;
+        if let Some((
+            _,
+            source,
+            HandOffOrigin::User {
+                archive,
+                observed_roles,
+            },
+            _,
+        )) = hand_off
+        {
+            let from = self
+                .workspace
+                .chat(source)
+                .map_err(engine_error)?
+                .ok_or_else(|| {
+                    error(WorkOutlineErrorCode::NotFound, "Hand-off source not found")
+                })?;
+            if from.device_id != self.workspace.device_id()
+                || from.space_id.as_deref() != Some(space_id.as_str())
+            {
+                return Err(conflict(
+                    "Hand-off source does not belong to this Space and device",
+                ));
+            }
+            let intent = crate::handoff_roles::PendingHandoff::new(&from, &chat_id, archive)
+                .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+            self.sessions
+                .agent_tokens()
+                .pending_handoffs
+                .prepare(&intent, observed_roles)
+                .map_err(|err| engine_error(err.into()))?;
+        }
 
         // ── 2. effective configuration + validation + capability ──
         let existing_binding = self
@@ -955,10 +990,10 @@ impl WorkItemLaunchService {
         requested: &str,
         operation_id: &str,
         space_id: &str,
-        origin: HandOffOrigin,
+        origin: HandOffOrigin<'_>,
     ) -> Result<(), WorkOutlineError> {
         let invalid = |detail: String| error(WorkOutlineErrorCode::Invalid, detail);
-        let HandOffOrigin::User { archive } = origin else {
+        let HandOffOrigin::User { archive, .. } = origin else {
             return self
                 .workspace
                 .rotate_standing_role_for_chat(source, successor)
@@ -987,10 +1022,6 @@ impl WorkItemLaunchService {
             .ok_or_else(|| conflict("Hand-off source has no Space"))?;
         // Publish the registry completion only after recovery can find the
         // roles and the successor's first turn is durable.
-        tokens
-            .pending_handoffs
-            .prepare(&intent)
-            .map_err(|err| engine_error(err.into()))?;
         self.doc_host
             .persist_chat_now(successor)
             .map_err(engine_error)?;

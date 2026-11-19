@@ -5956,6 +5956,8 @@ impl Shell {
         };
         let state = self.state.read(cx);
         if state.workspace_scope == Some(WorkspaceScope::Local) {
+            self.reconcile_local_pin_handoffs(&profile_key, cx);
+            let state = self.state.read(cx);
             if !state.chats_synced {
                 return;
             }
@@ -6064,6 +6066,7 @@ impl Shell {
         }
         match self.state.read(cx).workspace_scope {
             Some(WorkspaceScope::Local) => {
+                let cancelled = self.cancel_local_pin_handoffs(change.session_id());
                 if pinned_session_ids.is_empty() {
                     self.settings
                         .sidebar_pinned_session_ids_by_profile
@@ -6074,6 +6077,9 @@ impl Shell {
                         .insert(profile_key, pinned_session_ids);
                 }
                 self.schedule_save(cx);
+                if cancelled {
+                    settings::flush(cx);
+                }
             }
             Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
                 return self.queue_sidebar_pin_write(profile_key, change, cx);

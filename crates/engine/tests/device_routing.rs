@@ -592,6 +592,16 @@ impl RpcService for LoseHandoffReply {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_forwarded_handoff_reply_recovers_roles_after_restart_and_sync() {
+    verify_lost_forwarded_handoff(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_forwarded_handoff_preserves_role_edits_before_sync() {
+    verify_lost_forwarded_handoff(true, false).await;
+    verify_lost_forwarded_handoff(true, true).await;
+}
+
+async fn verify_lost_forwarded_handoff(edited: bool, initially_absent: bool) {
     use mast_proto::work_outline::{derive_id, roles};
 
     let (relay_url, _relay) = fake_device_room().await;
@@ -620,7 +630,7 @@ async fn lost_forwarded_handoff_reply_recovers_roles_after_restart_and_sync() {
         .unwrap();
     origin.workspace.upsert_device_row(&device);
     let tokens = origin.sessions.agent_tokens();
-    let grant = tokens.admin().grant("source", "space", None, true);
+    let grant = (!initially_absent).then(|| tokens.admin().grant("source", "space", None, true));
     let assistant = tokens.personal_assistant().set(&source);
     drop(tokens);
 
@@ -670,41 +680,47 @@ async fn lost_forwarded_handoff_reply_recovers_roles_after_restart_and_sync() {
     // registry row arrives after startup, as it would after reconnect.
     let restarted = assemble(&origin_dir, "origin");
     let tokens = restarted.sessions.agent_tokens();
-    assert_eq!(tokens.admin().live("source"), Some(grant.clone()));
+    assert_eq!(tokens.admin().live("source"), grant);
     assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
+    let edits = edited.then(|| {
+        let grant = tokens.admin().grant("source", "space", None, false);
+        let assistant = tokens.personal_assistant().set(&source);
+        (grant, assistant)
+    });
     assert!(
         restarted
             .workspace
             .apply_registry_rows(row.seq.max(1), vec![row])
     );
+    let pending_path = origin_dir.join("pending-role-handoffs.json");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while tokens
-            .personal_assistant()
-            .get()
-            .as_ref()
-            .map(|a| a.chat_id.as_str())
-            != Some(successor.as_str())
-        {
+        while std::fs::read_to_string(&pending_path).unwrap() != "[]" {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
     })
     .await
     .unwrap();
-    assert!(tokens.admin().live("source").is_none());
-    assert_eq!(
-        tokens.admin().live(&successor),
-        Some(mast_proto::AdminGrant {
-            chat_id: successor.clone(),
-            ..grant
-        })
-    );
-    assert_eq!(
-        tokens.personal_assistant().get(),
-        Some(mast_proto::PersonalAssistant {
-            chat_id: successor,
-            ..assistant
-        })
-    );
+    if let Some((grant, assistant)) = edits {
+        assert_eq!(tokens.admin().live("source"), Some(grant));
+        assert!(tokens.admin().live(&successor).is_none());
+        assert_eq!(tokens.personal_assistant().get(), Some(assistant));
+    } else {
+        assert!(tokens.admin().live("source").is_none());
+        assert_eq!(
+            tokens.admin().live(&successor),
+            grant.map(|grant| mast_proto::AdminGrant {
+                chat_id: successor.clone(),
+                ..grant
+            })
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor,
+                ..assistant
+            })
+        );
+    }
     restarted.shutdown().await;
     owner.shutdown().await;
 }
