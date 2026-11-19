@@ -38,6 +38,8 @@ pub(super) struct BlameState {
     over_popover: bool,
     /// Loaded-content hash of the file when blame was requested.
     content_hash: Option<String>,
+    /// A git-status change arrived while a request was in flight.
+    recheck_pending: bool,
 }
 
 #[derive(Clone)]
@@ -75,6 +77,11 @@ pub(super) fn gutter_cells(blame: &Blame, lines: impl IntoIterator<Item = u32>) 
             GutterCell { line, run, labelled }
         })
         .collect()
+}
+
+/// Blame reads the saved file: with unsaved edits its line numbers may not match.
+pub(super) fn blame_hint(dirty: bool) -> Option<&'static str> {
+    dirty.then_some("Save to update blame")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +246,43 @@ impl FilesSurface {
         }));
     }
 
+    /// The checkout's git status changed (commit, checkout, staging): refetch
+    /// quietly so the gutter follows HEAD. The engine answers from its cache
+    /// (one `rev-parse`) when nothing relevant moved; old blame stays on screen
+    /// until a different one arrives. One request at a time.
+    pub(super) fn recheck_blame(&mut self, cx: &mut Context<Self>) {
+        if !self.blame.enabled || self.blame.blame.is_none() {
+            return;
+        }
+        if self.blame.task.is_some() {
+            self.blame.recheck_pending = true;
+            return;
+        }
+        let Some(path) = self.blame.path.clone() else { return };
+        let Some(context) = self.request_context.clone() else { return };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return };
+        let generation = self.blame.generation;
+        let client = WorkspaceFilesClient::new(engine, context.clone());
+        self.blame.task = Some(cx.spawn(async move |this, cx| {
+            let result = client.file_blame(path).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request_context.as_ref() != Some(&context) || this.blame.generation != generation {
+                    return;
+                }
+                this.blame.task = None;
+                if let Ok(blame) = result
+                    && this.blame.blame.as_deref() != Some(&blame)
+                {
+                    this.blame.blame = Some(Arc::new(blame));
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.blame.recheck_pending) {
+                    this.recheck_blame(cx);
+                }
+            });
+        }));
+    }
+
     /// Called when the active file changes to `path`.
     pub(super) fn blame_on_open(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.blame.enabled && self.blame.path.as_deref() != Some(path) {
@@ -315,6 +359,13 @@ impl FilesSurface {
         if !self.blame.enabled {
             return None;
         }
+        let dirty = self
+            .preview
+            .active
+            .as_ref()
+            .and_then(|path| self.preview.documents.get(path))
+            .is_some_and(|document| document.is_dirty());
+        let hint = blame_hint(dirty);
         let column = div()
             .id("files-blame-column")
             .flex_none()
@@ -386,7 +437,26 @@ impl FilesSurface {
                 }));
             children.push(element.into_any_element());
         }
-        Some(column.children(children).into_any_element())
+        Some(
+            column
+                .when(dirty, |el| el.opacity(0.5))
+                .children(children)
+                .when_some(hint, |el, hint| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .bottom(px(0.0))
+                            .left(px(0.0))
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .bg(theme.surface_raised)
+                            .text_color(theme.text_muted)
+                            .child(hint),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The hover popover: commit facts, and the chat when known.
@@ -530,6 +600,12 @@ mod tests {
         assert_eq!(second.chip.as_deref(), Some("A very long ch…"));
         assert!(!second.probably);
         assert_eq!(run_label(&blame, &blame.runs[2], now).text, "Not committed");
+    }
+
+    #[test]
+    fn unsaved_edits_show_the_save_hint() {
+        assert_eq!(blame_hint(true), Some("Save to update blame"));
+        assert_eq!(blame_hint(false), None);
     }
 
     #[test]

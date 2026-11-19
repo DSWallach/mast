@@ -1,5 +1,8 @@
 use super::*;
 
+/// Gaps between attempts to scroll an opened chat to a turn: 0 + these sum to ~15 s.
+const TURN_SCROLL_RETRY_MS: [u64; 8] = [0, 250, 500, 1000, 2000, 3000, 4000, 4000];
+
 impl Shell {
     pub(super) fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
         if let Some(terminal) = &self.right_terminal {
@@ -247,13 +250,15 @@ impl Shell {
     }
 
     /// Open `chat_id`, then scroll its transcript to the turn (the user message
-    /// `turn_id`). The transcript may not have rows yet, so retry a few times
-    /// with growing gaps, then give up and leave the chat open.
+    /// `turn_id`). The transcript may still be hydrating, so retry with growing
+    /// gaps for up to ~15 s, then say the turn wasn't found (the chat stays
+    /// open).
     pub(super) fn open_chat_at_turn(&mut self, chat_id: String, turn_id: Option<String>, cx: &mut Context<Self>) {
         self.open_chat(chat_id.clone(), cx);
         let Some(turn_id) = turn_id else { return };
         self.turn_scroll_task = Some(cx.spawn(async move |this, cx| {
-            for delay_ms in [0u64, 250, 750, 2000] {
+            let mut found = false;
+            for delay_ms in TURN_SCROLL_RETRY_MS {
                 if delay_ms > 0 {
                     cx.background_executor().timer(std::time::Duration::from_millis(delay_ms)).await;
                 }
@@ -275,8 +280,15 @@ impl Shell {
                     })
                     .unwrap_or(true);
                 if done {
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                let _ = this.update(cx, |this, cx| {
+                    this.sidebar_notice = Some("Couldn't find that turn".into());
+                    cx.notify();
+                });
             }
         }));
     }
