@@ -1639,7 +1639,8 @@ async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
     for id in ["role-source", "role-successor", "plain-source", "plain-successor"] {
         workspace.create_chat_with_parent(id, Some("role-space"), Some(&rig.core.device_id), None, None, None).unwrap();
     }
-    workspace.adopt_standing_role(StandingRoleKind::Manager, "project", "role-source", &[]).unwrap();
+    let item = workspace.ensure_chat_work_item("role-source").unwrap();
+    workspace.adopt_standing_role(StandingRoleKind::Manager, &item, "role-source", &[]).unwrap();
 
     assert_eq!(workspace.rotate_standing_role_for_chat("plain-source", "plain-successor").unwrap(), None);
     assert!(!workspace.chat("plain-source").unwrap().unwrap().archived);
@@ -1650,9 +1651,9 @@ async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
     assert_eq!(workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap(), Some(role));
     // A source a role already replaced cannot hand off to a different chat.
     assert!(workspace.rotate_standing_role_for_chat("role-source", "plain-successor").is_err());
-    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("role-successor"));
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-successor"));
     let source = workspace.chat("role-source").unwrap().unwrap();
     assert!(source.archived && source.is_standing_role_predecessor());
-    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("role-successor"));
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-successor"));
     rig.core.shutdown().await;
 }
