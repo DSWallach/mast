@@ -198,9 +198,9 @@ async fn rig_for(fake_codex: bool) -> Rig {
     // Legacy unassociated chats exercise the authorization boundary. Tests
     // for current user creation go through Mutate below.
     for chat in [CHAT, OTHER_CHAT] {
-        core.workspace.create_chat(chat, Some(SPACE), Some(&core.device_id), None, None).unwrap();
+        core.workspace.create_chat(chat, Some(SPACE), Some(&core.device_id), None, None, &[]).unwrap();
     }
-    core.workspace.create_chat(PROJECTLESS, None, Some(&core.device_id), None, None).unwrap();
+    core.workspace.create_chat(PROJECTLESS, None, Some(&core.device_id), None, None, &[]).unwrap();
     Rig {
         _tmp: tmp,
         core,
@@ -5530,16 +5530,16 @@ fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
     let grants = AdminGrants::default();
     let token = grants.open_approval("chat", "exec-a", "hash-a", "request-1", 12);
     // The same count with a different resolved preview is not what was shown.
-    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b", None).unwrap_err();
+    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b", None, &[]).unwrap_err();
     assert!(err.contains("preview changed"), "{err}");
     // Another chat or another batch cannot use it.
-    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a", None).is_err());
-    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None).unwrap_err().contains("another batch"));
+    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a", None, &[]).is_err());
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None, &[]).unwrap_err().contains("another batch"));
     // The first claim is fresh; a retry of that batch resumes it even though its
     // own earlier steps moved the preview; no other batch can take it over.
-    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a", None).unwrap(), ("request-1".into(), 12, true));
-    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved", None).unwrap(), ("request-1".into(), 12, false));
-    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None).is_err());
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a", None, &[]).unwrap(), ("request-1".into(), 12, true));
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved", None, &[]).unwrap(), ("request-1".into(), 12, false));
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None, &[]).is_err());
 
     // Racing claims from many batches: exactly one gets it.
     let token = grants.open_approval("chat", "exec-0", "hash", "request-2", 11);
@@ -5547,7 +5547,7 @@ fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let (grants, token) = (&grants, &token);
-                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash", None).is_ok())
+                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash", None, &[]).is_ok())
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
@@ -5772,4 +5772,129 @@ async fn an_approval_is_claimed_only_when_the_approved_batch_runs_with_its_allow
     let done = admin(&rig, &token, with_token(json!({}))).await.unwrap();
     assert_eq!(done["applied"], 1, "{done}");
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_retry_is_checked_against_the_plan_the_user_approved() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..2 {
+        create_item(&rig, &format!("pr-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // The first attempt was admitted (and, say, crashed) with this plan: archive
+    // the Tickets subtree, 4 items, well inside the allowance.
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let grants_owner = rig.core.sessions.agent_tokens();
+    let grants = grants_owner.admin();
+    let exec = exec_key_of(CHAT, "pr-batch", &steps);
+    let approved = step_plan_digest(&snapshot(&rig), "archive", &p.tickets);
+    grants.admit_batch(&exec, 10, &[approved], false).unwrap();
+    // The target changes before the retry; it still costs less than the allowance left.
+    create_item(&rig, "pr-late", "Added meanwhile", Some(&p.tickets)).await;
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "pr-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "the unfinished step no longer matches its plan: {ask}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none(), "nothing ran");
+    // Approving the changed plan replaces it, and the step then runs.
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "pr-approve").await;
+    let done = admin(&rig, &token, json!({
+        "idempotencyKey": "pr-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap();
+    assert_eq!(done["applied"], 1, "{done}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_size_template_substitution_changes_what_an_approval_is_bound_to() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let set = |key: &str, titles: [&str; 2]| {
+        json!({ "idempotencyKey": key, "steps": [{
+            "op": "template_set", "itemId": p.tickets,
+            "template": { "root": { "children": [{ "title": titles[0] }, { "title": titles[1] }] } }
+        }]})
+    };
+    admin(&rig, &token, set("ts-one", ["Planning", "Tickets"])).await.unwrap();
+    let before = snapshot(&rig);
+    let create_before = step_plan_digest(&before, "create", &p.tickets);
+    let apply_before = step_plan_digest(&before, "template_apply", &p.tickets);
+    // Same node count, different rules.
+    admin(&rig, &token, set("ts-two", ["Design", "Build"])).await.unwrap();
+    let after = snapshot(&rig);
+    assert_eq!(
+        mast_engine::work_outline::step_effects(&after, "create", &p.tickets),
+        mast_engine::work_outline::step_effects(&before, "create", &p.tickets),
+        "the count did not change"
+    );
+    assert_ne!(step_plan_digest(&after, "create", &p.tickets), create_before);
+    assert_ne!(step_plan_digest(&after, "template_apply", &p.tickets), apply_before);
+    // A row of the subtree replaced by another of the same size changes an apply too.
+    let apply_now = step_plan_digest(&after, "template_apply", &p.tickets);
+    admin(&rig, &token, json!({ "idempotencyKey": "ts-rename", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Same size, other title" }
+    ]})).await.unwrap();
+    assert_ne!(step_plan_digest(&snapshot(&rig), "template_apply", &p.tickets), apply_now);
+
+    // End to end: an approval for four creates is void once the rules are swapped
+    // for a same-size set.
+    let steps: Vec<Value> = (0..4)
+        .map(|i| json!({ "op": "create", "parentId": p.tickets, "title": format!("TS {i}") }))
+        .collect();
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "ts-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "{ask}");
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "ts-approve").await;
+    admin(&rig, &token, set("ts-three", ["Alpha", "Beta"])).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "ts-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+}
+
+#[test]
+fn batch_admission_fails_closed_on_an_unreadable_store_a_full_store_and_a_failed_claim() {
+    use mast_engine::admin::AdminGrants;
+    // An unreadable budget file: nothing is admitted and nothing spends.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("admin-batch-budgets.json"), b"not json").unwrap();
+    let broken = AdminGrants::default();
+    broken.set_store(dir.path().join("admin-grants.json"));
+    let err = broken.admit_batch("any", 10, &[], false).err().unwrap();
+    assert!(err.contains("unreadable"), "{err}");
+
+    // An unfinished batch is never forgotten, however many finished ones follow.
+    let grants = AdminGrants::default();
+    let keep = grants.admit_batch("unfinished", 10, &["plan".into()], false).unwrap();
+    for i in 0..700 {
+        grants.admit_batch(&format!("done-{i}"), 10, &[], false).unwrap().finish();
+    }
+    assert_eq!(grants.batch_state("unfinished").unwrap().1, vec!["plan".to_string()]);
+    assert!(keep.reserve(3));
+    // A batch that committed steps with no record is refused, not restarted.
+    let err = grants.admit_batch("forgotten", 10, &[], true).err().unwrap();
+    assert!(err.contains("budget record is gone"), "{err}");
+    // A store full of unfinished batches refuses new ones.
+    let full = AdminGrants::default();
+    for i in 0..4096 {
+        full.admit_batch(&format!("open-{i}"), 10, &[], false).unwrap();
+    }
+    assert!(full.admit_batch("one-too-many", 10, &[], false).err().unwrap().contains("too many"));
+
+    // A claim whose allowance cannot be saved claims nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let grants = AdminGrants::default();
+    grants.set_store(dir.path().join("admin-grants.json"));
+    let budget = grants.admit_batch("exec", 10, &[], false).unwrap();
+    let file = dir.path().join("admin-batch-budgets.json");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let token = grants.open_approval("chat", "exec", "hash", "request", 12);
+    let err = grants.claim_approval(&token, "chat", "exec", "hash", Some(&budget), &[]).unwrap_err();
+    assert!(err.contains("could not be saved"), "{err}");
+    assert!(!budget.reserve(1), "and nothing can spend while it cannot be saved");
+    assert_eq!(
+        grants.peek_approval(&token, "chat", "exec", "hash").unwrap(),
+        ("request".into(), 12, true),
+        "the token is still unclaimed"
+    );
 }

@@ -43,30 +43,63 @@ struct Approval {
     claimed_by: Option<String>,
 }
 
-/// `(total, spent)` per batch, written ahead to disk: a step's charge is
-/// reserved before the registry write and refunded if that write fails, so a
-/// crash can only over-count, never let a retry spend twice.
+/// One batch's durable record: what it may spend, what it has spent, the
+/// per-step plan the user approved (the digest each step must still match when
+/// it is written, kept across partial runs and restarts), and whether it has
+/// finished. Written ahead to disk: a step's charge is reserved before the
+/// registry write and refunded if that write fails, so a crash can only
+/// over-count, never let a retry spend twice.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct BatchRecord {
+    total: usize,
+    spent: usize,
+    plan: Vec<String>,
+    done: bool,
+}
+
 #[derive(Default)]
 struct BudgetBook {
-    entries: HashMap<String, (usize, usize)>,
+    entries: HashMap<String, BatchRecord>,
     order: std::collections::VecDeque<String>,
     path: Option<PathBuf>,
     /// The saved file exists but could not be read: nothing it held can be
-    /// trusted, so no step may reserve until the store is repaired.
+    /// trusted, so no batch may be admitted or spend until it is repaired.
     broken: bool,
 }
 
 impl BudgetBook {
-    /// Write the book (temp file, then rename, so a crash never leaves a
-    /// torn file). `Ok` without a store: the in-memory book is all there is.
+    /// Write the book durably: temp file, flushed to disk, renamed over the
+    /// old one, then the directory flushed, so neither a crash nor a power
+    /// loss leaves a charge missing while its registry write survives. `Ok`
+    /// without a store: the in-memory book is all there is.
     fn persist(&self) -> std::io::Result<()> {
+        use std::io::Write;
         let Some(path) = &self.path else { return Ok(()) };
-        let rows: Vec<(&String, usize, usize)> =
-            self.entries.iter().map(|(k, (t, s))| (k, *t, *s)).collect();
+        let rows: Vec<(&String, &BatchRecord)> = self.entries.iter().collect();
         let bytes = serde_json::to_vec(&rows).map_err(std::io::Error::other)?;
         let temp = path.with_extension("tmp");
-        std::fs::write(&temp, bytes)?;
-        std::fs::rename(&temp, path)
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)?;
+        if let Some(dir) = path.parent() {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Drop the oldest finished batches beyond the cap. An unfinished batch is
+    /// never dropped, so its record cannot vanish between a check and its use.
+    fn trim_finished(&mut self) {
+        while self.order.len() > MAX_FINISHED_BATCHES {
+            let Some(index) = self.order.iter().position(|key| self.entries.get(key).is_some_and(|r| r.done)) else {
+                break;
+            };
+            if let Some(key) = self.order.remove(index) {
+                self.entries.remove(&key);
+            }
+        }
     }
 }
 
@@ -88,34 +121,39 @@ impl std::fmt::Debug for BudgetBook {
 
 impl BatchBudget {
     /// A budget of its own (tests, one-off use); batches use
-    /// [`AdminGrants::batch_budget`].
+    /// [`AdminGrants::admit_batch`].
     pub fn new(total: usize) -> Arc<Self> {
         let book = Arc::new(Mutex::new(BudgetBook::default()));
-        lock(&book).entries.insert(String::new(), (total, 0));
+        lock(&book).entries.insert(String::new(), BatchRecord { total, ..Default::default() });
         Arc::new(Self { key: String::new(), book })
     }
 
     pub fn remaining(&self) -> usize {
-        lock(&self.book).entries.get(&self.key).map_or(0, |(total, spent)| total.saturating_sub(*spent))
+        lock(&self.book).entries.get(&self.key).map_or(0, |r| r.total.saturating_sub(r.spent))
     }
 
-    /// Take `n` if that much is left. Atomic, and written to disk before it
-    /// returns: if the store cannot be written (or was unreadable) it fails
-    /// closed and takes nothing, so a registry write can never outlive its
-    /// charge.
+    /// The per-step plan the user approved (empty if none was recorded).
+    pub fn plan(&self) -> Vec<String> {
+        lock(&self.book).entries.get(&self.key).map(|r| r.plan.clone()).unwrap_or_default()
+    }
+
+    /// Take `n` if that much is left. Atomic, and written to disk (flushed)
+    /// before it returns: if the store cannot be written (or was unreadable)
+    /// it fails closed and takes nothing, so a registry write can never
+    /// outlive its charge.
     pub fn reserve(&self, n: usize) -> bool {
         let mut book = lock(&self.book);
         if book.broken {
             return false;
         }
-        let Some((total, spent)) = book.entries.get_mut(&self.key) else { return false };
-        if n > total.saturating_sub(*spent) {
+        let Some(record) = book.entries.get_mut(&self.key) else { return false };
+        if n > record.total.saturating_sub(record.spent) {
             return false;
         }
-        *spent += n;
+        record.spent += n;
         if book.persist().is_err() {
-            if let Some((_, spent)) = book.entries.get_mut(&self.key) {
-                *spent = spent.saturating_sub(n);
+            if let Some(record) = book.entries.get_mut(&self.key) {
+                record.spent = record.spent.saturating_sub(n);
             }
             return false;
         }
@@ -126,26 +164,52 @@ impl BatchBudget {
     /// only leaves the stored count higher, which is the safe direction.
     pub fn refund(&self, n: usize) {
         let mut book = lock(&self.book);
-        if let Some((_, spent)) = book.entries.get_mut(&self.key) {
-            *spent = spent.saturating_sub(n);
+        if let Some(record) = book.entries.get_mut(&self.key) {
+            record.spent = record.spent.saturating_sub(n);
         }
         let _ = book.persist();
     }
 
-    /// A fresh approval for `allowance` more items: the total becomes what is
-    /// already spent plus that, so earlier committed steps stay counted. A
-    /// failed save only leaves the stored allowance smaller.
-    pub fn allow(&self, allowance: usize) {
+    /// A fresh approval for `allowance` more items over `plan`: the total
+    /// becomes what is already spent plus that, so earlier committed steps
+    /// stay counted, and the approved plan is replaced. All or nothing: if it
+    /// cannot be saved, nothing changes and the claim must not go ahead.
+    pub fn approve(&self, allowance: usize, plan: &[String]) -> Result<(), String> {
         let mut book = lock(&self.book);
-        if let Some((total, spent)) = book.entries.get_mut(&self.key) {
-            *total = *spent + allowance;
+        if book.broken {
+            return Err("the batch budget store is unreadable".into());
         }
+        let Some(record) = book.entries.get_mut(&self.key) else {
+            return Err("no budget is recorded for this batch".into());
+        };
+        let before = record.clone();
+        record.total = record.spent + allowance;
+        record.plan = plan.to_vec();
+        if book.persist().is_err() {
+            if let Some(record) = book.entries.get_mut(&self.key) {
+                *record = before;
+            }
+            return Err("the batch budget could not be saved".into());
+        }
+        Ok(())
+    }
+
+    /// The batch ran to completion: its record may be dropped when old.
+    pub fn finish(&self) {
+        let mut book = lock(&self.book);
+        if let Some(record) = book.entries.get_mut(&self.key) {
+            record.done = true;
+        }
+        book.trim_finished();
         let _ = book.persist();
     }
 }
 
-/// Batch budgets kept (oldest dropped first).
-const MAX_BATCH_BUDGETS: usize = 512;
+/// Finished batch records kept (oldest dropped first); unfinished ones never.
+const MAX_FINISHED_BATCHES: usize = 512;
+/// Most records, finished or not: past it new batches are refused rather than
+/// forgetting one that has committed steps.
+const MAX_BATCH_RECORDS: usize = 4096;
 
 #[derive(Default)]
 struct State {
@@ -191,10 +255,10 @@ impl AdminGrants {
         {
             let mut book = lock(&self.budgets);
             match std::fs::read(&budget_path) {
-                Ok(bytes) => match serde_json::from_slice::<Vec<(String, usize, usize)>>(&bytes) {
+                Ok(bytes) => match serde_json::from_slice::<Vec<(String, BatchRecord)>>(&bytes) {
                     Ok(saved) => {
-                        for (key, total, spent) in saved {
-                            if book.entries.insert(key.clone(), (total, spent)).is_none() {
+                        for (key, record) in saved {
+                            if book.entries.insert(key.clone(), record).is_none() {
                                 book.order.push_back(key);
                             }
                         }
@@ -368,28 +432,64 @@ impl AdminGrants {
 
     // ---- batch budgets ---------------------------------------------------------
 
-    /// The budget for batch `key` (the chat, its idempotency key and the
-    /// steps): created with `total` on first use, and kept across retries and
-    /// restarts, so a retry resumes what the first attempt left.
-    pub fn batch_budget(&self, key: &str, total: usize) -> Arc<BatchBudget> {
+    /// Admit batch `key` (the chat, its idempotency key and the steps): one
+    /// critical section that finds its durable record or creates it with the
+    /// default `total` and the approved `plan`. A batch that already committed
+    /// steps (`resumed`) but has no record cannot prove what it spent, so it
+    /// is refused rather than started over; so is a store that is unreadable,
+    /// full of unfinished batches, or cannot save the new record.
+    pub fn admit_batch(
+        &self,
+        key: &str,
+        total: usize,
+        plan: &[String],
+        resumed: bool,
+    ) -> Result<Arc<BatchBudget>, String> {
         let mut book = lock(&self.budgets);
-        if !book.entries.contains_key(key) {
-            book.entries.insert(key.to_owned(), (total, 0));
-            book.order.push_back(key.to_owned());
-            while book.order.len() > MAX_BATCH_BUDGETS {
-                if let Some(oldest) = book.order.pop_front() {
-                    book.entries.remove(&oldest);
-                }
-            }
-            let _ = book.persist();
+        if book.broken {
+            return Err("the batch budget store is unreadable: nothing can be admitted until it is repaired".into());
         }
-        Arc::new(BatchBudget { key: key.to_owned(), book: self.budgets.clone() })
+        if !book.entries.contains_key(key) {
+            if resumed {
+                return Err(
+                    "this batch already committed some steps but its budget record is gone, so what it \
+                     spent cannot be proven: start it again under a new idempotencyKey"
+                        .into(),
+                );
+            }
+            if book.entries.len() >= MAX_BATCH_RECORDS {
+                return Err("too many unfinished batches are recorded: finish or retire some first".into());
+            }
+            book.entries.insert(key.to_owned(), BatchRecord { total, plan: plan.to_vec(), ..Default::default() });
+            book.order.push_back(key.to_owned());
+            book.trim_finished();
+            if book.persist().is_err() {
+                book.entries.remove(key);
+                book.order.retain(|k| k != key);
+                return Err("the batch budget could not be saved".into());
+            }
+        }
+        drop(book);
+        Ok(Arc::new(BatchBudget { key: key.to_owned(), book: self.budgets.clone() }))
     }
 
-    /// What batch `key` may still spend, or `None` if no budget is recorded
-    /// for it (new, or forgotten).
+    /// [`Self::admit_batch`] with no plan and nothing committed (tests).
+    pub fn batch_budget(&self, key: &str, total: usize) -> Arc<BatchBudget> {
+        self.admit_batch(key, total, &[], false).expect("a batch budget")
+    }
+
+    /// What batch `key` may still spend and the plan it was approved with, or
+    /// `None` if no record exists for it (new). Read-only.
+    pub fn batch_state(&self, key: &str) -> Option<(usize, Vec<String>)> {
+        lock(&self.budgets)
+            .entries
+            .get(key)
+            .map(|r| (r.total.saturating_sub(r.spent), r.plan.clone()))
+    }
+
+    /// What batch `key` may still spend (see [`Self::batch_state`]).
     pub fn batch_remaining(&self, key: &str) -> Option<usize> {
-        lock(&self.budgets).entries.get(key).map(|(total, spent)| total.saturating_sub(*spent))
+        self.batch_state(key).map(|(remaining, _)| remaining)
     }
 
     // ---- bulk approvals --------------------------------------------------------
@@ -487,6 +587,7 @@ impl AdminGrants {
         exec_key: &str,
         preview_hash: &str,
         budget: Option<&BatchBudget>,
+        plan: &[String],
     ) -> Result<(String, usize, bool), String> {
         let mut state = lock(&self.state);
         let now = self.now_ms();
@@ -495,10 +596,12 @@ impl AdminGrants {
         };
         let (request_id, weight, fresh) = Self::evaluate(approval, now, chat_id, exec_key, preview_hash)?;
         if fresh {
-            approval.claimed_by = Some(exec_key.to_owned());
+            // The allowance and the approved plan are saved first: if that
+            // fails the token stays unclaimed and nothing runs.
             if let Some(budget) = budget {
-                budget.allow(weight);
+                budget.approve(weight, plan)?;
             }
+            approval.claimed_by = Some(exec_key.to_owned());
         }
         Ok((request_id, weight, fresh))
     }

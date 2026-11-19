@@ -750,24 +750,31 @@ impl AgentToolsService {
         let skip_bulk = grant.as_ref().is_some_and(|g| g.skip_bulk_confirmation);
         let weight: usize = sequence.weights.iter().sum();
         let mut claimed_token: Option<String> = None;
-        // A manager batch that already committed steps must still have its
-        // budget record: without it nothing proves what was spent, so it fails
-        // closed rather than start the allowance over.
-        let known_allowance = manager_root.as_ref().and_then(|_| admin.batch_remaining(&exec_key));
-        if manager_root.is_some()
-            && known_allowance.is_none()
-            && sequence.committed > 0
-            && sequence.committed < actions.len()
-        {
+        // A manager batch keeps a durable record: its remaining allowance and the
+        // per-step plan the user approved. One that already committed steps but
+        // has lost its record cannot prove what it spent, so it is not started
+        // over (the admission below enforces this atomically too).
+        let stored = manager_root.as_ref().and_then(|_| admin.batch_state(&exec_key));
+        let resumed = sequence.committed > 0 && sequence.committed < actions.len();
+        if manager_root.is_some() && stored.is_none() && resumed {
             return Err(forbidden(
                 "this batch already committed some steps but its budget record is gone, so what it \
                  spent cannot be proven: start it again under a new idempotencyKey",
             ));
         }
         // What may still run without asking: the batch's remaining allowance
-        // (the default threshold for a new batch), not the threshold each time.
-        let allowance = known_allowance.unwrap_or(ADMIN_BULK_THRESHOLD);
-        let bulk = weight > allowance && !skip_bulk;
+        // (the default threshold for a new batch), and only the plan the user
+        // approved. If the unfinished steps no longer match that plan the user
+        // is asked again, whatever they cost.
+        let allowance = stored.as_ref().map_or(ADMIN_BULK_THRESHOLD, |(remaining, _)| *remaining);
+        let plan_drift = stored.as_ref().is_some_and(|(_, plan)| {
+            sequence
+                .digests
+                .iter()
+                .zip(plan.iter())
+                .any(|(now, approved)| !now.is_empty() && !approved.is_empty() && now != approved)
+        });
+        let bulk = (weight > allowance || plan_drift) && !skip_bulk;
         let shown: Vec<&String> = preview.iter().take(PREVIEW_LINES).collect();
 
         let confirm = non_empty(arguments.get("confirmToken").and_then(Value::as_str).map(str::to_owned));
@@ -810,15 +817,27 @@ impl AgentToolsService {
         let turn_id = context.grant.run_id.clone();
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
-        // One budget per batch, shared by its steps, its retries and restarts.
-        let budget = manager_root.as_ref().map(|_| admin.batch_budget(&exec_key, ADMIN_BULK_THRESHOLD));
-        // Claim the approval and install what it allows (what is left to do, on
-        // top of what is already spent) as one step.
+        // Admit the batch: one durable record shared by its steps, its retries
+        // and restarts, created here with the plan that was previewed.
+        let budget = match &manager_root {
+            Some(_) => Some(
+                admin
+                    .admit_batch(&exec_key, ADMIN_BULK_THRESHOLD, &sequence.digests, resumed)
+                    .map_err(forbidden)?,
+            ),
+            None => None,
+        };
+        // Claim the approval and install what it allows and the plan it
+        // approved (what is left to do, on top of what is already spent) as
+        // one step.
         if let Some(token) = &claimed_token {
             admin
-                .claim_approval(token, &context.grant.chat_id, &exec_key, &sequence.hash, budget.as_deref())
+                .claim_approval(token, &context.grant.chat_id, &exec_key, &sequence.hash, budget.as_deref(), &sequence.digests)
                 .map_err(forbidden)?;
         }
+        // Steps are validated against the approved plan, which is retained
+        // across partial runs and restarts, not against a fresh preview.
+        let approved_plan: Vec<String> = budget.as_ref().map(|b| b.plan()).unwrap_or_default();
         for (i, step) in actions.iter().enumerate() {
             let still_allowed = match &manager_root {
                 Some(root) => self.manager_scope_now(&context.grant.chat_id).as_ref() == Some(root),
@@ -849,7 +868,7 @@ impl AgentToolsService {
                 let effects = vec![(
                     op.to_owned(),
                     manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw)).unwrap_or_default(),
-                    sequence.digests[i].clone(),
+                    approved_plan.get(i).cloned().unwrap_or_default(),
                 )];
                 crate::work_outline::ManagerGuard {
                     chat_id: context.grant.chat_id.clone(),
@@ -883,6 +902,9 @@ impl AgentToolsService {
                 &who(),
             );
             results.push(json!({ "summary": built.summary, "workItemId": reply.work_item_id }));
+        }
+        if let Some(budget) = &budget {
+            budget.finish();
         }
         if let Some(token) = &claimed_token {
             admin.complete_approval(token);

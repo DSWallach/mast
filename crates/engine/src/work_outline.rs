@@ -229,10 +229,16 @@ pub struct ManagerGuard {
     pub budget: Option<std::sync::Arc<crate::admin::BatchBudget>>,
 }
 
-/// Digest of what a step will touch: the ids it affects (an archive or restore's
-/// whole subtree, a template apply's children) and how many items that is. The
-/// preview binds the approval to it and the writer re-checks it under its lock,
-/// so the same count over different items does not keep an old approval.
+/// Digest of what a step will touch. The preview binds the approval to it and
+/// the writer re-checks it under its lock, so the same count over different
+/// items, or the same shape under different template rules, does not keep an
+/// old approval.
+///
+/// An archive or restore binds the ids of its whole subtree. A template apply
+/// binds the template's full content and every row of the subtree it can adopt
+/// or rewrite (id, title, rule node, flags, destination and instructions), and a
+/// create binds its parent's template content, since that decides what the new
+/// item expands to.
 pub fn step_plan_digest(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> String {
     use sha2::{Digest, Sha256};
     fn subtree(snapshot: &WorkOutlineSnapshot, id: &str, depth: usize, out: &mut Vec<String>) {
@@ -247,20 +253,50 @@ pub fn step_plan_digest(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str)
         }
     }
     let mut ids = vec![item_id.to_owned()];
+    let mut text = format!("{op}|{}", step_effects(snapshot, op, item_id));
     match op {
         "archive" | "restore" => {
             ids.clear();
             subtree(snapshot, item_id, 0, &mut ids);
         }
-        "template_apply" => {
-            if let Some(item) = snapshot.item(item_id) {
-                ids.extend(item.child_ids.iter().cloned());
+        "template_apply" | "create" => {
+            let item = snapshot.item(item_id);
+            let template = match op {
+                "create" => item.and_then(|i| i.container_template.as_ref()),
+                _ => item.and_then(|i| i.container_template.as_ref()).or_else(|| {
+                    item.and_then(|i| i.parent_work_item_id.as_deref())
+                        .and_then(|parent| snapshot.item(parent))
+                        .and_then(|parent| parent.container_template.as_ref())
+                }),
+            };
+            text.push_str(&format!("|tpl:{}", template.and_then(|t| serde_json::to_string(t).ok()).unwrap_or_default()));
+            if op == "template_apply" {
+                ids.clear();
+                subtree(snapshot, item_id, 0, &mut ids);
+                ids.sort();
+                for id in &ids {
+                    let Some(row) = snapshot.item(id) else { continue };
+                    let instructions: Vec<String> = snapshot
+                        .instructions
+                        .iter()
+                        .filter(|i| i.work_item_id.as_deref() == Some(id.as_str()))
+                        .map(|i| format!("{}={}", i.id, i.text))
+                        .collect();
+                    text.push_str(&format!(
+                        "|row:{id}:{}:{}:{}:{}:{}",
+                        row.title,
+                        row.template_node_id.as_deref().unwrap_or(""),
+                        row.is_project,
+                        row.worker_destination_id.as_deref().unwrap_or(""),
+                        instructions.join(";"),
+                    ));
+                }
             }
         }
         _ => {}
     }
     ids.sort();
-    let text = format!("{op}|{}|{}", ids.join(","), step_effects(snapshot, op, item_id));
+    text.push_str(&format!("|ids:{}", ids.join(",")));
     format!("{:x}", Sha256::digest(text))
 }
 
