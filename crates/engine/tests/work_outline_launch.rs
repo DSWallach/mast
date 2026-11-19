@@ -2397,5 +2397,22 @@ async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rej
     let stray_entry = commands(&rig, &chat).into_iter().find(|c| c.id == "stray-command").unwrap();
     assert_eq!(stray_entry.status, SessionCommandStatus::Rejected);
     assert!(stray_entry.resolution.unwrap_or_default().contains("not started yet"));
+
+    // After the role adopts the chat, a user's Retry Delivery must not
+    // re-issue the refused message: the rejection is final.
+    rig.core
+        .workspace
+        .activate_standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item, &chat, &[])
+        .expect("the provisional chat activates");
+    rig.core.doc_host.retry_delivery(&chat).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(turns_with(&rig, "stray message").is_empty(), "the refused message never ran");
+    let stray_commands: Vec<_> = commands(&rig, &chat)
+        .into_iter()
+        .filter(|c| matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if message_id == "stray-message"))
+        .collect();
+    assert_eq!(stray_commands.len(), 1, "no re-issued attempt: {stray_commands:?}");
+    assert_eq!(stray_commands[0].status, SessionCommandStatus::Rejected);
     rig.core.shutdown().await;
 }

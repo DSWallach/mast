@@ -2860,6 +2860,11 @@ impl DocHost {
     /// (which queues through `queue_command_with_id`): until the role adopts it
     /// the chat is hidden, and a message sent to it would run where no one can
     /// see the answer.
+    /// The resolution of a message refused on a provisional Manager chat. It is
+    /// final: a user's Retry Delivery never re-issues it, so a message that was
+    /// not authorized cannot reach the chat after the role adopts it.
+    const UNAUTHORIZED_FIRST_MESSAGE: &str = "this Manager has not started yet";
+
     /// For a provisional first-start chat, the command id and the user message
     /// id of its own launch (empty when the marker names no operation); `None`
     /// for any other chat. A retry of a rejected or expired launch re-issues
@@ -4449,6 +4454,10 @@ impl DocHost {
             if message_landed(mid) {
                 continue;
             }
+            // Refused as unauthorized on a provisional Manager chat: final.
+            if c.resolution.as_deref() == Some(Self::UNAUTHORIZED_FIRST_MESSAGE) {
+                continue;
+            }
             let dead = match c.status {
                 // Rejected: execute failed or the sweep terminalized a crash
                 // window. Expired: the entry outlived its TTL undelivered —
@@ -5032,7 +5041,7 @@ impl DocHost {
                             handle,
                             &c.id,
                             SessionCommandStatus::Rejected,
-                            Some("this Manager has not started yet"),
+                            Some(Self::UNAUTHORIZED_FIRST_MESSAGE),
                         );
                         skipped.insert(c.id.clone());
                     }
