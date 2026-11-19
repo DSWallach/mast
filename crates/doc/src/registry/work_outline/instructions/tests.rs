@@ -1528,14 +1528,14 @@ fn a_provisional_manager_start_is_a_manager_before_its_role_adopts_it() {
     make_project(&mut doc, "op-proj", &a);
     let mut provisional = space_chat("first", Some(SPACE));
     provisional.standing_role_successor =
-        Some(mast_proto::standing_role_provisional_tag(Manager, &a));
+        Some(mast_proto::standing_role_provisional_marker(Manager, &a, "op-first"));
     doc.upsert_chat(&provisional).unwrap();
     assert!(doc.chat_is_manager("first"), "no role record exists yet");
     assert!(provisional.is_provisional_for(Manager, &a));
 
     // An assistant's provisional start is not a Manager, nor is a plain chat.
     let mut other = space_chat("other", Some(SPACE));
-    other.standing_role_successor = Some(mast_proto::standing_role_provisional_tag(Assistant, &a));
+    other.standing_role_successor = Some(mast_proto::standing_role_provisional_marker(Assistant, &a, "op-other"));
     doc.upsert_chat(&other).unwrap();
     assert!(!doc.chat_is_manager("other"));
     doc.upsert_chat(&space_chat("plain", Some(SPACE))).unwrap();
