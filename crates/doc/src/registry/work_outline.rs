@@ -1389,6 +1389,22 @@ impl RegistryDoc {
         {
             set.insert("queueOrderKey".to_owned(), Value::Null);
         }
+        // The same holds for queued descendants whose project changes with the
+        // move (a project inside the moved subtree keeps its own queue).
+        let new_root = dest.and_then(|dest| Self::tree_project_root(&tree, dest));
+        for descendant in tree.descendants(&p.work_item_id) {
+            let before = Self::tree_project_root(&tree, &descendant);
+            if tree.items[&descendant].queue_order_key.is_some()
+                && before.as_deref() != Some(p.work_item_id.as_str())
+                && before != new_root
+            {
+                plan.push(Planned::update(
+                    KIND_WORK_ITEMS,
+                    &descendant,
+                    BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+                ));
+            }
+        }
         plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         let extra: Vec<(&str, &str)> = dest.map(|d| (KIND_WORK_ITEMS, d)).into_iter().collect();
         self.commit(plan, &extra)

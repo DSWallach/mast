@@ -914,27 +914,34 @@ impl WorkItemDetails {
                         theme,
                     ))
                     .when(live_ix.is_some(), |row| {
-                        row
-                    .child(
-                        crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(anchor) = up_to.clone() {
-                                    this.set_queue(up_id.clone(), QueueChange::Place {
-                                        placement: WorkOutlinePlacement::Before { sibling_work_item_id: anchor },
-                                    }, cx);
-                                }
-                            })),
-                    )
-                            .child(
-                        crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(anchor) = down_to.clone() {
-                                    this.set_queue(down_id.clone(), QueueChange::Place {
-                                        placement: WorkOutlinePlacement::After { sibling_work_item_id: anchor },
-                                    }, cx);
-                                }
-                            })),
-                    )
+                        row.child(
+                            crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = up_to.clone() {
+                                        this.set_queue(
+                                            up_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::Before { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                        .child(
+                            crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(anchor) = down_to.clone() {
+                                        this.set_queue(
+                                            down_id.clone(),
+                                            QueueChange::Place {
+                                                placement: WorkOutlinePlacement::After { sibling_work_item_id: anchor },
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
                     })
                     .child(
                         crate::work_outline::hints::details_button(("work-queue-remove", ix), "Remove", theme)

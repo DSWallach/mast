@@ -46,7 +46,7 @@ The manager cannot write files, so it publishes the document as text with `artif
 
 ## Queue wakes
 
-When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again until it stops being ready and becomes ready again. A project with no Manager has one started by the queue instead. Users can pause this per project.
+When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again (not even after an engine restart) until it stops being ready and becomes ready again. A project with no Manager has one started by the queue instead. Users can pause this per project.
 
 ## Archive finished workers
 

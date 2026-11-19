@@ -118,7 +118,9 @@ impl WorkQueueDispatcher {
     fn save_offered(&self) {
         let Some(path) = &self.store else { return };
         let bytes = serde_json::to_vec(&lock(&self.state).offered).unwrap_or_default();
-        if let Err(error) = std::fs::write(path, bytes) {
+        // Write beside the file and rename, so a crash never leaves a torn file.
+        let tmp = path.with_extension("tmp");
+        if let Err(error) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
             tracing::warn!(%error, "work queue: could not save offered items");
         }
     }
@@ -187,7 +189,11 @@ impl WorkQueueDispatcher {
             let before = state.offered.len();
             state
                 .offered
-                .retain(|id, _| still_ready.contains(id) || !in_space.contains(id.as_str()));
+                .retain(|id, _| {
+                    still_ready.contains(id)
+                        || (!in_space.contains(id.as_str())
+                            && self.workspace.work_item_space(id).is_some())
+                });
             state.offered.len() != before
         };
         if changed {
@@ -242,10 +248,10 @@ impl WorkQueueDispatcher {
                 return;
             }
         }
-        // Stable per (project, item): a retry after a crash adopts the same
-        // Manager instead of starting a second one.
-        // The launch binds an operation id to its prompt, so the prompt is part
-        // of the id: a renamed item starts a fresh attempt instead of
+        // Stable per (project, item, prompt): a retry after a crash adopts the
+        // same Manager instead of starting a second one. The launch binds an
+        // operation id to its prompt, so the prompt is part of the id; a
+        // renamed item (a different prompt) starts a fresh attempt instead of
         // conflicting with a half-done one.
         let prompt = manager_start_prompt(project, &entry);
         let operation_id = format!(

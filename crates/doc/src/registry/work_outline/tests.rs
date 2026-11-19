@@ -2089,3 +2089,26 @@ fn agents_cannot_edit_a_queue_or_its_pause() {
     }
     assert_eq!(snap(&doc).item(&a).unwrap().queue_order_key, None);
 }
+
+#[test]
+fn moving_a_container_drops_queued_descendants_but_keeps_a_nested_projects_queue() {
+    let mut doc = doc_with_spaces("dev-a");
+    let p1 = create(&mut doc, "qc-p1", None, "P1");
+    let p2 = create(&mut doc, "qc-p2", None, "P2");
+    mark_project(&mut doc, "qc-m1", &p1);
+    mark_project(&mut doc, "qc-m2", &p2);
+    let folder = create(&mut doc, "qc-folder", Some(&p1), "Folder");
+    let child = create(&mut doc, "qc-child", Some(&folder), "Child");
+    let nested = create(&mut doc, "qc-nested", Some(&folder), "Nested project");
+    mark_project(&mut doc, "qc-mn", &nested);
+    let inner = create(&mut doc, "qc-inner", Some(&nested), "Inner");
+    queue(&mut doc, "qc-q1", &child, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    queue(&mut doc, "qc-q2", &inner, queue_place(WorkOutlinePlacement::Last)).unwrap();
+
+    move_to(&mut doc, "qc-move", &folder, Some(&p2), WorkOutlinePlacement::Last).unwrap();
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&child).unwrap().queue_order_key, None);
+    assert!(snapshot.item(&inner).unwrap().queue_order_key.is_some());
+    assert_eq!(queue_titles(&doc, &nested), ["Inner"]);
+    assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+}

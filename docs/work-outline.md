@@ -773,10 +773,11 @@ When an entry is ready and fewer than one queued item is running, the Manager is
 - A project with a Manager gets a *queue wake* through the orchestrator wake path, on the device that hosts
   the Manager Chat. The usual batching and "user is typing" holds apply.
 
-Each item is offered once per time it becomes ready. The Manager still writes the brief, picks the model
+Each item is offered once per time it becomes ready, and the offers are remembered across restarts. The Manager still writes the brief, picks the model
 and starts the worker with `create_chat` on the item, so the existing launch claim prevents a second worker.
 **Pause auto-start** in the Work queue section stops offers for that project; a running worker is not
-interrupted, and **Resume auto-start** offers the next ready item. Only users and admin chats edit the
+interrupted, and **Resume auto-start** offers the next ready item. Moving an item out of its project (or unmarking a project)
+drops its queue membership. Only users and admin chats edit the
 queue or the pause setting; agents cannot.
 
 ## Child templates
