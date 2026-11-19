@@ -24,6 +24,7 @@ struct DefinitionState {
     watch_failed_at: Option<Instant>,
     editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
+    selected_origin_line: Option<u32>,
     navigation_handled: bool,
 }
 
@@ -57,6 +58,7 @@ impl SymbolDefinitionProvider {
     }
 
     pub fn selected(&self) -> Vec<Definition> { self.state.borrow().selected.clone() }
+    pub fn selected_origin_line(&self) -> Option<u32> { self.state.borrow().selected_origin_line }
     pub fn mark_navigation_handled(&self) { self.state.borrow_mut().navigation_handled = true; }
     pub fn take_navigation_handled(&self) -> bool { std::mem::take(&mut self.state.borrow_mut().navigation_handled) }
 
@@ -142,8 +144,12 @@ impl DefinitionProvider for SymbolDefinitionProvider {
             };
             definitions.sort_by_key(|entry| definition_order(&path, &entry.path, entry.symbol.start_line));
             if state.borrow().revision != Some(revision) || state.borrow().path_generation != path_generation { return Ok(Vec::new()); }
-            state.borrow_mut().selected = definitions.clone();
             let origin = lsp_types::Range::new(rope.offset_to_position(range.start), rope.offset_to_position(range.end));
+            {
+                let mut state = state.borrow_mut();
+                state.selected = definitions.clone();
+                state.selected_origin_line = Some(origin.start.line.saturating_add(1));
+            }
             let mut links = Vec::with_capacity(definitions.len());
             for definition in definitions {
                 let uri = "file:///definition".parse().expect("valid definition URI");
@@ -206,13 +212,14 @@ mod tests {
             let result = Rc::new(RefCell::new(None));
             let output = result.clone();
             host.update(cx, |_, window, cx| {
-                let task = provider.definitions(&Rope::from("fn call() {}"), 4, window, cx);
+                let task = provider.definitions(&Rope::from("\nfn call() {}"), 5, window, cx);
                 cx.spawn(async move |_, _| { *output.borrow_mut() = Some(task.await.unwrap().len()); }).detach();
             }).unwrap();
             cx.run_until_parked();
             cx.executor().advance_clock(Duration::from_millis(150));
             cx.run_until_parked();
             assert_eq!(*result.borrow(), Some(1));
+            assert_eq!(provider.selected_origin_line(), Some(2));
             assert_eq!(transport.queries.load(Ordering::SeqCst), expected);
         }
         // Moving to another word must not discard A while the editor still

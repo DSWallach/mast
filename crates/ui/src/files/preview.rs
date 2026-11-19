@@ -3127,10 +3127,11 @@ impl FilesSurface {
                 editor.lsp_mut().definition_provider = Some(provider);
                 editor.lsp_mut().show_document = Some(Rc::new(move |_, _, cx| {
                     selection.mark_navigation_handled();
+                    let from_line = selection.selected_origin_line();
                     let definitions = selection.selected().into_iter().map(|entry| (entry.path, entry.symbol)).collect();
                     surface.update(cx, |surface, cx| {
                         if let Some(from_path) = surface.preview.active.clone() {
-                            cx.emit(FilesEvent::DefinitionCandidates { from_path, from_line: surface.current_code_line(cx), definitions });
+                            cx.emit(FilesEvent::DefinitionCandidates { from_path, from_line: from_line.unwrap_or_else(|| surface.current_code_line(cx)), definitions });
                         }
                     }).is_ok()
                 }));
