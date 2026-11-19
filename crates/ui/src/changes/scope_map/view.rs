@@ -37,9 +37,15 @@ mod tests {
 
     #[gpui::test]
     fn tile_click_and_review_decoration(cx: &mut gpui::TestAppContext) {
+        let settings_dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
+            crate::settings::init(
+                crate::settings::UiSettings::default(),
+                settings_dir.path(),
+                cx,
+            );
         });
         let (changes, vcx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
@@ -115,7 +121,7 @@ mod tests {
             assert!(changes.scope_map_selected);
             assert!(crate::settings::current(cx).changes_scope_map);
         });
-        let first = changes.update(vcx, |changes, cx| {
+        let _first = changes.update(vcx, |changes, cx| {
             let tree_key = changes.file_tree_key();
             changes
                 .file_tree_collapsed
@@ -144,10 +150,7 @@ mod tests {
                 .unwrap()
         });
         vcx.update(|window, cx| window.draw(cx).clear());
-        let more = vcx
-            .debug_bounds(&format!("scope-map-more-{first}"))
-            .unwrap()
-            .center();
+        let more = vcx.debug_bounds("scope-map-more").unwrap().center();
         vcx.simulate_click(more, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
         changes.read_with(vcx, |changes, _| {
@@ -676,7 +679,7 @@ impl Changes {
                     let lines = *lines;
                     canvas = canvas.child(
                         base.id(("scope-map-more", first))
-                            .debug_selector(move || format!("scope-map-more-{first}"))
+                            .debug_selector(|| "scope-map-more".into())
                             .cursor_pointer()
                             .border_1()
                             .border_color(theme.border)
