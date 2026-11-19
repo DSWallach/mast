@@ -518,6 +518,7 @@ impl WorkItemLaunchService {
                 execution_override: &successor.execution_override,
                 worktree_choice: &successor.worktree_choice,
                 parent_chat_id: &successor.parent_chat_id,
+                standing_role: &successor.standing_role,
             });
             if self
                 .workspace
