@@ -19,12 +19,21 @@ impl RegistryDoc {
                 .get("headSha")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            reviewed_head: row
+                .fields
+                .get("reviewedHead")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             ..Default::default()
         };
         for (field, value) in &row.fields {
             if let Some(hash) = field.strip_prefix("h:") {
                 if value.as_bool() == Some(true) {
                     state.viewed_hunks.insert(hash.to_owned());
+                }
+            } else if let Some(hash) = field.strip_prefix("r:") {
+                if value.as_bool() == Some(true) {
+                    state.reviewed_hunks.insert(hash.to_owned());
                 }
             } else if field.starts_with("f:")
                 && let Some(path) = value.as_str()
@@ -61,7 +70,9 @@ impl RegistryDoc {
         if self.diff_review_state(&state.target).is_none()
             && (before.head_sha.is_some()
                 || !before.viewed_hunks.is_empty()
-                || !before.viewed_files.is_empty())
+                || !before.viewed_files.is_empty()
+                || before.reviewed_head.is_some()
+                || !before.reviewed_hunks.is_empty())
         {
             return Err(DocError::Schema(
                 "diff review state was cleared; reload before editing".into(),
@@ -83,6 +94,27 @@ impl RegistryDoc {
                 ("target", json!(state.target)),
                 ("headSha", opt_str(state.head_sha.as_deref())),
             ]));
+        }
+        if before.reviewed_head != state.reviewed_head {
+            updates.push(fields([(
+                "reviewedHead",
+                opt_str(state.reviewed_head.as_deref()),
+            )]));
+        }
+        for hash in before
+            .reviewed_hunks
+            .symmetric_difference(&state.reviewed_hunks)
+        {
+            let mut set = BTreeMap::new();
+            set.insert(
+                format!("r:{hash}"),
+                if state.reviewed_hunks.contains(hash) {
+                    json!(true)
+                } else {
+                    Value::Null
+                },
+            );
+            updates.push(set);
         }
         for hash in before
             .viewed_hunks
@@ -223,5 +255,37 @@ mod tests {
         assert!(combined.viewed_hunks.contains(&"b".repeat(64)));
         assert!(registry.delete_diff_review_state(&base.target));
         assert!(registry.update_diff_review_state(&combined, &a).is_err());
+    }
+
+    #[test]
+    fn reviewed_head_and_hunks_roundtrip_and_update_independently() {
+        let mut registry = RegistryDoc::new("device");
+        let base = DiffReviewState {
+            target: "pr:o/r#7".into(),
+            head_sha: Some("h1".into()),
+            ..Default::default()
+        };
+        assert!(registry.put_diff_review_state(&base).unwrap());
+        let mut next = base.clone();
+        next.reviewed_head = Some("h1".into());
+        next.reviewed_hunks.insert("a".repeat(64));
+        next.reviewed_hunks.insert("b".repeat(64));
+        assert!(registry.update_diff_review_state(&base, &next).unwrap());
+        assert_eq!(registry.diff_review_state(&base.target), Some(next.clone()));
+        // The PR head moving does not move the review baseline.
+        let mut moved = next.clone();
+        moved.head_sha = Some("h2".into());
+        assert!(registry.update_diff_review_state(&next, &moved).unwrap());
+        let read = registry.diff_review_state(&base.target).unwrap();
+        assert_eq!(read.head_sha.as_deref(), Some("h2"));
+        assert_eq!(read.reviewed_head.as_deref(), Some("h1"));
+        assert_eq!(read.reviewed_hunks.len(), 2);
+        // Re-stamping replaces the snapshot and clears dropped hunks.
+        let mut stamped = moved.clone();
+        stamped.reviewed_head = Some("h2".into());
+        stamped.reviewed_hunks = ["c".repeat(64)].into();
+        assert!(registry.update_diff_review_state(&moved, &stamped).unwrap());
+        assert_eq!(registry.diff_review_state(&base.target), Some(stamped));
+        assert!(!registry.put_diff_review_state(&registry.diff_review_state(&base.target).unwrap()).unwrap());
     }
 }
