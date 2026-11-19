@@ -263,6 +263,7 @@ mod tests {
                     "artifacts-v1",
                     "side-chat-v1",
                     "chat-handoff-v1",
+                    "chat-handoff-preferences-v1",
                     "standing-role-handoff-v1",
                     "project-manager-grant-v1"
                 ],
