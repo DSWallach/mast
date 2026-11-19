@@ -38,6 +38,40 @@ pub struct SubmitReviewComment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_side: Option<ReviewSide>,
     pub body: String,
+    /// The text of the anchored line (end line for a range), used only to check
+    /// the placement against GitHub's diff; not sent in the review.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub line_text: String,
+    /// The text of a range's first line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub start_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnplacedDraft {
+    pub draft_id: String,
+    pub reason: String,
+}
+
+/// `PrepareReviewSubmit`: validate drafts against GitHub's own diff at the PR head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareReviewParams {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    #[serde(default)]
+    pub comments: Vec<SubmitReviewComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareReviewReply {
+    /// The PR's head commit on GitHub; the review is pinned to it.
+    pub head_sha: String,
+    pub placed: Vec<String>,
+    pub unplaced: Vec<UnplacedDraft>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,12 +86,13 @@ pub struct SubmitReviewParams {
     pub body: String,
     #[serde(default)]
     pub comments: Vec<SubmitReviewComment>,
-    /// The head commit the lines were placed against.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit_id: Option<String>,
-    /// Stable across retries of one submission; embedded in the review body so
-    /// a retry can tell the first POST already landed.
-    pub attempt_id: String,
+    /// The PR head the lines were validated against (from `PrepareReviewSubmit`).
+    /// Required: the engine refuses to post without it, and refuses if GitHub's
+    /// head has moved since.
+    pub commit_id: String,
+    /// Only look for a review this PR's marker already posted; never POST.
+    #[serde(default)]
+    pub check_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +105,8 @@ pub enum SubmitReviewOutcome {
     /// The reviewer has a pending review on the PR (started in the browser);
     /// nothing was sent.
     PendingConflict,
+    /// `check_only` found no review carrying this PR's marker.
+    NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +117,14 @@ pub struct SubmitReviewReply {
     pub review_id: Option<u64>,
     /// The review (or, for a pending conflict, the pull request) on GitHub.
     pub url: String,
+    /// Set when the review reached GitHub but the local record could not be
+    /// written. The drafts stay and the next attempt finds the review and records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_record_error: Option<String>,
+    /// Draft ids that are on GitHub because of this review (all of them after a
+    /// post; the ones matched in the existing review after "already posted").
+    #[serde(default)]
+    pub sent_draft_ids: Vec<String>,
 }
 
 /// Local record of a review Mast posted, kept per review target.

@@ -228,6 +228,10 @@ pub mod methods {
     /// "Submit review…" dialog on a human click; never forwardable, never
     /// reachable from an agent tool.
     pub const SUBMIT_REVIEW: &str = "SubmitReview";
+    /// Read-only companion of [`SUBMIT_REVIEW`]: `mast_proto::PrepareReviewParams`
+    /// → `mast_proto::PrepareReviewReply`. Checks drafts against the PR's diff at
+    /// its head on GitHub and reports that head. Same human-only transports.
+    pub const PREPARE_REVIEW_SUBMIT: &str = "PrepareReviewSubmit";
     /// `{target}` → `Vec<mast_proto::PostedReview>`: reviews Mast posted.
     pub const GET_POSTED_REVIEWS: &str = "GetPostedReviews";
     pub const GET_DISMISSED_REVIEW_SUGGESTIONS: &str = "GetDismissedReviewSuggestions";
@@ -704,6 +708,12 @@ impl RpcReply {
             .map_err(|e| RpcError::Failed(format!("serialize response: {e}")))
     }
 }
+
+/// Methods that only the Mast app itself may call, over its own in-process
+/// connection. Anything that can act on the user's behalf outside Mast (here:
+/// posting a GitHub review) belongs here; the engine refuses them on the local
+/// WebSocket port agents are given and on relay connections.
+pub const HUMAN_ONLY_METHODS: &[&str] = &[methods::SUBMIT_REVIEW, methods::PREPARE_REVIEW_SUBMIT];
 
 /// Server-side dispatch: one implementation serves every transport.
 #[async_trait]

@@ -832,6 +832,11 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
     }
 
+    pub fn ensure_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+        let candidate = uuid::Uuid::new_v4().to_string();
+        Ok(self.mutate(|doc| doc.ensure_review_nonce(target, &candidate))?)
+    }
+
     pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
         self.read(|doc| doc.posted_reviews(target))
     }

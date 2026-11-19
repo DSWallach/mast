@@ -118,52 +118,51 @@ pub trait GhRunner: Send + Sync + 'static {
 /// the engine's GitHub calls).
 pub struct RealGh;
 
-fn gh_command() -> Option<std::process::Command> {
-    let mut command = mast_harness::gh_command()?;
-    command.env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
-    Some(command)
-}
-
 const GH_TIMEOUT: Duration = Duration::from_secs(90);
 
-async fn run_gh(args: Vec<String>) -> Result<std::process::Output, String> {
-    let job = tokio::task::spawn_blocking(move || {
-        let mut command =
-            gh_command().ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
-        command
-            .args(&args)
-            .output()
-            .map_err(|e| format!("could not run gh: {e}"))
-    });
-    match tokio::time::timeout(GH_TIMEOUT, job).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(format!("gh task failed: {e}")),
+/// Run `command` to completion under `timeout`. The child is killed when the
+/// future is dropped, so a timeout never leaves a `gh` process running that
+/// could still land a write after the caller has given up.
+async fn run_command(
+    mut command: tokio::process::Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncWriteExt;
+    command
+        .kill_on_drop(true)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let work = async move {
+        let mut child = command.spawn().map_err(|e| format!("could not run gh: {e}"))?;
+        if let Some(input) = input
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(&input).await.map_err(|e| format!("could not send to gh: {e}"))?;
+            stdin.shutdown().await.ok();
+        }
+        child.wait_with_output().await.map_err(|e| format!("could not run gh: {e}"))
+    };
+    match tokio::time::timeout(timeout, work).await {
+        Ok(result) => result,
         Err(_) => Err("gh timed out".to_string()),
     }
+}
+
+async fn run_gh_input(args: Vec<String>, input: Option<Vec<u8>>) -> Result<std::process::Output, String> {
+    let mut command = mast_harness::gh_command_async()
+        .ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
+    command.env("GH_PROMPT_DISABLED", "1").args(&args);
+    run_command(command, input, GH_TIMEOUT).await
+}
+
+async fn run_gh(args: Vec<String>) -> Result<std::process::Output, String> {
+    run_gh_input(args, None).await
 }
 
 async fn run_gh_with_input(args: Vec<String>, input: Vec<u8>) -> Result<std::process::Output, String> {
-    let job = tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        let mut command =
-            gh_command().ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
-        let mut child = command
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("could not run gh: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&input).map_err(|e| format!("could not send to gh: {e}"))?;
-        }
-        child.wait_with_output().map_err(|e| format!("could not run gh: {e}"))
-    });
-    match tokio::time::timeout(GH_TIMEOUT, job).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(format!("gh task failed: {e}")),
-        Err(_) => Err("gh timed out".to_string()),
-    }
+    run_gh_input(args, Some(input)).await
 }
 
 fn truncate_message(text: &str) -> String {
@@ -1283,6 +1282,8 @@ struct Inner {
     me: Mutex<Option<String>>,
     store: Store,
     threads: tokio::sync::Mutex<HashMap<String, ThreadCacheEntry>>,
+    /// One in-flight review submit per PR.
+    submit_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 struct ThreadCacheEntry {
@@ -1326,6 +1327,7 @@ impl PrDash {
                 me: Mutex::new(None),
                 store,
                 threads: tokio::sync::Mutex::new(HashMap::new()),
+                submit_locks: Mutex::new(HashMap::new()),
             }),
         }
     }

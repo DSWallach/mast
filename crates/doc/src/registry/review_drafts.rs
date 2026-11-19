@@ -132,6 +132,45 @@ impl RegistryDoc {
         drafts
     }
 
+    /// The per-target marker nonce embedded in a posted review's body. Persisted so a
+    /// restart after a lost response can still find the review it posted.
+    pub fn review_nonce(&self, target: &str) -> Option<String> {
+        let row = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target))?;
+        if row.fields.get("target").and_then(Value::as_str) != Some(target) {
+            return None;
+        }
+        row.fields
+            .get("nonce")
+            .and_then(Value::as_str)
+            .filter(|nonce| !nonce.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// Return the target's nonce, writing `candidate` first if it has none. The nonce stays
+    /// until [`Self::record_posted_review`] confirms a post.
+    pub fn ensure_review_nonce(&mut self, target: &str, candidate: &str) -> Result<String, DocError> {
+        if target.trim().is_empty() || candidate.trim().is_empty() {
+            return Err(DocError::Schema("review nonce needs a target".into()));
+        }
+        if let Some(nonce) = self.review_nonce(target) {
+            return Ok(nonce);
+        }
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let mut set = fields([("target", json!(target))]);
+        set.insert("nonce".into(), json!(candidate));
+        let hlc = self.mint_hlc();
+        self.write_ops(vec![RowOp {
+            kind: KIND_REVIEW_DRAFTS.into(),
+            id,
+            op: OpKind::Upsert,
+            set: Some(set),
+            hlc,
+            clocks: None,
+        }])?;
+        Ok(candidate.to_owned())
+    }
+
     /// Posted reviews recorded for a target, oldest first.
     pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
         let Some(row) = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target)) else {
@@ -169,7 +208,11 @@ impl RegistryDoc {
         if !already {
             set.insert(key, json!(serde_json::to_string(review)?));
         }
-        let mut removed = false;
+        let mut removed = self.review_nonce(target).is_some();
+        if removed {
+            // A confirmed post consumes the marker nonce; the next review gets a fresh one.
+            set.insert("nonce".into(), Value::Null);
+        }
         for comment in &review.comments {
             if self.review_drafts(target).iter().any(|d| d.id == comment.draft_id) {
                 set.insert(
@@ -353,6 +396,24 @@ mod tests {
         // Recording it again (a retried submit that found the review) changes nothing.
         assert!(!registry.record_posted_review(target, &review).unwrap());
         assert_eq!(registry.posted_reviews(target).len(), 1);
+    }
+
+    #[test]
+    fn nonce_persists_until_a_post_is_recorded() {
+        use mast_proto::{PostedReview, ReviewEvent};
+        let mut registry = RegistryDoc::new("device");
+        let target = "pr:owner/repo#42";
+        assert_eq!(registry.review_nonce(target), None);
+        assert_eq!(registry.ensure_review_nonce(target, "first").unwrap(), "first");
+        // A later candidate (a retry, or a restarted engine) gets the stored one.
+        assert_eq!(registry.ensure_review_nonce(target, "second").unwrap(), "first");
+        assert_eq!(registry.review_nonce(target).as_deref(), Some("first"));
+        let review = PostedReview {
+            review_id: 3, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1, comments: vec![],
+        };
+        assert!(registry.record_posted_review(target, &review).unwrap());
+        assert_eq!(registry.review_nonce(target), None, "confirmed post consumes the nonce");
+        assert_eq!(registry.ensure_review_nonce(target, "third").unwrap(), "third");
     }
 
     #[test]

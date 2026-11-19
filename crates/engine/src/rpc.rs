@@ -3278,30 +3278,44 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&threads)
             }
+            methods::PREPARE_REVIEW_SUBMIT => {
+                let p: mast_proto::PrepareReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                RpcReply::value(&dash.prepare_review(&p).await.map_err(RpcError::Failed)?)
+            }
             methods::SUBMIT_REVIEW => {
                 let p: mast_proto::SubmitReviewParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {
                     crate::pr_dash::PrDash::with_real_gh()
                         .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
                 });
-                let reply = dash.submit_review(&p).await.map_err(RpcError::Failed)?;
+                // The marker nonce is persisted per review target and lives until a post is
+                // confirmed and recorded, so a retry after a timeout or restart finds the review.
+                let nonce = self.workspace.ensure_review_nonce(&p.target)
+                    .map_err(|error| RpcError::Failed(format!("could not prepare the review: {error}")))?;
+                let mut reply = dash.submit_review(&p, &nonce).await.map_err(RpcError::Failed)?;
                 if matches!(
                     reply.outcome,
                     mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
                 ) && let Some(review_id) = reply.review_id
                 {
+                    let sent: std::collections::HashSet<&String> = reply.sent_draft_ids.iter().collect();
                     let posted = mast_proto::PostedReview {
                         review_id,
                         url: reply.url.clone(),
                         event: p.event,
                         body: p.body.clone(),
                         posted_at: chrono::Utc::now().timestamp_millis(),
-                        comments: p.comments.clone(),
+                        comments: p.comments.iter().filter(|c| sent.contains(&c.draft_id)).cloned().collect(),
                     };
-                    // The review is on GitHub already; failing to record it must not
-                    // look like a failed post, so the drafts stay and the reply says posted.
+                    // The review is on GitHub already. If the local record cannot be written the
+                    // drafts and the nonce stay, so the next attempt finds the review and records it.
                     if let Err(error) = self.workspace.record_posted_review(&p.target, &posted) {
                         tracing::warn!("could not record posted review locally: {error}");
+                        reply.local_record_error = Some(error.to_string());
                     }
                 }
                 RpcReply::value(&reply)

@@ -21,6 +21,7 @@ pub mod agent_tools;
 pub mod approval_commands;
 pub mod archivable;
 pub mod git_gate;
+pub mod human_only;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
@@ -801,7 +802,7 @@ impl EngineCore {
                 }
             }
         });
-        mast_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        mast_rpc::HostRelay::spawn(config, outward_transport(self.rpc_service(), "relay"), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -1386,7 +1387,19 @@ pub async fn serve_ipc(
         agent_tools::note_bound_ipc_port(addr.port());
     }
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(mast_rpc::serve_ws_listener(listener, service)))
+    Ok(tokio::spawn(mast_rpc::serve_ws_listener(
+        listener,
+        outward_transport(service, "local IPC"),
+    )))
+}
+
+/// Wrap a service for a transport other than the app's own in-process one, so
+/// [`mast_rpc::HUMAN_ONLY_METHODS`] are refused there.
+pub fn outward_transport(
+    service: std::sync::Arc<dyn mast_rpc::RpcService>,
+    transport: &'static str,
+) -> std::sync::Arc<dyn mast_rpc::RpcService> {
+    human_only::HumanOnlyGate::new(service, transport)
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the
