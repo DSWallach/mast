@@ -2325,6 +2325,7 @@ mod tests {
             instruction_proposals: Vec::new(),
             space_settings: Default::default(),
             templates: Vec::new(),
+            standing_roles: Vec::new(),
         };
         let actor_json =
             json!({"kind":"agent","deviceId":"dev-1","chatId":"chat-1","messageId":"msg-1"});

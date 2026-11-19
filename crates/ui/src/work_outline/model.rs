@@ -1349,6 +1349,7 @@ pub(crate) mod tests {
         let mut assignment = snapshot.assignments.iter().find(|a| a.chat_id == CHAT_API).unwrap().clone();
         assignment.chat_id = bootstrap.clone();
         snapshot.assignments.push(assignment);
+        snapshot.items.iter_mut().find(|i| i.id == API).unwrap().chat_ids.push(bootstrap.clone());
         let spaces = [ready("s1", "Repo", snapshot)];
         let mut chats = fixture_chats("s1");
         chats.push(chat(&bootstrap, Some("s1")));

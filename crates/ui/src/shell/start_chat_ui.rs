@@ -2224,7 +2224,11 @@ mod tests {
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
         });
+        cx.update(|_, cx| {
+            crate::history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx)
+        });
         let calls = seed(&shell, cx, snapshot, true, validated_ok(), launched("chat-x"));
+        draw(cx);
         shell
             .update(cx, |shell, cx| shell.open_start_manager("s1", HOUSEKEEPING, cx))
             .unwrap();
