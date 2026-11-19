@@ -196,6 +196,9 @@ struct Inner {
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     token_usage: OnceLock<crate::token_usage::TokenUsage>,
+    /// Text for the agent to see before a new chat's first prompt (the
+    /// briefing index); wired at engine assembly, absent in bare tests.
+    chat_start_notice: Mutex<Option<ChatStartNotice>>,
     /// `~/.mast/settings.json`, consulted only by runs in Rules mode.
     permission_rules: Mutex<Arc<crate::permission_rules::PermissionRules>>,
     /// Per-project accounts; unset in bare test engines (everything runs on Default).
@@ -320,6 +323,9 @@ fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<
     }).collect()
 }
 
+/// Given a chat id, the text to show its agent before its first prompt, if any.
+pub type ChatStartNotice = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 fn prepare_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> (String, Vec<(std::path::PathBuf, u128)>) {
     if prompt.trim_start().starts_with('/') { return (prompt.to_owned(), Vec::new()); }
     let changes = journal.pending_skill_changes(chat_id);
@@ -336,6 +342,8 @@ fn acknowledge_skill_notices(journal: &RunJournal, chat_id: &str, changes: &[(st
 }
 
 impl SessionsEngine {
+    pub fn set_chat_start_notice(&self, notice: ChatStartNotice) { *lock(&self.inner.chat_start_notice) = Some(notice); }
+
     pub fn set_token_usage(&self, usage: crate::token_usage::TokenUsage) { let _ = self.inner.token_usage.set(usage); }
     pub fn token_usage(&self) -> Option<crate::token_usage::TokenUsage> { self.inner.token_usage.get().cloned() }
 
@@ -401,6 +409,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 token_usage: OnceLock::new(),
+                chat_start_notice: Mutex::new(None),
                 permission_rules: Mutex::new(Arc::new(crate::permission_rules::PermissionRules::new(
                     crate::permission_rules::PermissionRules::default_path(),
                 ))),
@@ -1249,7 +1258,14 @@ impl SessionsEngine {
         let notices = delivered_prompt
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
-        request.prompt = format!("{notices}{}", request.prompt);
+        // A new native session (nothing resumed) of a main chat also gets the
+        // briefing index; it is delivered like a notice and never in the transcript.
+        let start_notice = if request.resume.is_none() && !side_chat {
+            lock(&self.inner.chat_start_notice).clone().and_then(|notice| notice(chat_id))
+        } else {
+            None
+        };
+        request.prompt = format!("{}{notices}{}", start_notice.unwrap_or_default(), request.prompt);
 
         let run_id = new_id();
         let agent_tools = self.agent_tools_for(chat_id, &run_id, harness.as_ref());

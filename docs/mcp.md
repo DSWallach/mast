@@ -109,10 +109,32 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `briefing_read`    | `AgentToolCall` (read-only; latest results artifacts)     |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
 cancels server-side, exactly what the sidebar does on attach.
+
+`briefing_read` returns the latest results artifact of one scheduled task, or of
+every task in the caller's Space, so a chat on any work item can see what a
+briefing found without `read_chat` or Notion. It takes optional `task` (a task
+name, task id or results artifact id; omitted means all) and `index` (run times
+only, no content). It replies `{briefings: [{task, artifactId, title, revision,
+runAt, runAtLocal, runId, workItemId, content, contentTruncated,
+contentAvailable}], needYou}`. `runAt` is when the newest revision was
+published, in epoch milliseconds. `needYou` counts open Required Actions that
+scheduled tasks raised on those items. Content is capped (128 KB for one
+briefing, 32 KB each for several) and `contentAvailable` is false when the file
+lives on another device. An unknown task is an error that lists the tasks that
+do have results. Hosts that predate the tool answer `unknown agent tool`.
+
+The lookup is `crates/engine/src/briefing.rs` and is built to be reused. A caller
+names a `BriefingKind` (which artifacts count) and passes a `BriefingScope`
+whose `permits` runs on every candidate before it is listed or its bytes are
+read. A candidate the scope refuses looks the same as one that does not exist.
+Scheduled results use `SpaceScope`. Manager sessions add a
+`BriefingKind::ManagerStatus` for its status artifact and a scope that permits
+only artifacts on items inside the manager's project subtree.
 
 A message to the parent chat (and `report_to_parent`) is not a direct send: the
 engine queues a "worker report" wake event (text capped at 4 KB, cut text marked)

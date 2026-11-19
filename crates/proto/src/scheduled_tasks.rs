@@ -231,10 +231,14 @@ impl ScheduledRunResults {
         }
     }
 
+    /// Start of every Required Action dedupe key a scheduled run raises.
+    pub const NEED_DEDUPE_PREFIX: &'static str = "scheduled-need:";
+
     /// Prefix of the Required Action dedupe keys this task's runs raise.
     pub fn dedupe_prefix(task_id: &str) -> String {
         format!(
-            "scheduled-need:{}:",
+            "{}{}:",
+            Self::NEED_DEDUPE_PREFIX,
             crate::work_outline::derive_id(task_id, "results")
         )
     }
@@ -261,6 +265,10 @@ pub struct ScheduledTasksSnapshot {
     pub preview: Vec<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ScheduledRunCleanup>,
+    /// Whether new interactive chats on this device start with the one-line
+    /// briefing index. Absent from older hosts, which read as off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub briefing_index: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +336,11 @@ pub enum ScheduledTasksRequest {
     Cleanup {
         #[serde(flatten)]
         mode: ScheduledRunCleanupMode,
+    },
+    /// Switch the chat-start briefing index. Hosts without
+    /// `briefing-read-v1` reject the action, so clients gate it.
+    SetBriefingIndex {
+        enabled: bool,
     },
     ImportPreview {
         #[serde(default)]
@@ -661,5 +674,29 @@ mod tests {
         assert!(ScheduledRunResults::is_results_role(&shouted));
         assert_eq!(ScheduledRunResults::normalize_role(&shouted), role);
         assert!(!ScheduledRunResults::is_results_role("doc"));
+    }
+
+    #[test]
+    fn briefing_index_wire_shape_is_compatible_both_ways() {
+        let request = ScheduledTasksRequest::SetBriefingIndex { enabled: true };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"action": "setBriefingIndex", "enabled": true})
+        );
+        // Off is omitted, so an older client never sees the field; a snapshot
+        // from an older host has none and reads as off.
+        let off = serde_json::to_value(ScheduledTasksSnapshot::default()).unwrap();
+        assert!(off.get("briefingIndex").is_none());
+        let mut on = ScheduledTasksSnapshot::default();
+        on.briefing_index = true;
+        assert_eq!(serde_json::to_value(&on).unwrap()["briefingIndex"], true);
+        let old: ScheduledTasksSnapshot =
+            serde_json::from_value(serde_json::json!({"deviceId": "d", "tasks": [], "runs": []})).unwrap();
+        assert!(!old.briefing_index);
+    }
+
+    #[test]
+    fn need_keys_share_the_published_prefix() {
+        assert!(ScheduledRunResults::dedupe_prefix("task").starts_with(ScheduledRunResults::NEED_DEDUPE_PREFIX));
     }
 }

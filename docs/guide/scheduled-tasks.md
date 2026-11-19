@@ -88,6 +88,21 @@ run published a new revision. A run that did not is marked **Failed** with the
 reason, stays unarchived and raises the same task Required Action as any other
 failure. Interactive runs get no contract and are not checked.
 
+## Read the latest results from any chat
+
+A chat on any work item can read the newest results of your scheduled tasks
+with the `briefing_read` tool, for one task by name or for all of them, with the
+time each run published. It does not need `read_chat` or Notion. Ask the agent
+for "the latest Slack briefing" or "what's in my briefings".
+
+Scheduled tasks also has **Briefing index in new chats**. Turn it on and each
+new chat's agent starts with one line such as `Slack 05:31 · GitHub 04:52 · 3
+need you`: when each task last published and how many Required Actions from
+scheduled tasks are open. The line goes to the agent only and does not appear in
+the transcript. It is off by default, applies to chats started on this device
+after you change it, and is skipped for Background runs and side chats. The
+switch is hidden for a device whose Mast is too old to support it.
+
 ## Read editions
 
 The sidebar and Overview show the latest unarchived run per task on each device

@@ -2729,3 +2729,64 @@ async fn structured_plan_card_tracks_its_sheet_decision() {
     sync.reconcile(id);
     assert_eq!(open_texts(&rig, id), ["1 open question in Plan"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn briefing_read_returns_the_latest_results_with_run_times_for_any_chat() {
+    let rig = rig().await;
+    let role = mast_proto::ScheduledRunResults::role_for("task-slack");
+    let file = rig.worktree.join("slack.md");
+    for (run, body, key) in [("run-1", "all quiet", "k1"), ("run-2", "2 PRs need review", "k2")] {
+        std::fs::write(&file, format!("Run: {run}\n# Slack\n{body}\n")).unwrap();
+        publish(
+            &rig,
+            &rig.token,
+            json!({ "path": file.to_string_lossy(), "title": "Results: Slack", "role": role,
+                    "note": "run", "idempotencyKey": key }),
+        )
+        .await;
+    }
+    // An ordinary doc is not a briefing.
+    let doc = rig.worktree.join("doc.md");
+    std::fs::write(&doc, "# Doc\n").unwrap();
+    publish(
+        &rig,
+        &rig.token,
+        json!({ "path": doc.to_string_lossy(), "title": "Doc", "role": "doc", "note": "n",
+                "idempotencyKey": "k3" }),
+    )
+    .await;
+
+    // A chat on another item and a chat with no item both read it.
+    for token in [&rig.other_token, &rig.lone_token] {
+        let all = tool(&rig, token, "briefing_read", json!({})).await.unwrap();
+        let briefings = all["briefings"].as_array().unwrap();
+        assert_eq!(briefings.len(), 1, "{all}");
+        let slack = &briefings[0];
+        assert_eq!(slack["task"], "Slack");
+        assert_eq!(slack["revision"], 2);
+        assert_eq!(slack["runId"], "run-2");
+        assert!(slack["runAt"].as_i64().unwrap() > 0);
+        assert!(slack["content"].as_str().unwrap().contains("2 PRs need review"));
+        assert_eq!(slack["contentAvailable"], true);
+        assert_eq!(all["needYou"], 0);
+    }
+
+    // One task by name, id or artifact id; run times only on request.
+    for task in ["slack", "task-slack"] {
+        let one = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": task }))
+            .await
+            .unwrap();
+        assert_eq!(one["briefings"][0]["runId"], "run-2", "{task}");
+    }
+    let index = tool(&rig, &rig.other_token, "briefing_read", json!({ "index": true }))
+        .await
+        .unwrap();
+    assert_eq!(index["briefings"][0]["content"], Value::Null);
+    assert_eq!(index["briefings"][0]["revision"], 2);
+
+    let missing = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": "GitHub" }))
+        .await
+        .unwrap_err();
+    assert!(missing.contains("available: Slack"), "{missing}");
+    assert!(tool(&rig, "zat_forged", "briefing_read", json!({})).await.is_err());
+}
