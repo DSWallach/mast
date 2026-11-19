@@ -81,9 +81,11 @@ impl RegistryDoc {
     /// The role `chat_id` currently holds, if any. A superseded chat holds
     /// nothing.
     pub fn standing_role_of_chat(&self, chat_id: &str) -> Option<StandingRole> {
-        self.standing_roles()
+        // Decode and convert only the match: this runs on every agent call.
+        self.read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
             .into_iter()
-            .find(|role| role.current_chat_id.as_deref() == Some(chat_id))
+            .find(|raw| raw.current_chat_id.as_deref() == Some(chat_id))
+            .map(StandingRole::from)
     }
 
     /// Write rows as one checked registry batch: every op is size-gated first

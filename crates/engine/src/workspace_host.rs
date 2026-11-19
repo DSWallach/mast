@@ -1029,7 +1029,7 @@ impl WorkspaceHost {
         actor: &mast_proto::WorkOutlineActor,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
-        self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
+        self.work_outline_mutate_admin(mutation, actor, None, None, ledger_keys)
     }
 
     /// Apply a prepared pack under one registry lock after validating it on a
@@ -1117,10 +1117,15 @@ impl WorkspaceHost {
         mutation: &mast_proto::WorkOutlineMutation,
         actor: &mast_proto::WorkOutlineActor,
         admin_space: Option<&str>,
+        guard: Option<&crate::work_outline::ManagerGuard>,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
         let now = Utc::now().timestamp_millis();
+        let synced = self.registry_synced();
         self.mutate(|doc| {
+            if let (Some(guard), Some(space)) = (guard, admin_space) {
+                guard.verify(doc, space, synced)?;
+            }
             let reply = doc.with_admin_scope(admin_space, |doc| {
                 doc.apply_work_outline_mutation(mutation, actor, now)
             })?;

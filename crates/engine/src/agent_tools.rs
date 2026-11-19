@@ -1184,7 +1184,7 @@ impl AgentToolsService {
         context: &CallContext,
         mutation: &WorkOutlineMutation,
     ) -> Result<WorkOutlineMutateReply, AgentToolError> {
-        self.apply_scoped(context, mutation, context.admin_space.as_deref())
+        self.apply_scoped(context, mutation, context.admin_space.as_deref(), None)
     }
 
     /// [`Self::apply`] with `admin_space` in force. Only `work_outline_admin`
@@ -1195,9 +1195,10 @@ impl AgentToolsService {
         context: &CallContext,
         mutation: &WorkOutlineMutation,
         admin_space: Option<&str>,
+        guard: Option<&crate::work_outline::ManagerGuard>,
     ) -> Result<WorkOutlineMutateReply, AgentToolError> {
         let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
-        Ok(self.work_outline.mutate_as_admin(mutation, &actor, admin_space)?)
+        Ok(self.work_outline.mutate_guarded(mutation, &actor, admin_space, guard)?)
     }
 
     fn resolve_work_item_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {

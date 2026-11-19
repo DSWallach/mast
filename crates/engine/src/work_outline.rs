@@ -203,6 +203,53 @@ pub struct WorkOutlineService {
     workflow_pack: crate::workflow_pack_service::WorkflowPackService,
 }
 
+/// What a project manager's step may touch, re-checked by the registry
+/// writer under its lock so a concurrent move or hand-off cannot slip a
+/// target out of the project between the check and the write.
+#[derive(Debug, Clone)]
+pub struct ManagerGuard {
+    pub chat_id: String,
+    /// The project item the role is scoped to.
+    pub root: String,
+    /// Items that must be at or below `root`.
+    pub inside: Vec<String>,
+    /// Items that must be strictly below `root`.
+    pub strict: Vec<String>,
+}
+
+impl ManagerGuard {
+    pub fn verify(
+        &self,
+        doc: &mast_doc::RegistryDoc,
+        space_id: &str,
+        synced: bool,
+    ) -> Result<(), WorkOutlineError> {
+        let holds = doc.standing_role_of_chat(&self.chat_id).is_some_and(|role| {
+            role.role == mast_proto::StandingRoleKind::Manager && role.scope_item_id == self.root
+        });
+        if !holds {
+            return Err(WorkOutlineError::unauthorized(
+                "the manager role was handed off or ended; nothing was changed",
+            ));
+        }
+        let snapshot = doc.work_outline_snapshot(space_id, synced);
+        if snapshot.item(&self.root).is_none_or(|item| item.archived_at.is_some()) {
+            return Err(WorkOutlineError::unauthorized("the managed project no longer exists"));
+        }
+        let outside = |id: &String, strict: bool| {
+            snapshot.item(id).is_none()
+                || !snapshot.is_within(&self.root, id)
+                || (strict && *id == self.root)
+        };
+        if self.inside.iter().any(|id| outside(id, false)) || self.strict.iter().any(|id| outside(id, true)) {
+            return Err(WorkOutlineError::unauthorized(
+                "a target is no longer inside the managed project; nothing was changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl WorkOutlineService {
     /// Workflow pack import previews, applies, undo and receipts.
     pub fn workflow_pack(&self) -> &crate::workflow_pack_service::WorkflowPackService {
@@ -367,6 +414,18 @@ impl WorkOutlineService {
         actor: &WorkOutlineActor,
         admin_space: Option<&str>,
     ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+        self.mutate_guarded(mutation, actor, admin_space, None)
+    }
+
+    /// [`Self::mutate_as_admin`] with a manager guard that the registry
+    /// writer re-checks under its own lock, immediately before the write.
+    pub fn mutate_guarded(
+        &self,
+        mutation: &WorkOutlineMutation,
+        actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
+        guard: Option<&ManagerGuard>,
+    ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
         if writes_disabled() {
             return Err(WorkOutlineError::new(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -415,7 +474,7 @@ impl WorkOutlineService {
             }
             _ => self
                 .workspace
-                .work_outline_mutate_admin(mutation, actor, admin_space, &keys)?,
+                .work_outline_mutate_admin(mutation, actor, admin_space, guard, &keys)?,
         };
         recent.insert(operation_id, hash, reply.clone());
         Ok(reply)

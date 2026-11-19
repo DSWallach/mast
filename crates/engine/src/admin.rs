@@ -165,6 +165,7 @@ impl AdminGrants {
         kind: &str,
         summary: String,
         inverse: Option<WorkOutlineMutation>,
+        label: &str,
     ) {
         let now = self.now_ms();
         let mut state = lock(&self.state);
@@ -179,7 +180,7 @@ impl AdminGrants {
                         space_id: space_id.to_owned(),
                         started_at_ms: now,
                         updated_at_ms: now,
-                        label: attribution(chat_title),
+                        label: label.to_owned(),
                         actions: Vec::new(),
                         undone: false,
                     },

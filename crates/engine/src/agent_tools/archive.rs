@@ -130,9 +130,15 @@ impl AgentToolsService {
             scope.extend(chats.iter().map(|c| c.id.clone()));
             scope.remove(&context.grant.chat_id);
         }
-        // A project manager also reaches every chat of its project; it
-        // still passes the finished-worker check or force-with-reason.
-        scope.extend(self.manager_scope_chats(context));
+        // A project manager's scope is its project's chats and nothing else
+        // (not the workers or children its other routes would add); it still
+        // passes the finished-worker check or force-with-reason. An admin
+        // grant or the assistant outranks it.
+        let wider = context.personal_assistant
+            || context.admin_space.as_deref() == Some(context.grant.space_id.as_str());
+        if context.manager_scope.is_some() && !wider {
+            scope = self.manager_scope_chats(context).into_iter().collect();
+        }
         (chats, scope)
     }
 

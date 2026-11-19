@@ -1222,10 +1222,13 @@ impl Tools {
             } else {
                 Default::default()
             };
-            let managed = self.manager_chat_ids(origin).await;
-            chats.retain(|c| {
-                reachable(origin, c, true, true) || scope.contains_key(&c.id) || managed.contains(&c.id)
-            });
+            if origin.manager_scope_item_id.is_some() {
+                // A project manager sees only its project, never its other routes.
+                let managed = self.manager_chat_ids(origin).await;
+                chats.retain(|c| c.id == origin.chat_id || managed.contains(&c.id));
+            } else {
+                chats.retain(|c| reachable(origin, c, true, true) || scope.contains_key(&c.id));
+            }
         }
         if let Some(project) = args.project.as_deref() {
             let space = self.zeron.resolve_space(project).await?;
@@ -2103,6 +2106,24 @@ impl Tools {
                 .collect();
             return resolve_chat_in(&chats, key);
         }
+        // A project manager reaches only the chats of its own project (and
+        // itself where the reach allows it), never a child, parent or
+        // project route that points elsewhere. Archived ones only where that
+        // is the point (reading, listing, archiving and un-archiving).
+        if origin.manager_scope_item_id.is_some() {
+            let managed = self.manager_chat_ids(origin).await;
+            let archived_ok = matches!(reach, Reach::ReadScope | Reach::SelfOrChild | Reach::ArchiveScope);
+            let chats: Vec<Chat> = all
+                .into_iter()
+                .filter(|c| {
+                    (allow_self && c.id == origin.chat_id)
+                        || (managed.contains(&c.id) && (archived_ok || !c.archived))
+                })
+                .collect();
+            return resolve_chat_in(&chats, key).map_err(|_| {
+                anyhow::anyhow!("no chat matches {key:?}: a project manager reaches only the chats of its own project")
+            });
+        }
         let parent = (reach == Reach::MessageScope)
             .then(|| {
                 all.iter()
@@ -2112,10 +2133,8 @@ impl Tools {
             .flatten();
         let mut handoff_sources: Vec<String> = Vec::new();
         let project_chats: Vec<String> = if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
-            self.zeron
-                .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
+            self.project_scope()
                 .await
-                .ok()
                 .and_then(|v| {
                     handoff_sources = serde_json::from_value(v["handoffSourceChatIds"].clone()).unwrap_or_default();
                     serde_json::from_value(v["chatIds"].clone()).ok()
@@ -2129,21 +2148,13 @@ impl Tools {
         } else {
             Vec::new()
         };
-        // A project manager's reach: every chat inside its project, for every
-        // tool. Archived ones only where that is the point (reading, listing,
-        // archiving and un-archiving).
-        let managed = self.manager_chat_ids(origin).await;
-        let managed_archived_ok = matches!(reach, Reach::ReadScope | Reach::SelfOrChild | Reach::ArchiveScope);
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
                 if matches!(reach, Reach::CommunicationScope | Reach::MessageScope) && c.id == origin.chat_id {
                     return false;
                 }
-                (c.id != origin.chat_id
-                    && managed.contains(&c.id)
-                    && (managed_archived_ok || !c.archived))
-                    || reachable(origin, c, allow_self, admin_ok)
+                reachable(origin, c, allow_self, admin_ok)
                     || (reach == Reach::ArchiveScope && admin_reaches(origin, c))
                     || (!c.archived
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
@@ -2185,12 +2196,19 @@ impl Tools {
         if origin.manager_scope_item_id.is_none() {
             return Vec::new();
         }
+        self.project_scope()
+            .await
+            .and_then(|v| serde_json::from_value(v["managerChatIds"].clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// The engine's project-scope reply, one call (`chatIds`,
+    /// `handoffSourceChatIds`, and `managerChatIds` for a manager token).
+    async fn project_scope(&self) -> Option<Value> {
         self.zeron
             .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
             .await
             .ok()
-            .and_then(|v| serde_json::from_value(v["managerChatIds"].clone()).ok())
-            .unwrap_or_default()
     }
 
     /// Prefix the sender's identity when this server speaks for a chat, so

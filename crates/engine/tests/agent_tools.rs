@@ -5178,3 +5178,112 @@ async fn the_manager_grant_moves_to_the_successor_and_leaves_the_predecessor() {
     ]})).await.unwrap();
     assert_eq!(title_of(&rig, &p.ticket), "After hand-off");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_child_filed_in_another_project_is_not_reachable() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createChat", "chatId": "chat-moved-child", "spaceId": SPACE,
+                    "deviceId": rig.core.device_id, "parentChatId": CHAT }),
+        )
+        .await
+        .unwrap();
+    assign_chat(&rig, "mg-moved", "chat-moved-child", &p.other_tickets).await;
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(!ids(&scope["managerChatIds"]).contains(&"chat-moved-child".to_owned()));
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get("chat-moved-child").is_none(), "{info}");
+    let refused = tool(&rig, &token, "chat_archive", json!({ "chatId": "chat-moved-child" })).await.unwrap_err();
+    assert!(refused.contains("can only archive"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_writer_rechecks_the_manager_guard_under_its_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let archive = |op: &str, item: &str| {
+        WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: item.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = |chat: &str, inside: Vec<String>, strict: Vec<String>| ManagerGuard {
+        chat_id: chat.to_owned(),
+        root: p.project.clone(),
+        inside,
+        strict,
+    };
+    // A target that is outside the project (it moved out after the check).
+    let err = outline
+        .mutate_guarded(&archive("g-out", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![], vec![p.other_tickets.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    // The project item itself where a strict descendant is required.
+    let err = outline
+        .mutate_guarded(&archive("g-root", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![], vec![p.project.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    // A chat that does not hold the role (a predecessor or a role-less chat).
+    let err = outline
+        .mutate_guarded(&archive("g-holder", &p.ticket), &actor, Some(SPACE), Some(&guard(OTHER_CHAT, vec![], vec![p.ticket.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("handed off or ended"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_none());
+    // The same write passes when the holder and the target are right.
+    outline
+        .mutate_guarded(&archive("g-ok", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.tickets.clone()], vec![p.ticket.clone()])))
+        .unwrap();
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_never_edits_the_project_item_but_adds_under_it() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for (what, op) in [
+        ("rename", json!({ "op": "rename", "itemId": p.project, "title": "X" })),
+        ("describe", json!({ "op": "describe", "itemId": p.project, "description": "X" })),
+        ("status", json!({ "op": "status", "itemId": p.project, "status": "completed" })),
+        ("destination", json!({ "op": "destination", "itemId": p.project, "destinationId": null })),
+        ("instruction", json!({ "op": "instruction_add", "itemId": p.project, "text": "x" })),
+        ("template", json!({ "op": "template_set", "itemId": p.project, "template": null })),
+    ] {
+        let err = admin(&rig, &token, json!({ "idempotencyKey": format!("mg-root-{what}"), "steps": [op] })).await.unwrap_err();
+        assert!(err.contains("project item itself"), "{what}: {err}");
+    }
+    assert_eq!(title_of(&rig, &p.project), "Project");
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-under-root", "steps": [
+        { "op": "create", "parentId": p.project, "title": "Added under the project" }
+    ]})).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_bulk_count_covers_a_cascading_archive_and_anchors_to_the_project() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("mg-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // One archive step, 12 items in its subtree: it needs approval.
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "mg-cascade", "steps": [
+        { "op": "archive", "itemId": p.tickets }
+    ]})).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // The request sits on the project item, not on wherever the manager chat is filed.
+    let request = snapshot(&rig).user_action_requests.iter().find(|r| r.text.contains("by project manager")).cloned().unwrap();
+    assert_eq!(request.work_item_id, p.project);
+    // Recent changes label the manager, not an admin grant.
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-label", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Labeled" }
+    ]})).await.unwrap();
+    let turns = rig.core.sessions.agent_tokens().admin().turns(Some(SPACE));
+    assert!(turns.iter().all(|t| t.label.starts_with("by project manager")), "{turns:?}");
+}
