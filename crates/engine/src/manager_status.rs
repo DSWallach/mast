@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 0 });
         t.ask_failed("m");
         t.begin("m");
-        assert!(!t.state().runs["m"].ask);
+        assert!(!t.state().turns["m"].ask);
     }
 
     #[test]
