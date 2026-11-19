@@ -285,12 +285,16 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// The assembled engine, the setting on, and a genuine result published by a
-/// Background run: a normal chat gets the index, a Background run and a side
-/// chat do not, and the transcript never shows it.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_side_chats() {
-    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+struct Assembled {
+    _rpc: Arc<mast_engine::rpc::EngineRpc>,
+    client: mast_rpc::RpcClient,
+    _publisher: mast_engine::agent_tools::AgentTokenLease,
+    artifact_id: String,
+}
+
+/// The assembled engine with the setting on and a genuine result ("Slack",
+/// run r1) published by a Background run chat on a work item.
+async fn assemble_with_result(rig: &Rig) -> Assembled {
     let root = std::path::PathBuf::from(&rig.cwd);
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["config", "user.email", "t@example.com"]);
@@ -336,27 +340,43 @@ async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_si
             )
             .unwrap();
     }
-    let lease =
+    let publisher =
         rig.core
             .sessions
             .agent_tokens()
             .mint("run-pub", "run-x", "space-bd", &rig.core.device_id);
     std::fs::write(root.join("slack.md"), "Run: r1\n# Slack\nall quiet\n").unwrap();
-    client
+    let published = client
         .call(
             mast_proto::agent_tools::TOOL_CALL_METHOD,
-            json!({ "token": lease.token(), "tool": "artifact_publish", "arguments": {
+            json!({ "token": publisher.token(), "tool": "artifact_publish", "arguments": {
                 "path": root.join("slack.md").to_string_lossy(), "title": "Results: Slack",
                 "role": ScheduledRunResults::role_for("task-slack"), "note": "run",
                 "idempotencyKey": "scheduled-run-r1" } }),
         )
         .await
         .unwrap();
+    let artifact_id = published["artifactId"].as_str().unwrap().to_owned();
     rig.core
         .scheduled_tasks
         .request(ScheduledTasksRequest::SetBriefingIndex { enabled: true })
         .await
         .unwrap();
+    Assembled {
+        rpc,
+        client,
+        publisher,
+        artifact_id,
+    }
+}
+
+/// The assembled engine, the setting on, and a genuine result published by a
+/// Background run: a normal chat gets the index, a Background run and a side
+/// chat do not, and the transcript never shows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_side_chats() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+    let assembled = assemble_with_result(&rig).await;
 
     run(&rig, "chat-n", "hello", "m1");
     let prompts = wait_for_prompts(&rig, 1).await;
@@ -388,7 +408,127 @@ async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_si
         "a side chat gets no index: {}",
         prompts[2]
     );
-    drop(lease);
-    drop(rpc);
+    drop(assembled);
+    rig.core.shutdown().await;
+}
+
+/// `briefing_read` as a normal chat, through the assembled engine.
+async fn read_briefing(rig: &Rig, assembled: &Assembled) -> Value {
+    let token =
+        rig.core
+            .sessions
+            .agent_tokens()
+            .mint("chat-n", "run-n", "space-bd", &rig.core.device_id);
+    assembled
+        .client
+        .call(
+            mast_proto::agent_tools::TOOL_CALL_METHOD,
+            json!({ "token": token.token(), "tool": "briefing_read", "arguments": {} }),
+        )
+        .await
+        .unwrap()
+}
+
+/// Record `revisions` ((id, at) pairs, oldest first) on the artifact as edits
+/// made by a user, newest becoming current.
+fn add_user_edits(rig: &Rig, artifact_id: &str, revisions: &[(u32, i64)]) {
+    let mut view = rig.core.workspace.artifact(artifact_id).unwrap();
+    for (id, at) in revisions {
+        view.revisions.insert(
+            0,
+            mast_proto::ArtifactRevision {
+                id: *id,
+                hash: format!("{id:064x}"),
+                note: "edit".into(),
+                at: *at,
+                by: mast_proto::WorkOutlineActor {
+                    kind: mast_proto::WorkOutlineActorKind::User,
+                    ..Default::default()
+                },
+                size_bytes: 1,
+                ..Default::default()
+            },
+        );
+        view.current_revision = *id;
+    }
+    rig.core.workspace.put_artifact(&view).unwrap();
+}
+
+fn assert_genuine_result(read: &Value) {
+    let briefings = read["briefings"].as_array().unwrap();
+    assert_eq!(briefings.len(), 1, "{read}");
+    assert_eq!(briefings[0]["revision"], 1, "{read}");
+    assert_eq!(briefings[0]["runId"], "r1", "{read}");
+    assert!(
+        briefings[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("all quiet"),
+        "{read}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_edit_and_a_deleted_publisher_do_not_hide_the_genuine_result() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+    let assembled = assemble_with_result(&rig).await;
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+
+    let now = chrono::Utc::now().timestamp_millis();
+    add_user_edits(&rig, &assembled.artifact_id, &[(2, now + 1_000)]);
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+
+    // The stamp saved with the publication carries it once the chat is gone.
+    assert!(rig.core.workspace.delete_chat("run-pub").unwrap());
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_genuine_revision_outlives_the_history_limit() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+    let assembled = assemble_with_result(&rig).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let edits: Vec<(u32, i64)> = (2..=70).map(|n| (n, now + n as i64)).collect();
+    add_user_edits(&rig, &assembled.artifact_id, &edits);
+    let kept = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    assert!(
+        kept.revisions
+            .iter()
+            .any(|r| r.id == 1 && r.scheduled_task.is_some())
+    );
+    assert_eq!(kept.revisions[0].id, 70);
+    assert!(rig.core.workspace.delete_chat("run-pub").unwrap());
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_result_from_before_stamps_is_stamped_while_its_chat_exists() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+    let assembled = assemble_with_result(&rig).await;
+    // Simulate a result published before stamps existed.
+    let clear_stamp = || {
+        let mut view = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+        for revision in &mut view.revisions {
+            revision.scheduled_task = None;
+        }
+        rig.core.workspace.put_artifact(&view).unwrap();
+    };
+    clear_stamp();
+    // Chat still there: readable through the chat, and stamped by the read.
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    let view = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    assert!(
+        view.revisions.iter().all(|r| r.scheduled_task.is_some()),
+        "{view:?}"
+    );
+    assert!(rig.core.workspace.delete_chat("run-pub").unwrap());
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+
+    // Unstamped and its chat already gone: cannot be verified, so not returned.
+    clear_stamp();
+    let none = read_briefing(&rig, &assembled).await;
+    assert!(none["briefings"].as_array().unwrap().is_empty(), "{none}");
     rig.core.shutdown().await;
 }

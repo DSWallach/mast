@@ -656,6 +656,7 @@ impl EngineCore {
                 artifacts.note_assistant_text(chat_id, text);
             }));
         }
+        artifacts.backfill_run_stamps(None);
         artifacts.spawn_watch_loop();
         artifact_questions::ArtifactQuestionSync::new(artifacts.clone()).spawn_loop();
         sessions
