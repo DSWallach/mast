@@ -49,6 +49,9 @@ pub(super) enum SearchMode {
     Content,
     Line,
 }
+fn adds_symbol_reference(mode: SearchMode, alternate: bool) -> bool {
+    alternate && mode == SearchMode::Symbols
+}
 #[derive(Clone)]
 struct ResultRow {
     path: String,
@@ -967,7 +970,7 @@ impl Shell {
                     "escape" => this.close_workspace_search(window, cx),
                     "enter" => {
                         let index = this.workspace_search.as_ref().map_or(0, |s| s.active);
-                        if event.keystroke.modifiers.alt && mode == SearchMode::Symbols { this.add_workspace_symbol_to_chat(index, cx); }
+                        if adds_symbol_reference(mode, event.keystroke.modifiers.alt) { this.add_workspace_symbol_to_chat(index, cx); }
                         else { this.select_workspace_result(index, window, cx); }
                     }
                     "up" | "down" => {
@@ -1166,6 +1169,14 @@ fn split_globs(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn alternate_enter_keeps_file_and_content_selection() {
+        assert!(!adds_symbol_reference(SearchMode::Files, true));
+        assert!(!adds_symbol_reference(SearchMode::Content, true));
+        assert!(!adds_symbol_reference(SearchMode::Symbols, false));
+        assert!(adds_symbol_reference(SearchMode::Symbols, true));
+    }
 
     #[test]
     fn symbol_reference_finds_nearest_matching_name_and_kind() {
