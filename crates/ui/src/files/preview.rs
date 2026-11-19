@@ -1862,6 +1862,10 @@ impl FilesSurface {
             .map(|(_, new)| new.clone())
             .collect();
         for (old_document_path, new_document_path) in &renames {
+            if let Some(provider) = self.definition_providers.remove(old_document_path) {
+                provider.set_path(new_document_path.clone());
+                self.definition_providers.insert(new_document_path.clone(), provider);
+            }
             let Some(mut document) = self.preview.documents.remove(old_document_path) else {
                 continue;
             };
@@ -2714,6 +2718,17 @@ impl FilesSurface {
             };
             return div()
                 .id("files-editor-body")
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !event.modifiers.secondary() { return; }
+                    let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
+                    if provider.take_navigation_handled() { return; }
+                    if provider.is_indexing() {
+                        provider.start_watch(cx);
+                        this.show_definition_notice("Indexing…".into(), true, cx);
+                    } else {
+                        this.go_to_definition(cx);
+                    }
+                }))
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
@@ -3095,6 +3110,21 @@ impl FilesSurface {
         let focus_editor = !document.show_markdown;
         let editor =
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
+        if let (Some(context), Some(engine)) = (self.request_context.clone(), self.state.read(cx).engine().cloned()) {
+            let provider = super::definitions::SymbolDefinitionProvider::new(WorkspaceFilesClient::new(engine, context), path.to_owned());
+            let surface = cx.weak_entity();
+            let selection = provider.clone();
+            self.definition_providers.retain(|path, _| self.preview.documents.contains_key(path));
+            self.definition_providers.insert(path.to_owned(), provider.clone());
+            editor.update(cx, |editor, _| {
+                editor.lsp_mut().definition_provider = Some(provider);
+                editor.lsp_mut().show_document = Some(Rc::new(move |_, _, cx| {
+                    selection.mark_navigation_handled();
+                    let definitions = selection.selected().into_iter().map(|entry| (entry.path, entry.symbol)).collect();
+                    surface.update(cx, |_, cx| cx.emit(FilesEvent::DefinitionCandidates(definitions))).is_ok()
+                }));
+            });
+        }
         let event_path = path.to_string();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
         let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());

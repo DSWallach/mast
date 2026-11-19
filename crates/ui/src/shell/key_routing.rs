@@ -39,6 +39,7 @@ pub fn apply_keymap(
     for (id, action) in [
         (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
         (ShortcutId::QuickOpenSymbols, Box::new(QuickOpenSymbols) as Box<dyn Action>),
+        (ShortcutId::GoToDefinition, Box::new(GoToDefinition) as Box<dyn Action>),
         (ShortcutId::FileNavigationBack, Box::new(FileNavigationBack) as Box<dyn Action>),
         (ShortcutId::FileNavigationForward, Box::new(FileNavigationForward) as Box<dyn Action>),
         (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
@@ -48,7 +49,7 @@ pub fn apply_keymap(
     ] {
         let combo = keymap.get(id);
         if combo.is_empty() { continue; }
-        let context = if matches!(id, ShortcutId::AddCodeToChat | ShortcutId::FileNavigationBack | ShortcutId::FileNavigationForward) { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
+        let context = if matches!(id, ShortcutId::GoToDefinition | ShortcutId::AddCodeToChat | ShortcutId::FileNavigationBack | ShortcutId::FileNavigationForward) { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
         let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
         if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
             cx.bind_keys([binding]);

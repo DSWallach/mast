@@ -111,6 +111,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "tracker-expanded",
         "code-reference",
         "symbol-search",
+        "definition-search",
         "file-outline",
         "changes-expanded",
         "scope-map",

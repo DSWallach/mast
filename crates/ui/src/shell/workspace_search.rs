@@ -46,6 +46,7 @@ fn file_score(path: &IndexedPath, query: &str) -> Option<i64> {
 pub(super) enum SearchMode {
     Files,
     Symbols,
+    Definitions,
     Content,
     Line,
 }
@@ -92,6 +93,22 @@ pub(super) struct WorkspaceSearch {
 }
 
 impl Shell {
+    pub(super) fn open_definition_candidates(&mut self, definitions: Vec<(String, mast_syntax::symbols::Symbol)>, window: &mut Window, cx: &mut Context<Self>) {
+        if definitions.len() == 1 {
+            let (path, symbol) = definitions.into_iter().next().unwrap();
+            self.add_file_surface_at(path, Some(symbol.start_line), None, window, cx);
+            return;
+        }
+        if definitions.is_empty() { return; }
+        self.open_workspace_search(SearchMode::Definitions, window, cx);
+        if let Some(search) = self.workspace_search.as_mut() {
+            search.task = None;
+            search.rows = definitions.into_iter().map(|(path, symbol)| ResultRow { path, line: Some(symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(symbol) }).collect();
+            search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+            search.status.clear();
+        }
+        cx.notify();
+    }
     fn refresh_workspace_symbols(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(context) = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat) else { return; };
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
@@ -110,6 +127,13 @@ impl Shell {
                 });
             }
         }).detach();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_definition_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_chat = "fixture-chat".into();
+        let symbol = mast_syntax::symbols::Symbol { name: "review_hunk_identity".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 28, end_line: 30 };
+        self.open_definition_candidates(vec![("src/review.rs".into(), symbol.clone()), ("tests/review.rs".into(), mast_syntax::symbols::Symbol { start_line: 84, end_line: 87, ..symbol })], window, cx);
     }
 
     #[cfg(feature = "snapshot")]
@@ -367,6 +391,7 @@ impl Shell {
                 match mode {
                     SearchMode::Files => "Search files…",
                     SearchMode::Symbols => "Search symbols…",
+                    SearchMode::Definitions => "Choose a definition…",
                     SearchMode::Content => "Search in files…",
                     SearchMode::Line => "Line number…",
                 },
@@ -445,7 +470,7 @@ impl Shell {
         if mode == SearchMode::Symbols {
             if self.workspace_symbol_error.is_some() { self.workspace_symbol_key = None; }
             self.subscribe_workspace_symbols(cx);
-        } else {
+        } else if mode != SearchMode::Definitions {
             self.workspace_search_index_key = None;
             self.prewarm_workspace_search(cx);
         }
@@ -487,6 +512,7 @@ impl Shell {
             cx.notify();
             return;
         }
+        if search.mode == SearchMode::Definitions { return; }
         search.task = None;
         search.generation = search.generation.wrapping_add(1);
         search.query_started = std::time::Instant::now();
@@ -1048,7 +1074,7 @@ impl Shell {
         }
         let results = gpui::list(list, cx.processor(Self::render_workspace_search_row))
             .h(px(
-                if mode == SearchMode::Symbols { (search.rows.len() as f32 * 42.0).clamp(42.0, 320.0).min((f32::from(viewport.height) - 200.0).max(80.0)) }
+                if matches!(mode, SearchMode::Symbols | SearchMode::Definitions) { (search.rows.len() as f32 * 42.0).clamp(42.0, 320.0).min((f32::from(viewport.height) - 200.0).max(80.0)) }
                 else { 320.0_f32.min((f32::from(viewport.height) - 200.0).max(80.0)) }
             ))
             .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
@@ -1172,6 +1198,35 @@ fn split_globs(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn definition_picker_selects_candidates_and_records_navigation(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| { settings::init(settings::UiSettings::default(), dir.path(), cx); gpui_base::init(cx); cx.set_global(Theme::default()); crate::app_menus::init(cx); });
+        let host = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(state, EngineBootConfig { data_dir: dir.path().into(), ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock }, cx)
+        });
+        host.update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![serde_json::from_value(serde_json::json!({"id":"chat", "deviceId":"local", "cwd":"/fixture", "archived":false, "createdAt":Utc::now()})).unwrap()];
+            });
+            shell.active_chat = "chat".into();
+            shell.add_file_surface_at("src/a.rs".into(), Some(2), None, window, cx);
+            let symbol = mast_syntax::symbols::Symbol { name: "call".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 10, end_line: 10 };
+            shell.open_definition_candidates(vec![("src/b.rs".into(), symbol.clone()), ("tests/b.rs".into(), symbol)], window, cx);
+            let search = shell.workspace_search.as_ref().unwrap();
+            assert_eq!(search.mode, SearchMode::Definitions);
+            assert_eq!(search.active, 0);
+            assert_eq!(search.rows.len(), 2);
+            shell.select_workspace_result(0, window, cx);
+            let RightSurface::File(id) = shell.resolved_right_active(cx) else { panic!("definition not opened"); };
+            assert_eq!(shell.file_surface_paths[&id], "src/b.rs");
+            shell.move_file_navigation(false, window, cx);
+            let RightSurface::File(id) = shell.resolved_right_active(cx) else { panic!("history did not open file"); };
+            assert_eq!(shell.file_surface_paths[&id], "src/a.rs");
+        }).unwrap();
+    }
 
     #[test]
     fn alternate_enter_keeps_file_and_content_selection() {
