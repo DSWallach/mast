@@ -375,12 +375,24 @@ struct LaunchInputs<'a> {
     /// cannot be replayed as a plain one.
     #[serde(skip_serializing_if = "Option::is_none")]
     standing_role: &'a Option<mast_proto::StandingRoleKind>,
+    /// Explicit archive choices are part of a user hand-off operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hand_off_archive: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum HandOffOrigin {
     User { archive: Option<bool> },
     Agent,
+}
+
+impl HandOffOrigin {
+    fn archive_choice(self) -> Option<bool> {
+        match self {
+            Self::User { archive } => archive,
+            Self::Agent => None,
+        }
+    }
 }
 
 /// The launch workflow and Turn continuation. Cheap to clone.
@@ -534,6 +546,7 @@ impl WorkItemLaunchService {
                 worktree_choice: &successor.worktree_choice,
                 parent_chat_id: &successor.parent_chat_id,
                 standing_role: &successor.standing_role,
+                hand_off_archive: origin.archive_choice(),
             });
             if self
                 .workspace
@@ -576,6 +589,7 @@ impl WorkItemLaunchService {
             worktree_choice: &p.worktree_choice,
             parent_chat_id: &p.parent_chat_id,
             standing_role: &p.standing_role,
+            hand_off_archive: hand_off.and_then(|(_, _, origin)| origin.archive_choice()),
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
@@ -959,9 +973,17 @@ impl WorkItemLaunchService {
                 "Hand-off chats must belong to the same Space and device",
             ));
         }
+        // Persist the launch and registry hand-off before moving local roles
+        // that a retry must be able to find after a restart.
+        self.doc_host
+            .persist_chat_now(successor)
+            .map_err(engine_error)?;
         self.workspace
             .complete_user_chat_hand_off(source, successor, archive)
             .map_err(invalid)?;
+        self.workspace
+            .persist_registry_now()
+            .map_err(engine_error)?;
         self.transfer_user_handoff_roles(&from, successor)
     }
 
@@ -990,15 +1012,6 @@ impl WorkItemLaunchService {
         let Some(space_id) = from.space_id.as_deref() else {
             return Ok(());
         };
-        // The registry completion is shared. This receipt is local to the
-        // device whose grants and assistant designation are being changed.
-        let key = format!(
-            "{}handoff-roles:{successor}",
-            crate::work_outline::LEDGER_KEY_PREFIX
-        );
-        if self.workspace.ledger_holds(&key) {
-            return Ok(());
-        }
         let chats = if from.scheduled_task_info.is_some() {
             self.workspace.read_chats().map_err(engine_error)?
         } else {
@@ -1007,14 +1020,23 @@ impl WorkItemLaunchService {
         let tokens = self.sessions.agent_tokens();
         tokens
             .admin()
-            .transfer_for_hand_off(&from.id, successor, space_id);
+            .transfer_for_hand_off(&from.id, successor, space_id)
+            .map_err(|err| {
+                error(
+                    WorkOutlineErrorCode::Invalid,
+                    format!("Could not save the admin hand-off: {err}"),
+                )
+            })?;
         tokens
             .personal_assistant()
-            .transfer_for_hand_off(from, successor, &chats);
-        self.workspace
-            .ledger_mark(&key)
-            .map(drop)
-            .map_err(engine_error)
+            .transfer_for_hand_off(from, successor, &chats)
+            .map_err(|err| {
+                error(
+                    WorkOutlineErrorCode::Invalid,
+                    format!("Could not save the personal assistant hand-off: {err}"),
+                )
+            })?;
+        Ok(())
     }
 
     /// Make a provisional first-start chat the role's chat: save its session

@@ -7,7 +7,9 @@
 //! re-checked on every agent call (and between the steps of a batch), so a
 //! revoke or expiry takes effect immediately.
 
+use crate::handoff_role_file::HandoffRoleFile;
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -39,7 +41,7 @@ struct Approval {
 #[derive(Default)]
 struct State {
     grants: HashMap<String, AdminGrant>,
-    store: Option<PathBuf>,
+    store: HandoffRoleFile,
     audit: Vec<TurnRecord>,
     approvals: HashMap<String, Approval>,
 }
@@ -68,22 +70,17 @@ impl AdminGrants {
     pub fn set_store(&self, path: PathBuf) {
         let now = self.now_ms();
         let mut state = lock(&self.state);
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(saved) = serde_json::from_slice::<Vec<AdminGrant>>(&bytes)
-        {
+        if let Some(saved) = state.store.load::<Vec<AdminGrant>>(path) {
             for grant in saved.into_iter().filter(|g| g.is_live(now)) {
                 state.grants.insert(grant.chat_id.clone(), grant);
             }
         }
-        state.store = Some(path);
     }
 
     fn persist(state: &State) {
-        if let Some(path) = &state.store {
-            let list: Vec<&AdminGrant> = state.grants.values().collect();
-            if let Ok(bytes) = serde_json::to_vec(&list) {
-                let _ = std::fs::write(path, bytes);
-            }
+        let grants: Vec<_> = state.grants.values().collect();
+        if let Err(error) = state.store.save(grants) {
+            tracing::warn!(%error, "could not save admin grants");
         }
     }
 
@@ -112,25 +109,34 @@ impl AdminGrants {
 
     /// Reassign a live grant within its original Space. A direct grant to
     /// the successor takes precedence.
-    pub(crate) fn transfer_for_hand_off(&self, from: &str, to: &str, space_id: &str) {
+    pub(crate) fn transfer_for_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        space_id: &str,
+    ) -> io::Result<()> {
         let now = self.now_ms();
         let mut state = lock(&self.state);
-        if !state
-            .grants
+        if state.store.contains(to) {
+            return Ok(());
+        }
+        let mut grants = state.grants.clone();
+        if let Some(mut grant) = grants
             .get(from)
-            .is_some_and(|grant| grant.is_live(now) && grant.space_id == space_id)
+            .filter(|grant| grant.is_live(now) && grant.space_id == space_id)
+            .cloned()
         {
-            return;
+            grants.remove(from);
+            if !grants.get(to).is_some_and(|grant| grant.is_live(now)) {
+                grant.chat_id = to.to_owned();
+                grants.insert(grant.chat_id.clone(), grant);
+            }
         }
-        let mut grant = state
-            .grants
-            .remove(from)
-            .expect("source grant checked under lock");
-        if !state.grants.get(to).is_some_and(|grant| grant.is_live(now)) {
-            grant.chat_id = to.to_owned();
-            state.grants.insert(grant.chat_id.clone(), grant);
-        }
-        Self::persist(&state);
+        state
+            .store
+            .complete(to, grants.values().collect::<Vec<_>>())?;
+        state.grants = grants;
+        Ok(())
     }
 
     /// The default grant length, for callers without a choice.

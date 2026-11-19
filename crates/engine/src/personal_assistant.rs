@@ -4,6 +4,8 @@
 //! Authenticate re-reads it on every agent
 //! call, so a clear takes effect immediately.
 
+use crate::handoff_role_file::HandoffRoleFile;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -12,7 +14,7 @@ use mast_proto::{Chat, PersonalAssistant};
 #[derive(Default)]
 struct State {
     current: Option<PersonalAssistant>,
-    store: Option<PathBuf>,
+    store: HandoffRoleFile,
 }
 
 #[derive(Default)]
@@ -28,19 +30,14 @@ impl PersonalAssistantStore {
     /// Persist at `path` (device-local) and load the saved designation.
     pub fn set_store(&self, path: PathBuf) {
         let mut state = lock(&self.state);
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(saved) = serde_json::from_slice::<Option<PersonalAssistant>>(&bytes)
-        {
+        if let Some(saved) = state.store.load::<Option<PersonalAssistant>>(path) {
             state.current = saved;
         }
-        state.store = Some(path);
     }
 
     fn persist(state: &State) {
-        if let Some(path) = &state.store
-            && let Ok(bytes) = serde_json::to_vec(&state.current)
-        {
-            let _ = std::fs::write(path, bytes);
+        if let Err(error) = state.store.save(&state.current) {
+            tracing::warn!(%error, "could not save personal assistant designation");
         }
     }
 
@@ -55,18 +52,26 @@ impl PersonalAssistantStore {
         assistant
     }
 
-    pub(crate) fn transfer_for_hand_off(&self, from: &Chat, successor: &str, chats: &[Chat]) {
+    pub(crate) fn transfer_for_hand_off(
+        &self,
+        from: &Chat,
+        successor: &str,
+        chats: &[Chat],
+    ) -> io::Result<()> {
         let mut state = lock(&self.state);
-        if let Some(assistant) = &state.current
+        if state.store.contains(successor) {
+            return Ok(());
+        }
+        let mut current = state.current.clone();
+        if let Some(assistant) = &mut current
             && assistant.covers(from, chats)
         {
-            state.current = Some(PersonalAssistant {
-                chat_id: successor.to_owned(),
-                designated_at_ms: assistant.designated_at_ms,
-                scheduled_task: None,
-            });
-            Self::persist(&state);
+            assistant.chat_id = successor.to_owned();
+            assistant.scheduled_task = None;
         }
+        state.store.complete(successor, &current)?;
+        state.current = current;
+        Ok(())
     }
 
     pub fn clear(&self) {

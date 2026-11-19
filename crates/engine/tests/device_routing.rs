@@ -540,6 +540,35 @@ async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
         on_b.id
     );
 
+    // An older client omits the archive choice. Both capable devices
+    // still transfer their own roles and keep this plain predecessor active.
+    on_b.id = "remote-handoff-legacy".into();
+    core_b.workspace.import_chat_row(&on_b).unwrap();
+    core_a.workspace.import_chat_row(&on_b).unwrap();
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        tokens.personal_assistant().set(&on_b);
+        tokens
+            .admin()
+            .grant(&on_b.id, "handoff-space", None, skip_bulk);
+    }
+    let params = serde_json::json!({
+        "chatId": on_b.id, "summary": "Continue from an older client",
+        "operationId": "remote-handoff-legacy",
+    });
+    let reply = loop_hand_off(&client, params).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(!core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        assert_eq!(
+            tokens.personal_assistant().get().unwrap().chat_id,
+            successor
+        );
+        assert!(tokens.admin().live(&on_b.id).is_none());
+        let grant = tokens.admin().live(successor).unwrap();
+        assert_eq!(grant.space_id, "handoff-space");
+        assert_eq!(grant.skip_bulk_confirmation, skip_bulk);
+    }
+
     core_a.shutdown().await;
     core_b.shutdown().await;
 }

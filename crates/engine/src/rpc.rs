@@ -1920,52 +1920,43 @@ impl EngineRpc {
     ) -> Result<RpcReply, RpcError> {
         let mut handoff_source = None;
         if method == methods::HAND_OFF_ORCHESTRATOR {
-            let supported = self.workspace.read_devices().ok().is_some_and(|devices| {
-                devices.iter().any(|device| {
-                    device.id == target
-                        && device.supports(mast_proto::capabilities::CHAT_HANDOFF_V1)
-                })
-            });
-            if !supported {
+            use mast_proto::capabilities::{
+                CHAT_HANDOFF_PREFERENCES_V1, CHAT_HANDOFF_V1, STANDING_ROLE_HANDOFF_V1,
+            };
+            let device = self
+                .workspace
+                .read_devices()
+                .ok()
+                .and_then(|devices| devices.into_iter().find(|device| device.id == target));
+            let supports = |capability| {
+                device
+                    .as_ref()
+                    .is_some_and(|device| device.supports(capability))
+            };
+            if !supports(CHAT_HANDOFF_V1) {
                 return Err(RpcError::Failed(format!(
                     "Update Mast on {} and reconnect to hand off this chat.",
                     self.device_label(target)
                 )));
             }
+            let transfers_preferences = supports(CHAT_HANDOFF_PREFERENCES_V1);
             if params.get("archive").is_some_and(|value| !value.is_null())
-                && !self.workspace.read_devices().ok().is_some_and(|devices| {
-                    devices.iter().any(|device| {
-                        device.id == target
-                            && device
-                                .supports(mast_proto::capabilities::CHAT_HANDOFF_PREFERENCES_V1)
-                    })
-                })
+                && !transfers_preferences
             {
                 return Err(RpcError::Failed(format!(
                     "Update Mast on {} and reconnect to hand off this chat with its preferences.",
                     self.device_label(target)
                 )));
             }
-            // An older host would start the successor and move workers but
-            // leave the role on the predecessor, so a role chat needs a host
-            // that moves roles.
             let chat_id = params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default();
-            if params.get("archive").is_some_and(serde_json::Value::is_boolean) {
-                handoff_source = Some(chat_id.to_owned());
+            if self.workspace.chat_in_standing_role(chat_id) && !supports(STANDING_ROLE_HANDOFF_V1) {
+                return Err(RpcError::Failed(format!(
+                    "Update Mast on {} and reconnect to hand off this manager or assistant chat.",
+                    self.device_label(target)
+                )));
             }
-            if self.workspace.chat_in_standing_role(chat_id) {
-                let role_capable = self.workspace.read_devices().ok().is_some_and(|devices| {
-                    devices.iter().any(|device| {
-                        device.id == target
-                            && device.supports(mast_proto::capabilities::STANDING_ROLE_HANDOFF_V1)
-                    })
-                });
-                if !role_capable {
-                    return Err(RpcError::Failed(format!(
-                        "Update Mast on {} and reconnect to hand off this manager or assistant chat.",
-                        self.device_label(target)
-                    )));
-                }
+            if transfers_preferences {
+                handoff_source = Some(chat_id.to_owned());
             }
         }
         let Some(links) = &self.links else {

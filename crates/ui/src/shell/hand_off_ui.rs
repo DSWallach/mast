@@ -13,6 +13,7 @@ pub(super) struct HandOffDialog {
     workers: Vec<String>,
     details_available: bool,
     archive: bool,
+    archive_locked: bool,
     submitting: bool,
     error: Option<String>,
     operation: OperationSlot,
@@ -94,7 +95,7 @@ impl Shell {
             self.open_chat(chat_id.clone(), cx);
         }
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
-            chat_id, input, default_summary: summary, pickers, _picker_observe: picker_observe, workers, details_available, archive: true, submitting: false,
+            chat_id, input, default_summary: summary, pickers, _picker_observe: picker_observe, workers, details_available, archive: true, archive_locked: false, submitting: false,
             error: None,
             operation: OperationSlot::default(),
         }), cx);
@@ -178,8 +179,20 @@ impl Shell {
         let harness = choice.harness;
         let model = choice.model;
         let reasoning = choice.reasoning;
-        let operation_id = dialog.operation.id_for(&format!("{summary}|{harness:?}|{model:?}|{reasoning:?}"));
-        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams { chat_id: source.clone(), summary, operation_id, archive: Some(dialog.archive), harness, model, reasoning });
+        let archive = dialog.archive;
+        let operation_id = dialog.operation.id_for(&format!(
+            "{summary}|{harness:?}|{model:?}|{reasoning:?}|{archive}"
+        ));
+        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams {
+            chat_id: source.clone(),
+            summary,
+            operation_id,
+            archive: Some(archive),
+            harness,
+            model,
+            reasoning,
+        });
+        dialog.archive_locked = true;
         dialog.submitting = true;
         dialog.error = None;
         cx.notify();
@@ -226,14 +239,17 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         .when(!dialog.workers.is_empty(), |card| card
             .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
             .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers)))
-        .child(div().id("hand-off-archive").debug_selector(|| "hand-off-archive".into()).mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+        .child(div().id("hand-off-archive").debug_selector(|| "hand-off-archive".into()).mt(px(12.0)).when(!dialog.archive_locked, |row| row.cursor_pointer()).on_click(cx.listener(|this, _, _, cx| {
             if let Some(WorkOutlineModal::HandOff(dialog)) = this.work_outline_modal.as_mut()
-                && !dialog.submitting
+                && !dialog.archive_locked
             {
                 dialog.archive = !dialog.archive;
                 cx.notify();
             }
         })).child(SharedString::from(if dialog.archive { "☑ Archive old chat" } else { "☐ Archive old chat" })))
+        .when(dialog.archive_locked && !dialog.submitting && dialog.error.is_some(), |card| {
+            card.child(div().mt(px(4.0)).text_color(theme.text_muted).child("Retry uses the original archive choice."))
+        })
         .when_some(dialog.error.clone(), |card, error| card.child(div().mt(px(8.0)).text_color(theme.warning).child(SharedString::from(error))))
         .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
             .child(popover::btn_ghost(theme, "Cancel", "hand-off-cancel").id("hand-off-cancel").on_click(cx.listener(|this, _, window, cx| { this.cancel_work_outline_modal(window, cx); })))
@@ -424,6 +440,44 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["archive"], false);
+    }
+
+    #[gpui::test]
+    fn hand_off_retry_keeps_the_archive_choice_after_a_lost_reply(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(
+            move |_, params| {
+                let mut recorded = recorded.lock().unwrap();
+                recorded.push(params);
+                if recorded.len() == 1 {
+                    Err(mast_rpc::RpcError::Transport("reply lost".into()))
+                } else {
+                    Ok(
+                        serde_json::json!({"chatId":"successor", "messageId":"m", "commandId":"c",
+                    "executionRoot":"/work", "state":"queued"}),
+                    )
+                }
+            },
+        ));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.work_outline_actions_override = Some(actions)
+            });
+            shell.open_hand_off(CHAT_API.into(), cx);
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        super::super::chat_item_tests::draw(cx);
+        let archive = cx.debug_bounds("hand-off-archive").unwrap().center();
+        cx.simulate_click(archive, gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| shell.submit_hand_off(cx));
+        cx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["archive"], true);
+        assert_eq!(calls[0], calls[1]);
     }
 
     #[gpui::test]

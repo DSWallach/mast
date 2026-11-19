@@ -38,6 +38,7 @@ pub mod external_import;
 pub mod friction_import;
 mod http_error;
 pub mod instance_lock;
+mod handoff_role_file;
 pub mod instruction_delivery;
 pub mod instruction_registry;
 pub mod linear;
