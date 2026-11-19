@@ -51,15 +51,6 @@ pub struct CommitProvenance {
     pub remapped_from: Option<String>,
 }
 
-/// Request: blame one file of a checkout at its current HEAD.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlameRequest {
-    #[serde(flatten)]
-    pub target: crate::WorkspaceTarget,
-    pub path: String,
-}
-
 /// How sure the engine is about the chat behind a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

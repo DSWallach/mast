@@ -4399,6 +4399,11 @@ impl RpcService for EngineRpc {
                 let diff = self.workspace_files.file_history_diff(request).await.map_err(RpcError::from)?;
                 RpcReply::value(diff.as_ref())
             }
+            methods::GET_WORKSPACE_FILE_BLAME => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let blame = self.workspace_files.file_blame(request).await.map_err(RpcError::from)?;
+                RpcReply::value(blame.as_ref())
+            }
             methods::REFRESH_WORKSPACE_SYMBOLS => {
                 let request: crate::workspace_files::symbols::RefreshSymbolsRequest = parse_params(params)?;
                 self.workspace_files.refresh_symbols(request.target, request.force).await.map_err(RpcError::from)?;

@@ -622,12 +622,11 @@ impl EngineCore {
         // Commit → chat provenance: record on HEAD moves of bound worktrees.
         {
             let transcripts = doc_host.clone();
-            let recorder = provenance::ProvenanceRecorder::new(
-                workspace.clone(),
-                Arc::new(move |chat_id| {
-                    transcripts.open(chat_id).ok()?.doc().read_entries().ok()
-                }),
-            );
+            let reader: provenance::TranscriptReader = Arc::new(move |chat_id| {
+                transcripts.open(chat_id).ok()?.doc().read_entries().ok()
+            });
+            workspace_files.set_transcript_reader(reader.clone());
+            let recorder = provenance::ProvenanceRecorder::new(workspace.clone(), reader);
             let weak = Arc::downgrade(&recorder);
             diff_sync.set_head_move_listener(Arc::new(move |head_move| {
                 if let Some(recorder) = weak.upgrade() {

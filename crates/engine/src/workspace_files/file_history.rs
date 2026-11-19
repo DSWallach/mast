@@ -43,15 +43,24 @@ pub struct FileHistory {
     pub truncated: bool,
 }
 
+/// Blame cache key: (checkout id, HEAD, path, working-file stamp).
+pub(super) type BlameKey = (String, String, String, (u64, u128));
+
 #[derive(Default)]
 pub struct FileHistoryCache {
+    pub(super) blames: tokio::sync::Mutex<HashMap<BlameKey, Arc<mast_proto::Blame>>>,
+    pub(super) blame_flights: std::sync::Mutex<HashMap<BlameKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    /// (checkout id, sha) → local branches containing it (fallback guess).
+    pub(super) containing: std::sync::Mutex<HashMap<(String, String), Arc<Vec<String>>>>,
+    /// (sha, path, chat) → the turn that edited `path` (None cached too).
+    pub(super) turns: std::sync::Mutex<HashMap<(String, String, String), Option<String>>>,
     histories: tokio::sync::Mutex<HashMap<(String, String, String), Arc<FileHistory>>>,
     diffs: tokio::sync::Mutex<HashMap<(String, String, String, Option<String>), Arc<String>>>,
     history_flights: std::sync::Mutex<HashMap<(String, String, String), std::sync::Weak<tokio::sync::Mutex<()>>>>,
     diff_flights: std::sync::Mutex<HashMap<(String, String, String, Option<String>), std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
-fn flight<K: Eq + std::hash::Hash + Clone>(flights: &std::sync::Mutex<HashMap<K, std::sync::Weak<tokio::sync::Mutex<()>>>>, key: &K) -> Arc<tokio::sync::Mutex<()>> {
+pub(super) fn flight<K: Eq + std::hash::Hash + Clone>(flights: &std::sync::Mutex<HashMap<K, std::sync::Weak<tokio::sync::Mutex<()>>>>, key: &K) -> Arc<tokio::sync::Mutex<()>> {
     let mut flights = lock(flights);
     flights.retain(|_, flight| flight.strong_count() > 0);
     if let Some(existing) = flights.get(key).and_then(std::sync::Weak::upgrade) { return existing; }
@@ -171,7 +180,7 @@ impl WorkspaceFiles {
     }
 }
 
-fn evict_if_full<K: Eq + std::hash::Hash + Clone, V>(cache: &mut HashMap<K, V>, limit: usize) {
+pub(super) fn evict_if_full<K: Eq + std::hash::Hash + Clone, V>(cache: &mut HashMap<K, V>, limit: usize) {
     if cache.len() >= limit
         && let Some(key) = cache.keys().next().cloned()
     {
@@ -179,11 +188,17 @@ fn evict_if_full<K: Eq + std::hash::Hash + Clone, V>(cache: &mut HashMap<K, V>, 
     }
 }
 
-fn valid_sha(value: &str) -> bool {
+pub(super) fn valid_sha(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-async fn run_git(root: &Path, args: &[&str]) -> Result<String, WorkspaceFilesError> {
+pub(super) async fn run_git(root: &Path, args: &[&str]) -> Result<String, WorkspaceFilesError> {
+    run_git_limited(root, args, MAX_GIT_OUTPUT).await
+}
+
+/// [`run_git`] with a caller-chosen output cap (blame output carries the
+/// file's own text).
+pub(super) async fn run_git_limited(root: &Path, args: &[&str], max_output: usize) -> Result<String, WorkspaceFilesError> {
     static GIT_WORKERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     let _permit = GIT_WORKERS.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire().await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let mut child = mast_harness::git_command_async()
@@ -200,12 +215,12 @@ async fn run_git(root: &Path, args: &[&str]) -> Result<String, WorkspaceFilesErr
             .stdout
             .take()
             .expect("piped git output")
-            .take(MAX_GIT_OUTPUT as u64 + 1);
+            .take(max_output as u64 + 1);
         stdout
             .read_to_end(&mut bytes)
             .await
             .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
-        if bytes.len() > MAX_GIT_OUTPUT {
+        if bytes.len() > max_output {
             let _ = child.kill().await;
             return Err(WorkspaceFilesError::Unsupported(
                 "file history output exceeds the limit".into(),

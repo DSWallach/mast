@@ -70,6 +70,7 @@ pub(super) fn forwardable(method: &str) -> bool {
             | methods::REFRESH_WORKSPACE_SYMBOLS
             | methods::LIST_WORKSPACE_FILE_HISTORY
             | methods::GET_WORKSPACE_FILE_HISTORY_DIFF
+            | methods::GET_WORKSPACE_FILE_BLAME
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
