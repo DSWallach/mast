@@ -2722,10 +2722,11 @@ impl FilesSurface {
                     Some(self.selection_actions(theme, top, left, cx))
                 }
             };
+            let click_editor = editor.clone();
             return div()
                 .id("files-editor-body")
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    if !event.modifiers.secondary() { return; }
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !event.modifiers.secondary() || !super::editor::pointer_in_text(click_editor.read(cx), event.position) { return; }
                     let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
                     if provider.take_navigation_handled() { return; }
                     if provider.is_indexing() {

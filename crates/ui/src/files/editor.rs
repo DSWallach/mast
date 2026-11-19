@@ -54,6 +54,18 @@ pub(super) fn identifier_at_cursor(source: &str, offset: usize) -> Option<std::o
     (start < end).then_some(start..end)
 }
 
+/// Exclude the line-number gutter from definition-click fallback handling.
+pub(super) fn pointer_in_text(editor: &FileEditorState, position: gpui::Point<gpui::Pixels>) -> bool {
+    let bounds = editor.input_bounds();
+    if !bounds.contains(&position) { return false; }
+    let source = editor.value();
+    let cursor = editor.cursor().min(source.len());
+    let Some(prefix) = source.get(..cursor) else { return false; };
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let Some(line_bounds) = editor.range_to_bounds(&(line_start..line_start)) else { return false; };
+    position.x >= line_bounds.left() - editor.scroll_offset().x
+}
+
 /// Creates a stable editor entity for an open workspace document.
 pub(super) fn new_file_editor(
     text: impl Into<SharedString>,
