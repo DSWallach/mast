@@ -139,6 +139,15 @@ pub(crate) struct HeaderModel {
     pub(crate) promoted_path: Option<String>,
 }
 
+/// The role a row or header shows. A scheduled task's results role is a
+/// reserved hash, so it reads as "results".
+fn shown_role(artifact: &ArtifactView) -> Option<String> {
+    if artifact.is_scheduled_results() {
+        return Some("results".into());
+    }
+    artifact.role.clone().filter(|role| !role.trim().is_empty())
+}
+
 pub(crate) fn header(artifact: &ArtifactView, shown: Option<u32>) -> HeaderModel {
     let revision = shown.unwrap_or(artifact.current_revision);
     let recorded = artifact.revision(revision);
@@ -147,7 +156,7 @@ pub(crate) fn header(artifact: &ArtifactView, shown: Option<u32>) -> HeaderModel
         .filter(|note| !note.is_empty());
     HeaderModel {
         title: artifact.title.clone(),
-        role: artifact.role.clone().filter(|role| !role.trim().is_empty()),
+        role: shown_role(artifact),
         revision,
         current: revision == artifact.current_revision,
         edited_without_note: note.as_deref() == Some(EDITED_WITHOUT_NOTE),
@@ -188,7 +197,7 @@ pub(crate) fn row(
         id: artifact.id.clone(),
         icon: kind_icon(artifact.kind),
         title: artifact.title.clone(),
-        role: artifact.role.clone().filter(|role| !role.trim().is_empty()),
+        role: shown_role(artifact),
         revision: format!("r{}", artifact.current_revision),
         age: age_label(now, artifact.updated_at),
         pinned: artifact.pinned_as_plan,

@@ -490,6 +490,9 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
         state.selected_space = Some("s1".into());
         state.set_work_outline_for_test(outline_with_requests("s1"));
+        if std::env::var_os("MAST_PREVIEW_ARTIFACTS").is_some() {
+            state.set_test_artifacts(artifact_list_fixture("s1", fixture_ids::API));
+        }
         state
     });
     let boot = crate::EngineBootConfig {
@@ -537,6 +540,55 @@ pub fn outline_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<impl Render + 
         details,
         _shell: shell,
     })
+}
+
+/// The item's artifact list: a pinned plan, two scheduled tasks' results and
+/// an ordinary artifact that is newer than both. Shown by the `details` screen
+/// with `MAST_PREVIEW_ARTIFACTS=1`; expected order is plan, both results
+/// (newest first), then the newer ordinary artifact.
+fn artifact_list_fixture(space: &str, item: &str) -> mast_proto::ArtifactsSnapshot {
+    let now = crate::artifacts::model::now_ms();
+    let (minute, hour) = (60_000, 3_600_000);
+    let artifact = |id: &str, title: &str, role: String, age: i64, plan: bool| {
+        mast_proto::ArtifactView {
+            id: id.into(),
+            space_id: space.into(),
+            device_id: "local".into(),
+            work_item_id: Some(item.into()),
+            title: title.into(),
+            kind: mast_proto::ArtifactKind::Markdown,
+            role: Some(role),
+            folder: "api".into(),
+            stored_path: format!("/repo/.mast/artifacts/api/{id}.md"),
+            current_revision: 3,
+            created_at: now - 48 * hour,
+            updated_at: now - age,
+            pinned_as_plan: plan,
+            ..Default::default()
+        }
+    };
+    mast_proto::ArtifactsSnapshot {
+        space_id: space.into(),
+        artifacts: vec![
+            artifact("scratch", "Scratch notes", "doc".into(), 5 * minute, false),
+            artifact(
+                "slack",
+                "Results: Slack digest",
+                mast_proto::ScheduledRunResults::role_for("slack"),
+                2 * hour,
+                false,
+            ),
+            artifact("plan", "Delivery plan", "plan".into(), 30 * hour, true),
+            artifact(
+                "github",
+                "Results: GitHub review queue",
+                mast_proto::ScheduledRunResults::role_for("github"),
+                5 * hour,
+                false,
+            ),
+        ],
+        ..Default::default()
+    }
 }
 
 /// Offline token usage page. No engine or user store is opened.

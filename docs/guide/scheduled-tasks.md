@@ -80,6 +80,14 @@ unarchived. Look for the task's Required Action on its work item. It links to
 the run chat when one exists and updates as new runs need attention. A successful
 run resolves the action.
 
+Each Background run must also leave its results on the work item. Mast appends
+a short contract to the task's prompt that asks the run to publish one markdown
+artifact titled `Results: <task name>`, raise a Required Action for anything that
+needs you, and set the item's status. When the run ends, Mast checks that this
+run published a new revision. A run that did not is marked **Failed** with the
+reason, stays unarchived and raises the same task Required Action as any other
+failure. Interactive runs get no contract and are not checked.
+
 ## Read editions
 
 The sidebar and Overview show the latest unarchived run per task on each device

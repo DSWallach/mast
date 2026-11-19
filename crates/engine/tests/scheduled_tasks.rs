@@ -1365,7 +1365,51 @@ async fn save_lifecycle_task(
         .unwrap();
 }
 
+/// A well-behaved run: its Background results are published before it ends.
 async fn claim_lifecycle_run(core: &EngineCore, task: &str, operation: &str) -> ScheduledRun {
+    let run = claim_run_without_results(core, task, operation).await;
+    if run.results.is_some() {
+        let chat = run.chat_id.clone().unwrap();
+        publish_results(core, &run, &chat, &format!("Run: {}\nDone.", run.id));
+    }
+    run
+}
+
+/// Publish a run's results artifact as `chat`; returns the reply.
+fn publish_results(
+    core: &EngineCore,
+    run: &ScheduledRun,
+    chat: &str,
+    body: &str,
+) -> mast_proto::ArtifactPublishReply {
+    let results = run.results.as_ref().expect("a Background run with an item");
+    let dir = std::env::temp_dir().join(format!("mast-results-{}", &run.id[..8]));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join(format!("results-{chat}.md"));
+    std::fs::write(&source, body).unwrap();
+    core.artifacts
+        .record(mast_engine::artifacts::PublishRequest {
+            space_id: ITEM_SPACE.into(),
+            work_item_id: run.snapshot.work_item_id.clone(),
+            chat_id: Some(chat.into()),
+            source,
+            title: results.title.clone(),
+            kind: None,
+            role: Some(results.role.clone()),
+            note: "results".into(),
+            pin_as_plan: false,
+            operation_id: Some(format!("test-{chat}-{}", body.len())),
+            by: WorkOutlineActor {
+                kind: WorkOutlineActorKind::Agent,
+                device_id: ITEM_DEVICE.into(),
+                chat_id: Some(chat.into()),
+                message_id: None,
+            },
+        })
+        .unwrap()
+}
+
+async fn claim_run_without_results(core: &EngineCore, task: &str, operation: &str) -> ScheduledRun {
     let snapshot = core
         .scheduled_tasks
         .request(ScheduledTasksRequest::RunNow {
@@ -1955,5 +1999,290 @@ async fn write_to_notion_setting_reaches_the_run_prompt_and_chat_and_survives_ol
         .unwrap();
     let off = saved.tasks.iter().find(|t| t.id == "off").unwrap();
     assert_eq!(off.draft.write_to_notion, Some(false));
+fn failure_actions(core: &EngineCore, task: &str) -> Vec<UserActionRequestView> {
+    let key = format!("scheduled-run-failed:{task}");
+    mast_doc::materialize_work_outline(
+        ITEM_SPACE,
+        &core.workspace.work_outline_inputs(ITEM_SPACE),
+    )
+    .user_action_requests
+    .into_iter()
+    .filter(|request| request.dedupe_key.as_deref() == Some(key.as_str()))
+    .collect()
+}
+
+async fn finished_run(core: &EngineCore, run: &ScheduledRun) -> ScheduledRun {
+    core.scheduled_tasks
+        .request(ScheduledTasksRequest::History {
+            id: run.task_id.clone(),
+            before: None,
+        })
+        .await
+        .unwrap()
+        .runs
+        .into_iter()
+        .find(|r| r.id == run.id)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_background_run_that_skips_publishing_fails_and_is_not_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+    let run = claim_run_without_results(&core, "routine", "silent").await;
+    let results = run.results.clone().unwrap();
+    assert_eq!(results.title, "Results: Scheduled integration");
+    assert_eq!(results.role, ScheduledRunResults::role_for("routine"));
+    assert!(results.revision.is_none());
+    wait_for_run_state(&core, &run, ScheduledRunState::Failed).await;
+
+    let run = finished_run(&core, &run).await;
+    assert!(run.detail.as_deref().unwrap().contains("without publishing"));
+    assert!(run.results.unwrap().revision.is_none());
+    assert!(!core.workspace.chat(run.chat_id.as_deref().unwrap()).unwrap().unwrap().archived);
+    let actions = failure_actions(&core, "routine");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].is_open());
+    assert!(actions[0].info.as_deref().unwrap().contains("without publishing"));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_this_runs_own_new_revision_counts_as_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+
+    // First run publishes: its revision is recorded on the run.
+    let first = claim_run_without_results(&core, "routine", "first").await;
+    let chat = first.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &first, &chat, "Run: first\nAll quiet.");
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let first = finished_run(&core, &first).await;
+    assert_eq!(first.results.unwrap().revision, Some(reply.revision));
+
+    // Identical content records no revision, so the run did not publish.
+    let second = claim_run_without_results(&core, "routine", "second").await;
+    let chat = second.chat_id.clone().unwrap();
+    let repeat = publish_results(&core, &second, &chat, "Run: first\nAll quiet.");
+    assert!(!repeat.changed);
+    wait_for_run_state(&core, &second, ScheduledRunState::Failed).await;
+    let second = finished_run(&core, &second).await;
+    assert!(second.detail.as_deref().unwrap().contains("not published by this run"));
+
+    // Another chat publishing the same artifact (an interactive chat on the
+    // item) is not this run's publication.
+    let third = claim_run_without_results(&core, "routine", "third").await;
+    publish_results(&core, &third, "someone-elses-chat", "Run: other\nManual edit.");
+    wait_for_run_state(&core, &third, ScheduledRunState::Failed).await;
+    assert!(finished_run(&core, &third).await.detail.unwrap().contains("not published by this run"));
+
+    // Changed content from the run's own chat succeeds again.
+    let fourth = claim_run_without_results(&core, "routine", "fourth").await;
+    let chat = fourth.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &fourth, &chat, "Run: fourth\nNew finding.");
+    wait_for_run_state(&core, &fourth, ScheduledRunState::Completed).await;
+    assert_eq!(finished_run(&core, &fourth).await.results.unwrap().revision, Some(reply.revision));
+    assert!(failure_actions(&core, "routine").iter().all(|a| !a.is_open()));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn tasks_sharing_an_item_publish_to_their_own_results_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for (id, name) in [("slack", "Slack"), ("github", "GitHub")] {
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.name = name.into();
+        draft.output = ScheduledTaskOutput::Background;
+        save_lifecycle_task(&core, id, 0, draft).await;
+    }
+    let slack = claim_run_without_results(&core, "slack", "s").await;
+    let github = claim_run_without_results(&core, "github", "g").await;
+    assert_ne!(
+        slack.results.as_ref().unwrap().artifact_id,
+        github.results.as_ref().unwrap().artifact_id
+    );
+    // Only the Slack run publishes; the GitHub run cannot lean on it.
+    let chat = slack.chat_id.clone().unwrap();
+    publish_results(&core, &slack, &chat, "Run: s");
+    wait_for_run_state(&core, &slack, ScheduledRunState::Completed).await;
+    wait_for_run_state(&core, &github, ScheduledRunState::Failed).await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn interactive_runs_carry_no_results_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    save_lifecycle_task(&core, "chatty", 0, item_draft(&root, Some(item))).await;
+    let run = claim_run_without_results(&core, "chatty", "interactive").await;
+    assert!(run.results.is_none());
+    wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    assert!(failure_actions(&core, "chatty").is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_background_run_may_publish_its_results_once_and_never_as_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft).await;
+    let run = claim_run_without_results(&core, "routine", "guarded").await;
+    core.scheduled_tasks
+        .tick(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    let results = run.results.clone().unwrap();
+    let chat = run.chat_id.clone().unwrap();
+    let caller = mast_engine::artifacts::AgentCaller {
+        chat_id: chat.clone(),
+        run_id: "agent-run".into(),
+        space_id: ITEM_SPACE.into(),
+        device_id: ITEM_DEVICE.into(),
+        work_item_id: Some(item),
+    };
+    std::fs::write(root.join("results.md"), format!("Run: {}\nFirst.", run.id)).unwrap();
+    let publish = |title: &str, role: &str, key: &str, pin: bool| {
+        core.artifacts.agent_publish(
+            &caller,
+            &serde_json::json!({
+                "path": "results.md", "title": title, "role": role, "note": "n",
+                "pinAsPlan": pin, "idempotencyKey": key,
+            }),
+        )
+    };
+    let err = |outcome: Result<_, mast_proto::artifacts::ArtifactError>| {
+        outcome.map(|_: serde_json::Value| ()).unwrap_err().to_string()
+    };
+    assert!(err(publish("Other title", &results.role, "k1", false)).contains("use both exactly"));
+    assert!(err(publish(&results.title, "plan", "k1", false)).contains("use both exactly"));
+    assert!(err(publish("Anything", "scheduled-results:other", "k1", false)).contains("another task"));
+    assert!(err(publish(&results.title, &results.role, "k1", true)).contains("not the item's plan"));
+    // Roles compare trimmed and lowercased, as artifact ids do.
+    assert!(err(publish("Anything", " Scheduled-Results:OTHER ", "k1", false)).contains("another task"));
+    let padded = format!("  {}  ", results.role.to_uppercase());
+    assert!(err(publish(&results.title, &padded, "k1", true)).contains("not the item's plan"));
+
+    let ok = publish(&results.title, &results.role, "k1", false).unwrap();
+    assert_eq!(ok["artifactId"], results.artifact_id);
+    assert!(core.workspace.artifact(&results.artifact_id).unwrap().pinned_as_plan == false);
+    // A retry with the same key replays; a new key is a second publish.
+    publish(&results.title, &results.role, "k1", false).unwrap();
+    std::fs::write(root.join("results.md"), "Run: again").unwrap();
+    assert!(err(publish(&results.title, &results.role, "k2", false)).contains("publishes once"));
+    assert!(err(publish(&results.title, &padded, "k4", false)).contains("publishes once"));
+    // Unrelated artifacts from the run are not restricted.
+    publish("Scratch notes", "doc", "k3", false).unwrap();
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn renaming_a_task_keeps_one_results_artifact_and_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut draft = item_draft(&root, Some(item.clone()));
+    draft.output = ScheduledTaskOutput::Background;
+    save_lifecycle_task(&core, "routine", 0, draft.clone()).await;
+    let first = claim_lifecycle_run(&core, "routine", "before-rename").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let first = finished_run(&core, &first).await;
+    let original = first.results.clone().unwrap();
+
+    draft.name = "Renamed integration".into();
+    save_lifecycle_task(&core, "routine", 1, draft).await;
+    let second = claim_run_without_results(&core, "routine", "after-rename").await;
+    // The claim names the new title; launch resolves to the existing artifact.
+    assert_ne!(second.results.as_ref().unwrap().artifact_id, original.artifact_id);
+    let mut as_first = second.clone();
+    as_first.results = Some(original.clone());
+    let chat = second.chat_id.clone().unwrap();
+    let reply = publish_results(&core, &as_first, &chat, "Run: second\nAfter the rename.");
+    assert_eq!(reply.artifact_id, original.artifact_id);
+    wait_for_run_state(&core, &second, ScheduledRunState::Completed).await;
+    let second = finished_run(&core, &second).await;
+    let results = second.results.unwrap();
+    assert_eq!(results.artifact_id, original.artifact_id);
+    assert_eq!(results.title, original.title);
+    assert_eq!(results.revision, Some(reply.revision));
+    assert_eq!(reply.revision, 2);
+    let artifacts = core
+        .workspace
+        .artifacts_of_space(ITEM_SPACE)
+        .into_iter()
+        .filter(|a| a.role.as_deref() == Some(original.role.as_str()))
+        .count();
+    assert_eq!(artifacts, 1);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn simultaneous_publishes_from_one_run_let_exactly_one_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    for round in 0..4 {
+        let task = format!("racer-{round}");
+        let mut draft = item_draft(&root, Some(item.clone()));
+        draft.name = format!("Racer {round}");
+        draft.output = ScheduledTaskOutput::Background;
+        save_lifecycle_task(&core, &task, 0, draft).await;
+        let run = claim_run_without_results(&core, &task, &format!("race-{round}")).await;
+        core.scheduled_tasks
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let results = run.results.clone().unwrap();
+        let caller = mast_engine::artifacts::AgentCaller {
+            chat_id: run.chat_id.clone().unwrap(),
+            run_id: "agent-run".into(),
+            space_id: ITEM_SPACE.into(),
+            device_id: ITEM_DEVICE.into(),
+            work_item_id: Some(item.clone()),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|n| {
+                std::fs::write(root.join(format!("race-{round}-{n}.md")), format!("Run: {n}")).unwrap();
+                let (artifacts, caller, barrier, results) =
+                    (core.artifacts.clone(), caller.clone(), barrier.clone(), results.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    artifacts
+                        .agent_publish(
+                            &caller,
+                            &serde_json::json!({
+                                "path": format!("race-{round}-{n}.md"),
+                                "title": results.title, "role": results.role,
+                                "note": "n", "idempotencyKey": format!("key-{n}"),
+                            }),
+                        )
+                        .is_ok()
+                })
+            })
+            .collect();
+        let accepted = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(accepted, 1, "round {round}");
+        let artifact = core.workspace.artifact(&results.artifact_id).unwrap();
+        assert_eq!(artifact.revisions.len(), 1, "round {round}");
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+    }
     core.shutdown().await;
 }

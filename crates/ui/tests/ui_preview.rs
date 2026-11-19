@@ -122,6 +122,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "changes-collapsed",
         "changes-focus-resize",
         "details",
+        "artifact",
         "walkthrough",
         "handoff",
         "appearance",

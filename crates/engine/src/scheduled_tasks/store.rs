@@ -10,6 +10,17 @@ use std::{
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>, Arc<String>);
 
+/// A Background run on a work item promises its task's results artifact.
+fn results_for(task: &ScheduledTask) -> Option<ScheduledRunResults> {
+    let draft = &task.draft;
+    match (&draft.space_id, &draft.work_item_id, draft.output) {
+        (Some(space), Some(item), ScheduledTaskOutput::Background) => Some(
+            ScheduledRunResults::new(space, item, &task.id, &draft.name),
+        ),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Followup {
     Action,
@@ -279,6 +290,7 @@ impl Store {
                 snapshot: task.draft.clone(),
                 awaiting_request_id: None,
                 awaiting_since: None,
+                results: skipped.is_none().then(|| results_for(task)).flatten(),
             };
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO runs(id,task_id,slot,created_at,body,state) VALUES(?1,?2,?3,?4,?5,json_extract(?5,'$.state'))",
@@ -588,6 +600,7 @@ mod tests {
             snapshot: task.draft,
             awaiting_request_id: None,
             awaiting_since: None,
+            results: None,
         };
         let c = Connection::open(dir.path().join("scheduled-tasks.sqlite3")).unwrap();
         c.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,slot TEXT NOT NULL,created_at INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(task_id,slot)); PRAGMA user_version=1;").unwrap();

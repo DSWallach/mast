@@ -225,6 +225,7 @@ pub fn render(
                     mast_ui::snapshot::changes_fixture(false, true, window, cx).into()
                 }
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
+                "artifact" => mast_ui::snapshot::artifact_fixture(window, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx
                     .new(mast_ui::settings::appearance::AppearancePage::new)

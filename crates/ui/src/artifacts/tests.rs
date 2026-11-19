@@ -1,7 +1,9 @@
 //! Artifact UI tests (GUI-free logic and headless gpui views).
 use std::sync::Arc;
 
-use mast_proto::{ArtifactKind, ArtifactRevision, ArtifactView, ArtifactsSnapshot};
+use mast_proto::{
+    ArtifactKind, ArtifactRevision, ArtifactView, ArtifactsSnapshot, ScheduledRunResults,
+};
 
 use super::model::{self, LinkResolution};
 use super::store::{ArtifactStore, ArtifactsLoad};
@@ -102,6 +104,43 @@ fn details_order_puts_the_plan_first_then_newest() {
     assert_eq!(titles, ["Plan", "New", "Old"]);
     assert_eq!(store.count_for_work_item(SPACE, "w-api"), 3);
     assert_eq!(store.plan_of(SPACE, "w-api").unwrap().title, "Plan");
+}
+
+#[test]
+fn scheduled_results_sit_under_the_plan_and_above_newer_artifacts() {
+    let mut plan = artifact(&id(1), "Plan", ArtifactKind::Markdown);
+    plan.updated_at = 1;
+    plan.pinned_as_plan = true;
+    let mut slack = artifact(&id(2), "Results: Slack", ArtifactKind::Markdown);
+    slack.updated_at = 5;
+    slack.role = Some(ScheduledRunResults::role_for("slack"));
+    let mut github = artifact(&id(3), "Results: GitHub", ArtifactKind::Markdown);
+    github.updated_at = 9;
+    github.role = Some(ScheduledRunResults::role_for("github"));
+    let mut newer = artifact(&id(4), "Scratch", ArtifactKind::Markdown);
+    newer.updated_at = 100;
+    let mut plain_role = artifact(&id(5), "Notes", ArtifactKind::Markdown);
+    plain_role.updated_at = 50;
+    plain_role.role = Some("doc".into());
+    let store = ready_store(vec![newer, slack, plain_role, github, plan]);
+    let titles: Vec<_> = store
+        .for_work_item(SPACE, "w-api")
+        .iter()
+        .map(|a| a.title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Plan", "Results: GitHub", "Results: Slack", "Scratch", "Notes"]
+    );
+    assert_eq!(store.plan_of(SPACE, "w-api").unwrap().title, "Plan");
+    let shown = store.for_work_item(SPACE, "w-api");
+    assert_eq!(
+        model::row(shown[1], 0, &Default::default()).role.as_deref(),
+        Some("results")
+    );
+    assert_eq!(model::header(shown[1], None).role.as_deref(), Some("results"));
+    // Results are not a plan: the plan pin still names only the plan.
+    assert_eq!(store.count_for_work_item(SPACE, "w-api"), 5);
 }
 
 #[test]
