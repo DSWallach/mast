@@ -747,7 +747,7 @@ impl WorkItemLaunchService {
             None => {
                 p.standing_role == Some(mast_proto::StandingRoleKind::Manager)
                     || holds_manager(&chat_id)
-                    || hand_off.is_some_and(|(_, source)| holds_manager(source))
+                    || hand_off.is_some_and(|(_, source, _, _)| holds_manager(source))
             }
         };
         let manager_role = is_manager.then_some(mast_proto::StandingRoleKind::Manager);
