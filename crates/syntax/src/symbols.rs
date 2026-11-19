@@ -199,31 +199,31 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
         ),
         C => (
             tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::TAGS_QUERY.to_owned(),
+            format!("{}\n((declaration (type_qualifier) @qualifier declarator: (init_declarator declarator: (identifier) @name)) @definition.constant (#eq? @qualifier \"const\"))\n((declaration (type_qualifier) @qualifier declarator: (identifier) @name) @definition.constant (#eq? @qualifier \"const\"))", tree_sitter_c::TAGS_QUERY),
         ),
         Cpp => (
             tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::TAGS_QUERY.to_owned(),
+            format!("{}\n((declaration (type_qualifier) @qualifier declarator: (init_declarator declarator: (identifier) @name)) @definition.constant (#eq? @qualifier \"const\"))\n((declaration (type_qualifier) @qualifier declarator: (identifier) @name) @definition.constant (#eq? @qualifier \"const\"))", tree_sitter_cpp::TAGS_QUERY),
         ),
         CSharp => (
             tree_sitter_c_sharp::LANGUAGE.into(),
-            tree_sitter_c_sharp::TAGS_QUERY.to_owned(),
+            format!("{}\n((field_declaration (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))\n((local_declaration_statement (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))", tree_sitter_c_sharp::TAGS_QUERY),
         ),
         Java => (
             tree_sitter_java::LANGUAGE.into(),
-            tree_sitter_java::TAGS_QUERY.to_owned(),
+            format!("{}\n(field_declaration (modifiers \"final\") declarator: (variable_declarator name: (identifier) @name)) @definition.constant", tree_sitter_java::TAGS_QUERY),
         ),
         Swift => (
             tree_sitter_swift::LANGUAGE.into(),
-            tree_sitter_swift::TAGS_QUERY.to_owned(),
+            format!("{}\n(property_declaration (value_binding_pattern mutability: \"let\") name: (pattern bound_identifier: (simple_identifier) @name)) @definition.constant", tree_sitter_swift::TAGS_QUERY),
         ),
         Ruby => (
             tree_sitter_ruby::LANGUAGE.into(),
-            tree_sitter_ruby::TAGS_QUERY.to_owned(),
+            format!("{}\n(assignment left: (constant) @name) @definition.constant", tree_sitter_ruby::TAGS_QUERY),
         ),
         Php => (
             tree_sitter_php::LANGUAGE_PHP.into(),
-            tree_sitter_php::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_declaration (const_element (name) @name)) @definition.constant", tree_sitter_php::TAGS_QUERY),
         ),
         Lua => (
             tree_sitter_lua::LANGUAGE.into(),
@@ -307,7 +307,10 @@ pub fn identifier_ranges(source: &str, path: &str) -> Vec<std::ops::Range<usize>
     let mut ranges = Vec::new();
     loop {
         let node = cursor.node();
-        if node.kind().ends_with("identifier") && node.child_count() == 0 {
+        let identifier = node.kind().ends_with("identifier")
+            || (language_id == LanguageId::Ruby && node.kind() == "constant")
+            || (language_id == LanguageId::Php && node.kind() == "name");
+        if identifier && node.child_count() == 0 {
             ranges.push(node.byte_range());
         }
         if cursor.goto_first_child() { continue; }
@@ -465,11 +468,30 @@ mod tests {
         let ranges = identifier_ranges(source, "a.rs");
         let names: Vec<_> = ranges.iter().map(|range| &source[range.clone()]).collect();
         assert_eq!(names, ["run", "value", "run", "text"]);
+        for (path, source) in [("a.rb", "LIMIT = 10"), ("a.php", "<?php const LIMIT = 10;")] {
+            assert!(identifier_ranges(source, path).iter().any(|range| &source[range.clone()] == "LIMIT"), "{path}");
+        }
     }
 
     #[test]
     fn javascript_typescript_and_go_constants_are_indexed() {
         for (path, source) in [("a.js", "const LIMIT = 10; let mutable = 2;"), ("a.ts", "const LIMIT: number = 10; let mutable = 2;"), ("a.go", "package p\nconst LIMIT = 10\nvar mutable = 2\n")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn c_cpp_and_csharp_constants_are_indexed() {
+        for (path, source) in [("a.c", "const int LIMIT = 10; int mutable = 2;"), ("a.cpp", "const int LIMIT = 10; int mutable = 2;"), ("a.cs", "class C { const int LIMIT = 10; int mutable = 2; }")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn java_swift_ruby_and_php_constants_are_indexed() {
+        for (path, source) in [("a.java", "class C { final int LIMIT = 10; int mutable = 2; }"), ("a.swift", "let LIMIT = 10\nvar mutable = 2"), ("a.rb", "LIMIT = 10\nmutable = 2"), ("a.php", "<?php const LIMIT = 10; $mutable = 2;")] {
             let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
             assert_eq!(constants, ["LIMIT"], "{path}");
         }
