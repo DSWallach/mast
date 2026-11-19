@@ -865,6 +865,11 @@ impl OutlineView {
         self.prune_multi();
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_collapse(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.set_collapsed(key, true, cx);
+    }
+
     fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
         let changed = if collapsed {
             self.collapsed.insert(key.to_string())
@@ -2889,18 +2894,30 @@ impl OutlineView {
             || row
                 .open_chat()
                 .is_some_and(|chat| self.panel_chat.as_deref() == Some(chat.chat.id.as_str()));
+        let manager = row.manager().is_some();
         let pinned_chat = row
             .open_chat()
-            .filter(|chat| !chat.dangling && self.pinned_chats.contains(&chat.chat.id));
+            .filter(|chat| !chat.dangling)
+            .map(|chat| chat.chat.id.as_str())
+            .or_else(|| row.manager().and_then(|manager| manager.chat_id.as_deref()))
+            .filter(|chat_id| self.pinned_chats.contains(*chat_id));
         let pinned = pinned_chat.is_some();
-        let pin_mark = pinned_chat.map(|chat| {
-            let selector = format!("outline-pinned-chat-{}", chat.chat.id);
+        let pin_mark = pinned_chat.map(|chat_id| {
+            let selector = format!("outline-pinned-chat-{chat_id}");
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .flex_none()
-                .text_color(if selected { theme.text } else { theme.accent })
-                .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
+                // An svg paints only with its own text color.
+                .child(
+                    crate::icons::icon(crate::icons::PIN)
+                        .size(px(12.0))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.pinned_accent()
+                        }),
+                )
                 .hint("Pinned", HintKey::None)
         });
         let renaming = matches!(
@@ -3276,8 +3293,16 @@ impl OutlineView {
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
         })
-        .when(pinned && !(selected || in_group), |el| {
+        // A Manager keeps its own fill; pinning one adds the pinned accent as
+        // its outline.
+        .when(manager && !(selected || in_group), |el| {
+            el.bg(theme.manager_wash())
+        })
+        .when(pinned && !manager && !(selected || in_group), |el| {
             el.bg(theme.accent_wash)
+        })
+        .when(pinned && manager, |el| {
+            el.border_color(theme.pinned_accent())
         })
         .when((selected || in_group) && focused, |el| {
             el.bg(theme.element_active)
