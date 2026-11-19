@@ -140,7 +140,7 @@ fn ancestor(root: &Path, old: &str, new: &str) -> bool {
 }
 
 #[tokio::test]
-async fn force_push_that_drops_a_hunk_or_a_file_shows_no_reversions() {
+async fn force_push_that_drops_a_hunk_or_a_file_shows_the_removals_as_reversions() {
     let (_tmp, root, repos) = repo();
     git(&root, &["checkout", "-qb", "feature"]);
     write(&root, "a.txt", "1\nA\n3\n4\n5\n6\n7\n8\n9\nTEN\n");
@@ -153,8 +153,15 @@ async fn force_push_that_drops_a_hunk_or_a_file_shows_no_reversions() {
     let new = commit(&root, "f1 rewritten");
     assert!(!ancestor(&root, &old, &new));
     let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
-    assert_eq!(paths(&snapshot), vec!["c.txt"], "only the added change shows; dropped hunks and files are not reversions");
-    assert!(!snapshot.patch.contains("TEN") && !snapshot.patch.contains("+D") && !snapshot.patch.contains("-A"));
+    assert_eq!(paths(&snapshot), vec!["a.txt", "c.txt", "d.txt"]);
+    // The new change is a plain hunk; the carried A hunk is not repeated.
+    assert!(snapshot.patch.contains("+C"));
+    assert!(!snapshot.patch.contains("-A\n") && !snapshot.patch.contains("+A\n"), "carried hunk absent");
+    // The dropped a.txt hunk (10 -> TEN) and the dropped d.txt file come back reversed, labelled.
+    let label = mast_engine::diff_sync::since::REMOVED_LABEL;
+    assert_eq!(snapshot.patch.matches(label).count(), 2, "one dropped hunk in a.txt, one in d.txt:\n{}", snapshot.patch);
+    assert!(snapshot.patch.contains("+10\n-TEN\n"), "{}", snapshot.patch);
+    assert!(snapshot.patch.contains("+3\n-D\n"), "{}", snapshot.patch);
 }
 
 #[tokio::test]

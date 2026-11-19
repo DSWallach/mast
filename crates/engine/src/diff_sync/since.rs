@@ -286,19 +286,75 @@ fn hunk_key(path: &str, hunk: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Label on every hunk of a removal group; the UI keys its "Removed since you reviewed" group on it.
+pub const REMOVED_LABEL: &str = "Removed since you reviewed";
+
+/// `@@ -a[,b] +c[,d] @@ ...` as ((a, b), (c, d)).
+fn parse_hunk_ranges(header: &str) -> Option<((u32, u32), (u32, u32))> {
+    let rest = header.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let (new, _) = rest.split_once(" @@")?;
+    let range = |text: &str| -> Option<(u32, u32)> {
+        match text.split_once(',') {
+            Some((start, len)) => Some((start.parse().ok()?, len.parse().ok()?)),
+            None => Some((text.parse().ok()?, 1)),
+        }
+    };
+    Some((range(old)?, range(new)?))
+}
+
+/// An old-head hunk that the new head no longer has, as a reversion: additions become
+/// deletions (and the reverse), ranges swap, and the header carries [`REMOVED_LABEL`].
+fn reversed_hunk(hunk: &str) -> Option<String> {
+    let mut lines = hunk.lines();
+    let ((old_start, old_len), (new_start, new_len)) = parse_hunk_ranges(lines.next()?)?;
+    let mut out = format!("@@ -{new_start},{new_len} +{old_start},{old_len} @@ {REMOVED_LABEL}\n");
+    for line in lines {
+        match line.as_bytes().first() {
+            Some(b'+') => out.push('-'),
+            Some(b'-') => out.push('+'),
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+        }
+        out.push_str(&line[1..]);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn count_changes(hunk: &str) -> (u32, u32) {
+    hunk.lines().skip(1).fold((0, 0), |(adds, dels), line| match line.as_bytes().first() {
+        Some(b'+') => (adds + 1, dels),
+        Some(b'-') => (adds, dels + 1),
+        _ => (adds, dels),
+    })
+}
+
+/// What changed between two heads that were each diffed against their own merge-base:
+/// the new head's hunks the old head did not have, then (as reversions, in a
+/// "Removed since you reviewed" group) the old head's hunks the new head dropped.
 fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
-    let seen: HashSet<[u8; 32]> = split_patch(&before.patch)
+    let old_chunks = split_patch(&before.patch);
+    let new_chunks = split_patch(&after.patch);
+    let seen: HashSet<[u8; 32]> = old_chunks
         .iter()
         .flat_map(|file| file.hunks.iter().map(|hunk| hunk_key(&file.path, hunk)))
         .collect();
-    let before_headers: HashSet<&str> = split_patch(&before.patch)
+    let present: HashSet<[u8; 32]> = new_chunks
+        .iter()
+        .flat_map(|file| file.hunks.iter().map(|hunk| hunk_key(&file.path, hunk)))
+        .collect();
+    let before_headers: HashSet<&str> = old_chunks
         .iter()
         .filter(|file| file.hunks.is_empty())
         .map(|file| file.header)
         .collect();
     let mut patch = String::new();
     let mut counts: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
-    for file in split_patch(&after.patch) {
+    for file in &new_chunks {
         let kept: Vec<&str> = file
             .hunks
             .iter()
@@ -313,15 +369,38 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         let (mut adds, mut dels) = (0u32, 0u32);
         for hunk in kept {
             patch.push_str(hunk);
-            for line in hunk.lines().skip(1) {
-                match line.as_bytes().first() {
-                    Some(b'+') => adds += 1,
-                    Some(b'-') => dels += 1,
-                    _ => {}
-                }
-            }
+            let (a, d) = count_changes(hunk);
+            adds += a;
+            dels += d;
         }
-        counts.insert(file.path, (adds, dels));
+        counts.insert(file.path.clone(), (adds, dels));
+    }
+    // Removed: old-head hunks absent from the new head's diff, shown as reversions.
+    let mut removed_only: Vec<(String, u32, u32)> = Vec::new();
+    for file in &old_chunks {
+        let dropped: Vec<String> = file
+            .hunks
+            .iter()
+            .filter(|hunk| !present.contains(&hunk_key(&file.path, hunk)))
+            .filter_map(|hunk| reversed_hunk(hunk))
+            .collect();
+        if dropped.is_empty() {
+            continue;
+        }
+        patch.push_str(&format!(
+            "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n",
+            file.path
+        ));
+        let (mut adds, mut dels) = (0u32, 0u32);
+        for hunk in &dropped {
+            patch.push_str(hunk);
+            let (a, d) = count_changes(hunk);
+            adds += a;
+            dels += d;
+        }
+        if !counts.contains_key(&file.path) {
+            removed_only.push((file.path.clone(), adds, dels));
+        }
     }
     if patch.len() > MAX_PATCH_BYTES {
         let mut cut = MAX_PATCH_BYTES;
@@ -343,6 +422,16 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         }
         None => false,
     });
+    for (path, additions, deletions) in removed_only {
+        after.files.push(mast_proto::DiffFileSummary {
+            path,
+            old_path: None,
+            status: "M".into(),
+            additions,
+            deletions,
+            binary: false,
+        });
+    }
     after.additions = after.files.iter().map(|f| f.additions).sum();
     after.deletions = after.files.iter().map(|f| f.deletions).sum();
     after.submodules.clear();
@@ -385,5 +474,43 @@ mod tests {
         assert_eq!(split_patch(rename)[0].path, "y");
         let deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
         assert_eq!(split_patch(deleted)[0].path, "gone");
+    }
+
+    fn snapshot(patch: String) -> DiffSnapshot {
+        DiffSnapshot {
+            git_status: None,
+            branch: "b".into(),
+            head_sha: Some("h".into()),
+            patch,
+            files: Vec::new(),
+            submodules: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+            checksum: String::new(),
+        }
+    }
+
+    #[test]
+    fn oversized_multibyte_patches_truncate_on_a_char_boundary() {
+        // Three-byte characters, so the byte cap lands inside a character.
+        let body = "\u{20ac}".repeat(1000);
+        let mut text = String::from("diff --git a/f b/f\n--- a/f\n+++ b/f\n");
+        for n in 0..(MAX_PATCH_BYTES / 2000 + 50) {
+            text.push_str(&format!("@@ -{n} +{n} @@\n+{body}{n}\n"));
+        }
+        let out = interdiff(&snapshot(String::new()), snapshot(text));
+        assert!(out.truncated);
+        assert!(out.patch.len() <= MAX_PATCH_BYTES + 64);
+        assert!(out.patch.ends_with("# Comet diff truncated\n"));
+    }
+
+    #[test]
+    fn dropped_hunks_are_reversed_and_labelled() {
+        let old = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -3,2 +3,2 @@\n ctx\n-a\n+fix\n";
+        let out = interdiff(&snapshot(old.into()), snapshot(String::new()));
+        assert!(out.patch.contains(&format!("@@ -3,2 +3,2 @@ {REMOVED_LABEL}\n ctx\n+a\n-fix\n")), "{}", out.patch);
+        assert_eq!(out.files.len(), 1);
+        assert_eq!((out.additions, out.deletions), (1, 1));
     }
 }

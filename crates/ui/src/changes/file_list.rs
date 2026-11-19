@@ -458,8 +458,19 @@ enum FileTreeRow {
     },
     /// "Changed since you reviewed" group header (re-review).
     Heading {
+        label: &'static str,
         count: usize,
     },
+}
+
+/// A file whose every hunk is a reversion of something the PR dropped (see the engine's
+/// `REMOVED_LABEL`).
+pub(super) fn is_removal_file(file: &FileDiff) -> bool {
+    !file.hunks.is_empty()
+        && file
+            .hunks
+            .iter()
+            .all(|hunk| hunk.header.contains(mast_engine::diff_sync::since::REMOVED_LABEL))
 }
 
 fn file_tree_rows(
@@ -685,9 +696,21 @@ impl Changes {
             .collect();
         let (changed_indices, indices): (Vec<usize>, Vec<usize>) =
             indices.into_iter().partition(|index| changed.contains(index));
+        // In the Since view, files made only of reversed hunks (dropped by a force-push) are a group.
+        let (removed_indices, indices): (Vec<usize>, Vec<usize>) = if rereview {
+            indices.into_iter().partition(|index| is_removal_file(&files[*index]))
+        } else {
+            (Vec::new(), indices)
+        };
         let (mut tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        if !removed_indices.is_empty() {
+            let mut group = vec![FileTreeRow::Heading { label: mast_engine::diff_sync::since::REMOVED_LABEL, count: removed_indices.len() }];
+            group.extend(removed_indices.into_iter().map(|index| FileTreeRow::File { index, depth: 0 }));
+            group.append(&mut tree_rows);
+            tree_rows = group;
+        }
         if !changed_indices.is_empty() {
-            let mut group = vec![FileTreeRow::Heading { count: changed_indices.len() }];
+            let mut group = vec![FileTreeRow::Heading { label: "Changed since you reviewed", count: changed_indices.len() }];
             group.extend(changed_indices.into_iter().map(|index| FileTreeRow::File { index, depth: 0 }));
             group.append(&mut tree_rows);
             tree_rows = group;
@@ -712,10 +735,15 @@ impl Changes {
                         .map(|row| {
                             let (index, depth) = match row {
                                 FileTreeRow::File { index, depth } => (index, depth),
-                                FileTreeRow::Heading { count } => {
+                                FileTreeRow::Heading { label, count } => {
+                                    let selector = if label == mast_engine::diff_sync::since::REMOVED_LABEL {
+                                        "changes-file-list-removed-heading"
+                                    } else {
+                                        "changes-file-list-changed-heading"
+                                    };
                                     return div()
-                                        .id("changes-file-list-changed-heading")
-                                        .debug_selector(|| "changes-file-list-changed-heading".to_owned())
+                                        .id(selector)
+                                        .debug_selector(move || selector.to_owned())
                                         .flex()
                                         .items_center()
                                         .gap(px(5.0))
@@ -723,7 +751,7 @@ impl Changes {
                                         .h(px(28.0))
                                         .text_size(px(11.0))
                                         .text_color(theme.text_muted)
-                                        .child(div().flex_1().min_w_0().truncate().child("Changed since you reviewed"))
+                                        .child(div().flex_1().min_w_0().truncate().child(label))
                                         .child(div().text_size(px(10.0)).child(SharedString::from(count.to_string())))
                                         .into_any_element();
                                 }
@@ -1249,6 +1277,33 @@ mod navigation_tests {
         changes.update(vcx, |changes, _| changes.review_state.as_mut().unwrap().reviewed_head = Some("h2".into()));
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("changes-file-list-changed-heading").is_none());
+    }
+
+    #[gpui::test]
+    fn removed_hunks_form_their_own_group_in_the_since_view(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/z.rs b/z.rs\n--- a/z.rs\n+++ b/z.rs\n@@ -1 +1 @@ Removed since you reviewed\n+x\n-fix\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            assert!(is_removal_file(&files[1]) && !is_removal_file(&files[0]));
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.scoped_is_since = true;
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let heading = vcx.debug_bounds("changes-file-list-removed-heading").expect("removed group heading");
+        let removed = vcx.debug_bounds("changes-file-list-entry-1").expect("z.rs listed");
+        let other = vcx.debug_bounds("changes-file-list-entry-0").expect("a.rs listed");
+        assert!(heading.origin.y < removed.origin.y && removed.origin.y < other.origin.y);
     }
 
     #[gpui::test]

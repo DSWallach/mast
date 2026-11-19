@@ -126,9 +126,10 @@ carry-over (`reconcile_review_head`).
   `diff_sync::since::capture_since_diff`. An ancestor old head with the same merge-base as the new head gives
   `git diff old new`. Otherwise (force-push, rebase, base merged in) it is an interdiff: each
   head against its own merge-base with the base ref, keeping the new head's hunks whose changed lines are absent from the
-  old head's diff of the same file. Missing commits are fetched through the existing read-only `git fetch origin <sha>`;
+  old head's diff of the same file, then the old head's hunks the new head dropped (a whole file dropped from the PR
+  included) as reversions whose hunk headers carry "Removed since you reviewed"; the UI lists them in a group of that name. Missing commits are fetched through the existing read-only `git fetch origin <sha>`;
   an unfetchable old head returns an error starting `old-head-unavailable` and the UI falls back to the full diff.
-  Output is capped by `MAX_PATCH_BYTES`; results are cached per (repository, old, new, base ref), 8 entries, checked before any git runs; a commit that failed to fetch is not asked for again for 5 minutes. Hunks only in the old head are never shown. The UI
+  Output is capped by `MAX_PATCH_BYTES`; results are cached per (repository, old, new, base ref), 8 entries, checked before any git runs; a commit that failed to fetch is not asked for again for 5 minutes.  The UI
   requests one pair once (the pair is part of the scoped-diff key).
 - **Cleanup.** Closing or merging deletes the row (and with it the baseline) through the existing path.
 

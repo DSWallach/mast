@@ -892,7 +892,9 @@ impl Changes {
         if let Some((old, _)) = self.rereview_range() {
             let files = if parsed.file_count == 1 { "file" } else { "files" };
             let short: String = old.chars().take(7).collect();
-            return format!("{} {files} changed since {short}", parsed.file_count);
+            let removed = parsed.files.iter().filter(|file| is_removal_file(file)).count();
+            let tail = if removed > 0 { format!(" \u{b7} {removed} removed") } else { String::new() };
+            return format!("{} {files} changed since {short}{tail}", parsed.file_count);
         }
         let changed = self.review_state.as_ref().map_or(0, |state| {
             changed_since_files(state, state.head_sha.as_deref(), &parsed.hunk_identities).len()

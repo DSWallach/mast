@@ -1327,6 +1327,10 @@ pub struct Changes {
     full_identities: Option<(String, Arc<Vec<Vec<String>>>)>,
     /// Files of that same full diff: drafts always anchor against it, never against the delta.
     full_files: Option<(String, Arc<Vec<FileDiff>>)>,
+    /// The completed scoped diff is a re-review range diff (not the full PR diff).
+    scoped_is_since: bool,
+    /// The PR head the completed scoped diff was requested at.
+    scoped_head: Option<String>,
     /// A baseline stamped before the full diff for its head was known: (target, head) awaiting its snapshot.
     pending_snapshot: Option<(String, String)>,
     review_walkthrough: bool,
@@ -1643,6 +1647,8 @@ impl Changes {
             full_identities: None,
             full_files: None,
             pending_snapshot: None,
+            scoped_is_since: false,
+            scoped_head: None,
             review_walkthrough: false,
             walkthrough_target: None,
             review_tour: false,

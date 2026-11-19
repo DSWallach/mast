@@ -1266,7 +1266,8 @@ mod tests {
         changes.rereview = true;
     }
 
-    const DELTA_A: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -5 +5 @@\n-five\n+cinco\n@@ -1 +1 @@\n-old\n+new\n";
+    // The delta's hunk at line 1 differs from the full diff's ("-older" vs "-old"), so their identities differ.
+    const DELTA_A: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -5 +5 @@\n-five\n+cinco\n@@ -1 +1 @@\n-older\n+new\n";
     const DELTA_Z: &str = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-x\n+y\n";
 
     #[gpui::test]
@@ -1307,8 +1308,9 @@ mod tests {
             // A new right-side draft takes the FULL diff's hunk hash, not the delta hunk's.
             let delta_hash = c.parsed.as_ref().unwrap().hunk_identities[0][1].clone();
             let draft = c.new_local_draft(TARGET, "a", CommentSide::New, 1).unwrap();
+            assert_ne!(full_hash, delta_hash, "the fixture's identities differ between delta and full diff");
             assert_eq!(draft.anchor.hunk_hash.as_deref(), Some(full_hash.as_str()));
-            assert_eq!(draft.anchor.hunk_hash.as_deref(), Some(delta_hash.as_str()).filter(|_| false).or(draft.anchor.hunk_hash.as_deref()));
+            assert_ne!(draft.anchor.hunk_hash.as_deref(), Some(delta_hash.as_str()));
             assert_eq!((draft.anchor.side, draft.anchor.start_line), (ReviewSide::Right, 1));
         });
         vcx.update(|window, cx| changes.update(cx, |c, cx| {

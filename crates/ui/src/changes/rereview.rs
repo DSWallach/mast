@@ -37,8 +37,10 @@ impl Changes {
         if self.rereview { self.rereview_baseline() } else { None }
     }
 
+    /// A delta is (or is still) what the pane shows: marks are read-only, drafts anchor
+    /// to the full diff, and nothing here counts as the full diff's identities.
     pub(super) fn rereview_active(&self) -> bool {
-        self.rereview_range().is_some()
+        self.rereview_range().is_some() || self.scoped_is_since
     }
 
     /// The old head could not be fetched: fall back to the full diff and say so.
@@ -61,16 +63,36 @@ impl Changes {
     /// so a baseline stamped (and drafts anchored) while the delta is on screen
     /// use the full diff. Fills in a baseline snapshot that was waiting for it.
     pub(super) fn note_full_identities(&mut self, cx: &mut Context<Self>) {
-        if self.rereview_active() {
-            return;
-        }
-        let head = self.review_identity(cx).and_then(|(_, head)| head);
-        let (Some(head), Some(parsed)) = (head, self.parsed.as_ref()) else {
+        let current = self.review_identity(cx).and_then(|(_, head)| head);
+        let key_matches = self
+            .parsed
+            .as_ref()
+            .zip(self.active_diff(cx))
+            .is_some_and(|(parsed, diff)| self.parse_key(diff) == parsed.key);
+        self.note_full(current, key_matches, cx);
+    }
+
+    /// The head a parsed diff may be remembered as the full diff of: the head it was
+    /// requested at, still the current head, no newer request in flight, not a delta,
+    /// and it is the diff now shown. A stale parse after the head moved is never
+    /// recorded as the new head's.
+    pub(super) fn full_head_to_record(&self, current: Option<&str>, key_matches: bool) -> Option<String> {
+        let requested = self.scoped_head.as_deref()?;
+        let current = current?;
+        (key_matches
+            && self.scoped_inflight.is_none()
+            && !self.rereview_active()
+            && requested.eq_ignore_ascii_case(current))
+        .then(|| current.to_owned())
+    }
+
+    pub(super) fn note_full(&mut self, current: Option<String>, key_matches: bool, cx: &mut Context<Self>) {
+        let Some(head) = self.full_head_to_record(current.as_deref(), key_matches) else {
             return;
         };
-        if parsed.truncated {
+        let Some(parsed) = self.parsed.as_ref().filter(|parsed| !parsed.truncated) else {
             return;
-        }
+        };
         self.full_files = Some((head.clone(), parsed.files.clone()));
         self.full_identities = Some((head.clone(), parsed.hunk_identities.clone()));
         let Some((target, wanted)) = self.pending_snapshot.clone() else {
@@ -328,6 +350,83 @@ mod tests {
             assert!(c.review_closed && c.review_state.is_none(), "the row is dropped locally");
             assert!(!c.rereview_active());
             assert!(!c.review_pending.contains_key("pr:o/r#1"));
+        });
+    }
+
+    #[gpui::test]
+    fn a_stale_parse_is_not_recorded_as_the_new_heads_full_diff(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                // Parsed for H1 (requested at H1) after the PR moved to H2.
+                c.scoped_head = Some("h1".into());
+                assert!(c.full_head_to_record(Some("h2"), true).is_none());
+                c.note_full(Some("h2".into()), true, cx);
+                assert!(c.full_identities.is_none() && c.full_files.is_none());
+                // A parse that is not the diff now shown, or while a newer request runs, is skipped too.
+                c.scoped_head = Some("h2".into());
+                c.note_full(Some("h2".into()), false, cx);
+                assert!(c.full_identities.is_none());
+                c.scoped_inflight = Some("newer request".into());
+                c.note_full(Some("h2".into()), true, cx);
+                assert!(c.full_identities.is_none());
+                c.scoped_inflight = None;
+                c.note_full(Some("h2".into()), true, cx);
+                assert_eq!(c.full_identities.as_ref().map(|(head, _)| head.as_str()), Some("h2"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_delta_parse_after_mark_all_reviewed_does_not_fill_the_snapshot(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("bbbbbbb1"));
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                // Mark all reviewed at the current head, with the full diff not on hand: the
+                // snapshot is pending. The Since diff still on screen must not fill it.
+                c.pending_snapshot = Some(("pr:o/r#1".into(), "bbbbbbb1".into()));
+                c.scoped_is_since = true;
+                c.scoped_head = Some("bbbbbbb1".into());
+                c.note_full(Some("bbbbbbb1".into()), true, cx);
+                assert!(c.review_state.as_ref().unwrap().reviewed_hunks.is_empty());
+                assert!(c.pending_snapshot.is_some());
+                // The full diff arrives: now it fills.
+                c.scoped_is_since = false;
+                c.note_full(Some("bbbbbbb1".into()), true, cx);
+                assert_eq!(c.review_state.as_ref().unwrap().reviewed_hunks.len(), 1);
+                assert!(c.pending_snapshot.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_posted_head_that_is_not_current_with_no_full_diff_is_marked_truncated(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                c.stamp_reviewed_head("pr:o/r#1", "ccccccc1", cx);
+                let state = c.review_state.as_ref().unwrap();
+                assert_eq!(state.reviewed_head.as_deref(), Some("ccccccc1"));
+                assert!(state.reviewed_truncated && state.reviewed_hunks.is_empty());
+                assert!(c.pending_snapshot.is_none(), "no snapshot is awaited for a head that is not current");
+                // The current head waits for its snapshot instead.
+                c.stamp_reviewed_head("pr:o/r#1", "bbbbbbb1", cx);
+                assert!(!c.review_state.as_ref().unwrap().reviewed_truncated);
+                assert!(c.pending_snapshot.is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn marking_on_a_truncated_parse_does_not_stamp(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", None);
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                c.parsed.as_mut().unwrap().truncated = true;
+                c.toggle_review_hunk(0, 0, cx);
+                c.toggle_review_file(0, cx);
+                assert!(c.review_state.as_ref().unwrap().reviewed_head.is_none());
+            });
         });
     }
 }

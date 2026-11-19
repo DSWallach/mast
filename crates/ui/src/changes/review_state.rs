@@ -963,7 +963,13 @@ impl Changes {
             return;
         };
         stamp_reviewed(state, head, known.as_ref().map(|ids| ids.as_slice()));
-        self.pending_snapshot = known.is_none().then(|| (target.to_owned(), head.to_owned()));
+        // No full diff for the posted head: the snapshot can only be filled in for the
+        // CURRENT head. For any other head mark it truncated so it never auto-advances.
+        let current = state.head_sha.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(head));
+        if known.is_none() && !current {
+            state.reviewed_truncated = true;
+        }
+        self.pending_snapshot = (known.is_none() && current).then(|| (target.to_owned(), head.to_owned()));
         self.review_pending.insert(state.target.clone(), state.clone());
         self.save_review_state(cx);
         self.ensure_scoped(cx);
@@ -995,7 +1001,7 @@ impl Changes {
             state.viewed_hunks.insert(identity);
         }
         state.viewed_files.remove(&file_diff.path);
-        if state.target.starts_with("pr:") {
+        if state.target.starts_with("pr:") && !parsed.truncated {
             stamp_on_mark(state, &parsed.hunk_identities);
         }
         self.review_pending
@@ -1038,7 +1044,7 @@ impl Changes {
             state.viewed_hunks.extend(identities);
             state.viewed_files.insert(file.path.clone());
         }
-        if let Some(parsed) = self.parsed.as_ref().filter(|_| state.target.starts_with("pr:")) {
+        if let Some(parsed) = self.parsed.as_ref().filter(|parsed| state.target.starts_with("pr:") && !parsed.truncated) {
             stamp_on_mark(state, &parsed.hunk_identities);
         }
         self.review_pending
