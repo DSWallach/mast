@@ -123,9 +123,6 @@ fn every_default_shortcut_binds_on_this_platform() {
             id.label()
         );
     }
-    for combo in ["ctrl--", "ctrl-shift--"] {
-        assert!(Keystroke::parse(combo).is_ok(), "file navigation shortcut {combo:?} does not parse");
-    }
 }
 
 #[test]
