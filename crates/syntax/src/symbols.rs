@@ -175,7 +175,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
         ),
         JavaScript | Jsx => (
             tree_sitter_javascript::LANGUAGE.into(),
-            tree_sitter_javascript::TAGS_QUERY.to_owned(),
+            format!("{}\n(lexical_declaration kind: \"const\" (variable_declarator name: (identifier) @name)) @definition.constant", tree_sitter_javascript::TAGS_QUERY),
         ),
         TypeScript | Tsx => (
             if language == Tsx {
@@ -184,7 +184,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
             },
             format!(
-                "{}\n{}",
+                "{}\n{}\n(lexical_declaration kind: \"const\" (variable_declarator name: (identifier) @name)) @definition.constant",
                 tree_sitter_javascript::TAGS_QUERY,
                 tree_sitter_typescript::TAGS_QUERY
             ),
@@ -195,7 +195,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
         ),
         Go => (
             tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_spec name: (identifier) @name) @definition.constant", tree_sitter_go::TAGS_QUERY),
         ),
         C => (
             tree_sitter_c::LANGUAGE.into(),
@@ -465,6 +465,14 @@ mod tests {
         let ranges = identifier_ranges(source, "a.rs");
         let names: Vec<_> = ranges.iter().map(|range| &source[range.clone()]).collect();
         assert_eq!(names, ["run", "value", "run", "text"]);
+    }
+
+    #[test]
+    fn javascript_typescript_and_go_constants_are_indexed() {
+        for (path, source) in [("a.js", "const LIMIT = 10; let mutable = 2;"), ("a.ts", "const LIMIT: number = 10; let mutable = 2;"), ("a.go", "package p\nconst LIMIT = 10\nvar mutable = 2\n")] {
+            let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["LIMIT"], "{path}");
+        }
     }
 
     #[test]
