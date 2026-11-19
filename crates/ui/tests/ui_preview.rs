@@ -116,6 +116,8 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "scope-map",
         "changes-collapsed",
         "changes-focus-resize",
+        "changes-rereview",
+        "changes-since",
         "details",
         "walkthrough",
         "handoff",

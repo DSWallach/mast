@@ -885,6 +885,27 @@ impl Changes {
         )
     }
 
+    /// The scope label, plus the re-review count: "3 files changed since you
+    /// reviewed" in the full diff, "Since abc1234" in the delta.
+    fn header_label(&self, parsed: &ParsedDiff) -> String {
+        let label = scope_label(self.scope, parsed.file_count, self.base_ref.as_deref());
+        if let Some((old, _)) = self.rereview_range() {
+            let files = if parsed.file_count == 1 { "file" } else { "files" };
+            let short: String = old.chars().take(7).collect();
+            let removed = parsed.files.iter().filter(|file| is_removal_file(file)).count();
+            let tail = if removed > 0 { format!(" \u{b7} {removed} removed") } else { String::new() };
+            return format!("{} {files} changed since {short}{tail}", parsed.file_count);
+        }
+        let changed = self.review_state.as_ref().map_or(0, |state| {
+            changed_since_files(state, state.head_sha.as_deref(), &parsed.hunk_identities).len()
+        });
+        if changed > 0 {
+            format!("{label} \u{b7} {changed} changed since you reviewed")
+        } else {
+            label
+        }
+    }
+
     pub(super) fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
         Some(
@@ -904,11 +925,7 @@ impl Changes {
                         .truncate()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(scope_label(
-                            self.scope,
-                            parsed.file_count,
-                            self.base_ref.as_deref(),
-                        ))),
+                        .child(SharedString::from(self.header_label(parsed))),
                 )
                 .child(
                     div()
@@ -1111,6 +1128,7 @@ impl Changes {
         let picker = self.render_checkout_picker(theme, cx);
         let ref_picker = self.render_ref_target_picker(theme, cx);
         let submit_review = self.render_submit_review(theme, cx);
+        let rereview = self.render_rereview_controls(theme, cx);
         let freshness = tooltip
             .rsplit_once('\n')
             .map(|(_, freshness)| freshness)
@@ -1153,6 +1171,7 @@ impl Changes {
                         .text_color(theme.text_faint)
                         .child(SharedString::from(freshness)),
                 )
+                .children(rereview)
                 .children(submit_review)
                 .children(ref_picker)
                 .children(picker)

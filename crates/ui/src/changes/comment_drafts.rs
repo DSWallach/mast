@@ -194,6 +194,11 @@ impl Changes {
         if self.pinned_cwd.is_some() {
             return;
         }
+        if let Some(reason) = self.comment_block_for_line(&path, side, line) {
+            self.local_draft_error = Some(reason.into());
+            cx.notify();
+            return;
+        }
         if self.draft.is_some() { self.commit_draft(cx); }
         let local = if local_allowed && matches!(self.scope, DiffScope::Branch | DiffScope::Range) {
             if let Some(target) = self.review_target.as_deref() {

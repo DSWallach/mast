@@ -3932,6 +3932,25 @@ impl RpcService for EngineRpc {
                             .await
                             .map(|(snapshot, _)| snapshot)
                         }
+                        // Re-review: what changed between the last-reviewed head
+                        // (`commitSha`) and the current head (`headRef`).
+                        "since" => {
+                            let base_ref = p
+                                .base_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                            let new = p
+                                .head_ref
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("headRef required".into()))?;
+                            let old = p
+                                .commit_sha
+                                .as_deref()
+                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            crate::diff_sync::since::capture_since_diff(&self.repos, root, base_ref, old, new)
+                                .await
+                                .map_err(|e| crate::EngineError::Other(e.to_string()))
+                        }
                         "turn" => {
                             let chat_id = p
                                 .chat_id

@@ -51,6 +51,86 @@ pub(super) fn hunk_identities(files: &[FileDiff]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Files holding a hunk that is new or changed since the reviewer last looked
+/// (not in the reviewed snapshot) and is still unviewed. Empty unless the
+/// baseline is an earlier head with a usable snapshot.
+pub(super) fn changed_since_files(
+    state: &mast_proto::DiffReviewState,
+    head: Option<&str>,
+    identities: &[Vec<String>],
+) -> Vec<usize> {
+    let (Some(reviewed), Some(head)) = (state.reviewed_head.as_deref(), head) else {
+        return Vec::new();
+    };
+    if reviewed.eq_ignore_ascii_case(head) || state.reviewed_hunks.is_empty() {
+        return Vec::new();
+    }
+    identities
+        .iter()
+        .enumerate()
+        .filter(|(_, ids)| {
+            ids.iter()
+                .any(|id| !state.reviewed_hunks.contains(id) && !state.viewed_hunks.contains(id))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Make `head` the re-review baseline, with the hunks it showed. A diff over the
+/// snapshot cap records the head with `reviewed_truncated` and no snapshot; with
+/// `None` the snapshot is not known yet and is filled in later.
+pub(super) fn stamp_reviewed(
+    state: &mut mast_proto::DiffReviewState,
+    head: &str,
+    identities: Option<&[Vec<String>]>,
+) {
+    state.reviewed_head = Some(head.to_owned());
+    state.reviewed_at = Some(chrono::Utc::now().timestamp_millis());
+    state.reviewed_hunks.clear();
+    state.reviewed_truncated = false;
+    if let Some(files) = identities {
+        fill_snapshot(state, files);
+    }
+}
+
+/// Record the reviewed-hunk snapshot (or that it is over the cap).
+pub(super) fn fill_snapshot(state: &mut mast_proto::DiffReviewState, identities: &[Vec<String>]) {
+    let set: std::collections::BTreeSet<String> = identities.iter().flatten().cloned().collect();
+    if set.len() > mast_proto::REVIEWED_HUNKS_CAP {
+        state.reviewed_hunks.clear();
+        state.reviewed_truncated = true;
+    } else {
+        state.reviewed_hunks = set;
+        state.reviewed_truncated = false;
+    }
+}
+
+/// Advance the baseline after a mark change, but only once the reviewer has
+/// caught up: while changed hunks remain unviewed the group must keep listing
+/// them, so marking one hunk must not erase the rest of the delta. A baseline
+/// without a usable snapshot (not yet known, or over the cap) never advances.
+pub(super) fn stamp_on_mark(
+    state: &mut mast_proto::DiffReviewState,
+    identities: &[Vec<String>],
+) {
+    let Some(head) = state.head_sha.clone() else {
+        return;
+    };
+    match state.reviewed_head.as_deref() {
+        None => stamp_reviewed(state, &head, Some(identities)),
+        Some(reviewed) => {
+            if reviewed.eq_ignore_ascii_case(&head)
+                || state.reviewed_truncated
+                || state.reviewed_hunks.is_empty()
+                || !changed_since_files(state, Some(&head), identities).is_empty()
+            {
+                return;
+            }
+            stamp_reviewed(state, &head, Some(identities));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +175,76 @@ mod tests {
         assert!(!seen_after_traversal(Duration::from_secs(2), 1, 1, 8, 8));
         assert!(!seen_after_traversal(Duration::from_secs(2), 1, 2, 7, 8));
         assert!(seen_after_traversal(Duration::from_secs(2), 1, 2, 8, 8));
+    }
+
+
+    #[test]
+    fn changed_group_lists_unviewed_hunks_missing_from_the_snapshot() {
+        let patch = |new: &str| {
+            parse_patch(&format!("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+{new}\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n"))
+        };
+        let first = hunk_identities(&patch("one"));
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:o/r#1".into(),
+            head_sha: Some("h1".into()),
+            ..Default::default()
+        };
+        stamp_reviewed(&mut state, "h1", Some(&first));
+        assert!(changed_since_files(&state, Some("h1"), &first).is_empty());
+        state.head_sha = Some("h2".into());
+        let second = hunk_identities(&patch("two"));
+        assert_eq!(changed_since_files(&state, Some("h2"), &second), vec![0]);
+        // Viewing the changed hunk removes it from the group.
+        state.viewed_hunks.insert(second[0][0].clone());
+        assert!(changed_since_files(&state, Some("h2"), &second).is_empty());
+    }
+
+    #[test]
+    fn marking_does_not_advance_the_baseline_until_caught_up() {
+        let patch = |new: &str| {
+            parse_patch(&format!("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+{new}\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+{new}\n"))
+        };
+        let first = hunk_identities(&patch("one"));
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:o/r#1".into(),
+            head_sha: Some("h1".into()),
+            ..Default::default()
+        };
+        stamp_on_mark(&mut state, &first);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h1"));
+        state.head_sha = Some("h2".into());
+        let second = hunk_identities(&patch("two"));
+        state.viewed_hunks.insert(second[0][0].clone());
+        stamp_on_mark(&mut state, &second);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h1"), "one changed hunk still unviewed");
+        state.viewed_hunks.insert(second[1][0].clone());
+        stamp_on_mark(&mut state, &second);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h2"));
+        assert_eq!(state.reviewed_hunks.len(), 2);
+    }
+
+    #[test]
+    fn oversized_snapshots_record_only_the_head() {
+        let huge: Vec<Vec<String>> = vec![(0..mast_proto::REVIEWED_HUNKS_CAP + 1).map(|i| i.to_string()).collect()];
+        let mut state = mast_proto::DiffReviewState { head_sha: Some("h2".into()), ..Default::default() };
+        stamp_reviewed(&mut state, "h", Some(&huge));
+        assert_eq!(state.reviewed_head.as_deref(), Some("h"));
+        assert!(state.reviewed_hunks.is_empty() && state.reviewed_truncated);
+        // A truncated baseline never advances on a mark.
+        stamp_on_mark(&mut state, &[vec!["x".into()]]);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn a_baseline_without_a_snapshot_never_advances_on_a_mark() {
+        let ids = vec![vec!["a".to_owned()]];
+        let mut state = mast_proto::DiffReviewState { head_sha: Some("h2".into()), ..Default::default() };
+        stamp_reviewed(&mut state, "h1", None);
+        stamp_on_mark(&mut state, &ids);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h1"));
+        assert!(state.reviewed_hunks.is_empty() && !state.reviewed_truncated);
+        fill_snapshot(&mut state, &ids);
+        assert_eq!(state.reviewed_hunks.len(), 1);
     }
 
     #[test]
@@ -627,6 +777,7 @@ impl Changes {
     /// Otherwise a slow parse (or a truncated patch) would erase valid marks.
     fn reconcile_current_review_head(&mut self, head: Option<String>, cx: &mut Context<Self>) {
         if head.is_none()
+            || self.rereview_active()
             || self
                 .review_state
                 .as_ref()
@@ -673,7 +824,7 @@ impl Changes {
         }
     }
 
-    fn refresh_review_status(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_review_status(&mut self, cx: &mut Context<Self>) {
         if self.review_status_task.is_some()
             || self
                 .review_status_checked
@@ -755,7 +906,7 @@ impl Changes {
         cx.notify();
     }
 
-    fn save_review_state(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_review_state(&mut self, cx: &mut Context<Self>) {
         if self.review_save_task.is_some() || self.review_error.is_some() {
             return;
         }
@@ -802,7 +953,42 @@ impl Changes {
         }));
     }
 
+    /// Record `head` as the re-review baseline for `target` (a submit or Mark all
+    /// reviewed) and leave re-review mode. The snapshot is the CURRENT full diff's
+    /// identities for that head; when the full diff for it is not on hand the head
+    /// is recorded now and the snapshot is filled in when that diff parses.
+    pub(super) fn stamp_reviewed_head(&mut self, target: &str, head: &str, cx: &mut Context<Self>) {
+        if self.review_target.as_deref() != Some(target) {
+            return;
+        }
+        self.rereview = false;
+        self.rereview_unavailable = None;
+        let known = self
+            .full_identities
+            .as_ref()
+            .filter(|(known, _)| known.eq_ignore_ascii_case(head))
+            .map(|(_, identities)| identities.clone());
+        let Some(state) = self.review_state.as_mut() else {
+            return;
+        };
+        stamp_reviewed(state, head, known.as_ref().map(|ids| ids.as_slice()));
+        // No full diff for the posted head: the snapshot can only be filled in for the
+        // CURRENT head. For any other head mark it truncated so it never auto-advances.
+        let current = state.head_sha.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(head));
+        if known.is_none() && !current {
+            state.reviewed_truncated = true;
+        }
+        self.pending_snapshot = (known.is_none() && current).then(|| (target.to_owned(), head.to_owned()));
+        self.review_pending.insert(state.target.clone(), state.clone());
+        self.save_review_state(cx);
+        self.ensure_scoped(cx);
+        cx.notify();
+    }
+
     pub(super) fn toggle_review_hunk(&mut self, file: usize, hunk: usize, cx: &mut Context<Self>) {
+        if self.rereview_active() {
+            return;
+        }
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
@@ -824,6 +1010,9 @@ impl Changes {
             state.viewed_hunks.insert(identity);
         }
         state.viewed_files.remove(&file_diff.path);
+        if state.target.starts_with("pr:") && !parsed.truncated {
+            stamp_on_mark(state, &parsed.hunk_identities);
+        }
         self.review_pending
             .insert(state.target.clone(), state.clone());
         self.review_state_generation = self.review_state_generation.wrapping_add(1);
@@ -832,6 +1021,9 @@ impl Changes {
     }
 
     pub(super) fn toggle_review_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.rereview_active() {
+            return;
+        }
         let Some(file) = self
             .parsed
             .as_ref()
@@ -861,6 +1053,9 @@ impl Changes {
         } else {
             state.viewed_hunks.extend(identities);
             state.viewed_files.insert(file.path.clone());
+        }
+        if let Some(parsed) = self.parsed.as_ref().filter(|parsed| state.target.starts_with("pr:") && !parsed.truncated) {
+            stamp_on_mark(state, &parsed.hunk_identities);
         }
         self.review_pending
             .insert(state.target.clone(), state.clone());
@@ -1090,6 +1285,39 @@ mod mark_tests {
                 assert!(!state.viewed_hunks.contains("removed"));
             })
         });
+    }
+
+    #[gpui::test]
+    fn marks_and_submit_record_the_reviewed_head(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.review_target = Some("pr:o/r#1".into());
+            changes.full_identities = Some(("h1".into(), changes.parsed.as_ref().unwrap().hunk_identities.clone()));
+            changes.review_state = Some(mast_proto::DiffReviewState { target: "pr:o/r#1".into(), head_sha: Some("h1".into()), ..Default::default() });
+            changes.toggle_review_hunk(0, 0, cx);
+            let state = changes.review_state.as_ref().unwrap();
+            assert_eq!(state.reviewed_head.as_deref(), Some("h1"));
+            assert_eq!(state.reviewed_hunks.len(), 1);
+            // A submit for another head records that head without a snapshot.
+            changes.stamp_reviewed_head("pr:o/r#1", "h0", cx);
+            let state = changes.review_state.as_ref().unwrap();
+            assert_eq!(state.reviewed_head.as_deref(), Some("h0"));
+            assert!(state.reviewed_hunks.is_empty());
+            changes.stamp_reviewed_head("pr:o/r#1", "h1", cx);
+            assert_eq!(changes.review_state.as_ref().unwrap().reviewed_hunks.len(), 1);
+            assert!(changes.review_pending.contains_key("pr:o/r#1"));
+        }));
     }
 
     #[gpui::test]

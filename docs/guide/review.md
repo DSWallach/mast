@@ -28,3 +28,13 @@ Nothing reaches GitHub until you click **Submit** in **Submit review…** (Chang
 Choose **Comment**, **Approve** or **Request changes**, edit the optional summary, and check the count of draft comments. Mast checks each draft against GitHub's version of the PR (its head commit), not your working tree, then sends them as one review through your own `gh` login. Accepted suggestions arrive as GitHub suggestion blocks. Drafts GitHub can't place are listed as "can't be placed" with the reason (not pushed, changed locally, no diff on GitHub, or a range that spans hunks). Mast checks the drafted line and two lines of context either side; they are not posted and stay as local drafts. If the PR gets new commits first, the post is refused and you check again.
 
 On success the sent drafts are cleared (Mast keeps a local record with the review link), threads refresh, and the dialog links to the review. If posting fails, nothing is lost and **Retry** is safe: Mast looks for a review it may already have posted, even after a timeout or a restart, and says **Already posted** instead of sending twice. If you already have a pending review on the PR from github.com, Mast tells you and offers **Open pull request** instead of replacing it.
+
+## Review again after new commits
+
+When a PR you already reviewed gets new commits, Mast shows what changed since you last looked. It remembers the head you reviewed at: the head when you submitted a review through Mast, or the head when you last caught up on viewed marks. **Mark all reviewed** sets it to the current head.
+
+- **Viewed marks carry over.** A hunk keeps its viewed mark if its changed lines are identical on the new head, wherever it moved. Changed and new hunks reset and their files are listed first under **Changed since you reviewed**. The header shows how many files that is. Marking those hunks viewed shrinks the group.
+- **Since abc1234 · 2d** (Changes context bar) switches the pane to just the changes between that head and the current one. After a force-push or rebase it compares each head against its own merge base and keeps only hunks whose content changed, so a rebase onto a newer main doesn't bury the real changes. Hunks the new head dropped (including whole files) are listed under **Removed since you reviewed**, shown as reversions, so you can see when something you asked for went missing. Marks are read-only in this view. Your drafts and GitHub threads still appear on the lines they belong to; items outside the delta wait in the full diff.
+- If the old commit is gone from GitHub (cleaned up after a force-push), Mast says so and shows the full diff.
+
+Closing or merging the PR clears all of this.

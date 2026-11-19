@@ -393,11 +393,16 @@ impl Changes {
             ),
             None => context,
         };
-        // Refs only: the checkout's own working tree is irrelevant.
-        let watch_sum = if range.is_some() {
+        let since = self.rereview_range();
+        // Refs only, or a range between two commits: the working tree is irrelevant.
+        let watch_sum = if range.is_some() || since.is_some() {
             String::new()
         } else {
             self.resolved(cx).map(|d| d.checksum.clone()).unwrap_or_default()
+        };
+        let context = match &since {
+            Some((old, new)) => format!("{context}|since|{old}|{new}"),
+            None => context,
         };
         let key = format!("{context}|{watch_sum}");
         if self.scoped_for.as_deref() == Some(key.as_str())
@@ -408,15 +413,21 @@ impl Changes {
         if self
             .scoped_for
             .as_deref()
-            .is_none_or(|prev| !prev.starts_with(&format!("{context}|")))
+            .is_none_or(|prev| {
+                !prev.starts_with(&format!("{context}|")) || prev.contains("|since|") != since.is_some()
+            })
         {
+            // Also when entering or leaving the Since view: the old diff is the other kind.
             self.scoped = None;
             self.scoped_error = None;
+            self.scoped_is_since = false;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         let mode = self.scope.mode();
+        let was_since = since.is_some();
+        let request_head = self.review_identity(cx).and_then(|(_, head)| head);
         self.scoped_inflight = Some(key.clone());
         self.scoped_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
@@ -437,6 +448,12 @@ impl Changes {
             if let Some(range) = range {
                 params.insert("baseRef".into(), serde_json::Value::String(range.base_ref));
                 params.insert("headRef".into(), serde_json::Value::String(range.head_ref));
+            }
+            if let Some((old, new)) = since {
+                // Re-review: the engine diffs old..new (interdiff after a force-push).
+                params.insert("mode".into(), serde_json::Value::String("since".into()));
+                params.insert("commitSha".into(), serde_json::Value::String(old));
+                params.insert("headRef".into(), serde_json::Value::String(new));
             }
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
@@ -460,10 +477,20 @@ impl Changes {
                     Ok(diff) => {
                         changes.scoped = Some(diff);
                         changes.scoped_error = None;
+                        changes.scoped_is_since = was_since;
+                        changes.scoped_head = request_head;
+                    }
+                    Err(err) if err.to_string().contains("old-head-unavailable") => {
+                        // The reviewed head was garbage-collected: say so and show the full diff.
+                        changes.note_rereview_unavailable();
+                        changes.scoped = None;
+                        changes.scoped_error = None;
+                        changes.scoped_is_since = false;
                     }
                     Err(err) => {
                         changes.scoped = None;
                         changes.scoped_error = Some(err.to_string().into());
+                        changes.scoped_is_since = false;
                     }
                 }
                 changes.scoped_for = Some(key);
