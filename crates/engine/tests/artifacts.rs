@@ -2939,3 +2939,28 @@ async fn inline_status_publishing_is_only_for_the_manager_and_a_valid_document()
             .all(|a| a.role.as_deref() != Some("manager-status"))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_edit_of_the_status_file_does_not_replace_the_last_published_revision() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 0);
+    std::fs::write(first["storedPath"].as_str().unwrap(), "edited by hand\n").unwrap();
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 1);
+    let row = artifact(&rig, first["artifactId"].as_str().unwrap());
+    assert_eq!(row.current_revision, 2);
+    assert!(row.revisions[0].manager_status.is_none());
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["revision"], 1);
+    let content = entries[0]["content"].as_str().unwrap();
+    assert!(content.contains("Updated: 09:00") && !content.contains("by hand"), "{content}");
+}

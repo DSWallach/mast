@@ -1046,4 +1046,49 @@ mod tests {
         let wrong = ArtifactRevision { by: agent("gone"), manager_status: stamp("elsewhere"), ..Default::default() };
         assert!(!manager_provenance(&artifact, &wrong));
     }
+    #[test]
+    fn a_newer_unstamped_edit_does_not_hide_the_last_stamped_manager_status() {
+        use mast_proto::{ManagerStatusStamp, WorkOutlineActor};
+        let mut artifact = status("a", "proj", "s", 3);
+        let stamped = ArtifactRevision {
+            id: 2,
+            at: 2,
+            by: WorkOutlineActor {
+                kind: WorkOutlineActorKind::Agent,
+                chat_id: Some("gone".into()),
+                ..Default::default()
+            },
+            manager_status: Some(ManagerStatusStamp {
+                role_id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, "proj"),
+                chat_id: "gone".into(),
+            }),
+            ..Default::default()
+        };
+        let hand_edit = ArtifactRevision { id: 3, at: 3, ..Default::default() };
+        artifact.current_revision = 3;
+        artifact.revisions = vec![hand_edit, stamped];
+        let trusted = |a: &ArtifactView| {
+            a.revisions.iter().find(|r| manager_provenance(a, r)).map(|r| r.id)
+        };
+        let found = select(
+            vec![artifact.clone()],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ManagerStatus),
+            &trusted,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_revision, 2);
+        assert_eq!(found[0].current().map(|r| r.at), Some(2));
+        // With no stamped revision at all, the artifact is absent.
+        artifact.revisions.retain(|r| r.id == 3);
+        let none = select(
+            vec![artifact],
+            &SpaceScope("s"),
+            &BriefingQuery::new(BriefingKind::ManagerStatus),
+            &trusted,
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
 }
