@@ -247,4 +247,16 @@ mod tests {
         assert!(!derive_ticket_lifecycle(&[chat], &[pr], Some(false), None).stale);
         assert!(derive_ticket_lifecycle(&[chat], &[], Some(false), None).stale);
     }
+
+    #[test]
+    fn completed_item_or_merged_pr_is_done_and_never_stale() {
+        let idle = ChatFacts { ready_request: true, idle_over_three_days: true, ..Default::default() };
+        let completed = derive_ticket_lifecycle(&[idle], &[], Some(true), None);
+        assert_eq!(completed.stage, LifecycleStage::Done);
+        assert!(!completed.stale);
+        let merged = PullRequestFacts { state_known: true, merged: true, ..Default::default() };
+        let row = derive_ticket_lifecycle(&[idle], &[merged], Some(true), None);
+        assert_eq!(row.stage, LifecycleStage::Done);
+        assert!(!row.stale);
+    }
 }
