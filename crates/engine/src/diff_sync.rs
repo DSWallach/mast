@@ -4213,21 +4213,22 @@ mod repository_ref_budget_tests {
         std::fs::create_dir(&data).unwrap();
         std::fs::write(data.join("device-id"), "test-device").unwrap();
         let core = EngineCore::assemble(&data, Arc::new(HarnessRegistry::new()), mast_proto::HarnessId::Mock, None).unwrap();
-        core.workspace.create_chat("chat", None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
-        for path in &paths {
-            core.diff_targets.bind("chat", &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            let chat = format!("chat-{index}");
+            core.workspace.create_chat(&chat, None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
+            core.diff_targets.bind(&chat, &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
         }
         core.diff_sync.set_head_move_listener(Arc::new(|_| {}));
         core.diff_sync.reconcile_now().await;
         let inner = &core.diff_sync.inner;
         let entries: Vec<_> = lock(&inner.entries).values().filter(|entry| paths.contains(&entry.identity.root)).cloned().collect();
         assert_eq!(entries.len(), 20);
-        for _ in 0..5 {
-            for entry in &entries { sync_entry(inner, entry).await; }
-        }
-        git(&repo, &["branch", "additional", "HEAD"]);
-        for _ in 0..5 {
-            for entry in &entries { sync_entry(inner, entry).await; }
+        for capture in 0..10 {
+            if capture == 5 { git(&repo, &["branch", "additional", "HEAD"]); }
+            for entry in &entries {
+                std::fs::write(entry.identity.root.join("file"), format!("edit {capture}\n")).unwrap();
+                sync_entry(inner, entry).await;
+            }
         }
         let common = common_dir_of(&repo.join(".git"));
         let reads = lock(&inner.repository_tips).get(&common).unwrap().cache.as_ref().unwrap().reads;
