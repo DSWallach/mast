@@ -18,6 +18,7 @@ pub(in crate::changes) struct State {
     layouts: HashMap<Bucket, Arc<Vec<Tile>>>,
     progress_key: Option<(String, usize, usize)>,
     progress: (usize, u64),
+    selected_tile: Option<usize>,
     #[cfg(test)]
     clicked: Option<usize>,
 }
@@ -55,6 +56,13 @@ mod tests {
             changes.reflatten(cx);
         });
         vcx.update(|window, cx| window.draw(cx).clear());
+        vcx.update(|window, cx| {
+            changes.update(cx, |changes, cx| window.focus(&changes.scope_map_focus, cx))
+        });
+        vcx.simulate_keystrokes("right enter");
+        changes.read_with(vcx, |changes, _| {
+            assert_eq!(changes.scope_map_view.selected_tile, Some(1))
+        });
         assert!(
             vcx.debug_bounds("scope-map-file-0-viewed-no-risk")
                 .is_some()
@@ -152,6 +160,75 @@ mod tests {
 }
 
 impl Changes {
+    fn set_scope_map_selected(&mut self, map: bool, cx: &mut Context<Self>) {
+        self.scope_map_selected = map;
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+            settings.changes_scope_map = map
+        });
+        cx.notify();
+    }
+
+    fn scope_map_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.scope_map_focus.is_focused(window) {
+            return;
+        }
+        let Some(tiles) = self
+            .scope_map_view
+            .bucket
+            .and_then(|bucket| self.scope_map_view.layouts.get(&bucket))
+            .cloned()
+        else {
+            return;
+        };
+        let mut order: Vec<usize> = tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tile)| {
+                (!matches!(tile.kind, TileKind::Folder(_))).then_some(index)
+            })
+            .collect();
+        order.sort_by(|a, b| {
+            tiles[*a]
+                .bounds
+                .y
+                .total_cmp(&tiles[*b].bounds.y)
+                .then(tiles[*a].bounds.x.total_cmp(&tiles[*b].bounds.x))
+        });
+        if order.is_empty() {
+            return;
+        }
+        let current = self
+            .scope_map_view
+            .selected_tile
+            .and_then(|index| order.iter().position(|candidate| *candidate == index))
+            .unwrap_or(0);
+        match event.keystroke.key.as_str() {
+            "left" | "up" => {
+                self.scope_map_view.selected_tile = Some(order[current.saturating_sub(1)])
+            }
+            "right" | "down" => {
+                self.scope_map_view.selected_tile = Some(order[(current + 1).min(order.len() - 1)])
+            }
+            "enter" => match &tiles[order[current]].kind {
+                TileKind::File(index) => {
+                    self.jump_to_file(*index, cx);
+                    window.focus(&self.diff_focus, cx);
+                }
+                TileKind::More { folder, files, .. } => {
+                    self.reveal_scope_folder(folder.clone(), files[0], window, cx)
+                }
+                TileKind::Folder(_) => {}
+            },
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
     #[cfg(feature = "snapshot")]
     pub(crate) fn prepare_scope_map_snapshot(&mut self, cx: &mut Context<Self>) {
         if let Some(parsed) = self.parsed.as_mut() {
@@ -229,13 +306,7 @@ impl Changes {
                     crate::components::segmented_key(el, theme, selected == map)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.scope_map_selected = map;
-                    crate::settings::update(
-                        crate::settings::SavePolicy::Debounced,
-                        cx,
-                        |settings| settings.changes_scope_map = map,
-                    );
-                    cx.notify();
+                    this.set_scope_map_selected(map, cx);
                 }))
                 .child(label)
         };
@@ -254,6 +325,21 @@ impl Changes {
             .child(
                 div()
                     .flex()
+                    .track_focus(&self.scope_toggle_focus)
+                    .tab_index(0)
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if !this.scope_toggle_focus.is_focused(window) {
+                            return;
+                        }
+                        let map = match event.keystroke.key.as_str() {
+                            "left" => false,
+                            "right" => true,
+                            "enter" | "space" => !this.scope_map_selected,
+                            _ => return,
+                        };
+                        this.set_scope_map_selected(map, cx);
+                        cx.stop_propagation();
+                    }))
                     .child(button("List", false, cx))
                     .child(button("Map", true, cx)),
             )
@@ -301,13 +387,19 @@ impl Changes {
                 .insert(bucket, Arc::new(layout::layout(&data.root, bounds)));
         }
         self.scope_map_view.bucket = Some(bucket);
+        self.scope_map_view.selected_tile =
+            self.scope_map_view.layouts.get(&bucket).and_then(|tiles| {
+                tiles
+                    .iter()
+                    .position(|tile| !matches!(tile.kind, TileKind::Folder(_)))
+            });
         cx.notify();
     }
 
     pub(in crate::changes) fn render_scope_map(
         &mut self,
         theme: &Theme,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(parsed) = self.parsed.as_ref() else {
@@ -368,13 +460,19 @@ impl Changes {
         )
         .absolute()
         .inset_0();
+        let focused = self.scope_map_focus.is_focused(window);
         let mut canvas = div()
             .relative()
+            .track_focus(&self.scope_map_focus)
+            .tab_index(0)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                this.scope_map_key_down(event, window, cx)
+            }))
             .flex_1()
             .min_h_0()
             .overflow_hidden()
             .child(measure);
-        for tile in tiles.iter() {
+        for (tile_index, tile) in tiles.iter().enumerate() {
             let r = tile.bounds;
             let base = div()
                 .absolute()
@@ -408,12 +506,17 @@ impl Changes {
                             .cursor_pointer()
                             .border_1()
                             .border_color(theme.border)
+                            .when(
+                                focused && self.scope_map_view.selected_tile == Some(tile_index),
+                                |el| el.border_2().border_color(theme.accent),
+                            )
                             .bg(theme.element_hover)
                             .child(format!("{count} more"))
                             .tooltip(move |_, cx| {
                                 cx.new(|_| DiffHeaderTooltip(title.clone().into())).into()
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                this.scope_map_view.selected_tile = Some(tile_index);
                                 this.reveal_scope_folder(folder.clone(), first, window, cx)
                             })),
                     );
@@ -467,6 +570,10 @@ impl Changes {
                             } else {
                                 theme.border
                             })
+                            .when(
+                                focused && self.scope_map_view.selected_tile == Some(tile_index),
+                                |el| el.border_2().border_color(theme.accent),
+                            )
                             .bg(color.opacity(0.24))
                             .opacity(if viewed { 0.45 } else { 1.0 })
                             .text_size(px(10.0))
