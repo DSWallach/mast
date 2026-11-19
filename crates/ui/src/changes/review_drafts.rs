@@ -519,6 +519,11 @@ impl Changes {
         theme: &Theme,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
+        // The delta shows only some of the PR: drafts and threads outside it are
+        // not outdated, they live in the full diff.
+        if self.rereview_active() {
+            return Vec::new();
+        }
         let Some(target) = self.review_target.as_ref() else {
             return Vec::new();
         };
@@ -1052,7 +1057,7 @@ impl Changes {
                 .filter(|file| self.review_thread_index.by_anchor.contains_key(&file.path))
             {
                 for line in file.hunks.iter().flat_map(|hunk| &hunk.lines) {
-                    if let Some(number) = line.old_no {
+                    if let Some(number) = line.old_no.filter(|_| !self.rereview_active()) {
                         placed.extend(
                             self.review_thread_index
                                 .at(&file.path, CommentSide::Old, number)
@@ -1087,6 +1092,7 @@ impl Changes {
         if self.review_threads.is_empty() {
             return rows;
         }
+        let rereview = self.rereview_active();
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
             result.push(row);
@@ -1100,7 +1106,10 @@ impl Changes {
                 else {
                     return;
                 };
+                // Left-side threads anchor to the base file; in the delta the
+                // old side is the previous head, so only right-side anchors apply.
                 if line.kind != LineKind::Add
+                    && !rereview
                     && let Some(n) = line.old_no
                         && let Some(slot) = anchors.get_mut(count) {
                             *slot = Some((CommentSide::Old, n));

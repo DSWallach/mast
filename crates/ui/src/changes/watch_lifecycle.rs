@@ -399,6 +399,11 @@ impl Changes {
         } else {
             self.resolved(cx).map(|d| d.checksum.clone()).unwrap_or_default()
         };
+        let since = self.rereview_range();
+        let context = match &since {
+            Some((old, new)) => format!("{context}|since|{old}|{new}"),
+            None => context,
+        };
         let key = format!("{context}|{watch_sum}");
         if self.scoped_for.as_deref() == Some(key.as_str())
             || self.scoped_inflight.as_deref() == Some(key.as_str())
@@ -438,6 +443,12 @@ impl Changes {
                 params.insert("baseRef".into(), serde_json::Value::String(range.base_ref));
                 params.insert("headRef".into(), serde_json::Value::String(range.head_ref));
             }
+            if let Some((old, new)) = since {
+                // Re-review: the engine diffs old..new (interdiff after a force-push).
+                params.insert("mode".into(), serde_json::Value::String("since".into()));
+                params.insert("commitSha".into(), serde_json::Value::String(old));
+                params.insert("headRef".into(), serde_json::Value::String(new));
+            }
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
             }
@@ -459,6 +470,12 @@ impl Changes {
                 }) {
                     Ok(diff) => {
                         changes.scoped = Some(diff);
+                        changes.scoped_error = None;
+                    }
+                    Err(err) if err.to_string().contains("old-head-unavailable") => {
+                        // The reviewed head was garbage-collected: say so and show the full diff.
+                        changes.note_rereview_unavailable();
+                        changes.scoped = None;
                         changes.scoped_error = None;
                     }
                     Err(err) => {

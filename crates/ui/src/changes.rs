@@ -73,6 +73,7 @@ mod patch_parser;
 mod explanation;
 mod ref_picker;
 mod ref_and_checkout_menus;
+mod rereview;
 mod review_state;
 mod review_drafts;
 mod review_submit;
@@ -1318,6 +1319,12 @@ pub struct Changes {
     review_status_base: Option<String>,
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
+    /// Re-review mode: show what changed since the last-reviewed head.
+    rereview: bool,
+    /// A last-reviewed head that could not be fetched (GC'd); the full diff shows instead.
+    rereview_unavailable: Option<String>,
+    /// Hunk identities of the latest full (non re-review) diff and the head they belong to.
+    full_identities: Option<(String, Arc<Vec<Vec<String>>>)>,
     review_walkthrough: bool,
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
@@ -1627,6 +1634,9 @@ impl Changes {
             review_status_base: None,
             review_closed: false,
             review_state: None,
+            rereview: false,
+            rereview_unavailable: None,
+            full_identities: None,
             review_walkthrough: false,
             walkthrough_target: None,
             review_tour: false,
@@ -1976,6 +1986,7 @@ impl Changes {
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.note_full_identities(cx);
                 changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
                 changes.refresh_thread_rows(cx);

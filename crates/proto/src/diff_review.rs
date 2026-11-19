@@ -17,6 +17,9 @@ pub struct DiffReviewState {
     /// re-review ("changes since you reviewed").
     #[serde(default)]
     pub reviewed_head: Option<String>,
+    /// Unix millis when `reviewed_head` was recorded (shown as "Since abc1234, 2d").
+    #[serde(default)]
+    pub reviewed_at: Option<i64>,
     /// Hunk identities of the diff at `reviewed_head`; current hunks outside
     /// this set changed since the reviewer last looked. Bounded by
     /// `REVIEWED_HUNKS_CAP`.

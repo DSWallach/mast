@@ -153,7 +153,7 @@ impl Changes {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_indexed_hunk_to_chat(file as usize, hunk as usize, cx);
                             }))))
-                    .when(self.review_state.is_some() || self.review_closed || self.review_error.is_some(), |row| row.child(
+                    .when((self.review_state.is_some() || self.review_closed || self.review_error.is_some()) && !self.rereview_active(), |row| row.child(
                         crate::components::button(SharedString::from(format!("changes-hunk-viewed-{file}-{hunk}")), label, crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
                         .absolute().right(px(Theme::SPACE_SM)).top(px(Theme::SPACE_XS / 2.0))
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_review_hunk(file as usize, hunk as usize, cx)))))

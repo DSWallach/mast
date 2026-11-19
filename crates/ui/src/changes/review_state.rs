@@ -85,6 +85,7 @@ pub(super) fn stamp_reviewed(
     identities: Option<&[Vec<String>]>,
 ) {
     state.reviewed_head = Some(head.to_owned());
+    state.reviewed_at = Some(chrono::Utc::now().timestamp_millis());
     state.reviewed_hunks = identities
         .map(|files| files.iter().flatten().cloned().collect::<std::collections::BTreeSet<_>>())
         .filter(|set| set.len() <= mast_proto::REVIEWED_HUNKS_CAP)
@@ -742,6 +743,7 @@ impl Changes {
     /// Otherwise a slow parse (or a truncated patch) would erase valid marks.
     fn reconcile_current_review_head(&mut self, head: Option<String>, cx: &mut Context<Self>) {
         if head.is_none()
+            || self.rereview_active()
             || self
                 .review_state
                 .as_ref()
@@ -924,10 +926,10 @@ impl Changes {
             return;
         };
         let identities = self
-            .parsed
+            .full_identities
             .as_ref()
-            .filter(|parsed| !parsed.truncated && state.head_sha.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(head)))
-            .map(|parsed| parsed.hunk_identities.as_slice());
+            .filter(|(known, _)| known.eq_ignore_ascii_case(head))
+            .map(|(_, identities)| identities.as_slice());
         stamp_reviewed(state, head, identities);
         self.review_pending.insert(state.target.clone(), state.clone());
         self.save_review_state(cx);
@@ -935,6 +937,9 @@ impl Changes {
     }
 
     pub(super) fn toggle_review_hunk(&mut self, file: usize, hunk: usize, cx: &mut Context<Self>) {
+        if self.rereview_active() {
+            return;
+        }
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
@@ -966,6 +971,9 @@ impl Changes {
     }
 
     pub(super) fn toggle_review_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.rereview_active() {
+            return;
+        }
         let Some(file) = self
             .parsed
             .as_ref()
@@ -1244,6 +1252,7 @@ mod mark_tests {
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
             changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
             changes.review_target = Some("pr:o/r#1".into());
+            changes.full_identities = Some(("h1".into(), changes.parsed.as_ref().unwrap().hunk_identities.clone()));
             changes.review_state = Some(mast_proto::DiffReviewState { target: "pr:o/r#1".into(), head_sha: Some("h1".into()), ..Default::default() });
             changes.toggle_review_hunk(0, 0, cx);
             let state = changes.review_state.as_ref().unwrap();

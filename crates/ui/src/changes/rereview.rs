@@ -1,0 +1,267 @@
+//! Re-review mode: the Changes pane of a PR the reviewer already reviewed shows
+//! only what changed since the head they last reviewed ("Since abc1234").
+//!
+//! The baseline lives in the review-state row (`reviewed_head`, stamped on a
+//! successful submit, on mark changes once caught up, and by "Mark all
+//! reviewed"). The range diff itself comes from the engine (`mode: "since"`),
+//! once per (old head, new head) pair: the scoped-diff request key includes the
+//! pair, so nothing re-runs per render or keystroke.
+//!
+//! While the mode is on, marks are read-only (the delta's hunks are not the full
+//! diff's hunks, so their identities would not match) and the stored marks are
+//! never reconciled against it.
+
+use super::*;
+
+impl Changes {
+    /// `(old, new)` heads of the re-review range, when this review has a
+    /// baseline that differs from the current head and that is still fetchable.
+    pub(super) fn rereview_baseline(&self) -> Option<(String, String)> {
+        let state = self.review_state.as_ref()?;
+        if self.review_closed
+            || !state.target.starts_with("pr:")
+            || !matches!(self.scope, DiffScope::Branch | DiffScope::Range)
+        {
+            return None;
+        }
+        let old = state.reviewed_head.as_deref()?;
+        let new = state.head_sha.as_deref()?;
+        if old.eq_ignore_ascii_case(new) || self.rereview_unavailable.as_deref() == Some(old) {
+            return None;
+        }
+        Some((old.to_owned(), new.to_owned()))
+    }
+
+    /// The range to request while the mode is on.
+    pub(super) fn rereview_range(&self) -> Option<(String, String)> {
+        if self.rereview { self.rereview_baseline() } else { None }
+    }
+
+    pub(super) fn rereview_active(&self) -> bool {
+        self.rereview_range().is_some()
+    }
+
+    /// The old head could not be fetched: fall back to the full diff and say so.
+    pub(super) fn note_rereview_unavailable(&mut self) {
+        self.rereview_unavailable = self.review_state.as_ref().and_then(|s| s.reviewed_head.clone());
+        self.rereview = false;
+    }
+
+    pub(super) fn set_rereview(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.rereview == on {
+            return;
+        }
+        self.rereview = on && self.rereview_baseline().is_some();
+        // Layout and scroll belong to the other diff.
+        self.ensure_scoped(cx);
+        cx.notify();
+    }
+
+    /// Remember the identities of the full diff for the current head, so a
+    /// baseline stamped while the delta is on screen still carries a snapshot.
+    pub(super) fn note_full_identities(&mut self, cx: &App) {
+        if self.rereview_active() {
+            return;
+        }
+        let (Some(parsed), Some((_, Some(head)))) = (self.parsed.as_ref(), self.review_identity(cx)) else {
+            return;
+        };
+        if !parsed.truncated {
+            self.full_identities = Some((head, parsed.hunk_identities.clone()));
+        }
+    }
+
+    /// Full-diff identities for `head`, if known.
+    pub(super) fn full_identities_for(&self, head: &str) -> Option<&Vec<Vec<String>>> {
+        self.full_identities
+            .as_ref()
+            .filter(|(known, _)| known.eq_ignore_ascii_case(head))
+            .map(|(_, identities)| identities.as_ref())
+    }
+
+    /// "Mark all reviewed": the current head becomes the baseline.
+    pub(super) fn mark_all_reviewed(&mut self, cx: &mut Context<Self>) {
+        let Some(head) = self.review_state.as_ref().and_then(|s| s.head_sha.clone()) else {
+            return;
+        };
+        let Some(target) = self.review_target.clone() else {
+            return;
+        };
+        self.rereview = false;
+        self.rereview_unavailable = None;
+        self.stamp_reviewed_head(&target, &head, cx);
+        self.ensure_scoped(cx);
+    }
+
+    pub(super) fn render_rereview_controls(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(state) = self.review_state.as_ref().filter(|s| s.target.starts_with("pr:") && !self.review_closed) else {
+            return Vec::new();
+        };
+        let mut controls = Vec::new();
+        let unavailable = state
+            .reviewed_head
+            .as_deref()
+            .is_some_and(|old| self.rereview_unavailable.as_deref() == Some(old));
+        if let Some((old, _)) = self.rereview_baseline() {
+            let short: String = old.chars().take(7).collect();
+            let age = state
+                .reviewed_at
+                .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                .map(|at| format!(" \u{b7} {}", mast_proto::view::format_time_ago(at, chrono::Utc::now())))
+                .unwrap_or_default();
+            let on = self.rereview;
+            controls.push(
+                div()
+                    .id("changes-rereview-toggle")
+                    .debug_selector(|| "changes-rereview-toggle".into())
+                    .flex_none()
+                    .h(px(20.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(if on { theme.text } else { theme.text_muted })
+                    .when(true, |el| crate::components::review_text_action(el, theme))
+                    .occlude()
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_rereview(!on, cx)))
+                    .child(SharedString::from(format!("Since {short}{age}")))
+                    .into_any_element(),
+            );
+        }
+        if self.rereview_baseline().is_some() || unavailable {
+            controls.push(
+                div()
+                    .id("changes-mark-all-reviewed")
+                    .debug_selector(|| "changes-mark-all-reviewed".into())
+                    .flex_none()
+                    .h(px(20.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .when(true, |el| crate::components::review_text_action(el, theme))
+                    .occlude()
+                    .on_click(cx.listener(|this, _, _, cx| this.mark_all_reviewed(cx)))
+                    .child("Mark all reviewed")
+                    .into_any_element(),
+            );
+        }
+        if unavailable {
+            controls.push(
+                div()
+                    .id("changes-rereview-unavailable")
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .text_color(theme.warning)
+                    .child("Last reviewed commit is gone; showing the full diff")
+                    .into_any_element(),
+            );
+        }
+        controls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changes_with_review<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        head: &str,
+        reviewed: Option<&str>,
+    ) -> (Entity<Changes>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        vcx.update(|_, cx| {
+            changes.update(cx, |changes, cx| {
+                let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+                let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+                let horizontal = files.iter().map(FileHorizontalState::new).collect();
+                changes.scope = DiffScope::Branch;
+                changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 1, deletions: 1, file_count: 1, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+                changes.review_target = Some("pr:o/r#1".into());
+                changes.review_state = Some(mast_proto::DiffReviewState {
+                    target: "pr:o/r#1".into(),
+                    head_sha: Some(head.into()),
+                    reviewed_head: reviewed.map(Into::into),
+                    reviewed_at: reviewed.map(|_| chrono::Utc::now().timestamp_millis() - 3 * 3_600_000),
+                    ..Default::default()
+                });
+                cx.notify();
+            });
+        });
+        (changes, vcx)
+    }
+
+    #[gpui::test]
+    fn toggle_needs_a_baseline_that_differs_from_the_head(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        let count = |vcx: &mut gpui::VisualTestContext, changes: &Entity<Changes>| {
+            vcx.update(|_, cx| changes.update(cx, |c, cx| c.render_rereview_controls(&Theme::dark(), cx).len()))
+        };
+        assert_eq!(count(vcx, &changes), 2, "Since toggle and Mark all reviewed");
+        changes.update(vcx, |c, _| c.review_state.as_mut().unwrap().reviewed_head = Some("bbbbbbb1".into()));
+        assert_eq!(count(vcx, &changes), 0, "reviewed head is the current head");
+        changes.update(vcx, |c, _| c.review_state.as_mut().unwrap().reviewed_head = None);
+        assert_eq!(count(vcx, &changes), 0, "never reviewed");
+    }
+
+    #[gpui::test]
+    fn rereview_is_read_only_for_marks_and_falls_back_when_the_head_is_gone(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                c.set_rereview(true, cx);
+                assert_eq!(c.rereview_range(), Some(("aaaaaaa1".into(), "bbbbbbb1".into())));
+                c.toggle_review_hunk(0, 0, cx);
+                c.toggle_review_file(0, cx);
+                assert!(c.review_state.as_ref().unwrap().viewed_hunks.is_empty(), "marks are read-only in the delta");
+                // The engine reports the old head as garbage-collected.
+                c.note_rereview_unavailable();
+                assert!(!c.rereview_active());
+                assert!(c.rereview_baseline().is_none(), "no range diff is offered for a missing head");
+                assert_eq!(c.render_rereview_controls(&Theme::dark(), cx).len(), 2, "Mark all reviewed and the notice");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn mark_all_reviewed_makes_the_current_head_the_baseline(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        vcx.update(|_, cx| {
+            changes.update(cx, |c, cx| {
+                c.full_identities = Some(("bbbbbbb1".into(), c.parsed.as_ref().unwrap().hunk_identities.clone()));
+                c.set_rereview(true, cx);
+                c.mark_all_reviewed(cx);
+                let state = c.review_state.as_ref().unwrap();
+                assert_eq!(state.reviewed_head.as_deref(), Some("bbbbbbb1"));
+                assert_eq!(state.reviewed_hunks.len(), 1, "snapshot comes from the full diff, not the delta");
+                assert!(!c.rereview && c.rereview_baseline().is_none());
+                assert!(c.review_pending.contains_key("pr:o/r#1"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn closing_the_pr_clears_the_review_state_and_the_mode(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+        changes.update(vcx, |c, cx| {
+            c.rereview = true;
+            // The status refresh's closed path (see refresh_review_status).
+            c.review_closed = true;
+            c.review_state = None;
+            c.review_pending.remove("pr:o/r#1");
+            assert!(!c.rereview_active());
+            assert!(c.render_rereview_controls(&Theme::dark(), cx).is_empty());
+        });
+    }
+}

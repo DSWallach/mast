@@ -24,6 +24,7 @@ impl RegistryDoc {
                 .get("reviewedHead")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            reviewed_at: row.fields.get("reviewedAt").and_then(Value::as_i64),
             ..Default::default()
         };
         for (field, value) in &row.fields {
@@ -72,6 +73,7 @@ impl RegistryDoc {
                 || !before.viewed_hunks.is_empty()
                 || !before.viewed_files.is_empty()
                 || before.reviewed_head.is_some()
+                || before.reviewed_at.is_some()
                 || !before.reviewed_hunks.is_empty())
         {
             return Err(DocError::Schema(
@@ -100,6 +102,9 @@ impl RegistryDoc {
                 "reviewedHead",
                 opt_str(state.reviewed_head.as_deref()),
             )]));
+        }
+        if before.reviewed_at != state.reviewed_at {
+            updates.push(fields([("reviewedAt", state.reviewed_at.map_or(Value::Null, |at| json!(at)))]));
         }
         for hash in before
             .reviewed_hunks
@@ -268,6 +273,7 @@ mod tests {
         assert!(registry.put_diff_review_state(&base).unwrap());
         let mut next = base.clone();
         next.reviewed_head = Some("h1".into());
+        next.reviewed_at = Some(1_700_000_000_000);
         next.reviewed_hunks.insert("a".repeat(64));
         next.reviewed_hunks.insert("b".repeat(64));
         assert!(registry.update_diff_review_state(&base, &next).unwrap());
@@ -287,5 +293,8 @@ mod tests {
         assert!(registry.update_diff_review_state(&moved, &stamped).unwrap());
         assert_eq!(registry.diff_review_state(&base.target), Some(stamped));
         assert!(!registry.put_diff_review_state(&registry.diff_review_state(&base.target).unwrap()).unwrap());
+        // Closing or merging the PR deletes the row, baseline included.
+        assert!(registry.delete_diff_review_state(&base.target));
+        assert_eq!(registry.diff_review_state(&base.target), None);
     }
 }

@@ -655,7 +655,8 @@ impl Changes {
         ordered_file_indices(&parsed.layout, &mut indices);
         let files = parsed.files.clone();
         let identities = parsed.hunk_identities.clone();
-        let review_state = self.review_state.clone();
+        let rereview = self.rereview_active();
+        let review_state = self.review_state.clone().filter(|_| !rereview);
         let indices = indices
             .into_iter()
             .filter(|index| {
@@ -670,8 +671,7 @@ impl Changes {
             .get(&tree_key)
             .cloned()
             .unwrap_or_default();
-        let changed: std::collections::HashSet<usize> = self
-            .review_state
+        let changed: std::collections::HashSet<usize> = review_state
             .as_ref()
             .map(|state| {
                 review_state::changed_since_files(
