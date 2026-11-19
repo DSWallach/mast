@@ -41,6 +41,8 @@ pub struct QuerySymbolsRequest {
     #[serde(flatten)] pub target: WorkspaceTarget,
     pub query: String,
     pub limit: usize,
+    #[serde(default)] pub exact_name: bool,
+    #[serde(default)] pub kinds: Option<Vec<mast_syntax::symbols::SymbolKind>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -137,18 +139,21 @@ impl WorkspaceFiles {
         let (index, generation, expected) = {
             let indexes = lock(&self.inner.symbol_indexes);
             let slot = indexes.get(&workspace.checkout_id).ok_or_else(|| WorkspaceFilesError::Io("symbol index stopped".into()))?;
-            let expected = slot.query_generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-            (lock(&slot.index).clone(), slot.query_generation.clone(), expected)
+            let generation = if request.exact_name { Arc::new(std::sync::atomic::AtomicU64::new(0)) } else { slot.query_generation.clone() };
+            let expected = generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            (lock(&slot.index).clone(), generation, expected)
         };
-        let query = request.query.to_lowercase();
+        let query = if request.exact_name { request.query } else { request.query.to_lowercase() };
+        let exact_name = request.exact_name;
+        let kinds = request.kinds;
         let limit = request.limit.min(200);
-        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected)).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected, exact_name, kinds.as_deref())).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         drop(receiver);
         results.ok_or_else(|| WorkspaceFilesError::Io("symbol query superseded".into()))
     }
 }
 
-fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &std::sync::atomic::AtomicU64, expected: u64) -> Option<SymbolQueryResult> {
+fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &std::sync::atomic::AtomicU64, expected: u64, exact_name: bool, kinds: Option<&[mast_syntax::symbols::SymbolKind]>) -> Option<SymbolQueryResult> {
     let mut best = Vec::with_capacity(limit + 1);
     let mut count = 0usize;
     let mut visited = 0usize;
@@ -156,7 +161,14 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
         for (symbol, lower_name) in file.symbols.iter().zip(&file.lower_names) {
             visited += 1;
             if visited % 128 == 0 && generation.load(Ordering::Acquire) != expected { return None; }
-            let Some(score) = symbol_score(lower_name, &file.lower_path, query) else { continue; };
+            if kinds.is_some_and(|kinds| !kinds.contains(&symbol.kind)) { continue; }
+            let score = if exact_name {
+                if symbol.name != query { continue; }
+                0
+            } else {
+                let Some(score) = symbol_score(lower_name, &file.lower_path, query) else { continue; };
+                score
+            };
             count += 1;
             let position = best.partition_point(|(existing_score, existing_path, existing_symbol): &(i64, &String, &Symbol)| existing_score > &score || (existing_score == &score && (existing_path.as_str(), existing_symbol.start_line) <= (path.as_str(), symbol.start_line)));
             if position < limit {
@@ -485,14 +497,26 @@ mod tests {
         let mut index = SymbolIndex::new(4, 500, 500);
         index.apply(1, &[FileChange::Changed { path: "items.rs", source: &source }]);
         let generation = std::sync::atomic::AtomicU64::new(1);
-        let all = search_snapshot(&index, "item", 200, &generation, 1).unwrap();
+        let all = search_snapshot(&index, "item", 200, &generation, 1, false, None).unwrap();
         assert_eq!(all.matches.len(), 200);
         assert!(all.truncated);
         let source = (0..200).map(|i| format!("fn item_{i}() {{}}\n")).collect::<String>();
         index.apply(2, &[FileChange::Changed { path: "items.rs", source: &source }]);
-        let exact = search_snapshot(&index, "item", 200, &generation, 1).unwrap();
+        let exact = search_snapshot(&index, "item", 200, &generation, 1, false, None).unwrap();
         assert_eq!(exact.matches.len(), 200);
         assert!(!exact.truncated);
+    }
+
+    #[test]
+    fn exact_query_filters_names_and_kinds() {
+        use mast_syntax::symbols::SymbolKind;
+        let mut index = SymbolIndex::new(4, 20, 20);
+        index.apply(1, &[FileChange::Changed { path: "items.rs", source: "fn item() {}\nfn Item() {}\nstruct item;\nfn item_extra() {}\n" }]);
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let result = search_snapshot(&index, "item", 200, &generation, 1, true, Some(&[SymbolKind::Function])).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].symbol.name, "item");
+        assert_eq!(result.matches[0].symbol.kind, SymbolKind::Function);
     }
 
     #[test]
@@ -545,13 +569,13 @@ mod tests {
         let query_started = Instant::now();
         let snapshot = lock(&shared).clone();
         let generation = std::sync::atomic::AtomicU64::new(1);
-        let found = search_snapshot(&snapshot, "not_present", 200, &generation, 1).unwrap();
+        let found = search_snapshot(&snapshot, "not_present", 200, &generation, 1, false, None).unwrap();
         let query_elapsed = query_started.elapsed();
         eprintln!("20k-symbol query during reparse: {query_elapsed:?}");
         assert!(found.matches.is_empty());
         assert!(query_elapsed < Duration::from_millis(25));
         generation.store(2, Ordering::Release);
-        assert!(search_snapshot(&snapshot, "function", 200, &generation, 1).is_none());
+        assert!(search_snapshot(&snapshot, "function", 200, &generation, 1, false, None).is_none());
         release_tx.send(()).unwrap();
         worker.join().unwrap();
         let first_batch: Vec<_> = file_revisions.keys().take(FRESHNESS_BATCH_SIZE).cloned().collect();
