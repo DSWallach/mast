@@ -318,14 +318,17 @@ async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_si
         )
         .await
         .unwrap();
-    for (chat, task) in [("run-pub", "task-slack"), ("chat-bg", "task-other")] {
+    for (chat, task, name) in [
+        ("run-pub", "task-slack", "Slack"),
+        ("chat-bg", "task-other", "Other"),
+    ] {
         rig.core
             .workspace
             .set_chat_scheduled_task_info(
                 chat,
                 &ScheduledChat {
                     task_id: task.into(),
-                    task_name: task.into(),
+                    task_name: name.into(),
                     run_id: chat.into(),
                     output: ScheduledTaskOutput::Background,
                     ..Default::default()
