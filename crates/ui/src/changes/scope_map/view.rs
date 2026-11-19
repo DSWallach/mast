@@ -104,6 +104,13 @@ mod tests {
             assert!(!changes.scope_map_selected);
             assert!(!crate::settings::current(cx).changes_scope_map);
         });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let map = vcx.debug_bounds("scope-map-toggle").unwrap().center();
+        vcx.simulate_click(map, gpui::Modifiers::default());
+        changes.read_with(vcx, |changes, cx| {
+            assert!(changes.scope_map_selected);
+            assert!(crate::settings::current(cx).changes_scope_map);
+        });
     }
 
     #[gpui::test]
@@ -143,6 +150,10 @@ mod tests {
             let start = std::time::Instant::now();
             changes.scope_map_resize(640.0, 480.0, cx);
             let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(3),
+                "layout took {elapsed:?}"
+            );
             let first = changes.scope_map_view.layouts[&(20, 15)].clone();
             changes.scope_map_resize(650.0, 490.0, cx);
             assert!(Arc::ptr_eq(
@@ -157,6 +168,11 @@ mod tests {
                 &first,
                 &changes.scope_map_view.layouts[&(20, 15)]
             ));
+            for width in [704.0, 736.0, 768.0] {
+                changes.scope_map_resize(width, 480.0, cx);
+            }
+            assert_eq!(changes.scope_map_view.layouts.len(), 4);
+            assert!(!changes.scope_map_view.layouts.contains_key(&(21, 15)));
             changes.parsed.as_mut().unwrap().key = "two".into();
             changes.refresh_scope_map_data();
             changes.scope_map_resize(640.0, 480.0, cx);
@@ -423,7 +439,9 @@ impl Changes {
             self.scope_map_view.labels.insert(bucket, Arc::new(labels));
             self.scope_map_view.layouts.insert(bucket, Arc::new(tiles));
         }
-        self.scope_map_view.layout_lru.retain(|entry| *entry != bucket);
+        self.scope_map_view
+            .layout_lru
+            .retain(|entry| *entry != bucket);
         self.scope_map_view.layout_lru.push_back(bucket);
         while self.scope_map_view.layout_lru.len() > 4 {
             if let Some(old) = self.scope_map_view.layout_lru.pop_front() {
@@ -503,7 +521,10 @@ impl Changes {
                     (width.max(0.0) / 32.0).floor() as u16,
                     (height.max(0.0) / 32.0).floor() as u16,
                 );
-                if (Some(bucket) != current_bucket || (width, height) != current_size) && bucket.0 > 0 && bucket.1 > 0 {
+                if (Some(bucket) != current_bucket || (width, height) != current_size)
+                    && bucket.0 > 0
+                    && bucket.1 > 0
+                {
                     let weak = weak.clone();
                     cx.defer(move |cx| {
                         let _ =
@@ -514,7 +535,14 @@ impl Changes {
         )
         .absolute()
         .inset_0();
-        let (scale_x, scale_y) = current_bucket.map(|bucket| (current_size.0 / (f32::from(bucket.0) * 32.0), current_size.1 / (f32::from(bucket.1) * 32.0))).unwrap_or((1.0, 1.0));
+        let (scale_x, scale_y) = current_bucket
+            .map(|bucket| {
+                (
+                    current_size.0 / (f32::from(bucket.0) * 32.0),
+                    current_size.1 / (f32::from(bucket.1) * 32.0),
+                )
+            })
+            .unwrap_or((1.0, 1.0));
         let focused = self.scope_map_focus.is_focused(window);
         let mut canvas = div()
             .relative()
