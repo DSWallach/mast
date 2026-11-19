@@ -883,6 +883,17 @@ impl WorkspaceHost {
         self.read(|doc| doc.part_done_hand_off_from(from))
     }
 
+    /// The role of `kind` that has reserved a hand-off to `chat_id` and not yet
+    /// rotated to it: the chat is that role's successor in the making.
+    pub fn standing_role_awaiting(&self, chat_id: &str, kind: mast_proto::StandingRoleKind) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| {
+            doc.standing_roles().into_iter().filter(|role| role.role == kind).find(|role| {
+                doc.pending_standing_hand_off(role.role, &role.scope_item_id)
+                    .is_some_and(|pending| pending.to_chat_id == chat_id)
+            })
+        })
+    }
+
     pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
         self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
     }

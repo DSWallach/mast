@@ -5294,6 +5294,108 @@ async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
     rig.harness.release.notify_one();
 }
 
+/// A hand-off's successor is a plain chat whose first turn is queued before the
+/// role rotates to it. The reserved hand-off names it, so the turn is placed in
+/// the intended project, starts from that project's existing record, and is
+/// checked once the successor holds the role.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role() {
+    let (rig, item) = role_rig("status-successor").await;
+    plant_stamped_status(&rig, "status-successor-doc", &item, 4).await;
+    let successor = "successor-chat";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-successor-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-handoff", None).unwrap();
+
+    // The successor's first turn runs while the old manager still holds the role.
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(successor, "run-successor", SPACE, &rig.core.device_id);
+    assert_eq!(
+        tokens.manager_status().current_run(successor),
+        Some((4, (SPACE.to_owned(), item.clone()))),
+        "the reserved hand-off places the turn in the project, from its record"
+    );
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "h1" }))
+        .await
+        .unwrap();
+    drop(lease);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
+
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder after rotation").await;
+    let prompts = nudge_prompts(&rig);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("latest revision is 4"), "{}", prompts[0]);
+    rig.harness.release.notify_one();
+}
+
+/// A hand-off that never completes leaves its successor a non-holder: its
+/// turn is dropped when the wait ends, and a late rotation sends nothing for
+/// it. The old holder is never reminded for the successor's turn either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_handoff_never_nudges_a_non_holder() {
+    let (rig, item) = role_rig("status-failed-handoff").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_adoption_wait(Duration::from_millis(300));
+    let successor = "failed-successor";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-failed-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-failed", None).unwrap();
+
+    let lease = tokens.mint(successor, "run-failed", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "x1" }))
+        .await
+        .unwrap();
+    drop(lease);
+    // The hand-off never rotates. Once the wait is over the turn is forgotten.
+    wait_for(|| tokens.manager_status().pending(successor) == 0, "the held turn to be dropped").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+
+    // A rotation after the wait finds nothing to remind about.
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+}
+
+/// The reservation going to a different successor ends the first one's claim
+/// at once, without waiting for the cutoff.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_handoff_reservation_drops_the_first_successors_turn() {
+    let (rig, item) = role_rig("status-replaced-handoff").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    for (name, op) in [("first-successor", "op-r1"), ("second-successor", "op-r2")] {
+        rig.core
+            .workspace
+            .create_chat(name, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+            .unwrap();
+        assign_chat(&rig, &format!("assign-{name}"), name, &item).await;
+        if name == "first-successor" {
+            rig.core.workspace.reserve_standing_role_hand_off(CHAT, name, op, None).unwrap();
+        }
+    }
+    let lease = tokens.mint("first-successor", "run-r1", SPACE, &rig.core.device_id);
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "r1" }))
+        .await
+        .unwrap();
+    // The first reservation is replaced before its turn ends.
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, "second-successor", "op-r2", None).unwrap();
+    drop(lease);
+    wait_for(|| tokens.manager_status().pending("first-successor") == 0, "the turn to be dropped").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
+    assert_eq!(nudges(&rig), 0);
+}
+
 /// A worker chat's own dispatches are not a manager's: no reminder, and the
 /// tracker does not keep the chat's turn open afterwards.
 #[tokio::test(flavor = "multi_thread")]

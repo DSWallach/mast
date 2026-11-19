@@ -10,9 +10,17 @@
 //! follow each other. The ask itself is a turn, checked against the revision of
 //! the turn it asks about.
 //!
-//! A first start's chat becomes the Manager only after its first turn is
-//! queued, so its project is read from its provisional marker, and a turn that
-//! ends before adoption is held until the chat is adopted.
+//! A Manager's chat holds the role only after its first turn is queued: a first
+//! start carries a provisional marker, and a hand-off's successor is named in
+//! the role's reserved hand-off. Either way the project is known before the
+//! role is, and a turn that ends first is held until the chat holds the role.
+//! If the marker or reservation goes away without the chat ever holding it (a
+//! failed or replaced hand-off), or the wait runs out, the turn is dropped and
+//! nothing is sent: only the chat that holds the role is ever reminded.
+//!
+//! Locks: the grants map, the tracker's state and the probe are never held
+//! while the probe reads the workspace, and a token is minted and dropped from
+//! run tasks and RPC handlers, which hold no workspace lock.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -72,8 +80,11 @@ pub struct RunBasis {
 
 pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
 
-/// How long a turn that ended before its chat was adopted waits for adoption.
-const ADOPTION_WAIT: Duration = Duration::from_secs(60);
+/// How long a turn that ended before its chat held the role waits for that.
+/// Adoption normally follows the first queued turn within moments; this only
+/// bounds a reservation or marker that never resolves, so a delayed but valid
+/// adoption is not cut off early.
+const DEFAULT_ADOPTION_WAIT: Duration = Duration::from_secs(10 * 60);
 
 struct Run {
     run_id: String,
@@ -107,6 +118,7 @@ pub struct StatusTracker {
     state: Mutex<State>,
     probe: Mutex<Option<RunProbe>>,
     wake: Arc<Notify>,
+    adoption_wait: Mutex<Option<Duration>>,
 }
 
 impl StatusTracker {
@@ -114,6 +126,18 @@ impl StatusTracker {
     /// it is set nothing is tracked.
     pub fn set_probe(&self, probe: RunProbe) {
         *self.probe.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+
+    /// Override how long a turn waits for its chat to hold the role (tests).
+    pub fn set_adoption_wait(&self, wait: Duration) {
+        *self.adoption_wait.lock().unwrap_or_else(|e| e.into_inner()) = Some(wait);
+    }
+
+    fn adoption_wait(&self) -> Duration {
+        self.adoption_wait
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or(DEFAULT_ADOPTION_WAIT)
     }
 
     fn basis(&self, chat_id: &str) -> Option<RunBasis> {
@@ -278,12 +302,22 @@ pub fn managed_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(Stri
     Some((space, role.scope_item_id))
 }
 
-/// The project of a chat's first start that the role will adopt.
+/// The project of a chat the Manager role is about to adopt: a first start
+/// still carrying its provisional marker, or the successor a hand-off has
+/// reserved.
 fn pending_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(String, String)> {
-    let chat = workspace.chat(chat_id).ok().flatten()?;
-    let item = chat.standing_role_provisional_scope(StandingRoleKind::Manager)?;
-    let space = workspace.work_item_space(item)?;
-    Some((space, item.to_owned()))
+    let item = workspace
+        .chat(chat_id)
+        .ok()
+        .flatten()
+        .and_then(|chat| chat.standing_role_provisional_scope(StandingRoleKind::Manager).map(str::to_owned))
+        .or_else(|| {
+            workspace
+                .standing_role_awaiting(chat_id, StandingRoleKind::Manager)
+                .map(|role| role.scope_item_id)
+        })?;
+    let space = workspace.work_item_space(&item)?;
+    Some((space, item))
 }
 
 /// Where a run on this chat belongs and how far its project's record has got.
@@ -298,7 +332,7 @@ pub fn run_basis(workspace: &WorkspaceHost, chat_id: &str) -> RunBasis {
 enum Check {
     /// Not a manager's turn any more (the role moved on): nothing to check.
     Drop,
-    /// The chat is the role's first start and is not adopted yet.
+    /// The chat is about to hold the role (first start or hand-off successor).
     Wait,
     Ready { published: bool },
 }
@@ -314,11 +348,15 @@ fn check(workspace: &WorkspaceHost, ended: &EndedRun) -> Check {
             published: published_between(artifact.as_ref(), ended.baseline, ended.end_revision),
         };
     }
-    let pending = workspace
+    let provisional = workspace
         .chat(&ended.chat_id)
         .ok()
         .flatten()
         .is_some_and(|chat| chat.is_provisional_for(StandingRoleKind::Manager, item));
+    let pending = provisional
+        || workspace
+            .standing_role_awaiting(&ended.chat_id, StandingRoleKind::Manager)
+            .is_some_and(|role| role.scope_item_id == *item);
     if pending { Check::Wait } else { Check::Drop }
 }
 
@@ -357,7 +395,7 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
                 let published = match check(&workspace, &ended) {
                     Check::Drop => continue,
                     Check::Wait => {
-                        if ended.at.elapsed() < ADOPTION_WAIT {
+                        if ended.at.elapsed() < tracker.adoption_wait() {
                             waiting = true;
                             tracker.hold(ended);
                         }
