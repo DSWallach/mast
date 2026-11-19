@@ -7229,19 +7229,34 @@ impl Overview {
 
     /// Outline with `w-api` marked a project: `chat` gives its Manager the
     /// fixture chat `fixture-design` (model badge), `placeholder` leaves the
-    /// Manager before its first message.
+    /// Manager before its first message. `unselected` also makes `w-ui` a
+    /// project with a placeholder Manager and selects neither Manager, so
+    /// every row shows its resting fill.
     #[cfg(feature = "snapshot")]
-    pub(crate) fn show_snapshot_manager(&mut self, with_chat: bool, cx: &mut Context<Self>) {
+    pub(crate) fn show_snapshot_manager(
+        &mut self,
+        with_chat: bool,
+        unselected: bool,
+        cx: &mut Context<Self>,
+    ) {
         use mast_proto::{StandingRole, StandingRoleKind, StandingRoleState, standing_role_id};
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
         let project = "w-api";
-        snapshot
-            .items
-            .iter_mut()
-            .find(|i| i.id == project)
-            .unwrap()
-            .is_project = true;
+        for item in &mut snapshot.items {
+            item.is_project |= item.id == project || (unselected && item.id == "w-ui");
+        }
+        if unselected {
+            snapshot.standing_roles.push(StandingRole {
+                id: standing_role_id(StandingRoleKind::Manager, "w-ui"),
+                role: StandingRoleKind::Manager,
+                scope_item_id: "w-ui".into(),
+                chain: Vec::new(),
+                current_chat_id: None,
+                fallback_chain: Vec::new(),
+                state: StandingRoleState::Idle,
+            });
+        }
         let chat = with_chat.then(|| "fixture-design".to_owned());
         if let Some(chat) = &chat {
             let mut assignment = snapshot.assignments.first().cloned().unwrap();
@@ -7276,9 +7291,13 @@ impl Overview {
         );
         self.set_mode(OverviewMode::Outline, cx);
         self.sync_outline(cx);
-        self.outline.update(cx, |outline, cx| {
-            outline.select(&row_key::manager("fixture-space", project), cx)
-        });
+        let selected = if unselected {
+            row_key::item("fixture-space", "w-launch")
+        } else {
+            row_key::manager("fixture-space", project)
+        };
+        self.outline
+            .update(cx, |outline, cx| outline.select(&selected, cx));
     }
 
     #[cfg(feature = "snapshot")]
