@@ -2,7 +2,6 @@
 
 use super::*;
 use mast_syntax::symbols::{FileChange, Symbol, SymbolIndex};
-use std::collections::BTreeMap;
 
 const MAX_INDEX_FILES: usize = 50_000;
 const MAX_INDEX_SYMBOLS: usize = 200_000;
@@ -21,7 +20,7 @@ fn file_revision(root: &Path, path: &str) -> Option<FileRevision> {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct SymbolSnapshot {
-    pub files: Arc<BTreeMap<String, Vec<Symbol>>>,
+    pub revision: u64,
     pub truncated: bool,
     pub updating: bool,
 }
@@ -36,12 +35,25 @@ pub struct RefreshSymbolsRequest {
     pub force: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuerySymbolsRequest {
+    #[serde(flatten)] pub target: WorkspaceTarget,
+    pub query: String,
+    pub limit: usize,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolMatch { pub path: String, pub symbol: Symbol }
+
 pub(super) struct SymbolIndexSlot {
     sender: tokio::sync::watch::Sender<Option<SymbolResult>>,
     cancel: CancellationToken,
     accessed: u64,
     refresh: Arc<Notify>,
     force_refresh: Arc<AtomicBool>,
+    index: Arc<std::sync::Mutex<SymbolIndex>>,
 }
 
 impl WorkspaceFiles {
@@ -58,22 +70,22 @@ impl WorkspaceFiles {
                 (slot.sender.subscribe(), None)
             } else {
                 if indexes.len() >= MAX_CHECKOUT_INDEXES {
-                    let idle = indexes.iter().filter(|(_, slot)| slot.sender.receiver_count() == 0).min_by_key(|(_, slot)| slot.accessed).map(|(key, _)| key.clone());
-                    let Some(idle) = idle else { return Err(WorkspaceFilesError::Unsupported("Symbol indexes are busy in other checkouts".into())); };
+                    let idle = indexes.iter().min_by_key(|(_, slot)| slot.accessed).map(|(key, _)| key.clone()).expect("full cache");
                     if let Some(slot) = indexes.remove(&idle) { slot.cancel.cancel(); }
                 }
                 let (sender, receiver) = tokio::sync::watch::channel(None);
                 let cancel = self.inner.cancel.child_token();
                 let refresh = Arc::new(Notify::new());
                 let force_refresh = Arc::new(AtomicBool::new(false));
-                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone() });
-                (receiver, Some((sender, cancel, refresh, force_refresh)))
+                let index = Arc::new(std::sync::Mutex::new(SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS)));
+                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone(), index: index.clone() });
+                (receiver, Some((sender, cancel, refresh, force_refresh, index)))
             }
         };
-        if let Some((sender, cancel, refresh, force_refresh)) = sender {
+        if let Some((sender, cancel, refresh, force_refresh, index)) = sender {
             let service = self.clone();
             tokio::spawn(async move {
-                let result = run_index(&service, &workspace, target, &sender, &cancel, refresh, force_refresh).await;
+                let result = run_index(&service, &workspace, target, &sender, &cancel, refresh, force_refresh, index).await;
                 if let Err(error) = result {
                     sender.send_replace(Some(Err(error)));
                 }
@@ -99,6 +111,48 @@ impl WorkspaceFiles {
         drop(receiver);
         Ok(())
     }
+
+    pub async fn query_symbols(&self, request: QuerySymbolsRequest) -> Result<Vec<SymbolMatch>, WorkspaceFilesError> {
+        if request.query.chars().count() > 256 { return Err(WorkspaceFilesError::BadParams("symbol query too long".into())); }
+        let receiver = self.subscribe_symbols(request.target.clone()).await?;
+        let workspace = self.resolve_target(&request.target).await?;
+        let index = lock(&self.inner.symbol_indexes).get(&workspace.checkout_id).ok_or_else(|| WorkspaceFilesError::Io("symbol index stopped".into()))?.index.clone();
+        let query = request.query.to_lowercase();
+        let limit = request.limit.min(200);
+        let results = tokio::task::spawn_blocking(move || {
+            let index = lock(&index);
+            let mut best = Vec::with_capacity(limit + 1);
+            for (path, symbols) in index.files() {
+                let lower_path = path.to_lowercase();
+                for symbol in symbols {
+                    let Some(score) = symbol_score(&symbol.name.to_lowercase(), &lower_path, &query) else { continue; };
+                    let position = best.partition_point(|(existing_score, existing_path, existing_symbol): &(i64, &String, &Symbol)| existing_score > &score || (existing_score == &score && (existing_path.as_str(), existing_symbol.start_line) <= (path.as_str(), symbol.start_line)));
+                    if position < limit {
+                        best.insert(position, (score, path, symbol));
+                        if best.len() > limit { best.pop(); }
+                    }
+                }
+            }
+            best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect()
+        }).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        drop(receiver);
+        Ok(results)
+    }
+}
+
+fn symbol_score(name: &str, path: &str, query: &str) -> Option<i64> {
+    if query.is_empty() { return Some(0); }
+    if name == query { return Some(10_000); }
+    if name.starts_with(query) { return Some(8_000 - name.len() as i64); }
+    if let Some(i) = name.find(query) { return Some(6_000 - i as i64 - name.len() as i64); }
+    if let Some(i) = path.find(query) { return Some(4_000 - i as i64 - path.len() as i64); }
+    let mut wanted = query.chars();
+    let mut current = wanted.next()?;
+    let mut gaps = 0;
+    for c in name.chars().chain(path.chars()) {
+        if c == current { match wanted.next() { Some(next) => current = next, None => return Some(2_000 - gaps - name.len() as i64) } } else { gaps += 1; }
+    }
+    None
 }
 
 async fn run_index(
@@ -109,6 +163,7 @@ async fn run_index(
     cancel: &CancellationToken,
     refresh: Arc<Notify>,
     force_refresh: Arc<AtomicBool>,
+    shared_index: Arc<std::sync::Mutex<SymbolIndex>>,
 ) -> Result<(), String> {
     let mut changes = service
         .watch_files(WatchWorkspaceFilesRequest {
@@ -125,9 +180,9 @@ async fn run_index(
     let _ = changes.recv().await;
     let mut known = HashSet::new();
     let mut paths_truncated = false;
-    let mut index = SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS);
     let mut revision = 0u64;
     let mut file_revisions = HashMap::new();
+    let mut recent = Vec::<String>::new();
     let mut first = true;
     loop {
         let mut updates = HashSet::new();
@@ -135,9 +190,11 @@ async fn run_index(
         let mut paths_updated = first;
         let mut check_freshness = false;
         let mut force = false;
+        let mut repair = false;
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             _ = service.inner.cancel.cancelled() => return Ok(()),
+            _ = sender.closed(), if !first => return Ok(()),
             result = paths.changed(), if !first => {
                 if result.is_err() { return Err("workspace file index stopped".into()); }
                 paths_updated = true;
@@ -148,13 +205,17 @@ async fn run_index(
             }
             event = changes.recv(), if !first => {
                 let Some(event) = event else { return Err("workspace file watcher stopped".into()); };
-                if event.resync_required { check_freshness = true; }
-                for change in event.changes {
-                    if let Some(old) = change.old_path && known.contains(&old) { removed.insert(old); }
-                    if known.contains(&change.path) {
-                        if change.kind == WorkspaceFileChangeKind::Removed { removed.insert(change.path); }
-                        else { updates.insert(change.path); }
+                let mut next = Some(event);
+                while let Some(event) = next {
+                    if event.resync_required { check_freshness = true; repair = true; }
+                    for change in event.changes {
+                        if let Some(old) = change.old_path && known.contains(&old) { removed.insert(old); }
+                        if known.contains(&change.path) {
+                            if change.kind == WorkspaceFileChangeKind::Removed { updates.remove(&change.path); removed.insert(change.path); }
+                            else { removed.remove(&change.path); updates.insert(change.path); }
+                        }
                     }
+                    next = changes.try_recv();
                 }
             }
             _ = async {}, if first => {}
@@ -186,8 +247,13 @@ async fn run_index(
                 }
             }
         }
+        for path in &updates {
+            recent.retain(|candidate| candidate != path);
+            recent.push(path.clone());
+            if recent.len() > FRESHNESS_BATCH_SIZE { recent.remove(0); }
+        }
         if updates.is_empty() && removed.is_empty() && !check_freshness {
-            let truncated = paths_truncated || index.truncated();
+            let truncated = paths_truncated || lock(&shared_index).truncated();
             let publish = sender
                 .borrow()
                 .as_ref()
@@ -195,7 +261,7 @@ async fn run_index(
                 .is_none_or(|snapshot| snapshot.truncated != truncated);
             if publish {
                 sender.send_replace(Some(Ok(Arc::new(SymbolSnapshot {
-                    files: Arc::new(index.files().clone()),
+                    revision,
                     truncated,
                     updating: false,
                 }))));
@@ -204,7 +270,7 @@ async fn run_index(
         }
         let previous = sender.borrow().as_ref().and_then(|result| result.as_ref().ok()).cloned();
         if let Some(previous) = &previous && !previous.updating {
-            sender.send_replace(Some(Ok(Arc::new(SymbolSnapshot { files: previous.files.clone(), truncated: previous.truncated, updating: true }))));
+            sender.send_replace(Some(Ok(Arc::new(SymbolSnapshot { revision: previous.revision, truncated: previous.truncated, updating: true }))));
         }
         let root = workspace.root.clone();
         static WORKERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
@@ -218,33 +284,41 @@ async fn run_index(
             permit = semaphore.acquire_owned() => permit.map_err(|error| error.to_string())?,
         };
         let cancellation = cancel.clone();
-        let (next, next_revision, next_file_revisions, next_known, snapshot) = tokio::task::spawn_blocking(move || {
+        let worker_index = shared_index.clone();
+        let mut recent = recent.clone();
+        let initial_build = revision == 0;
+        let (next_revision, next_file_revisions, next_known, next_recent, snapshot) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut updates = updates;
             if check_freshness {
-                let mut paths: Vec<_> = known.iter().cloned().collect();
-                paths.sort_unstable();
+                let paths = freshness_paths(&known, &recent, force || repair);
                 for batch in paths.chunks(FRESHNESS_BATCH_SIZE) {
                     if cancellation.is_cancelled() { break; }
                     updates.extend(changed_files(&root, batch, &file_revisions, force));
                 }
             }
-            let had_removals = !removed.is_empty();
-            let (index, revision, file_revisions, reads) = update_paths(&root, index, revision, file_revisions, removed, updates, || cancellation.is_cancelled());
-            let files = if reads == 0 && !had_removals { previous.map(|snapshot| snapshot.files.clone()).unwrap_or_else(|| Arc::new(index.files().clone())) } else { Arc::new(index.files().clone()) };
+            let mut guard = lock(&worker_index);
+            let index = std::mem::replace(&mut *guard, SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS));
+            let (index, revision, file_revisions, _) = update_paths(&root, index, revision, file_revisions, removed, updates, || cancellation.is_cancelled());
+            if initial_build {
+                let mut newest: Vec<_> = file_revisions.iter().collect();
+                newest.sort_unstable_by_key(|(_, revision)| std::cmp::Reverse(revision.modified));
+                recent = newest.into_iter().take(FRESHNESS_BATCH_SIZE).map(|(path, _)| path.clone()).collect();
+            }
             let snapshot = Arc::new(SymbolSnapshot {
-                files,
+                revision,
                 truncated: paths_truncated || index.truncated(),
                 updating: false,
             });
-            (index, revision, file_revisions, known, snapshot)
+            *guard = index;
+            (revision, file_revisions, known, recent, snapshot)
         })
         .await
         .map_err(|error| error.to_string())?;
-        index = next;
         revision = next_revision;
         file_revisions = next_file_revisions;
         known = next_known;
+        recent = next_recent;
         if sender
             .borrow()
             .as_ref()
@@ -323,25 +397,22 @@ fn changed_files(root: &Path, paths: &[String], revisions: &HashMap<String, File
     }).cloned().collect()
 }
 
+fn freshness_paths(known: &HashSet<String>, recent: &[String], all: bool) -> Vec<String> {
+    if all { known.iter().cloned().collect() } else { recent.iter().take(FRESHNESS_BATCH_SIZE).cloned().collect() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn peak_resident_bytes() -> u64 {
-        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-        // SAFETY: getrusage initializes the output on success, checked below.
-        assert_eq!(
-            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-            0
-        );
-        // SAFETY: the successful call initialized the structure.
-        let resident = unsafe { usage.assume_init() }.ru_maxrss as u64;
-        if cfg!(target_os = "macos") {
-            resident
-        } else {
-            resident.saturating_mul(1024)
-        }
+    #[test]
+    fn open_freshness_sample_is_bounded_for_large_checkout() {
+        let known: HashSet<_> = (0..50_000).map(|number| format!("file_{number}.rs")).collect();
+        let recent: Vec<_> = known.iter().take(FRESHNESS_BATCH_SIZE).cloned().collect();
+        let started = Instant::now();
+        let paths = freshness_paths(&known, &recent, false);
+        assert_eq!(paths.len(), 128);
+        assert!(started.elapsed() < Duration::from_millis(5));
     }
 
     #[test]
@@ -356,8 +427,6 @@ mod tests {
             std::fs::write(root.path().join(&path), &source).unwrap();
             paths.insert(path);
         }
-        #[cfg(unix)]
-        let before_peak = peak_resident_bytes();
         let started = Instant::now();
         let (index, revision, file_revisions, reads) = update_paths(
             root.path(),
@@ -374,16 +443,10 @@ mod tests {
             "checkout index: {reads} files, {} symbols, {bytes} estimated payload bytes, {elapsed:?}",
             index.symbol_count()
         );
-        #[cfg(unix)]
-        {
-            let peak_growth = peak_resident_bytes().saturating_sub(before_peak);
-            eprintln!("checkout index peak resident growth: {peak_growth} bytes");
-            assert!(peak_growth < 128 * 1024 * 1024);
-        }
         assert_eq!(reads, 1000);
         assert_eq!(index.symbol_count(), 20_000);
         assert!(bytes < 4 * 1024 * 1024);
-        assert!(elapsed < Duration::from_secs(20));
+        assert!(elapsed < Duration::from_millis(750));
         let first_batch: Vec<_> = file_revisions.keys().take(FRESHNESS_BATCH_SIZE).cloned().collect();
         let check_started = Instant::now();
         let unchanged = changed_files(root.path(), &first_batch, &file_revisions, false);

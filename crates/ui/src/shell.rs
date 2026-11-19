@@ -657,7 +657,7 @@ pub struct Shell {
     workspace_search_index_task: Option<Task<()>>,
     workspace_symbol_key: Option<String>,
     workspace_symbol_engine: Option<crate::state::EngineHandle>,
-    workspace_symbol_index: Option<std::sync::Arc<Vec<workspace_search::IndexedSymbol>>>,
+    workspace_symbol_index: Option<()>,
     workspace_symbol_truncated: bool,
     workspace_symbol_updating: bool,
     workspace_symbol_error: Option<String>,

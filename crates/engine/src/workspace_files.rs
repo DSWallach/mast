@@ -851,6 +851,19 @@ impl CheckoutWatch {
 }
 
 impl WorkspaceFileSubscription {
+    fn try_recv(&mut self) -> Option<WorkspaceFileChanges> {
+        if let Some(initial) = self.initial.take() { return Some(initial); }
+        match self.receiver.try_recv() {
+            Ok(changes) => Some(changes),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                let (receiver, baseline) = self.watch.subscribe_with_baseline();
+                self.receiver = receiver;
+                Some(baseline)
+            }
+            Err(_) => None,
+        }
+    }
+
     pub async fn recv(&mut self) -> Option<WorkspaceFileChanges> {
         if self.watch.cancel.is_cancelled() {
             return None;

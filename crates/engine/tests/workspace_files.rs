@@ -106,43 +106,57 @@ async fn symbol_index_tracks_workspace_changes() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo(&repo).await;
+    std::fs::write(repo.join("many.rs"), (0..250).map(|i| format!("fn symbol_{i}() {{}}\n")).collect::<String>()).unwrap();
     let core = assemble(&temp.path().join("data"), "device-symbols");
     core.workspace.create_space("space-symbols", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
     core.workspace.create_chat("chat-symbols", Some("space-symbols"), None, None, None).unwrap();
     let client = mast_rpc::memory_client(core.rpc_service());
     let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
     let initial = tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
-    assert_eq!(initial["files"]["src/lib.rs"][0]["name"], "answer");
-    let target: mast_proto::WorkspaceTarget = serde_json::from_value(serde_json::json!({"chatId":"chat-symbols"})).unwrap();
-    let cached = core.workspace_files.subscribe_symbols(target.clone()).await.unwrap();
-    let snapshot = cached.borrow().clone().unwrap().unwrap();
-    drop(cached);
-    drop(stream);
-    let reopened = core.workspace_files.subscribe_symbols(target).await.unwrap();
-    let reused = reopened.borrow().clone().unwrap().unwrap();
-    assert!(Arc::ptr_eq(&snapshot, &reused), "reopening an unchanged checkout reuses its snapshot");
-    drop(reopened);
-    let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
+    assert!(initial.get("files").is_none(), "status frames must never carry the whole index");
+    assert!(serde_json::to_vec(&initial).unwrap().len() < 256);
+    let params = |query: &str| serde_json::json!({"chatId":"chat-symbols", "query":query, "limit":200});
+    let initial_matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("answer")).await.unwrap();
+    assert_eq!(initial_matches[0]["symbol"]["name"], "answer");
+    let bounded = client.call(methods::QUERY_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "query":"", "limit":10000})).await.unwrap();
+    assert_eq!(bounded.as_array().unwrap().len(), 200);
+    client.call(methods::REFRESH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "force":false})).await.unwrap();
+    let checked = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["updating"] == false { break frame; }
+        }
+    }).await.unwrap();
+    assert_eq!(checked["revision"], initial["revision"], "unchanged open must not parse files");
     std::fs::write(repo.join("src/lib.rs"), "pub fn revised() {}\n").unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let frame = stream.recv().await.unwrap();
-            if frame["files"]["src/lib.rs"][0]["name"] == "revised" { break; }
+            assert!(frame.get("files").is_none());
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("revised")).await.unwrap();
+                if !matches.as_array().unwrap().is_empty() { break; }
+            }
         }
     }).await.unwrap();
     std::fs::write(repo.join("created.rs"), "fn created() {}\n").unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let frame = stream.recv().await.unwrap();
-            if frame["files"]["created.rs"][0]["name"] == "created" { break; }
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
+                if !matches.as_array().unwrap().is_empty() { break; }
+            }
         }
     }).await.unwrap();
     std::fs::remove_file(repo.join("created.rs")).unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let frame = stream.recv().await.unwrap();
-            if frame["files"].as_object().is_some_and(|files| !files.contains_key("created.rs")) { break; }
+            if frame["updating"] == false {
+                let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
+                if matches.as_array().unwrap().is_empty() { break; }
+            }
         }
     }).await.unwrap();
 }

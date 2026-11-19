@@ -4350,10 +4350,15 @@ impl RpcService for EngineRpc {
                 self.workspace_files.refresh_symbols(request.target, request.force).await.map_err(RpcError::from)?;
                 RpcReply::value(&serde_json::json!({"ok": true}))
             }
+            methods::QUERY_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::QuerySymbolsRequest = parse_params(params)?;
+                let matches = self.workspace_files.query_symbols(request).await.map_err(RpcError::from)?;
+                RpcReply::value(&matches)
+            }
             methods::WATCH_WORKSPACE_SYMBOLS => {
                 let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let index = self.workspace_files.subscribe_symbols(request.target).await.map_err(RpcError::from)?;
-                let stream = futures::stream::unfold((index, true, None::<std::sync::Arc<crate::workspace_files::symbols::SymbolSnapshot>>), |(mut index, mut first, mut previous)| async move {
+                let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
                     loop {
                         if !first && index.changed().await.is_err() { return None; }
                         first = false;
@@ -4361,14 +4366,11 @@ impl RpcService for EngineRpc {
                         if let Some(value) = value {
                             let frame = match value {
                                 Ok(symbols) => {
-                                    let changed = previous.as_ref().is_none_or(|old| !std::sync::Arc::ptr_eq(&old.files, &symbols.files));
-                                    let frame = if changed { serde_json::json!({"files": symbols.files.as_ref(), "truncated": symbols.truncated, "updating": symbols.updating}) } else { serde_json::json!({"truncated": symbols.truncated, "updating": symbols.updating}) };
-                                    previous = Some(symbols);
-                                    frame
+                                    serde_json::json!({"revision": symbols.revision, "truncated": symbols.truncated, "updating": symbols.updating})
                                 },
                                 Err(error) => serde_json::json!({"error": error}),
                             };
-                            return Some((frame, (index, false, previous)));
+                            return Some((frame, (index, false)));
                         }
                     }
                 });

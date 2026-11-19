@@ -239,6 +239,10 @@ impl WorkspaceFilesClient {
         Ok(())
     }
 
+    pub async fn query_symbols(&self, query: String) -> Result<Vec<mast_engine::workspace_files::symbols::SymbolMatch>, FilesClientError> {
+        self.call(methods::QUERY_WORKSPACE_SYMBOLS, &mast_engine::workspace_files::symbols::QuerySymbolsRequest { target: self.context.target.clone(), query, limit: 200 }).await
+    }
+
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,
