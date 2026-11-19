@@ -2161,7 +2161,7 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
-        let turn_closed: bool;
+        let delivered_reminder;
         let session = {
             let mut statuses = lock(&self.statuses);
             // A chat's first row is created already in the new status, so
@@ -2191,10 +2191,13 @@ impl Inner {
             );
             // A turn ends when an active session settles: the same boundary
             // `started_at` and the tool-failure ledger use. Only an in-memory
-            // report is made, after the lock is released.
-            turn_closed = existed
-                && was_active
-                && matches!(status, SessionStatus::Idle | SessionStatus::Errored);
+            // snapshot is captured under the status lock, before a new turn can start.
+            delivered_reminder = if existed && was_active
+                && matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+                Some(self.agent_tokens.manager_status().delivered_reminder(chat_id))
+            } else {
+                None
+            };
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
@@ -2240,8 +2243,8 @@ impl Inner {
         }
         // The Manager status reminder is judged when a turn closes. No lock is
         // held here.
-        if turn_closed {
-            self.agent_tokens.manager_status().turn_closed(chat_id);
+        if let Some(delivered) = delivered_reminder {
+            self.agent_tokens.manager_status().turn_closed(chat_id, delivered.as_deref());
         }
     }
 

@@ -205,13 +205,18 @@ impl StatusTracker {
         }
     }
 
-    /// A turn closed: the session went idle. A reminder its turn received is
-    /// settled: covered, or given up for the generations it was issued to cover.
-    pub fn turn_closed(&self, chat_id: &str) {
+    /// Snapshot the delivered reminder at the session transition, under its status lock.
+    pub fn delivered_reminder(&self, chat_id: &str) -> Option<String> {
+        self.chats().get(chat_id).and_then(|c| c.ask.as_ref())
+            .filter(|ask| ask.delivered).map(|ask| ask.message_id.clone())
+    }
+
+    /// Settle only the reminder captured when this turn closed.
+    pub fn turn_closed(&self, chat_id: &str, delivered: Option<&str>) {
         {
             let mut chats = self.chats();
             if let Some(chat) = chats.get_mut(chat_id)
-                && chat.ask.as_ref().is_some_and(|ask| ask.delivered)
+                && chat.ask.as_ref().is_some_and(|ask| ask.delivered && Some(ask.message_id.as_str()) == delivered)
             {
                 let ask = chat.ask.take().expect("checked above");
                 if chat.covered() < ask.target {
@@ -281,6 +286,7 @@ impl StatusTracker {
             && chat.ask.as_ref().is_some_and(|ask| ask.message_id == message_id)
         {
             chat.ask = None;
+            self.wake.notify_one();
         }
     }
 
@@ -321,6 +327,7 @@ impl StatusTracker {
     /// the reminder is lost, so it is released and the next evaluation asks.
     pub fn reminder_lost(&self, chat_id: &str, message_id: &str) {
         self.release(chat_id, message_id);
+        self.wake.notify_one();
     }
 
     /// Give up what is owed so far, and any reminder: the chat does not manage a
@@ -436,6 +443,19 @@ impl ManagerStatusWatch {
     }
 }
 
+async fn retry_after(waiting: bool, interval: Duration) {
+    if waiting {
+        tokio::time::sleep(interval).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+fn queue_failed(tracker: &StatusTracker, chat_id: &str, message_id: &str, waiting: &mut bool) {
+    tracker.ask_failed(chat_id, message_id);
+    *waiting = true;
+}
+
 /// Watch for chats that owe the status and queue the one reminder each earns.
 pub fn spawn_watch(
     tokens: Arc<AgentTokens>,
@@ -487,23 +507,20 @@ pub fn spawn_watch(
                             doc_host.queue_context_message(&chat_id, &message_id, &manager_status_nudge_text(latest))
                         {
                             tracing::warn!(chat = %chat_id, target, %error, "manager status reminder not queued");
-                            tracker.ask_failed(&chat_id, &message_id);
+                            queue_failed(tracker, &chat_id, &message_id, &mut waiting);
                         }
                     }
                     Eval::Withdraw { message_id } => {
                         let removed = doc_host.withdraw_queued(&chat_id, &message_id).unwrap_or(false);
                         tracker.supersede_done(&chat_id, &message_id, removed);
+                        if !removed {
+                            waiting = true;
+                        }
                     }
                 }
             }
             let recheck = tracker.recheck_interval();
-            let retry = async {
-                if waiting {
-                    tokio::time::sleep(recheck).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            };
+            let retry = retry_after(waiting, recheck);
             tokio::select! {
                 _ = stop.cancelled() => return,
                 _ = wake.notified() => {}
@@ -644,7 +661,7 @@ mod tests {
         // The reminder is delivered, its turn closes without a publish: Missed
         // for generation 1 only.
         t.reminder_confirmed(CHAT, &id);
-        t.turn_closed(CHAT);
+        t.turn_closed(CHAT, t.delivered_reminder(CHAT).as_deref());
         assert!(t.reminder(CHAT).is_none());
         assert!(t.owes(CHAT), "generation 2 is newer than what was asked for");
         let (_, second) = remind(&t);
@@ -652,7 +669,7 @@ mod tests {
         // Missed again for generation 2: nothing is owed and nothing is asked
         // twice for the same generation.
         t.reminder_confirmed(CHAT, &t.reminder(CHAT).unwrap());
-        t.turn_closed(CHAT);
+        t.turn_closed(CHAT, t.delivered_reminder(CHAT).as_deref());
         assert!(!t.owes(CHAT));
         assert_eq!(t.evaluate(CHAT, true), Eval::Nothing);
         // A later change is owed again.
@@ -669,10 +686,24 @@ mod tests {
         let admitted = t.generation(CHAT); // the ask turn's publish is admitted
         t.changed(CHAT); // a change completes after dispatch and after admission
         t.published(CHAT, 1, admitted);
-        t.turn_closed(CHAT);
+        t.turn_closed(CHAT, t.delivered_reminder(CHAT).as_deref());
         assert!(t.reminder(CHAT).is_none(), "the reminder settled: it covered {target}");
         assert!(t.owes(CHAT), "the later change is owed");
         assert!(matches!(t.evaluate(CHAT, true), Eval::Remind { target: 2, .. }));
+    }
+
+    #[test]
+    fn delayed_old_closure_does_not_settle_the_next_turns_reminder() {
+        let (t, _row) = tracker();
+        t.changed(CHAT);
+        let old_delivery = t.delivered_reminder(CHAT);
+        let (id, _) = remind(&t);
+        t.reminder_confirmed(CHAT, &id);
+        t.turn_closed(CHAT, old_delivery.as_deref());
+        assert_eq!(t.reminder(CHAT).as_deref(), Some(id.as_str()));
+        assert!(t.owes(CHAT));
+        t.turn_closed(CHAT, t.delivered_reminder(CHAT).as_deref());
+        assert!(!t.owes(CHAT));
     }
 
     #[test]
@@ -681,7 +712,7 @@ mod tests {
         t.changed(CHAT);
         let (id, _) = remind(&t);
         t.reminder_confirmed(CHAT, "user-prompt");
-        t.turn_closed(CHAT);
+        t.turn_closed(CHAT, t.delivered_reminder(CHAT).as_deref());
         assert_eq!(t.reminder(CHAT).as_deref(), Some(id.as_str()), "only the reminder's own id counts");
     }
 
@@ -701,6 +732,34 @@ mod tests {
         // A change after the withdrawal is asked normally.
         t.changed(CHAT);
         assert!(matches!(t.evaluate(CHAT, true), Eval::Remind { .. }));
+    }
+
+    #[tokio::test]
+    async fn failed_queue_is_retried_without_an_unrelated_notification() {
+        let (t, _row) = tracker();
+        t.changed(CHAT);
+        let (id, _) = remind(&t);
+        t.wake.notified().await;
+        let mut waiting = false;
+        queue_failed(&t, CHAT, &id, &mut waiting);
+        tokio::time::timeout(Duration::from_secs(1), retry_after(waiting, Duration::from_millis(1)))
+            .await.expect("failed queue schedules a retry");
+        assert!(matches!(t.evaluate(CHAT, true), Eval::Remind { target: 1, .. }));
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_covered_reminder_wakes_the_watcher_for_newer_work() {
+        let (t, _row) = tracker();
+        t.changed(CHAT);
+        let (id, _) = remind(&t);
+        t.published(CHAT, 1, 1);
+        t.changed(CHAT);
+        // Consume the existing coalesced notification before withdrawal.
+        t.wake.notified().await;
+        assert_eq!(t.evaluate(CHAT, true), Eval::Withdraw { message_id: id.clone() });
+        t.supersede_done(CHAT, &id, true);
+        tokio::time::timeout(Duration::from_millis(100), t.wake.notified()).await.expect("withdrawal wakes watcher");
+        assert!(matches!(t.evaluate(CHAT, true), Eval::Remind { target: 2, .. }));
     }
 
     #[test]
