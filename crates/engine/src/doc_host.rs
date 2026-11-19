@@ -3853,8 +3853,6 @@ impl DocHost {
         self.inner.event_turns.clone()
     }
 
-    /// A wake message still waiting in the queue is taken back out and its
-    /// events handed back to the wake service.
     /// The Manager status reminder, if `id` is it, is being taken for dispatch:
     /// it is in flight, not cancelled, until the dispatch settles.
     fn note_dispatching(&self, chat_id: &str, id: &str) {
@@ -3864,21 +3862,26 @@ impl DocHost {
     }
 
     /// A failed dispatch has put its row back: it is no longer in flight, and
-    /// is queued again. If the row cannot be found in the queue the restore
-    /// failed and the message is lost: the reminder is released so that the next
-    /// owing turn asks again, rather than waiting on a row that will never come.
-    /// The reminder stays in flight until this has looked, so the gap between
-    /// the failure and the restore can never read as a cancellation.
+    /// is queued again. If the queue is read and the row is not in it, the
+    /// restore failed and the message is lost: the reminder is released so that
+    /// the next owing turn asks again, rather than waiting on a row that will
+    /// never come. If the queue cannot be read, nothing is known and the
+    /// reminder stays reserved. The reminder stays in flight until this has
+    /// looked, so the gap between the failure and the restore can never read as
+    /// a cancellation.
     fn settle_restore(&self, handle: &ChatDocHandle, id: &str) {
         let Some(sessions) = self.sessions() else {
             return;
         };
         let tracker = sessions.agent_tokens();
         let tracker = tracker.manager_status();
-        if handle.doc.read_queue().is_ok_and(|queue| queue.iter().any(|row| row.id == id)) {
-            tracker.dispatch_failed(&handle.chat_id, id);
-        } else {
-            tracker.reminder_lost(&handle.chat_id, id);
+        match handle.doc.read_queue() {
+            Ok(queue) if queue.iter().all(|row| row.id != id) => {
+                tracker.reminder_lost(&handle.chat_id, id)
+            }
+            // Back in the queue, or the queue cannot be read: nothing says the
+            // row is lost, so the reminder stays reserved and no longer in flight.
+            Ok(_) | Err(_) => tracker.dispatch_failed(&handle.chat_id, id),
         }
     }
 
@@ -3903,6 +3906,8 @@ impl DocHost {
         }
     }
 
+    /// A wake message still waiting in the queue is taken back out and its
+    /// events handed back to the wake service.
     pub(crate) fn pull_pending_event_message(&self, chat_id: &str) {
         let turns = &self.inner.event_turns;
         let Some(message_id) = turns.pending_message(chat_id) else {

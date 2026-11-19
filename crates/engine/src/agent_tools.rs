@@ -1165,17 +1165,19 @@ impl AgentToolsService {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
         // The turn a state-changing call belongs to is the one it is admitted
-        // in; a successful completion is attributed to that turn, whatever the
-        // session has done in the meantime.
+        // in, and that turn's record is kept until the call settles: a
+        // successful completion is attributed to it, whatever the session has
+        // done in the meantime.
         let admitted = crate::manager_status::is_state_changing(&params.tool)
-            .then(|| self.tokens.manager_status().admit(&context.grant.chat_id));
+            .then(|| self.tokens.manager_status().admit_call(&context.grant.chat_id));
         let result = self.dispatch(&context, &params.tool, &arguments);
-        if result.is_ok()
-            && let Some(turn) = admitted
-        {
-            self.tokens
-                .manager_status()
-                .note_state_change(&context.grant.chat_id, &context.grant.run_id, turn);
+        if let Some(turn) = admitted {
+            self.tokens.manager_status().complete_call(
+                &context.grant.chat_id,
+                &context.grant.run_id,
+                turn,
+                result.is_ok(),
+            );
         }
         result
             .map_err(|error| match error {

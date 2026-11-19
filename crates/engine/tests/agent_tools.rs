@@ -6040,14 +6040,117 @@ async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation()
     let id = tokens.manager_status().reserve_reminder(chat, 0);
     rig.core.doc_host.queue_message_with_id(chat, &id, "remind", Vec::new(), true).await.unwrap();
     let handle = rig.core.doc_host.open(chat).unwrap();
-    // Whatever the drain did with it, the row is there and the reminder is held.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The drain took the row, the dispatch failed, and the row was put back:
+    // the tracker saw exactly that failure and restore.
+    wait_for(|| tokens.manager_status().reminder_restores(chat) >= 1, "the failed dispatch to be restored").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         handle.doc().read_queue().unwrap().iter().any(|row| row.id == id),
         "the row is queued, not lost"
     );
     assert_eq!(tokens.manager_status().reminder(chat).as_deref(), Some(id.as_str()));
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing was delivered");
+    assert!(tokens.manager_status().reminder_restores(chat) >= 1, "a dispatch really failed and was restored");
+}
+
+fn warm_fixture(
+    warm: &Arc<Warm>,
+) -> (impl Fn() + '_, impl Fn() -> usize + '_) {
+    let feed_done = move || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = move || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    (feed_done, reminders)
+}
+
+/// A reminder that reaches an active turn through the queue's own steering
+/// (`steer_queued_now`) is settled by that turn, like a direct steer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_reminder_steered_into_an_active_turn_is_settled_by_it() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-queued-steer").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    // The reminder is queued behind the running turn, then promoted into it.
+    let id = tokens.manager_status().reserve_reminder(CHAT, 0);
+    rig.core.doc_host.queue_message_with_id(CHAT, &id, "status, please", Vec::new(), true).await.unwrap();
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap(), "the row was steered in");
+    wait_for(|| warm.received.lock().unwrap().iter().any(|m| m.contains("status, please")), "the harness to receive it").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the turn to park").await;
+    wait_for(|| tokens.manager_status().reminder(CHAT).is_none(), "the reminder to settle").await;
+
+    // Later owing turns are asked as usual.
+    rig.core.sessions.steer(CHAT, "another", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Next", "idempotencyKey": "qs1" }))
+        .await
+        .unwrap();
+    feed_done();
+    wait_for(|| reminders() == 1, "the next turn's reminder").await;
+}
+
+/// The user-message write fails after the mailbox accepted a prompt (injected
+/// at that exact point of the real steer path). The reservation does not
+/// linger: the numbers move on, and the next prompt's turn is tracked and asked
+/// about as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_reservation() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-post-mailbox").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    let before = tokens.manager_status().current_turn(CHAT);
+
+    // The write fails once the prompt is in the mailbox.
+    rig.core.sessions.fail_next_user_write(CHAT);
+    assert!(rig.core.sessions.steer(CHAT, "lost", None).await.is_err());
+    wait_for(|| warm.received.lock().unwrap().iter().any(|m| m == "lost"), "the harness to have been shown it").await;
+    assert!(tokens.manager_status().current_turn(CHAT) > before, "its number is spent");
+    // Whatever the run did with that prompt, let it settle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    if status_is(mast_proto::SessionStatus::Working) {
+        feed_done();
+    }
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the run to settle").await;
+    let spent = tokens.manager_status().current_turn(CHAT);
+
+    // The next prompt is numbered after it, and its turn is tracked.
+    rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    assert!(tokens.manager_status().current_turn(CHAT) > spent, "numbers are never reused");
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "After", "idempotencyKey": "pm1" }))
+        .await
+        .unwrap();
+    feed_done();
+    wait_for(|| reminders() == 1, "the reminder for the turn after the error").await;
 }
 
 /// Adoption can land before anyone has looked at the turns that ended without

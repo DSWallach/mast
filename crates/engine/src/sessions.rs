@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -217,6 +217,9 @@ struct Inner {
     /// Live per-Run agent-tool tokens (Work Outline Milestone 4); shared
     /// with the engine's agent RPC surface.
     agent_tokens: Arc<AgentTokens>,
+    /// Chats whose next user-message write, after a prompt has been accepted
+    /// into a run's mailbox, fails. A test seam for that error path.
+    fail_next_user_write: Mutex<HashSet<String>>,
     /// How injected `zeron mcp` servers reach this engine; `None` disables
     /// agent tools.
     agent_tools_launch: Mutex<Option<AgentToolsLaunch>>,
@@ -425,6 +428,7 @@ impl SessionsEngine {
                 assistant_text_listener: OnceLock::new(),
                 context_reset_confirmed: Mutex::new(std::collections::HashSet::new()),
                 agent_tokens: AgentTokens::new(),
+                fail_next_user_write: Mutex::new(HashSet::new()),
                 agent_tools_launch: Mutex::new(AgentToolsLaunch::from_current_exe()),
             }),
         }
@@ -439,6 +443,13 @@ impl SessionsEngine {
     /// Override how injected `zeron mcp` servers reach this engine (`None`
     /// turns agent tools off). Default: this executable's `mcp` subcommand
     /// on `MAST_IPC_PORT`.
+    /// Make the next user-message write for `chat_id`, after a prompt has been
+    /// accepted into a run's mailbox, fail. For tests of that error path.
+    #[doc(hidden)]
+    pub fn fail_next_user_write(&self, chat_id: &str) {
+        lock(&self.inner.fail_next_user_write).insert(chat_id.to_owned());
+    }
+
     pub fn set_agent_tools_launch(&self, launch: Option<AgentToolsLaunch>) {
         *lock(&self.inner.agent_tools_launch) = launch;
     }
@@ -1144,6 +1155,7 @@ impl SessionsEngine {
             };
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
+                self.inner.fail_if_injected(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 // A warm Turn continues the session's revision; record its pin
                 // so a crash mid-Turn revives it with the same one.
@@ -1483,6 +1495,7 @@ impl SessionsEngine {
             });
         }
         let handle = self.doc_handle(chat_id)?;
+        self.inner.fail_if_injected(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
@@ -2641,6 +2654,15 @@ impl Inner {
         {
             tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
         }
+    }
+
+    /// Fail once if a test armed it: the user-message write after the mailbox
+    /// accepted a prompt.
+    fn fail_if_injected(&self, chat_id: &str) -> Result<(), EngineError> {
+        if lock(&self.fail_next_user_write).remove(chat_id) {
+            return Err(EngineError::Other("injected user-message write failure".into()));
+        }
+        Ok(())
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -4432,9 +4454,9 @@ mod tests {
             Err("write_user_message failed")
         };
         assert!(delivered_then_failed(&turns).is_err());
-        assert_eq!(turns.admit("c"), 0, "the number is given back");
-        let (_, source) = turns.next_turn("c");
+        let (next, source) = turns.next_turn("c");
         assert_eq!(source, None, "no stale reservation is left to be consumed");
+        assert!(next > 1, "the released number is spent, never reissued");
         {
             let _reservation = TurnReservation::new(&turns, "c", "m2");
             let (taken, source) = turns.next_turn("c");

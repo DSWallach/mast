@@ -156,10 +156,13 @@ struct Numbered {
 /// What is needed to settle a call that completes after its turn ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosedTurn {
-    seq: u64,
     baseline: u32,
+    /// The record's revision when the turn actually ended.
+    end_revision: u32,
     project: (String, String),
     ask: bool,
+    /// The chat did not hold the role when the turn ended.
+    forced: bool,
 }
 
 /// How many deleted chats are remembered, oldest forgotten first.
@@ -175,6 +178,8 @@ struct Ask {
     dispatching: bool,
     /// The turn that delivered the reminder has started.
     running: bool,
+    /// How many times a dispatch of the reminder failed and its row was restored.
+    restores: u32,
 }
 
 #[derive(Default)]
@@ -190,10 +195,13 @@ struct State {
     /// stays until the turn's start is reported, so a tool call that lands in
     /// between can still find who started it.
     pending: HashMap<String, VecDeque<Numbered>>,
-    /// The latest turn of each chat that ended without owing anything, so a call
-    /// admitted into it that completes late is still settled.
-    last_closed: HashMap<String, ClosedTurn>,
-    /// Chats that no longer exist. A late report about one creates nothing.
+    /// Tool calls admitted into a turn and not yet settled, per chat and turn.
+    inflight: HashMap<(String, u64), usize>,
+    /// A turn that ended while a call admitted into it was still running, kept,
+    /// with its actual end revision, until every such call has settled, however
+    /// many turns have ended since.
+    closed_turns: HashMap<(String, u64), ClosedTurn>,
+    /// Chats confirmed deleted. A late report about one creates nothing.
     gone: HashSet<String>,
     gone_order: VecDeque<String>,
     asked: HashMap<String, Ask>,
@@ -277,20 +285,16 @@ impl StatusTracker {
     }
 
     /// The prompt was not delivered after all, or its delivery has finished:
-    /// drop the reservation if the session has not taken the number, and give
-    /// the number back when nothing was numbered after it. A number the session
-    /// has taken stays until its turn's start is reported.
+    /// drop the reservation if the session has not taken the number. The number
+    /// itself is spent: numbers are never reused, so a call admitted into this
+    /// turn can never be confused with a later one. A number the session has
+    /// taken stays until its turn's start is reported.
     pub fn release_turn(&self, chat_id: &str, source: &str) {
         let mut state = self.state();
-        let Some(queue) = state.pending.get_mut(chat_id) else {
-            return;
-        };
-        let Some(at) = queue.iter().position(|n| !n.consumed && n.source.as_deref() == Some(source)) else {
-            return;
-        };
-        let released = queue.remove(at).expect("position is in range");
-        if state.seq.get(chat_id).copied() == Some(released.seq) {
-            state.seq.insert(chat_id.to_owned(), released.seq - 1);
+        if let Some(queue) = state.pending.get_mut(chat_id)
+            && let Some(at) = queue.iter().position(|n| !n.consumed && n.source.as_deref() == Some(source))
+        {
+            queue.remove(at);
         }
     }
 
@@ -334,13 +338,60 @@ impl StatusTracker {
         self.state().seq.get(chat_id).copied().unwrap_or(0)
     }
 
-    /// The turn a tool call belongs to as it is admitted: the chat's latest
-    /// numbered turn. A number is reserved or taken before the agent can see its
-    /// prompt, and only for a prompt that starts a turn, so the latest number is
+    /// The turn a tool call belongs to as it is admitted: the newest turn that
+    /// is live, that is, in flight or numbered and waiting to be reported, else
+    /// the latest that ever was. A number is reserved or taken before the agent
+    /// can see its prompt, and only for a prompt that starts a turn, so this is
     /// the turn the call is in, even while the previous turn's end, or this
-    /// turn's start, has not been reported.
+    /// turn's start, has not been reported. A number that was reserved and then
+    /// released is no longer live, so calls in the turn still running are not
+    /// attributed to it.
     pub fn admit(&self, chat_id: &str) -> u64 {
-        self.current_turn(chat_id)
+        let state = self.state();
+        Self::live_turn(&state, chat_id)
+    }
+
+    fn live_turn(state: &State, chat_id: &str) -> u64 {
+        let open = state.turns.get(chat_id).map_or(0, |t| t.seq);
+        let waiting = state
+            .pending
+            .get(chat_id)
+            .and_then(|q| q.iter().map(|n| n.seq).max())
+            .unwrap_or(0);
+        match open.max(waiting) {
+            0 => state.seq.get(chat_id).copied().unwrap_or(0),
+            live => live,
+        }
+    }
+
+    /// A state-changing call is being admitted: it is placed in its turn, which
+    /// is returned, and counted as running until it settles, so that turn's
+    /// record is kept for as long as the call can still complete.
+    pub fn admit_call(&self, chat_id: &str) -> u64 {
+        let mut state = self.state();
+        let turn = Self::live_turn(&state, chat_id);
+        if turn > 0 && !state.gone.contains(chat_id) {
+            *state.inflight.entry((chat_id.to_owned(), turn)).or_default() += 1;
+        }
+        turn
+    }
+
+    /// The call admitted into `turn` has finished. When it succeeded the turn
+    /// owes a revision, whatever has happened to the turn since. The turn's
+    /// record is released once its last call has settled.
+    pub fn complete_call(&self, chat_id: &str, run_id: &str, turn: u64, succeeded: bool) {
+        if succeeded {
+            self.note_state_change(chat_id, run_id, turn);
+        }
+        let mut state = self.state();
+        let key = (chat_id.to_owned(), turn);
+        if let Some(count) = state.inflight.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                state.inflight.remove(&key);
+                state.closed_turns.remove(&key);
+            }
+        }
     }
 
     /// Number a turn and begin it (the session's start, as one step).
@@ -420,7 +471,7 @@ impl StatusTracker {
         enum Step {
             Owe,
             Open(Option<String>),
-            Late(Option<ClosedTurn>),
+            Late,
         }
         let step = {
             let state = self.state();
@@ -431,9 +482,7 @@ impl StatusTracker {
             let closed = state.closed.get(chat_id).copied().unwrap_or(0);
             match open {
                 Some(open) if turn == 0 || open == turn => Step::Owe,
-                _ if turn > 0 && turn <= closed => {
-                    Step::Late(state.last_closed.get(chat_id).filter(|c| c.seq == turn).cloned())
-                }
+                _ if turn > 0 && turn <= closed => Step::Late,
                 Some(open) if open > turn => return,
                 _ => Step::Open(
                     state
@@ -447,31 +496,29 @@ impl StatusTracker {
         match step {
             Step::Owe => {}
             Step::Open(source) => self.begin(chat_id, turn, source.as_deref()),
-            Step::Late(Some(closed)) => {
-                // The turn ended before this call completed: it owes after all.
-                let basis = self.basis(chat_id);
+            Step::Late => {
+                // The turn ended before this call completed: it owes after all,
+                // judged on the revisions as they were when the turn ended.
                 let mut state = self.state();
-                if state.last_closed.get(chat_id).is_some_and(|c| c.seq == closed.seq) {
-                    state.last_closed.remove(chat_id);
+                if let Some(closed) = state.closed_turns.remove(&(chat_id.to_owned(), turn)) {
                     let ended = EndedRun {
                         chat_id: chat_id.to_owned(),
                         baseline: closed.baseline,
-                        end_revision: basis.as_ref().map_or(closed.baseline, |b| b.revision).max(closed.baseline),
+                        end_revision: closed.end_revision,
                         project: closed.project,
                         ask: closed.ask,
-                        forced: basis.as_ref().is_some_and(|b| !b.holds),
+                        forced: closed.forced,
                     };
                     if ended.forced {
                         Self::absorb(&mut state, ended);
                     } else {
                         state.ended.push(ended);
                     }
+                    drop(state);
+                    self.wake.notify_one();
                 }
-                drop(state);
-                self.wake.notify_one();
                 return;
             }
-            Step::Late(None) => return,
         }
         if let Some(open) = self.state().turns.get_mut(chat_id).filter(|t| turn == 0 || t.seq == turn) {
             open.run_id = Some(run_id.to_owned());
@@ -481,19 +528,41 @@ impl StatusTracker {
 
     /// A prompt carrying queued message `source` was accepted into a turn
     /// already running. That turn is the one that delivered it: if the message
-    /// is the reminder, the turn is the ask.
+    /// is the reminder, the turn is the ask. When the session has numbered the
+    /// turn but its start is not reported yet, the message is bound to that
+    /// number, and the start report claims it. When there is no such turn, the
+    /// message is not tied to anything yet and nothing is marked.
     pub fn joined_active(&self, chat_id: &str, source: &str) {
         let mut state = self.state();
-        let Some(ask) = state.asked.get_mut(chat_id).filter(|a| a.message_id == source) else {
+        let Some(baseline) = state
+            .asked
+            .get(chat_id)
+            .filter(|a| a.message_id == source)
+            .map(|a| a.baseline)
+        else {
             return;
         };
-        ask.running = true;
-        ask.dispatching = false;
-        let baseline = ask.baseline;
-        if let Some(turn) = state.turns.get_mut(chat_id) {
-            turn.ask = true;
-            turn.owed = true;
-            turn.baseline = baseline;
+        if state.turns.contains_key(chat_id) {
+            let ask = state.asked.get_mut(chat_id).expect("checked above");
+            ask.running = true;
+            ask.dispatching = false;
+            if let Some(turn) = state.turns.get_mut(chat_id) {
+                turn.ask = true;
+                turn.owed = true;
+                turn.baseline = baseline;
+            }
+            return;
+        }
+        // Numbered, not reported: bind the message to the newest such turn.
+        if let Some(numbered) = state
+            .pending
+            .get_mut(chat_id)
+            .and_then(|q| q.iter_mut().filter(|n| n.consumed).max_by_key(|n| n.seq))
+            && numbered.source.is_none()
+        {
+            numbered.source = Some(source.to_owned());
+            let ask = state.asked.get_mut(chat_id).expect("checked above");
+            ask.dispatching = false;
         }
     }
 
@@ -534,21 +603,26 @@ impl StatusTracker {
         let Some(turn) = state.turns.remove(chat_id) else {
             return;
         };
+        let end_revision = basis.map_or(turn.baseline, |b| b.revision).max(turn.baseline);
+        let forced = basis.is_some_and(|b| !b.holds);
         if !turn.owed {
-            state.last_closed.insert(
-                chat_id.to_owned(),
-                ClosedTurn { seq: turn.seq, baseline: turn.baseline, project: turn.project, ask: turn.ask },
-            );
+            // A call admitted into this turn may still complete: keep what it
+            // would need, as the turn actually ended.
+            if state.inflight.contains_key(&(chat_id.to_owned(), turn.seq)) {
+                state.closed_turns.insert(
+                    (chat_id.to_owned(), turn.seq),
+                    ClosedTurn { baseline: turn.baseline, end_revision, project: turn.project, ask: turn.ask, forced },
+                );
+            }
             return;
         }
-        state.last_closed.remove(chat_id);
         let ended = EndedRun {
             chat_id: chat_id.to_owned(),
             baseline: turn.baseline,
-            end_revision: basis.map_or(turn.baseline, |b| b.revision).max(turn.baseline),
+            end_revision,
             project: turn.project,
             ask: turn.ask,
-            forced: basis.is_some_and(|b| !b.holds),
+            forced,
         };
         if ended.forced {
             Self::absorb(state, ended);
@@ -675,7 +749,7 @@ impl StatusTracker {
         let message_id = crate::new_id();
         state.asked.insert(
             chat_id.to_owned(),
-            Ask { baseline, message_id: message_id.clone(), dispatching: false, running: false },
+            Ask { baseline, message_id: message_id.clone(), dispatching: false, running: false, restores: 0 },
         );
         message_id
     }
@@ -718,7 +792,15 @@ impl StatusTracker {
         let mut state = self.state();
         if let Some(ask) = state.asked.get_mut(chat_id).filter(|a| a.message_id == message_id) {
             ask.dispatching = false;
+            ask.restores += 1;
         }
+    }
+
+    /// How many times the chat's reminder failed to dispatch and was put back
+    /// in its queue (tests).
+    #[doc(hidden)]
+    pub fn reminder_restores(&self, chat_id: &str) -> u32 {
+        self.state().asked.get(chat_id).map_or(0, |ask| ask.restores)
     }
 
     /// The dispatch of `message_id` failed and its row could not be put back:
@@ -730,42 +812,53 @@ impl StatusTracker {
         }
     }
 
-    /// Forget every chat that is not in `live`: its numbers, reservations,
-    /// obligation and reminder. The chats are gone, so a late report about one
-    /// finds nothing to open (the probe knows no such chat).
-    pub fn retain_chats(&self, live: &HashSet<String>) {
+    /// Every chat the tracker holds state for.
+    pub fn tracked_chat_ids(&self) -> Vec<String> {
+        let state = self.state();
+        let mut ids: HashSet<&String> = HashSet::new();
+        ids.extend(state.seq.keys());
+        ids.extend(state.turns.keys());
+        ids.extend(state.pending.keys());
+        ids.extend(state.asked.keys());
+        ids.extend(state.held.keys());
+        ids.into_iter().cloned().collect()
+    }
+
+    /// Chats remembered as deleted.
+    pub fn gone_chat_ids(&self) -> Vec<String> {
+        self.state().gone.iter().cloned().collect()
+    }
+
+    /// The chat is confirmed deleted: forget its numbers, reservations,
+    /// obligation and reminder, and remember it so that a late report about it
+    /// creates nothing.
+    pub fn forget_chat(&self, chat_id: &str) {
         let mut state = self.state();
-        let known: Vec<String> = state
-            .seq
-            .keys()
-            .chain(state.turns.keys())
-            .chain(state.pending.keys())
-            .chain(state.asked.keys())
-            .chain(state.held.keys())
-            .filter(|chat| !live.contains(*chat))
-            .cloned()
-            .collect();
-        for chat in known {
-            if state.gone.insert(chat.clone()) {
-                state.gone_order.push_back(chat);
-            }
+        state.turns.remove(chat_id);
+        state.seq.remove(chat_id);
+        state.closed.remove(chat_id);
+        state.pending.remove(chat_id);
+        state.asked.remove(chat_id);
+        state.held.remove(chat_id);
+        state.ended.retain(|e| e.chat_id != chat_id);
+        state.inflight.retain(|(chat, _), _| chat != chat_id);
+        state.closed_turns.retain(|(chat, _), _| chat != chat_id);
+        if state.gone.insert(chat_id.to_owned()) {
+            state.gone_order.push_back(chat_id.to_owned());
         }
-        // A chat that is listed again is a chat again.
-        state.gone.retain(|chat| !live.contains(chat));
-        state.gone_order.retain(|chat| !live.contains(chat));
         while state.gone_order.len() > MAX_GONE {
             if let Some(oldest) = state.gone_order.pop_front() {
                 state.gone.remove(&oldest);
             }
         }
-        state.turns.retain(|chat, _| live.contains(chat));
-        state.last_closed.retain(|chat, _| live.contains(chat));
-        state.seq.retain(|chat, _| live.contains(chat));
-        state.closed.retain(|chat, _| live.contains(chat));
-        state.pending.retain(|chat, _| live.contains(chat));
-        state.asked.retain(|chat, _| live.contains(chat));
-        state.held.retain(|chat, _| live.contains(chat));
-        state.ended.retain(|e| live.contains(&e.chat_id));
+    }
+
+    /// The chat exists after all (it is listed again): a chat again.
+    pub fn unforget_chat(&self, chat_id: &str) {
+        let mut state = self.state();
+        if state.gone.remove(chat_id) {
+            state.gone_order.retain(|c| c != chat_id);
+        }
     }
 
     /// How many chats the tracker holds state for (tests).
@@ -953,9 +1046,20 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
                     if changed.is_err() {
                         return;
                     }
-                    // Chats that no longer exist take their tracking with them.
+                    // A chat the list does not show is not necessarily gone (the
+                    // list may be older than the chat): only one the registry
+                    // confirms absent is forgotten, and a listed one is a chat.
                     let live: HashSet<String> = chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
-                    tracker.retain_chats(&live);
+                    for chat_id in tracker.gone_chat_ids() {
+                        if live.contains(&chat_id) {
+                            tracker.unforget_chat(&chat_id);
+                        }
+                    }
+                    for chat_id in tracker.tracked_chat_ids() {
+                        if !live.contains(&chat_id) && matches!(workspace.chat(&chat_id), Ok(None)) {
+                            tracker.forget_chat(&chat_id);
+                        }
+                    }
                 }
                 _ = retry => {}
             }
@@ -1471,7 +1575,7 @@ mod tests {
         let (t, _s) = tracker(true, 0);
         let a = t.next_turn("m").0;
         t.begin("m", a, None);
-        let admitted = t.admit("m");
+        let admitted = t.admit_call("m");
         assert_eq!(admitted, a);
         // The call is slow: turn A ends and turn B starts while it runs.
         t.end("m", a);
@@ -1479,11 +1583,93 @@ mod tests {
         t.begin("m", b, None);
         // Its completion is settled against A, which is over: A owes after all,
         // and B owes nothing for it.
-        t.note_state_change("m", "tok", admitted);
-        let owed = t.take_ended();
-        assert_eq!(owed.len(), 1, "A's call is not lost");
+        t.complete_call("m", "tok", admitted, true);
+        assert_eq!(t.take_ended().len(), 1, "A's call is not lost");
         t.end("m", b);
         assert!(t.take_ended().is_empty(), "B owes nothing for A's call");
+    }
+
+    #[test]
+    fn a_late_call_is_judged_on_its_turns_own_window_however_many_turns_have_ended_since() {
+        let (t, shared) = tracker(true, 1);
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        let admitted = t.admit_call("m"); // A's mutation starts and is slow
+        // A ends at revision 1. Then turn B publishes revision 2 and ends; then
+        // turn C starts and ends too. A's record must survive all of them.
+        t.end("m", a);
+        set_revision(&shared, 2);
+        for _ in 0..2 {
+            let turn = t.next_turn("m").0;
+            t.begin("m", turn, None);
+            t.end("m", turn);
+        }
+        // A's mutation finally commits.
+        t.complete_call("m", "tok", admitted, true);
+        let late = t.take_ended().remove(0);
+        assert_eq!((late.baseline, late.end_revision), (1, 1), "A's end, not the revision now");
+        // B's publication (revision 2) is outside A's window: A is not satisfied.
+        assert!(matches!(published(&t, &late, &[2]), Verdict::Nudge { baseline: 1, .. }));
+        // The record is gone once the call has settled: nothing is kept for ever.
+        assert!(t.state().closed_turns.is_empty() && t.state().inflight.is_empty());
+    }
+
+    #[test]
+    fn a_turn_record_is_kept_only_while_a_call_admitted_into_it_is_running() {
+        let (t, _s) = tracker(true, 0);
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        t.end("m", a); // no call was admitted: nothing is kept
+        assert!(t.state().closed_turns.is_empty());
+        let b = t.next_turn("m").0;
+        t.begin("m", b, None);
+        let call = t.admit_call("m");
+        t.end("m", b);
+        assert_eq!(t.state().closed_turns.len(), 1);
+        // The call fails: the turn owes nothing, and the record is released.
+        t.complete_call("m", "tok", call, false);
+        assert!(t.state().closed_turns.is_empty() && t.take_ended().is_empty());
+    }
+
+    #[test]
+    fn a_released_number_is_never_issued_again() {
+        let (t, _s) = tracker(true, 0);
+        let a = t.start_turn("m");
+        t.reserve_turn("m", Some("lost-delivery"));
+        let admitted = t.admit_call("m"); // the agent saw the prompt and called a tool
+        assert!(admitted > a);
+        t.release_turn("m", "lost-delivery"); // then the delivery's cleanup ran
+        t.reserve_turn("m", Some("next"));
+        let (next, _) = t.next_turn("m");
+        assert!(next > admitted, "the number the call holds is not given to another turn");
+        // Calls in the turn still running are not attributed to the released number.
+        t.complete_call("m", "tok", admitted, false);
+        assert_eq!(t.admit("m"), next, "the latest live turn");
+    }
+
+    #[test]
+    fn an_early_steer_into_a_numbered_turn_binds_to_it_until_its_start_is_reported() {
+        let (t, _s, _row, id) = reminded(3);
+        // Working is visible: the session numbered the turn, but its start has
+        // not been reported yet. The reminder is steered into it in that gap.
+        let (b, source) = t.next_turn("m");
+        t.joined_active("m", &id);
+        // The start report arrives: the turn claims the reminder.
+        t.begin("m", b, source.as_deref());
+        t.finish_turn("m");
+        let ended = t.take_ended().remove(0);
+        assert!(ended.ask, "the turn that took the reminder is the ask");
+        assert!(matches!(t.conclude(&ended, false), Verdict::Missed { .. }));
+        assert!(t.reminder("m").is_none(), "not stranded");
+    }
+
+    #[test]
+    fn a_steer_into_no_turn_at_all_marks_nothing() {
+        let (t, _s, _row, id) = reminded(3);
+        t.joined_active("m", &id); // no turn open, none numbered
+        // The reminder is still just queued: a later owing turn is not asked again.
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        assert_eq!(t.reminder("m").as_deref(), Some(id.as_str()));
     }
 
     #[test]
@@ -1496,7 +1682,7 @@ mod tests {
         }
         t.reserve_turn("gone", Some("m1"));
         assert_eq!(t.tracked_chats(), 2);
-        t.retain_chats(&HashSet::from(["kept".to_owned()]));
+        t.forget_chat("gone");
         assert_eq!(t.tracked_chats(), 1);
         assert!(!t.turn_open("gone") && t.turn_open("kept"));
         // A late end for the deleted chat does not recreate its state.
@@ -1682,7 +1868,7 @@ mod tests {
         let a = t.next_turn("gone").0;
         t.begin("gone", a, None);
         assert_eq!(t.tracked_chats(), 1);
-        t.retain_chats(&HashSet::new());
+        t.forget_chat("gone");
         assert_eq!(t.tracked_chats(), 0);
         t.reserve_turn("gone", Some("late"));
         let (seq, _) = t.next_turn("gone");
@@ -1691,8 +1877,8 @@ mod tests {
         t.end("gone", 7);
         assert_eq!((seq, t.tracked_chats()), (0, 0), "no counters, no turn");
         assert!(!t.turn_open("gone"));
-        // A chat that is listed again is a chat again.
-        t.retain_chats(&HashSet::from(["gone".to_owned()]));
+        // A chat that turns out to exist after all is a chat again.
+        t.unforget_chat("gone");
         assert!(t.start_turn("gone") > 0);
     }
 }
