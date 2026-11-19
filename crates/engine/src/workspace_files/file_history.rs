@@ -186,6 +186,8 @@ fn valid_sha(value: &str) -> bool {
 }
 
 async fn run_git(root: &Path, args: &[&str]) -> Result<String, WorkspaceFilesError> {
+    static GIT_WORKERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _permit = GIT_WORKERS.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire().await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let mut child = mast_harness::git_command_async()
         .current_dir(root)
         .args(args)
@@ -252,7 +254,6 @@ fn parse_log(output: &str) -> Vec<FileHistoryEntry> {
         index += 1;
         let (path, previous_path) = if status.starts_with('R') && index < fields.len() {
             let second = fields[index];
-            index += 1;
             (second, Some(first))
         } else {
             (first, None)
