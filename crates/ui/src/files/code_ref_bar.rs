@@ -86,14 +86,32 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
-    fn code_ref_message(&mut self, message: impl Into<gpui::SharedString>, clear: bool, cx: &mut gpui::Context<Self>) {
+    fn code_ref_message(&mut self, message: impl Into<gpui::SharedString>, success: bool, cx: &mut gpui::Context<Self>) {
         self.code_ref_status = Some(message.into());
+        self.code_ref_status_error = !success;
+        self.code_ref_status_selection = self.editor_path.as_ref().and_then(|path| {
+            self.preview.documents.get(path).and_then(|document| document.editor.as_ref())
+                .map(|editor| (path.clone(), editor.read(cx).selected_range()))
+        });
+        self.code_ref_status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| { this.clear_code_ref_message(cx); });
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn clear_code_ref_message(&mut self, cx: &mut gpui::Context<Self>) {
+        self.code_ref_status = None;
+        self.code_ref_status_selection = None;
         self.code_ref_status_task = None;
-        if clear {
-            self.code_ref_status_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
-                let _ = this.update(cx, |this, cx| { this.code_ref_status = None; cx.notify(); });
-            }));
+        cx.notify();
+    }
+
+    pub(super) fn observe_code_ref_selection(&mut self, path: &str, editor: &gpui::Entity<super::editor::FileEditorState>, cx: &mut gpui::Context<Self>) {
+        if self.code_ref_status_selection.as_ref().is_some_and(|(status_path, selection)| {
+            status_path == path && *selection != editor.read(cx).selected_range()
+        }) {
+            self.clear_code_ref_message(cx);
         }
         cx.notify();
     }
@@ -308,16 +326,13 @@ impl super::FilesSurface {
             self.code_ref_message("Could not read the selection.", false, cx); return;
         };
         let member = self.state.read(cx).selected_execution_member(&key);
-        let Some(member) = member else {
-            self.code_ref_message("No workspace is available for this chat.", false, cx); return;
-        };
         let reference = crate::code_ref::StagedCodeRef {
             id: uuid::Uuid::new_v4().to_string(),
             reference: mast_proto::CodeRef {
                 version: 1,
                 location: mast_proto::CodeRefLocation {
-                    repo_id: member.repo_id,
-                    worktree_id: member.checkout_id,
+                    repo_id: member.as_ref().map(|member| member.repo_id.clone()).unwrap_or_default(),
+                    worktree_id: member.and_then(|member| member.checkout_id),
                     repo_root: None,
                     path,
                 },
@@ -485,6 +500,10 @@ mod tests {
             let theme = crate::theme::Theme::of(cx).clone();
             let editor = super::super::editor::new_file_editor(text, "file.rs", false, &theme, window, cx);
             window.focus(&editor.focus_handle(cx), cx);
+            let observer = cx.observe(&editor, |surface, editor, cx| {
+                surface.observe_code_ref_selection("file.rs", &editor, cx);
+            });
+            document.editor_observer = Some(observer);
             document.editor = Some(editor);
             surface.preview.active = Some("file.rs".into());
             surface.preview.documents.insert("file.rs".into(), document);
@@ -495,13 +514,6 @@ mod tests {
         }).unwrap();
         state.update(cx, |state, _| {
             state.selected_chat = Some("b".into());
-            state.apply_chat_diff_targets(vec![mast_proto::ChatDiffTargetsView {
-                chat_id: "b".into(), targets: vec![mast_proto::ChatDiffTargetView {
-                    path: "/other-repo".into(), checkout_id: "other-checkout".into(),
-                    source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
-                    repo_name: "other".into(), branch: None, head_sha: None,
-                }], ref_targets: vec![],
-            }]);
             state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
         });
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
@@ -516,13 +528,9 @@ mod tests {
         state.read_with(cx, |state, _| assert!(state.code_refs("b").is_empty()));
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-a"));
         cx.simulate_keystrokes(window.into(), &shortcut);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
+        for _ in 0..8 {
             runtime.block_on(tokio::task::yield_now());
             cx.run_until_parked();
-            if state.read_with(cx, |state, _| !state.code_refs("b").is_empty()) { break; }
-            assert!(std::time::Instant::now() < deadline, "reference was not staged");
-            std::thread::yield_now();
         }
         state.read_with(cx, |state, _| {
             assert!(state.code_refs("a").is_empty());
@@ -531,7 +539,44 @@ mod tests {
             assert_eq!(staged.reference.location.worktree_id.as_deref(), Some("file-checkout"));
             assert_eq!(staged.snippet, "first line\nsecond line");
         });
+        window.update(cx, |surface, _, _| assert_eq!(surface.code_ref_status.as_deref(), Some("Added to chat"))).unwrap();
+        cx.simulate_keystrokes(window.into(), "right");
+        cx.run_until_parked();
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
         responder.abort();
+    }
+
+    #[gpui::test]
+    fn shortcut_without_selection_opens_outline(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::{cell::Cell, rc::Rc};
+        struct Host { surface: gpui::Entity<super::super::FilesSurface>, opened: Rc<Cell<bool>> }
+        impl gpui::Render for Host {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                gpui::div().size_full().on_action(cx.listener(|this, action: &crate::shell::work_outline_ui::RunWorkOutlineCommand, _, _| {
+                    if action.0 == crate::work_outline::WorkOutlineCommand::OpenOutline { this.opened.set(true); }
+                })).child(self.surface.clone())
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
+        });
+        let opened = Rc::new(Cell::new(false));
+        let (host, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            let surface = cx.new(|cx| super::super::FilesSurface::new(state, "a".into(), false, 1000, 13.0, false, false, cx));
+            Host { surface, opened: opened.clone() }
+        });
+        vcx.update(|window, cx| {
+            let surface = host.read(cx).surface.clone();
+            let focus = surface.read(cx).tree_focus.clone();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        vcx.simulate_keystrokes(&crate::settings::platform_combo("mod-shift-l"));
+        assert!(opened.get(), "Open Outline should receive the shortcut");
     }
 
     #[gpui::test]
@@ -542,6 +587,9 @@ mod tests {
         surface.update(cx, |surface, cx| surface.add_selected_code_to_chat(cx));
         surface.read_with(cx, |surface, _| assert_eq!(surface.code_ref_status.as_deref(), Some("Open a chat to add code to it.")));
         state.read_with(cx, |state, _| assert!(state.code_refs("chat").is_empty()));
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        surface.read_with(cx, |surface, _| assert!(surface.code_ref_status.is_none()));
     }
 
     #[test]

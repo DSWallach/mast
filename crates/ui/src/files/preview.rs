@@ -3120,7 +3120,10 @@ impl FilesSurface {
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
         let event_path = path.to_string();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
-        let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());
+        let selection_path = path.to_owned();
+        let editor_observer = cx.observe(&editor, move |surface, editor, cx| {
+            surface.observe_code_ref_selection(&selection_path, &editor, cx);
+        });
         if focus_editor {
             let focus = editor.focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));

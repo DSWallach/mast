@@ -826,7 +826,8 @@ pub fn combo_from_keystroke_on(
     Some(parts.join("-"))
 }
 
-/// Outline and side-panel shortcuts cannot be active at the same time.
+/// Scoped shortcuts may share a chord when their actions do not overlap.
+/// Add-to-chat falls through to Open Outline when there is no editor selection.
 pub fn shortcut_contexts_overlap(left: ShortcutId, right: ShortcutId) -> bool {
     let review = |id| matches!(id, ShortcutId::ReviewNextStep | ShortcutId::ReviewPreviousStep | ShortcutId::ReviewNextStepArrow | ShortcutId::ReviewPreviousStepArrow | ShortcutId::ReviewNextHunk | ShortcutId::ReviewPreviousHunk | ShortcutId::ReviewMarkReviewed | ShortcutId::ReviewToggleMode | ShortcutId::ExplainDiff);
     if (review(left) && matches!(right, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) || (review(right) && matches!(left, ShortcutId::Outline(_) | ShortcutId::OpenTeamTabFromPanel)) { return false; }
