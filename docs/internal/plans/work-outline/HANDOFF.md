@@ -1221,6 +1221,45 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-19 17:20; coordinator d7779d53 handing off)
+
+- **Mikey restarted at 17:05 onto release 115** (installed aa41a65ff). User guide for 112–116:
+  mast-artifact:d87cfddf154ea0db4cd247b65ea244e9.
+- **Release 116 NOT installed yet** (HEAD 858410d36 at the release run; integration head may be ahead).
+  - Contents: re-review (phase 7), provenance + blame, friction fixes (agents complete items with their own handoff
+    open; chat start activates pending items; long Required Action detail truncates), parked CoW-worktree proposal.
+  - Release tests passed on the rerun, after quarantining `orchestrator_wakes::hand_off_reclaims_a_queued_worker_report`
+    (flaky under load, passes alone 15/15; fix item under Bugs).
+  - Soak run 1 FAILED on CPU: cand2 steady 14.5 % vs 0.7–0.9 %, busy in `diff_sync::read_head`, under load average
+    8–11; cand1 was normal (0.8 %). A rerun was in flight at handoff: `/private/tmp/r116/soak-when-quiet.sh` (waits
+    for load < 6), log `/private/tmp/r116/soak.log`, run 1 in `soak-run1.log`.
+  - If the rerun fails again: look for what calls `read_head` repeatedly. Provenance's `note_head` runs on every
+    snapshot of a bound checkout; check how often snapshots happen with real data. Fix before installing.
+  - If it passes: install per "How we work", then push.
+- **Running:** go-to-definition (Terra, chat e5484b6c, branch feature/goto-definition, worktree `.worktrees/zeron/
+  goto-definition`). Review-fix round 2 is committed through 2fed29fc7 but unverified; it is paused ("no cargo until
+  resume") for the release. Send "resume" after 116 installs, then review it (fixes 1–9 from the first review).
+- **Queued, in order:**
+  - Mast Dev reads friction from all Spaces, opt-in grant (item 4aa4cc1c). Mikey wants this, because his Cofactr-Space
+    friction (e.g. a review_publish failure in a PR review) is invisible to Mast Dev today.
+  - Add-to-chat shortcut (⌘⇧L, never bound).
+  - Wave 4 (container b8ccbcd9): right-pane split, diagrams tied to code, dependency overlay, opt-in LSP.
+  - Follow-ups: pop-out part 2 (cf4d9687), scope-map polish (9b626d42), the flaky test (8e9406cb).
+- **Open for Mikey:** ⇧⌘O → symbol search (move Overview to ⌥⌘O; request a62da6b9, blocks completing the symbol-index
+  item); approval rules for `cargo test` and ui-preview in worktrees (they would remove most of the ~100 approval wakes
+  a day); "Keeping the Tracker clean" instruction; iOS research; pinned tabs A; UI driver plan questions.
+- **Outline cleanup done 2026-11-19:** closed 12 old research and design items (Mikey's OK) and completed merged
+  items. **Coordinator rule:** complete the work item yourself when you merge, until 116's fix is installed.
+- **Lessons this run:**
+  - Every feature slice needed 2–5 independent Opus review rounds; budget for them. Workers inverted a requirement
+    once (re-review removals); verify each fix, not just the tests.
+  - Terra stalls on open-ended feature briefs; give a numbered checklist with decisions made, or use Sonnet.
+  - Release runs: `/private/tmp/release-when-quiet.sh <dir>`, then a soak with the `soak-when-quiet.sh` pattern.
+    Check for `^RESULT:`.
+  - Merging after other features landed causes conflicts in changes.rs, file_list.rs, keymap.rs and snapshot.rs. Keep
+    both sides, then `cargo check -p mast-ui --tests`. Don't chain cleanup after `git merge` with `;`: it ran after a
+    failed merge once.
+
 ## In flight (snapshot 2026-11-19 16:30; coordinator d7779d53)
 
 - **Installed: release 115** (aa41a65ff), full perf gate (soak vs 114: CPU 6.1 vs 6.2 %, git/min 126 vs 142, footprint
