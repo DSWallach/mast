@@ -5964,6 +5964,92 @@ async fn a_prompt_steered_into_a_parked_run_is_numbered_before_the_agent_can_act
     wait_for(|| reminders() == 1, "the reminder for the steered turn").await;
 }
 
+/// The reminder is steered into a turn that is already running. No new turn
+/// starts for it, so the turn that took it is the ask. Its reservation does not
+/// strand: when that turn settles, the next owing turn is asked as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reminder_steered_into_an_active_turn_does_not_strand_later_reminders() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-active-steer").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let feed_done = || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    // A reminder is owed, and its message is steered into the turn in flight.
+    let id = tokens.manager_status().reserve_reminder(CHAT, 0);
+    let outcome = rig.core.sessions.steer(CHAT, "status, please", Some(id.clone())).await.unwrap();
+    assert!(matches!(outcome, mast_engine::SteerOutcome::Accepted));
+    assert!(status_is(mast_proto::SessionStatus::Working));
+    // The turn settles without a status: that was the ask, and it is settled.
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the turn to park").await;
+    wait_for(|| tokens.manager_status().reminder(CHAT).is_none(), "the reminder to settle").await;
+
+    // The next turn changes state and publishes nothing: it is asked normally.
+    rig.core.sessions.steer(CHAT, "another", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Next", "idempotencyKey": "as1" }))
+        .await
+        .unwrap();
+    feed_done();
+    wait_for(|| reminders() == 1, "the next turn's reminder").await;
+}
+
+/// A dispatch that fails puts its row back. The reminder stays reserved through
+/// the failure and the restore, and the row is queued again, not lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation() {
+    let rig = rig().await;
+    let tokens = rig.core.sessions.agent_tokens();
+    // A chat configured for a harness the engine does not have: dispatching to
+    // it fails.
+    let chat = "restore-chat";
+    let config = mast_proto::ChatConfig {
+        approval_rules: false,
+        harness: HarnessId::Codex,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+    };
+    rig.core
+        .workspace
+        .create_chat(chat, Some(SPACE), Some(&rig.core.device_id), Some(config), Some(rig.space_path.clone()))
+        .unwrap();
+    let id = tokens.manager_status().reserve_reminder(chat, 0);
+    rig.core.doc_host.queue_message_with_id(chat, &id, "remind", Vec::new(), true).await.unwrap();
+    let handle = rig.core.doc_host.open(chat).unwrap();
+    // Whatever the drain did with it, the row is there and the reminder is held.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        handle.doc().read_queue().unwrap().iter().any(|row| row.id == id),
+        "the row is queued, not lost"
+    );
+    assert_eq!(tokens.manager_status().reminder(chat).as_deref(), Some(id.as_str()));
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing was delivered");
+}
+
 /// Adoption can land before anyone has looked at the turns that ended without
 /// the role. Their obligation was merged when they ended, so it is still one.
 #[tokio::test(flavor = "multi_thread")]

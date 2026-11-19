@@ -3757,8 +3757,8 @@ impl DocHost {
             }
             // Put it back rather than swallowing what the user typed — at the
             // head, because the user just said this one was the urgent one.
-            self.note_dispatch_failed(&handle.chat_id, &item.id);
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+            self.settle_restore(&handle, &item.id);
             return Err(err);
         }
         Ok(true)
@@ -3841,8 +3841,8 @@ impl DocHost {
             if was_paused {
                 handle.queue_paused.store(true, Ordering::Release);
             }
-            self.note_dispatch_failed(&handle.chat_id, &item.id);
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+            self.settle_restore(&handle, &item.id);
             return Err(err);
         }
         Ok(true)
@@ -3860,6 +3860,25 @@ impl DocHost {
     fn note_dispatching(&self, chat_id: &str, id: &str) {
         if let Some(sessions) = self.sessions() {
             sessions.agent_tokens().manager_status().mark_dispatching(chat_id, id);
+        }
+    }
+
+    /// A failed dispatch has put its row back: it is no longer in flight, and
+    /// is queued again. If the row cannot be found in the queue the restore
+    /// failed and the message is lost: the reminder is released so that the next
+    /// owing turn asks again, rather than waiting on a row that will never come.
+    /// The reminder stays in flight until this has looked, so the gap between
+    /// the failure and the restore can never read as a cancellation.
+    fn settle_restore(&self, handle: &ChatDocHandle, id: &str) {
+        let Some(sessions) = self.sessions() else {
+            return;
+        };
+        let tracker = sessions.agent_tokens();
+        let tracker = tracker.manager_status();
+        if handle.doc.read_queue().is_ok_and(|queue| queue.iter().any(|row| row.id == id)) {
+            tracker.dispatch_failed(&handle.chat_id, id);
+        } else {
+            tracker.reminder_lost(&handle.chat_id, id);
         }
     }
 
@@ -4047,11 +4066,12 @@ impl DocHost {
                 .await
             {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
-                self.note_dispatch_failed(&handle.chat_id, &item.id);
                 // A context reset waiting on the user gates the row itself
                 // (durable, visible, head-of-line); anything else pauses the
                 // queue as before.
-                if !restore_queued(handle, 0, &item, pin.as_ref(), confirmed, Some(&err)) {
+                let gated = restore_queued(handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
+                self.settle_restore(handle, &item.id);
+                if !gated {
                     handle.queue_paused.store(true, Ordering::Release);
                 }
                 return;

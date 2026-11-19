@@ -143,6 +143,28 @@ pub struct EndedRun {
     forced: bool,
 }
 
+/// A turn number, and the queued message it carries, before its turn is reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Numbered {
+    seq: u64,
+    source: Option<String>,
+    /// The session has taken the number (it reserved it before the prompt was
+    /// shown to the agent; it is consumed when the status turns active).
+    consumed: bool,
+}
+
+/// What is needed to settle a call that completes after its turn ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClosedTurn {
+    seq: u64,
+    baseline: u32,
+    project: (String, String),
+    ask: bool,
+}
+
+/// How many deleted chats are remembered, oldest forgotten first.
+const MAX_GONE: usize = 4096;
+
 /// The reminder the tracker is waiting on for a chat. Its message id is chosen
 /// before the reminder exists, so no delivery can outrun the record of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,9 +184,18 @@ struct State {
     /// end has been reported.
     seq: HashMap<String, u64>,
     closed: HashMap<String, u64>,
-    /// Numbers reserved for prompts that are about to reach the agent, oldest
-    /// first, with the queued message each carries.
-    pending: HashMap<String, VecDeque<(u64, Option<String>)>>,
+    /// Numbers handed out for turns whose start has not been reported yet,
+    /// oldest first: reserved for a prompt about to reach the agent, or taken by
+    /// the session. Each carries the queued message that started the turn, and
+    /// stays until the turn's start is reported, so a tool call that lands in
+    /// between can still find who started it.
+    pending: HashMap<String, VecDeque<Numbered>>,
+    /// The latest turn of each chat that ended without owing anything, so a call
+    /// admitted into it that completes late is still settled.
+    last_closed: HashMap<String, ClosedTurn>,
+    /// Chats that no longer exist. A late report about one creates nothing.
+    gone: HashSet<String>,
+    gone_order: VecDeque<String>,
     asked: HashMap<String, Ask>,
     /// Finished turns of a holder, awaiting their check.
     ended: Vec<EndedRun>,
@@ -227,10 +258,65 @@ impl StatusTracker {
     /// again for the same message changes nothing.
     pub fn reserve_turn(&self, chat_id: &str, source: Option<&str>) {
         let mut state = self.state();
+        if state.gone.contains(chat_id) {
+            return;
+        }
         if let Some(id) = source
-            && state.pending.get(chat_id).is_some_and(|q| q.iter().any(|(_, s)| s.as_deref() == Some(id)))
+            && state.pending.get(chat_id).is_some_and(|q| q.iter().any(|n| n.source.as_deref() == Some(id)))
         {
             return;
+        }
+        let seq = state.seq.entry(chat_id.to_owned()).or_default();
+        *seq += 1;
+        let seq = *seq;
+        state.pending.entry(chat_id.to_owned()).or_default().push_back(Numbered {
+            seq,
+            source: source.map(str::to_owned),
+            consumed: false,
+        });
+    }
+
+    /// The prompt was not delivered after all, or its delivery has finished:
+    /// drop the reservation if the session has not taken the number, and give
+    /// the number back when nothing was numbered after it. A number the session
+    /// has taken stays until its turn's start is reported.
+    pub fn release_turn(&self, chat_id: &str, source: &str) {
+        let mut state = self.state();
+        let Some(queue) = state.pending.get_mut(chat_id) else {
+            return;
+        };
+        let Some(at) = queue.iter().position(|n| !n.consumed && n.source.as_deref() == Some(source)) else {
+            return;
+        };
+        let released = queue.remove(at).expect("position is in range");
+        if state.seq.get(chat_id).copied() == Some(released.seq) {
+            state.seq.insert(chat_id.to_owned(), released.seq - 1);
+        }
+    }
+
+    /// The session has no more prompts coming (its run is gone): drop numbers
+    /// reserved for prompts that never started a turn.
+    pub fn clear_pending(&self, chat_id: &str) {
+        let mut state = self.state();
+        if let Some(queue) = state.pending.get_mut(chat_id) {
+            queue.retain(|n| n.consumed);
+        }
+    }
+
+    /// Number the next turn of the chat: the oldest reserved number, or a new
+    /// one. The session calls this under its own status lock, in the same step
+    /// that publishes the status, so the numbers follow the order the session
+    /// started its turns in. The number stays on record until the turn's start
+    /// is reported.
+    pub fn next_turn(&self, chat_id: &str) -> (u64, Option<String>) {
+        let mut state = self.state();
+        if state.gone.contains(chat_id) {
+            return (0, None);
+        }
+        let queue = state.pending.entry(chat_id.to_owned()).or_default();
+        if let Some(reserved) = queue.iter_mut().find(|n| !n.consumed) {
+            reserved.consumed = true;
+            return (reserved.seq, reserved.source.clone());
         }
         let seq = state.seq.entry(chat_id.to_owned()).or_default();
         *seq += 1;
@@ -239,36 +325,8 @@ impl StatusTracker {
             .pending
             .entry(chat_id.to_owned())
             .or_default()
-            .push_back((seq, source.map(str::to_owned)));
-    }
-
-    /// The prompt was not delivered after all: give its number back, as far as
-    /// numbers can be (the number is spent, the reservation is dropped).
-    pub fn release_turn(&self, chat_id: &str, source: &str) {
-        let mut state = self.state();
-        if let Some(queue) = state.pending.get_mut(chat_id) {
-            queue.retain(|(_, s)| s.as_deref() != Some(source));
-        }
-    }
-
-    /// The session has no more prompts coming (its run is gone): drop numbers
-    /// reserved for prompts that never started a turn.
-    pub fn clear_pending(&self, chat_id: &str) {
-        self.state().pending.remove(chat_id);
-    }
-
-    /// Number the next turn of the chat: the oldest reserved number, or a new
-    /// one. The session calls this under its own status lock, in the same step
-    /// that publishes the status, so the numbers follow the order the session
-    /// started its turns in.
-    pub fn next_turn(&self, chat_id: &str) -> (u64, Option<String>) {
-        let mut state = self.state();
-        if let Some(reserved) = state.pending.get_mut(chat_id).and_then(|q| q.pop_front()) {
-            return reserved;
-        }
-        let seq = state.seq.entry(chat_id.to_owned()).or_default();
-        *seq += 1;
-        (*seq, None)
+            .push_back(Numbered { seq, source: None, consumed: true });
+        (seq, None)
     }
 
     /// The number of the chat's latest turn (`0` before any).
@@ -276,20 +334,13 @@ impl StatusTracker {
         self.state().seq.get(chat_id).copied().unwrap_or(0)
     }
 
-    /// The turn a tool call belongs to as it is admitted: the one reserved for
-    /// the prompt that is arriving, else the turn in flight, else the latest.
+    /// The turn a tool call belongs to as it is admitted: the chat's latest
+    /// numbered turn. A number is reserved or taken before the agent can see its
+    /// prompt, and only for a prompt that starts a turn, so the latest number is
+    /// the turn the call is in, even while the previous turn's end, or this
+    /// turn's start, has not been reported.
     pub fn admit(&self, chat_id: &str) -> u64 {
-        let state = self.state();
-        // A number is reserved only for a prompt going into a settled session,
-        // so a turn still open when one is waiting is over, its end not yet
-        // reported: the call belongs to the arriving prompt's turn.
-        if let Some((seq, _)) = state.pending.get(chat_id).and_then(|q| q.front()) {
-            return *seq;
-        }
-        if let Some(open) = state.turns.get(chat_id) {
-            return open.seq;
-        }
-        state.seq.get(chat_id).copied().unwrap_or(0)
+        self.current_turn(chat_id)
     }
 
     /// Number a turn and begin it (the session's start, as one step).
@@ -313,6 +364,25 @@ impl StatusTracker {
     pub fn begin(&self, chat_id: &str, seq: u64, source: Option<&str>) {
         let basis = self.basis(chat_id);
         let mut state = self.state();
+        if state.gone.contains(chat_id) {
+            return;
+        }
+        // The number's start is being reported: it no longer needs its record.
+        // A number still only reserved stays, for the session to take: a tool
+        // call that lands first opens the turn but does not use the number up.
+        let recorded = state
+            .pending
+            .get_mut(chat_id)
+            .and_then(|q| q.iter().position(|n| n.seq == seq).map(|at| (q, at)))
+            .and_then(|(q, at)| {
+                if q[at].consumed {
+                    q.remove(at).and_then(|n| n.source)
+                } else {
+                    q[at].source.clone()
+                }
+            });
+        let source = source.map(str::to_owned).or(recorded);
+        let source = source.as_deref();
         if seq > 0 && seq <= state.closed.get(chat_id).copied().unwrap_or(0) {
             return;
         }
@@ -342,28 +412,88 @@ impl StatusTracker {
     }
 
     /// A state-changing tool call completed successfully. It belongs to `turn`,
-    /// the turn it was admitted in, whatever has happened since: when that
+    /// the turn it was admitted in, whatever has happened since. When that
     /// turn's start has not been reported yet this opens it, and the late
-    /// report finds it open; when that turn is already over there is nothing
-    /// left to owe.
+    /// report finds it open. When that turn already ended, the call is settled
+    /// against it all the same: the turn owes a revision after all.
     pub fn note_state_change(&self, chat_id: &str, run_id: &str, turn: u64) {
-        let (open_seq, source) = {
+        enum Step {
+            Owe,
+            Open(Option<String>),
+            Late(Option<ClosedTurn>),
+        }
+        let step = {
             let state = self.state();
-            let source = state
-                .pending
-                .get(chat_id)
-                .and_then(|q| q.iter().find(|(seq, _)| *seq == turn))
-                .and_then(|(_, source)| source.clone());
-            (state.turns.get(chat_id).map(|t| t.seq), source)
+            if state.gone.contains(chat_id) {
+                return;
+            }
+            let open = state.turns.get(chat_id).map(|t| t.seq);
+            let closed = state.closed.get(chat_id).copied().unwrap_or(0);
+            match open {
+                Some(open) if turn == 0 || open == turn => Step::Owe,
+                _ if turn > 0 && turn <= closed => {
+                    Step::Late(state.last_closed.get(chat_id).filter(|c| c.seq == turn).cloned())
+                }
+                Some(open) if open > turn => return,
+                _ => Step::Open(
+                    state
+                        .pending
+                        .get(chat_id)
+                        .and_then(|q| q.iter().find(|n| n.seq == turn))
+                        .and_then(|n| n.source.clone()),
+                ),
+            }
         };
-        match open_seq {
-            Some(open) if turn == 0 || open == turn => {}
-            Some(open) if open > turn => return, // that turn is over
-            _ => self.begin(chat_id, turn, source.as_deref()),
+        match step {
+            Step::Owe => {}
+            Step::Open(source) => self.begin(chat_id, turn, source.as_deref()),
+            Step::Late(Some(closed)) => {
+                // The turn ended before this call completed: it owes after all.
+                let basis = self.basis(chat_id);
+                let mut state = self.state();
+                if state.last_closed.get(chat_id).is_some_and(|c| c.seq == closed.seq) {
+                    state.last_closed.remove(chat_id);
+                    let ended = EndedRun {
+                        chat_id: chat_id.to_owned(),
+                        baseline: closed.baseline,
+                        end_revision: basis.as_ref().map_or(closed.baseline, |b| b.revision).max(closed.baseline),
+                        project: closed.project,
+                        ask: closed.ask,
+                        forced: basis.as_ref().is_some_and(|b| !b.holds),
+                    };
+                    if ended.forced {
+                        Self::absorb(&mut state, ended);
+                    } else {
+                        state.ended.push(ended);
+                    }
+                }
+                drop(state);
+                self.wake.notify_one();
+                return;
+            }
+            Step::Late(None) => return,
         }
         if let Some(open) = self.state().turns.get_mut(chat_id).filter(|t| turn == 0 || t.seq == turn) {
             open.run_id = Some(run_id.to_owned());
             open.owed = true;
+        }
+    }
+
+    /// A prompt carrying queued message `source` was accepted into a turn
+    /// already running. That turn is the one that delivered it: if the message
+    /// is the reminder, the turn is the ask.
+    pub fn joined_active(&self, chat_id: &str, source: &str) {
+        let mut state = self.state();
+        let Some(ask) = state.asked.get_mut(chat_id).filter(|a| a.message_id == source) else {
+            return;
+        };
+        ask.running = true;
+        ask.dispatching = false;
+        let baseline = ask.baseline;
+        if let Some(turn) = state.turns.get_mut(chat_id) {
+            turn.ask = true;
+            turn.owed = true;
+            turn.baseline = baseline;
         }
     }
 
@@ -374,6 +504,9 @@ impl StatusTracker {
         let basis = self.basis(chat_id);
         {
             let mut state = self.state();
+            if state.gone.contains(chat_id) {
+                return;
+            }
             if seq > 0 && state.seq.contains_key(chat_id) {
                 let closed = state.closed.entry(chat_id.to_owned()).or_default();
                 *closed = (*closed).max(seq);
@@ -402,8 +535,13 @@ impl StatusTracker {
             return;
         };
         if !turn.owed {
+            state.last_closed.insert(
+                chat_id.to_owned(),
+                ClosedTurn { seq: turn.seq, baseline: turn.baseline, project: turn.project, ask: turn.ask },
+            );
             return;
         }
+        state.last_closed.remove(chat_id);
         let ended = EndedRun {
             chat_id: chat_id.to_owned(),
             baseline: turn.baseline,
@@ -529,12 +667,24 @@ impl StatusTracker {
         if current.is_some() {
             return Verdict::Outstanding;
         }
+        let message_id = Self::reserve(&mut state, chat, ended.baseline);
+        Verdict::Nudge { baseline: ended.baseline, message_id }
+    }
+
+    fn reserve(state: &mut State, chat_id: &str, baseline: u32) -> String {
         let message_id = crate::new_id();
         state.asked.insert(
-            chat.clone(),
-            Ask { baseline: ended.baseline, message_id: message_id.clone(), dispatching: false, running: false },
+            chat_id.to_owned(),
+            Ask { baseline, message_id: message_id.clone(), dispatching: false, running: false },
         );
-        Verdict::Nudge { baseline: ended.baseline, message_id }
+        message_id
+    }
+
+    /// Reserve the chat's reminder directly, as `conclude` does when a turn
+    /// owes a revision. For tests that drive delivery without a turn to owe it.
+    #[doc(hidden)]
+    pub fn reserve_reminder(&self, chat_id: &str, baseline: u32) -> String {
+        Self::reserve(&mut self.state(), chat_id, baseline)
     }
 
     /// A reminder withdrawn from the queue because a publication made it
@@ -569,8 +719,14 @@ impl StatusTracker {
         if let Some(ask) = state.asked.get_mut(chat_id).filter(|a| a.message_id == message_id) {
             ask.dispatching = false;
         }
-        if let Some(queue) = state.pending.get_mut(chat_id) {
-            queue.retain(|(_, s)| s.as_deref() != Some(message_id));
+    }
+
+    /// The dispatch of `message_id` failed and its row could not be put back:
+    /// the reminder is lost, so it is released and the next owing turn asks.
+    pub fn reminder_lost(&self, chat_id: &str, message_id: &str) {
+        let mut state = self.state();
+        if state.asked.get(chat_id).is_some_and(|a| a.message_id == message_id) {
+            state.asked.remove(chat_id);
         }
     }
 
@@ -579,7 +735,31 @@ impl StatusTracker {
     /// finds nothing to open (the probe knows no such chat).
     pub fn retain_chats(&self, live: &HashSet<String>) {
         let mut state = self.state();
+        let known: Vec<String> = state
+            .seq
+            .keys()
+            .chain(state.turns.keys())
+            .chain(state.pending.keys())
+            .chain(state.asked.keys())
+            .chain(state.held.keys())
+            .filter(|chat| !live.contains(*chat))
+            .cloned()
+            .collect();
+        for chat in known {
+            if state.gone.insert(chat.clone()) {
+                state.gone_order.push_back(chat);
+            }
+        }
+        // A chat that is listed again is a chat again.
+        state.gone.retain(|chat| !live.contains(chat));
+        state.gone_order.retain(|chat| !live.contains(chat));
+        while state.gone_order.len() > MAX_GONE {
+            if let Some(oldest) = state.gone_order.pop_front() {
+                state.gone.remove(&oldest);
+            }
+        }
         state.turns.retain(|chat, _| live.contains(chat));
+        state.last_closed.retain(|chat, _| live.contains(chat));
         state.seq.retain(|chat, _| live.contains(chat));
         state.closed.retain(|chat, _| live.contains(chat));
         state.pending.retain(|chat, _| live.contains(chat));
@@ -1297,8 +1477,11 @@ mod tests {
         t.end("m", a);
         let b = t.next_turn("m").0;
         t.begin("m", b, None);
-        // Its completion is attributed to A, which is over: nothing is owed by B.
+        // Its completion is settled against A, which is over: A owes after all,
+        // and B owes nothing for it.
         t.note_state_change("m", "tok", admitted);
+        let owed = t.take_ended();
+        assert_eq!(owed.len(), 1, "A's call is not lost");
         t.end("m", b);
         assert!(t.take_ended().is_empty(), "B owes nothing for A's call");
     }
@@ -1424,5 +1607,92 @@ mod tests {
         t.start_turn("m");
         t.finish_turn("m");
         assert!(t.take_ended().remove(0).ask);
+    }
+    #[test]
+    fn a_call_between_the_session_taking_a_number_and_reporting_the_turn_is_in_the_new_turn() {
+        let (t, _s) = tracker(true, 1);
+        let a = t.start_turn("m"); // turn A is open
+        // A settled and the next prompt was steered in: its number is reserved,
+        // then taken by the session when the status turns active...
+        t.reserve_turn("m", Some("steer-b"));
+        let (b, source) = t.next_turn("m");
+        assert!(b > a);
+        // ...and before the start is reported, with A's end not reported either,
+        // the agent's first call is admitted and completes.
+        let admitted = t.admit("m");
+        assert_eq!(admitted, b, "the number already taken, not the open turn A");
+        t.note_state_change("m", "tok", admitted);
+        assert_eq!(t.take_ended().len(), 0, "A owed nothing");
+        // The late start report finds the turn open with its source.
+        t.begin("m", b, source.as_deref());
+        t.finish_turn("m");
+        assert_eq!(t.take_ended().len(), 1, "the call was owed by B");
+    }
+
+    #[test]
+    fn a_released_reservation_gives_its_number_back_so_no_call_is_admitted_into_a_phantom_turn() {
+        let (t, _s) = tracker(true, 0);
+        let a = t.start_turn("m");
+        t.reserve_turn("m", Some("never-delivered"));
+        assert!(t.admit("m") > a);
+        t.release_turn("m", "never-delivered");
+        assert_eq!(t.admit("m"), a, "calls in the turn still running belong to it");
+        // A number the session took is not released: it stays for its start report.
+        t.reserve_turn("m", Some("taken"));
+        let (taken, _) = t.next_turn("m");
+        t.release_turn("m", "taken");
+        assert_eq!(t.admit("m"), taken);
+    }
+
+    #[test]
+    fn a_reminder_steered_into_a_turn_already_running_is_settled_by_that_turn() {
+        let (t, _s, _row, id) = reminded(3);
+        t.start_turn("m"); // an ordinary turn is running
+        t.joined_active("m", &id);
+        t.finish_turn("m");
+        let ended = t.take_ended().remove(0);
+        assert!(ended.ask, "the turn that took the reminder is the ask");
+        assert_eq!(ended.baseline, 3);
+        assert!(matches!(t.conclude(&ended, false), Verdict::Missed { baseline: 3 }));
+        assert!(t.reminder("m").is_none(), "not stranded");
+        // Another message joining a turn is nothing to the tracker.
+        t.start_turn("m");
+        t.joined_active("m", "some-other-message");
+        t.finish_turn("m");
+        assert!(t.take_ended().is_empty());
+    }
+
+    #[test]
+    fn a_reminder_whose_row_could_not_be_restored_is_released() {
+        let (t, _s, _row, id) = reminded(3);
+        t.mark_dispatching("m", &id);
+        t.reminder_lost("m", &id);
+        assert!(t.reminder("m").is_none());
+        // The next owing turn asks again.
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Nudge { .. }));
+        // A different message's loss changes nothing.
+        let current = t.reminder("m").unwrap();
+        t.reminder_lost("m", "unrelated");
+        assert_eq!(t.reminder("m"), Some(current));
+    }
+
+    #[test]
+    fn nothing_is_recreated_for_a_deleted_chat_by_a_late_start_or_reservation() {
+        let (t, _s) = tracker(true, 0);
+        let a = t.next_turn("gone").0;
+        t.begin("gone", a, None);
+        assert_eq!(t.tracked_chats(), 1);
+        t.retain_chats(&HashSet::new());
+        assert_eq!(t.tracked_chats(), 0);
+        t.reserve_turn("gone", Some("late"));
+        let (seq, _) = t.next_turn("gone");
+        t.begin("gone", 7, None);
+        t.note_state_change("gone", "tok", 7);
+        t.end("gone", 7);
+        assert_eq!((seq, t.tracked_chats()), (0, 0), "no counters, no turn");
+        assert!(!t.turn_open("gone"));
+        // A chat that is listed again is a chat again.
+        t.retain_chats(&HashSet::from(["gone".to_owned()]));
+        assert!(t.start_turn("gone") > 0);
     }
 }

@@ -1121,9 +1121,7 @@ impl SessionsEngine {
             // it before the mailbox can show it to the agent.
             let turns = self.inner.agent_tokens.manager_status();
             let reserved = steerable && same_runtime && !self.turn_in_flight(chat_id);
-            if reserved {
-                turns.reserve_turn(chat_id, Some(&user_id));
-            }
+            let _reservation = reserved.then(|| TurnReservation::new(turns, chat_id, &user_id));
             let accepted = if steerable && same_runtime {
                 // Warm dispatch uses the same mailbox as explicit steering.
                 // Register acceptance before a fast boundary can retire it.
@@ -1144,9 +1142,6 @@ impl SessionsEngine {
             } else {
                 false
             };
-            if reserved && !accepted {
-                turns.release_turn(chat_id, &user_id);
-            }
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -1170,11 +1165,13 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    turns.release_turn(chat_id, &user_id);
+                    if !reserved {
+                        // Accepted into a turn already running: it delivered the prompt.
+                        turns.joined_active(chat_id, &user_id);
+                    }
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
-                turns.release_turn(chat_id, &user_id);
                 // The run died around the send. If its exit drain already
                 // claimed the entry, that re-dispatch owns the message —
                 // otherwise reclaim it and fall through to a fresh run.
@@ -1472,17 +1469,12 @@ impl SessionsEngine {
         // the agent's first tool call already finds its turn.
         let turns = self.inner.agent_tokens.manager_status();
         let reserved = !self.turn_in_flight(chat_id);
-        if reserved {
-            turns.reserve_turn(chat_id, Some(&user_id));
-        }
+        let _reservation = reserved.then(|| TurnReservation::new(turns, chat_id, &user_id));
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
             let mut pending = lock(&ledger);
             if steer_tx.try_send(message).is_err() {
-                if reserved {
-                    turns.release_turn(chat_id, &user_id);
-                }
                 return Ok(SteerOutcome::NotSteerable);
             }
             pending.push_back(RoutedSteer {
@@ -1500,13 +1492,13 @@ impl SessionsEngine {
         if self.is_live(chat_id, &run_id) {
             acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
             self.set_status(chat_id, SessionStatus::Working, false);
-            // Consumed by the turn that started; a prompt that joined a turn
-            // already running reserved nothing that lasts.
-            turns.release_turn(chat_id, &user_id);
+            if !reserved {
+                // The prompt joined a turn already running: that turn delivered it.
+                turns.joined_active(chat_id, &user_id);
+            }
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
-        turns.release_turn(chat_id, &user_id);
         // The run died around the send. Exit drain claimed the entry → its
         // re-dispatch owns the message; still ours → reclaim and report
         // NotSteerable so the executor falls back to a fresh dispatch
@@ -2659,6 +2651,29 @@ impl Inner {
             // prompts that never started a turn are dropped.
             self.agent_tokens.manager_status().clear_pending(chat_id);
         }
+    }
+}
+
+/// A turn number reserved for a prompt about to be delivered. Dropping it
+/// releases the reservation, whichever way the delivery ends (an error after the
+/// mailbox accepted the prompt included); a number the session has already taken
+/// is not affected.
+struct TurnReservation<'a> {
+    turns: &'a crate::manager_status::StatusTracker,
+    chat_id: &'a str,
+    source: String,
+}
+
+impl<'a> TurnReservation<'a> {
+    fn new(turns: &'a crate::manager_status::StatusTracker, chat_id: &'a str, source: &str) -> Self {
+        turns.reserve_turn(chat_id, Some(source));
+        Self { turns, chat_id, source: source.to_owned() }
+    }
+}
+
+impl Drop for TurnReservation<'_> {
+    fn drop(&mut self) {
+        self.turns.release_turn(self.chat_id, &self.source);
     }
 }
 
@@ -4405,6 +4420,30 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 
 #[cfg(test)]
 mod tests {
+    /// A reservation is released however the delivery ends, an error after the
+    /// mailbox accepted the prompt included, and a number the session already
+    /// took is left for its start report.
+    #[test]
+    fn a_turn_reservation_is_released_when_delivery_ends_by_any_path() {
+        let turns = crate::manager_status::StatusTracker::default();
+        let delivered_then_failed = |turns: &crate::manager_status::StatusTracker| -> Result<(), &'static str> {
+            let _reservation = TurnReservation::new(turns, "c", "m1");
+            // The mailbox accepted the prompt; writing the transcript then failed.
+            Err("write_user_message failed")
+        };
+        assert!(delivered_then_failed(&turns).is_err());
+        assert_eq!(turns.admit("c"), 0, "the number is given back");
+        let (_, source) = turns.next_turn("c");
+        assert_eq!(source, None, "no stale reservation is left to be consumed");
+        {
+            let _reservation = TurnReservation::new(&turns, "c", "m2");
+            let (taken, source) = turns.next_turn("c");
+            assert_eq!(source.as_deref(), Some("m2"));
+            assert_eq!(turns.admit("c"), taken);
+        }
+        assert!(turns.admit("c") > 0, "a number the session took is not given back");
+    }
+
     use super::*;
 
     #[test]
