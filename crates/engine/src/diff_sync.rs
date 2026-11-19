@@ -4179,6 +4179,8 @@ mod repository_ref_budget_tests {
     use super::*;
     use crate::{EngineCore, HarnessRegistry};
 
+    static REF_BUDGET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn git(path: &Path, args: &[&str]) -> String {
         let output = mast_harness::git_command()
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
@@ -4190,6 +4192,7 @@ mod repository_ref_budget_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_repository_ref_read_budget() {
+        let _guard = lock(&REF_BUDGET_TEST_LOCK);
         let initial_reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst);
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -4240,11 +4243,32 @@ mod repository_ref_budget_tests {
         assert!(parses <= 2, "packed-refs parses: {parses}");
         assert_eq!(reads, 2);
         assert_eq!(parses, 1);
+        #[cfg(unix)]
+        {
+            let packed = common.join("packed-refs");
+            let metadata = std::fs::metadata(&packed).unwrap();
+            let stamp = crate::provenance::refs_stamp(&common);
+            assert_eq!(read_head(inner, &entries[0].identity).1.as_deref(), Some(head.as_str()));
+            let replacement = common.join("packed-refs.lock");
+            let changed = std::fs::read_to_string(&packed).unwrap().replace(&head, &"0".repeat(head.len()));
+            std::fs::write(&replacement, changed).unwrap();
+            std::fs::File::options().write(true).open(&replacement).unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().unwrap())).unwrap();
+            std::fs::rename(&replacement, &packed).unwrap();
+            let updated = std::fs::metadata(&packed).unwrap();
+            assert_eq!(metadata.len(), updated.len());
+            assert_eq!(metadata.modified().unwrap(), updated.modified().unwrap());
+            assert_ne!(crate::provenance::metadata_inode(&metadata), crate::provenance::metadata_inode(&updated));
+            assert_ne!(stamp, crate::provenance::refs_stamp(&common));
+            assert_eq!(read_head(inner, &entries[0].identity).1, Some("0".repeat(head.len())));
+            assert_eq!(lock(&inner.packed_refs).get(&common).unwrap().parses, 2);
+        }
         core.diff_sync.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prior_tips_remain_specific_to_each_checkout() {
+        let _guard = lock(&REF_BUDGET_TEST_LOCK);
         let _pause = CheckoutDiffSync::pause_watch_setups_for_test().await;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
