@@ -74,6 +74,7 @@ impl SymbolDefinitionProvider {
         let task = cx.spawn(async move |cx| {
             if let Ok(mut stream) = client.watch_symbols().await {
                 while let Some(frame) = stream.recv().await {
+                    if frame.get("error").is_some() { break; }
                     let Some(state) = state.upgrade() else { return; };
                     let revision = frame.get("revision").and_then(|value| value.as_u64());
                     let editor = {
@@ -355,6 +356,10 @@ mod tests {
         for _ in 0..20 { cx.update(|cx| provider.start_watch(cx)); }
         cx.run_until_parked();
         assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+        provider.state.borrow_mut().watch_failed_at = Some(Instant::now() - Duration::from_secs(61));
+        cx.update(|cx| provider.start_watch(cx));
+        cx.run_until_parked();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2);
     }
 
     #[test]
