@@ -223,6 +223,13 @@ pub mod methods {
     pub const GET_REVIEW_DRAFTS: &str = "GetReviewDrafts";
     pub const SET_REVIEW_DRAFTS: &str = "SetReviewDrafts";
     pub const GET_REVIEW_THREADS: &str = "GetReviewThreads";
+    /// The only method that writes a review to GitHub: `mast_proto::
+    /// SubmitReviewParams` → `mast_proto::SubmitReviewReply`. Called from the
+    /// "Submit review…" dialog on a human click; never forwardable, never
+    /// reachable from an agent tool.
+    pub const SUBMIT_REVIEW: &str = "SubmitReview";
+    /// `{target}` → `Vec<mast_proto::PostedReview>`: reviews Mast posted.
+    pub const GET_POSTED_REVIEWS: &str = "GetPostedReviews";
     pub const GET_DISMISSED_REVIEW_SUGGESTIONS: &str = "GetDismissedReviewSuggestions";
     pub const DISMISS_REVIEW_SUGGESTION: &str = "DismissReviewSuggestion";
     pub const ACCEPT_REVIEW_SUGGESTION: &str = "AcceptReviewSuggestion";

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod review_threads;
+mod review_submit;
 
 /// `classify` as a function pointer so tests can inject a trivial one.
 pub type ClassifyFn = fn(PrDashTab, &PrDashRow) -> (PrDashBucket, Vec<String>);
@@ -105,6 +106,12 @@ pub trait GhRunner: Send + Sync + 'static {
     /// (`{"data": …}`). A response with usable `data` is returned even when
     /// GitHub also reported per-field `errors`.
     async fn graphql(&self, query: &str, vars: &[(&str, &str)]) -> Result<Value, String>;
+    /// `gh api -X {method} {path} --input -` with an optional JSON body; returns
+    /// the parsed response. Only the human-clicked review submit uses a write
+    /// method. Runners that do not support REST fail closed.
+    async fn rest(&self, _method: &str, _path: &str, _body: Option<&Value>) -> Result<Value, String> {
+        Err("this GitHub runner does not support REST calls".into())
+    }
 }
 
 /// Shells out to `gh` (resolved through the login shell PATH, like the rest of
@@ -127,6 +134,30 @@ async fn run_gh(args: Vec<String>) -> Result<std::process::Output, String> {
             .args(&args)
             .output()
             .map_err(|e| format!("could not run gh: {e}"))
+    });
+    match tokio::time::timeout(GH_TIMEOUT, job).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(format!("gh task failed: {e}")),
+        Err(_) => Err("gh timed out".to_string()),
+    }
+}
+
+async fn run_gh_with_input(args: Vec<String>, input: Vec<u8>) -> Result<std::process::Output, String> {
+    let job = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut command =
+            gh_command().ok_or_else(|| "the GitHub CLI (gh) was not found".to_string())?;
+        let mut child = command
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not run gh: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&input).map_err(|e| format!("could not send to gh: {e}"))?;
+        }
+        child.wait_with_output().map_err(|e| format!("could not run gh: {e}"))
     });
     match tokio::time::timeout(GH_TIMEOUT, job).await {
         Ok(Ok(result)) => result,
@@ -160,6 +191,45 @@ impl GhRunner for RealGh {
         } else {
             Err(truncate_message(&String::from_utf8_lossy(&output.stderr)))
         }
+    }
+
+    async fn rest(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let mut args: Vec<String> = vec!["api".into(), "-X".into(), method.into(), path.into()];
+        let output = match body {
+            Some(body) => {
+                args.extend(["--input".into(), "-".into()]);
+                let input = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+                run_gh_with_input(args, input).await?
+            }
+            None => run_gh(args).await?,
+        };
+        let parsed: Option<Value> = serde_json::from_slice(&output.stdout).ok();
+        if output.status.success() {
+            return Ok(parsed.unwrap_or(Value::Null));
+        }
+        // gh prints the API error body on stdout and "gh: msg (HTTP 422)" on stderr.
+        let detail = parsed
+            .as_ref()
+            .and_then(|body| body.get("message").and_then(Value::as_str))
+            .map(str::to_owned);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut message = truncate_message(&stderr);
+        if let Some(detail) = detail
+            && !message.contains(&detail)
+        {
+            message = format!("{detail} ({message})");
+        }
+        if let Some(errors) = parsed.as_ref().and_then(|body| body.get("errors")).and_then(Value::as_array) {
+            let extra: Vec<String> = errors
+                .iter()
+                .map(|e| e.as_str().map(str::to_owned).unwrap_or_else(|| e.get("message").and_then(Value::as_str).unwrap_or_default().to_owned()))
+                .filter(|e| !e.is_empty())
+                .collect();
+            if !extra.is_empty() {
+                message = format!("{message}: {}", extra.join("; "));
+            }
+        }
+        Err(if message.is_empty() { "GitHub request failed".into() } else { message })
     }
 
     async fn graphql(&self, query: &str, vars: &[(&str, &str)]) -> Result<Value, String> {

@@ -132,6 +132,68 @@ impl RegistryDoc {
         drafts
     }
 
+    /// Posted reviews recorded for a target, oldest first.
+    pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
+        let Some(row) = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target)) else {
+            return Vec::new();
+        };
+        if row.fields.get("target").and_then(Value::as_str) != Some(target) {
+            return Vec::new();
+        }
+        let mut posted: Vec<mast_proto::PostedReview> = row
+            .fields
+            .iter()
+            .filter(|(key, _)| key.starts_with("p:"))
+            .filter_map(|(_, value)| value.as_str())
+            .filter_map(|value| serde_json::from_str(value).ok())
+            .collect();
+        posted.sort_by_key(|review| (review.posted_at, review.review_id));
+        posted
+    }
+
+    /// Keep a local record of a review that reached GitHub and remove the drafts it carried,
+    /// in one write. Recording the same review id again is a no-op.
+    pub fn record_posted_review(
+        &mut self,
+        target: &str,
+        review: &mast_proto::PostedReview,
+    ) -> Result<bool, DocError> {
+        if target.trim().is_empty() {
+            return Err(DocError::Schema("posted review needs a target".into()));
+        }
+        let key = format!("p:{}", derive_id(&review.review_id.to_string(), "posted-review"));
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let already = self.posted_reviews(target).iter().any(|r| r.review_id == review.review_id);
+        let mut set = fields([("target", json!(target))]);
+        if !already {
+            set.insert(key, json!(serde_json::to_string(review)?));
+        }
+        let mut removed = false;
+        for comment in &review.comments {
+            if self.review_drafts(target).iter().any(|d| d.id == comment.draft_id) {
+                set.insert(
+                    format!("d:{}", derive_id(&comment.draft_id, "review-draft")),
+                    Value::Null,
+                );
+                removed = true;
+            }
+        }
+        if already && !removed {
+            return Ok(false);
+        }
+        let hlc = self.mint_hlc();
+        self.write_ops(vec![RowOp {
+            kind: KIND_REVIEW_DRAFTS.into(),
+            id,
+            op: OpKind::Upsert,
+            set: Some(set),
+            hlc,
+            clocks: None,
+        }])?;
+        Ok(true)
+    }
+
     /// Compare before writing to avoid needless registry operations.
     pub fn put_review_drafts(
         &mut self,
@@ -256,6 +318,41 @@ mod tests {
         assert!(!registry.put_review_drafts(target, &[draft]).unwrap());
         assert!(registry.put_review_drafts(target, &[]).unwrap());
         assert!(registry.review_drafts(target).is_empty());
+    }
+
+    #[test]
+    fn posting_records_the_review_and_removes_only_its_drafts() {
+        use mast_proto::{PostedReview, ReviewEvent, SubmitReviewComment};
+        let mut registry = RegistryDoc::new("device");
+        let target = "pr:owner/repo#42";
+        let draft = |id: &str| ReviewDraft {
+            id: id.into(),
+            target: target.into(),
+            body: "note".into(),
+            source: ReviewDraftSource::User,
+            created_at: 1,
+            anchor: ReviewAnchor { file: "a.rs".into(), side: ReviewSide::Right, start_line: 2, end_line: 2, hunk_hash: None },
+            line_hash: None,
+            end_line_hash: None,
+        };
+        registry.put_review_drafts(target, &[draft("posted"), draft("kept")]).unwrap();
+        let review = PostedReview {
+            review_id: 9,
+            url: "https://github.com/owner/repo/pull/42#pullrequestreview-9".into(),
+            event: ReviewEvent::Comment,
+            body: "summary".into(),
+            posted_at: 5,
+            comments: vec![SubmitReviewComment {
+                draft_id: "posted".into(), path: "a.rs".into(), line: 2, side: ReviewSide::Right,
+                start_line: None, start_side: None, body: "note".into(),
+            }],
+        };
+        assert!(registry.record_posted_review(target, &review).unwrap());
+        assert_eq!(registry.review_drafts(target).iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["kept"]);
+        assert_eq!(registry.posted_reviews(target), vec![review.clone()]);
+        // Recording it again (a retried submit that found the review) changes nothing.
+        assert!(!registry.record_posted_review(target, &review).unwrap());
+        assert_eq!(registry.posted_reviews(target).len(), 1);
     }
 
     #[test]

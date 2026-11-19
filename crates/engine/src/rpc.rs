@@ -3278,6 +3278,40 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&threads)
             }
+            methods::SUBMIT_REVIEW => {
+                let p: mast_proto::SubmitReviewParams = parse_params(params)?;
+                let dash = self.pr_dash.get_or_init(|| {
+                    crate::pr_dash::PrDash::with_real_gh()
+                        .with_cache_file(self.repos.data_dir().join("cache").join("pr-dash.json"))
+                });
+                let reply = dash.submit_review(&p).await.map_err(RpcError::Failed)?;
+                if matches!(
+                    reply.outcome,
+                    mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
+                ) && let Some(review_id) = reply.review_id
+                {
+                    let posted = mast_proto::PostedReview {
+                        review_id,
+                        url: reply.url.clone(),
+                        event: p.event,
+                        body: p.body.clone(),
+                        posted_at: chrono::Utc::now().timestamp_millis(),
+                        comments: p.comments.clone(),
+                    };
+                    // The review is on GitHub already; failing to record it must not
+                    // look like a failed post, so the drafts stay and the reply says posted.
+                    if let Err(error) = self.workspace.record_posted_review(&p.target, &posted) {
+                        tracing::warn!("could not record posted review locally: {error}");
+                    }
+                }
+                RpcReply::value(&reply)
+            }
+            methods::GET_POSTED_REVIEWS => {
+                let target = params.get("target").and_then(serde_json::Value::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| RpcError::Failed("target is required".into()))?;
+                RpcReply::value(&self.workspace.posted_reviews(target))
+            }
             methods::PR_DASHBOARD => {
                 let p: mast_proto::PrDashParams = parse_params(params)?;
                 let dash = self.pr_dash.get_or_init(|| {

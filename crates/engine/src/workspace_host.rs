@@ -832,6 +832,14 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
     }
 
+    pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
+        self.read(|doc| doc.posted_reviews(target))
+    }
+
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review))?)
+    }
+
     pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.put_review_drafts(target, drafts))?)
     }
