@@ -6149,7 +6149,7 @@ impl DocHost {
             None => chat.cwd.unwrap_or_default(),
         };
         let config = chat.config;
-        Some(mast_proto::RunRequest { scheduled_task: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
+        Some(mast_proto::RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),

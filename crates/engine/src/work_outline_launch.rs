@@ -77,7 +77,7 @@ pub(crate) fn launch_scheduled_chat(
     let draft = &run.snapshot;
     let request = prompt_request(
         &WorkItemPrompt {
-            text: draft.prompt.clone(),
+            text: crate::scheduled_tasks::results::prompt_with_contract(run),
             attachments: vec![],
         },
         Some(&draft.config),
@@ -103,6 +103,7 @@ pub(crate) fn launch_scheduled_chat(
             session_created_at: Some(run.created_at),
             run_id: run.id.clone(),
             output: draft.output,
+            write_to_notion: draft.write_to_notion,
             ..Default::default()
         },
     )?;
@@ -1607,7 +1608,7 @@ fn with_default_model(
 
 /// A Turn's request from a prompt, a chat config, and a cwd.
 fn prompt_request(prompt: &WorkItemPrompt, config: Option<&ChatConfig>, cwd: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt: crate::doc_host::queued_message_prompt(&prompt.text, &prompt.attachments),
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),

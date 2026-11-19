@@ -13,6 +13,7 @@ fn request() -> RunRequest {
         auto_approve: false,
         approval_rules: false,
         scheduled_task: None,
+        scheduled_notion_writes: None,
         resume: None,
         fork_from: None,
         attachments: Vec::new(),

@@ -48,3 +48,6 @@ fn doctor_reports_missing_prerequisites_with_fixes() {
     assert_eq!(agent["status"], "error");
     assert!(agent["fix"].as_str().unwrap().contains("sign in"));
 }
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -851,7 +851,7 @@ impl PrReviewLauncher {
 
 Work only inside {checkout}: run git and read files there. Never switch branches or check anything out in {} or any other checkout.", space.path
         );
-        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),
@@ -1193,7 +1193,7 @@ Work only inside {checkout}: run git and read files there. Never switch branches
         if let Some(item) = &p.work_item_id {
             self.ensure_assignment(&chat_id, item, op)?;
         }
-        let request = RunRequest { scheduled_task: None, approval_rules: config.approval_rules,
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.approval_rules,
             prompt: prompt.clone(),
             harness: Some(config.harness),
             model: config.model.clone(),

@@ -1231,11 +1231,13 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         let shown_prompt = request.prompt.clone();
-        request.scheduled_task = self
+        let scheduled = self
             .inner
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .and_then(|chat| chat.scheduled_task_info)
+            .and_then(|chat| chat.scheduled_task_info);
+        request.scheduled_notion_writes = scheduled.as_ref().and_then(|task| task.write_to_notion);
+        request.scheduled_task = scheduled
             .map(|task| task.task_name)
             .filter(|name| !name.is_empty());
         if request.resume.is_none() && request.instructions.is_none() {
@@ -1696,7 +1698,7 @@ impl SessionsEngine {
             .or_else(|| host.request_from_chat_row(chat_id, prompt))
             .or_else(|| {
                 let (_, cwd) = self.inner.journal_harness_session(chat_id)?;
-                Some(RunRequest { scheduled_task: None, approval_rules: false,
+                Some(RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
                     prompt: String::new(), harness: None, model: None, reasoning: None,
                     model_options: Default::default(), cwd,
                     sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
@@ -4742,7 +4744,7 @@ mod tests {
     }
 
     fn request() -> RunRequest {
-        RunRequest { scheduled_task: None, approval_rules: false,
+        RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "first".into(),
             harness: None,
             model: Some("grok-4.6".into()),
