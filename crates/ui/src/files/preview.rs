@@ -3289,6 +3289,12 @@ impl FilesSurface {
         Some(format!("{:?}", self.preview.documents.get(path)?.phase))
     }
 
+    /// Tests: the pending save finished or was discarded.
+    pub(crate) fn test_clear_documents(&mut self, cx: &mut Context<Self>) {
+        self.preview.documents.clear();
+        cx.notify();
+    }
+
     pub(crate) fn seed_pending_exit_test_document(&mut self, failed: bool) {
         let mut document = FileDocument::loading(DocumentKey {
             chat_id: "test".into(),

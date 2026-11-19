@@ -92,12 +92,31 @@ fn prepare_quit(cx: &mut App) {
                 .unwrap_or(false);
         }
     }
+    // Without a main window nothing else holds the quit while a pop-out's
+    // save prompt is open, so the pop-out does.
+    let has_main = cx.windows().iter().any(|window| window.downcast::<shell::Shell>().is_some());
+    if !has_main {
+        ready &= crate::popout::prepare_exit(true, cx);
+    }
     if ready {
         quit_after_save(cx);
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static QUIT_REQUESTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: how many times the app actually reached the quit call.
+#[cfg(test)]
+pub(crate) fn quit_requests() -> u32 {
+    QUIT_REQUESTS.with(|count| count.get())
+}
+
 pub(crate) fn quit_after_save(cx: &mut App) {
+    #[cfg(test)]
+    QUIT_REQUESTS.with(|count| count.set(count.get() + 1));
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();
@@ -123,7 +142,7 @@ fn close_active_window(cx: &mut App) {
                     }
                 })
                 .ok();
-        } else {
+        } else if !crate::popout::close_active(window, cx) {
             window
                 .update(cx, |_, window, _| window.remove_window())
                 .ok();

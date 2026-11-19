@@ -188,6 +188,9 @@ impl Shell {
             }))
             .on_action(cx.listener(|this, _: &OpenItemTab, _, cx| this.open_item_tab(cx)))
             .on_action(cx.listener(|this, _: &OpenTeamTab, _, cx| this.open_team_tab(cx)))
+            .on_action(cx.listener(|this, _: &PopOutSurface, _, cx| {
+                this.pop_out_active_surface(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleRunningChats, window, cx| {
                 this.toggle_running_chats(window, cx)
             }))

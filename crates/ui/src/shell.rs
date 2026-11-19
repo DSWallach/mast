@@ -126,6 +126,7 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 mod start_chat_ui;
 mod tabs;
+mod popout_host;
 mod titlebar;
 #[cfg(test)] use titlebar::{titlebar_new_session_alpha, titlebar_island_vertical_geometry, titlebar_right_padding, TITLEBAR_CLUSTER_PAD};
 pub use titlebar::{titlebar_cluster_start, titlebar_spacer_width, caption_buttons_width, cluster_buttons_start, cluster_clearance, TITLEBAR_CONTROL_GAP, TITLEBAR_GROUP_GAP, TITLEBAR_IDENTITY_GAP, TITLEBAR_ACTION_EDGE_INSET, CLUSTER_BUTTONS_WIDTH, TITLEBAR_ACTION_SLOT_WIDTH, TITLEBAR_TRAILING_SLOTS_WIDTH};
@@ -176,6 +177,7 @@ actions!(
         OpenItemTab,
         OpenTeamTab,
         OpenTeamTabFromPanel,
+        PopOutSurface,
         ToggleItemCard,
         ToggleRunningChats
     ]
@@ -467,8 +469,6 @@ struct SubagentTab {
     doc_id: String,
     title: SharedString,
     transcript: Entity<Transcript>,
-    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    _fetch: Option<Task<()>>,
     /// Spawn chips INSIDE the subagent transcript open their own tabs.
     _events: Subscription,
 }
@@ -525,6 +525,8 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    /// The surface-tab context menu (Open in new window / Close tab).
+    right_tab_menu: popover::Popup<RightSurface>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -544,6 +546,8 @@ pub struct Shell {
     file_surface_seq: u64,
     pending_file_closes: std::collections::HashSet<RightSurface>,
     pending_exit: Option<PendingExit>,
+    /// Pop-out navigation waiting for its owner chat to show.
+    pending_popout_nav: Vec<(String, popout_host::PopoutNav)>,
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
@@ -1052,6 +1056,14 @@ impl Shell {
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
+        // Closing the main window releases its subagent tabs' holds on their
+        // docs; a pop-out showing the same doc keeps the feed.
+        cx.on_release(|shell: &mut Shell, cx| {
+            for tab in shell.subagent_tabs.values() {
+                shell.state.update(cx, |state, _| state.unwatch_subagent_doc(&tab.doc_id));
+            }
+        })
+        .detach();
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
             #[cfg(test)]
@@ -1081,6 +1093,7 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            right_tab_menu: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -1092,6 +1105,7 @@ impl Shell {
             file_surface_seq: 0,
             pending_file_closes: std::collections::HashSet::new(),
             pending_exit: None,
+            pending_popout_nav: Vec::new(),
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
@@ -3695,6 +3709,9 @@ impl Shell {
 
 #[cfg(test)]
 mod right_tab_mouse_regressions;
+
+#[cfg(test)]
+mod popout_tests;
 
 #[cfg(test)]
 mod shortcut_focus_regressions;
