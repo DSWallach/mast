@@ -162,6 +162,28 @@ async fn symbol_index_tracks_workspace_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symbol_index_evicts_the_least_recently_used_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-symbol-lru");
+    let mut receivers = Vec::new();
+    for number in 0..3 {
+        let repo = temp.path().join(format!("repo-{number}"));
+        init_repo(&repo).await;
+        let space = format!("space-{number}");
+        let chat = format!("chat-{number}");
+        core.workspace.create_space(&space, &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+        core.workspace.create_chat(&chat, Some(&space), None, None, None).unwrap();
+        let target: mast_proto::WorkspaceTarget = serde_json::from_value(serde_json::json!({"chatId": chat})).unwrap();
+        let mut receiver = core.workspace_files.subscribe_symbols(target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async { while receiver.borrow().is_none() { receiver.changed().await.unwrap(); } }).await.unwrap();
+        receivers.push(receiver);
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while receivers[0].changed().await.is_ok() {}
+    }).await.expect("oldest checkout should be evicted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_index_tracks_file_changes() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
