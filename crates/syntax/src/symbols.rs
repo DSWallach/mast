@@ -19,6 +19,8 @@ pub enum SymbolKind {
     Type,
     Constant,
     Test,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

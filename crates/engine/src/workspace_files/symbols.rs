@@ -51,7 +51,13 @@ pub struct QuerySymbolsRequest {
 pub struct SymbolMatch { pub path: String, pub symbol: Symbol }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct SymbolQueryResult { pub matches: Vec<SymbolMatch>, pub truncated: bool }
+#[serde(rename_all = "camelCase")]
+pub struct SymbolQueryResult {
+    pub matches: Vec<SymbolMatch>,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_name: Option<bool>,
+}
 
 pub(super) struct SymbolIndexSlot {
     sender: tokio::sync::watch::Sender<Option<SymbolResult>>,
@@ -169,6 +175,9 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
         for (symbol, lower_name) in file.symbols.iter().zip(&file.lower_names) {
             visited += 1;
             if visited % 128 == 0 && generation.load(Ordering::Acquire) != expected { return None; }
+            // A release-114 client does not know the newer constant kind.
+            // New clients request the kinds they understand explicitly.
+            if kinds.is_none() && !exact_name && symbol.kind == mast_syntax::symbols::SymbolKind::Constant { continue; }
             if kinds.is_some_and(|kinds| !kinds.contains(&symbol.kind)) { continue; }
             let score = if exact_name {
                 if symbol.name != query { continue; }
@@ -186,7 +195,7 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
         }
     }
     if generation.load(Ordering::Acquire) != expected { return None; }
-    Some(SymbolQueryResult { matches: best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect(), truncated: count > limit })
+    Some(SymbolQueryResult { matches: best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect(), truncated: count > limit, exact_name: Some(exact_name) })
 }
 
 fn definition_score(source: &str, target: &str) -> i64 {
