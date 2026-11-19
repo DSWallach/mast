@@ -60,7 +60,7 @@ Self-executing tests must pass the full module-qualified test name to `--exact`.
 
 On macOS, nextest's setup script selects the engine's periodic-repair fallback for
 tests that do not exercise native file watching. Native watcher and file-search tests,
-and the diff-publication watcher regression, retain FSEvents. This avoids contention
+and the diff-publication, git-status stream and remote file-watch regressions, retain FSEvents. This avoids contention
 in the macOS watcher daemon without changing application defaults or ordinary
 `cargo test` runs. The test-only switch `MAST_TEST_DISABLE_NATIVE_WATCHERS=1` takes
 effect only in a process with the home-isolation marker. To exercise every test with

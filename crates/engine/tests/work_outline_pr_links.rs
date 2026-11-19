@@ -234,8 +234,14 @@ impl Rig {
             json!({ "op": "createChat", "chatId": chat_id, "spaceId": SPACE, "deviceId": DEVICE }),
         )
         .await;
-        if let Some(item) = item {
-            self.assign(chat_id, item).await;
+        match item {
+            Some(item) => self.assign(chat_id, item).await,
+            // New chats get a default work item; detach it to model "no item".
+            None => {
+                self.mutate(json!({ "op": "removeChatFromWorkItem", "chatId": chat_id,
+                    "operationId": uuid::Uuid::new_v4().to_string() }))
+                .await;
+            }
         }
     }
 
