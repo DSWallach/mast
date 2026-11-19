@@ -2851,8 +2851,51 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, new_id(), payload, transfers)
             .map(|(id, _)| id)
+    }
+
+    /// A standing role's first-start chat takes no message but its own launch's
+    /// (which queues through `queue_command_with_id`): until the role adopts it
+    /// the chat is hidden, and a message sent to it would run where no one can
+    /// see the answer.
+    /// The resolution of a message refused on a provisional Manager chat. It is
+    /// final: a user's Retry Delivery never re-issues it, so a message that was
+    /// not authorized cannot reach the chat after the role adopts it.
+    const UNAUTHORIZED_FIRST_MESSAGE: &str = "this Manager has not started yet";
+
+    /// For a provisional first-start chat, the command id and the user message
+    /// id of its own launch (empty when the marker names no operation); `None`
+    /// for any other chat. A retry of a rejected or expired launch re-issues
+    /// the same message under a new command id, so the message id is what
+    /// identifies it.
+    fn provisional_launch_ids(&self, chat_id: &str) -> Option<(String, String)> {
+        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
+        chat.standing_role_provisional()?;
+        Some(
+            chat.standing_role_provisional_operation()
+                .map(|operation| {
+                    (
+                        mast_proto::derive_id(operation, mast_proto::roles::COMMAND),
+                        mast_proto::derive_id(operation, mast_proto::roles::MESSAGE),
+                    )
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    fn refuse_unstarted_role_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let provisional = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.standing_role_provisional().is_some());
+        if provisional {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Queue a command with a stable client-supplied identity, so a lost
@@ -2864,6 +2907,7 @@ impl DocHost {
         if command_id.is_empty() || command_id.len() > 64 {
             return Err(EngineError::Other("invalid command id".into()));
         }
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, transfers)
             .map(|(id, _)| id)
     }
@@ -2873,6 +2917,19 @@ impl DocHost {
     /// Idempotent by id: when an entry with `command_id` already exists the
     /// call writes nothing and returns `false`.
     pub fn queue_command_with_id(
+        &self,
+        chat_id: &str,
+        command_id: &str,
+        payload: SessionCommandPayload,
+    ) -> Result<bool, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
+        self.queue_launch_command_with_id(chat_id, command_id, payload)
+    }
+
+    /// [`Self::queue_command_with_id`] for a standing role's own first launch,
+    /// the one sender a provisional Manager chat accepts. Every other caller
+    /// goes through the guarded entry point.
+    pub(crate) fn queue_launch_command_with_id(
         &self,
         chat_id: &str,
         command_id: &str,
@@ -2889,6 +2946,49 @@ impl DocHost {
         }
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, Vec::new())
             .map(|(_, appended)| appended)
+    }
+
+    /// Whether the chat has the first-turn command `command_id` (a Run, with
+    /// or without instructions), queued or applied.
+    pub fn has_launch_command(&self, chat_id: &str, command_id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle.doc.read_commands()?.iter().any(|c| {
+            c.id == command_id
+                && matches!(
+                    c.payload,
+                    SessionCommandPayload::Run { .. }
+                        | SessionCommandPayload::RunWithInstructions { .. }
+                )
+        }))
+    }
+
+    /// Persist the chat's session doc now and report whether it reached
+    /// disk, unlike the debounced save, which logs failures and retries. A
+    /// caller that must not act on a queued command until it survives a
+    /// restart (a standing role's first message) calls this first.
+    pub fn persist_chat_now(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        if let Some(persistence) = &handle.persistence {
+            let generation = persistence.generation();
+            persistence.flush_sync();
+            return if persistence.has_saved(generation) {
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "the chat could not be saved to disk".into(),
+                ))
+            };
+        }
+        let bytes = handle
+            .doc
+            .export_snapshot()
+            .map_err(|e| EngineError::Other(format!("snapshot export failed: {e}")))?;
+        self.inner
+            .store
+            .save_snapshot(&handle.chat_id, &bytes)
+            .map_err(|e| EngineError::Other(format!("snapshot save failed: {e}")))?;
+        handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// The latest command attempt carrying the user message `message_id`
@@ -3152,6 +3252,7 @@ impl DocHost {
         message_id: Option<&str>,
     ) -> Result<String, EngineError> {
         if from_user {
+            self.refuse_unstarted_role_chat(chat_id)?;
             // User first: a wake still waiting in the queue is pulled back
             // (its events return to the held batch) so it can never run
             // ahead of this message, and a running event turn is
@@ -4353,6 +4454,10 @@ impl DocHost {
             if message_landed(mid) {
                 continue;
             }
+            // Refused as unauthorized on a provisional Manager chat: final.
+            if c.resolution.as_deref() == Some(Self::UNAUTHORIZED_FIRST_MESSAGE) {
+                continue;
+            }
             let dead = match c.status {
                 // Rejected: execute failed or the sweep terminalized a crash
                 // window. Expired: the entry outlived its TTL undelivered —
@@ -4453,6 +4558,20 @@ impl DocHost {
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
         let handle = self.open(chat_id)?;
+        // A provisional Manager chat takes no message from another device; its
+        // own launch queues locally and is never relayed.
+        if self.provisional_launch_ids(chat_id).is_some()
+            && matches!(
+                entry.payload,
+                SessionCommandPayload::Run { .. }
+                    | SessionCommandPayload::RunWithInstructions { .. }
+                    | SessionCommandPayload::Steer { .. }
+            )
+        {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
         if !self.missing_attachments(&entry).is_empty() {
@@ -4895,6 +5014,37 @@ impl DocHost {
                         Some("interrupted before completion — retry to send again"),
                     );
                     skipped.insert(c.id.clone());
+                }
+            }
+            // A provisional Manager chat runs only its own launch's command. A
+            // message that reached its doc another way (sync from a peer) is
+            // rejected here, so it cannot run once the chat is adopted.
+            if let Some((launch_command, launch_message)) =
+                self.provisional_launch_ids(&handle.chat_id)
+            {
+                for c in &commands {
+                    let message_id = match &c.payload {
+                        SessionCommandPayload::Run { message_id, .. }
+                        | SessionCommandPayload::RunWithInstructions { message_id, .. } => {
+                            Some(message_id.as_str())
+                        }
+                        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+                        _ => continue,
+                    };
+                    // The launch's command, or a retry's re-issue of its message.
+                    let own = c.id == launch_command || message_id == Some(launch_message.as_str());
+                    if c.status == SessionCommandStatus::Pending
+                        && !own
+                        && !skipped.contains(&c.id)
+                    {
+                        self.resolve_command(
+                            handle,
+                            &c.id,
+                            SessionCommandStatus::Rejected,
+                            Some(Self::UNAUTHORIZED_FIRST_MESSAGE),
+                        );
+                        skipped.insert(c.id.clone());
+                    }
                 }
             }
             let Some(entry) = commands

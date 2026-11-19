@@ -32,6 +32,11 @@ pub mod capabilities {
     /// captured execution binding at every dispatch. Clients forward a launch
     /// only to owners that advertise it.
     pub const WORK_OUTLINE_LAUNCH_V1: &str = "work-outline-launch-v1";
+    /// The host honors `standingRole` on `CreateChatForWorkItem` (adopts the
+    /// new Chat as a project's Manager) and carries standing roles in the
+    /// Work Outline snapshot. Clients start a Manager only on owners that
+    /// advertise it: older hosts would drop the field and make a plain Chat.
+    pub const STANDING_ROLE_LAUNCH_V1: &str = "standing-role-launch-v1";
     /// The host runs `StartPrReview` (check out a PR like the Cofactr
     /// launcher and start a review Chat). Clients forward a PR review start
     /// only to devices that advertise it.
@@ -50,6 +55,10 @@ pub mod capabilities {
     /// The host stores a scheduled task's `writeToNotion` setting and passes it
     /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
     pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
+    /// The host serves `briefing_read`, stores the `briefingIndex` setting and
+    /// handles the `setBriefingIndex` scheduled-tasks request. Clients offer the
+    /// switch only for hosts that advertise it.
+    pub const BRIEFING_READ_V1: &str = "briefing-read-v1";
     /// The host previews and applies scheduled-run chat cleanup.
     pub const SCHEDULED_RUN_CLEANUP_V1: &str = "scheduled-run-cleanup-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
@@ -99,11 +108,13 @@ pub mod capabilities {
         WORK_OUTLINE_INSTRUCTION_ENVELOPE_V1,
         WORK_OUTLINE_MULTI_REPO_V1,
         WORK_OUTLINE_LAUNCH_V1,
+        STANDING_ROLE_LAUNCH_V1,
         PR_REVIEW_LAUNCH_V1,
         SCHEDULED_TASK_WORK_ITEM_V1,
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
         SCHEDULED_TASK_NOTION_WRITES_V1,
+        BRIEFING_READ_V1,
         SCHEDULED_RUN_CLEANUP_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
@@ -228,11 +239,13 @@ mod tests {
                     "work-outline-instruction-envelope-v1",
                     "work-outline-multi-repo-v1",
                     "work-outline-launch-v1",
+                    "standing-role-launch-v1",
                     "pr-review-launch-v1",
                     "scheduled-task-work-item-v1",
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",
                     "scheduled-task-notion-writes-v1",
+                    "briefing-read-v1",
                     "scheduled-run-cleanup-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",

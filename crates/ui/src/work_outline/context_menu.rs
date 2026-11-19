@@ -521,7 +521,9 @@ impl OutlineView {
                 Some(menu)
             }
             OutlineRowKind::Unassociated { .. } => self.unassociated_context_menu(key, cx),
-            OutlineRowKind::Notice { .. } => None,
+            // Archive, rename and move belong to the Chat behind the role,
+            // which rotates; the row has no menu of its own.
+            OutlineRowKind::Manager(_) | OutlineRowKind::Notice { .. } => None,
         }
     }
 

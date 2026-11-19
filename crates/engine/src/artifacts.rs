@@ -688,6 +688,8 @@ struct Inner {
     /// record, so two concurrent publishes cannot both pass the check.
     agent_publish_serial: Mutex<()>,
     render: Arc<RenderBroker>,
+    /// Test seam: make provenance stamp writes fail.
+    fail_stamp_writes: std::sync::atomic::AtomicBool,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
 }
@@ -709,9 +711,18 @@ impl ArtifactsService {
                 gate: Mutex::new(HashMap::new()),
                 agent_publish_serial: Mutex::new(()),
                 render: Arc::new(RenderBroker::default()),
+                fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
         }
+    }
+
+    /// Test seam: while set, provenance stamp writes fail.
+    #[doc(hidden)]
+    pub fn fail_stamp_writes_for_test(&self, fail: bool) {
+        self.inner
+            .fail_stamp_writes
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Override the home directory the source deny-list is anchored to.
@@ -1181,6 +1192,7 @@ impl ArtifactsService {
                     by: request.by.clone(),
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
+                    scheduled_task: self.run_stamp(&request.by),
                 },
             );
             if manifest.is_some() {
@@ -1278,6 +1290,7 @@ impl ArtifactsService {
                     },
                     size_bytes: bytes.len() as u64,
                     op: None,
+                    scheduled_task: None,
                 },
             );
             view.current_revision = next;
@@ -1431,6 +1444,140 @@ impl ArtifactsService {
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
                 .map_err(|e| io_error("read snapshot of", Path::new(&artifact.stored_path), e))
         })
+    }
+
+    /// The task key to stamp on a revision published by a Background scheduled
+    /// run; `None` for any other writer.
+    fn run_stamp(&self, by: &WorkOutlineActor) -> Option<String> {
+        if by.kind != WorkOutlineActorKind::Agent {
+            return None;
+        }
+        let info = self
+            .workspace()
+            .chat(by.chat_id.as_deref()?)
+            .ok()
+            .flatten()?
+            .scheduled_task_info
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)?;
+        mast_proto::ScheduledRunResults::key_of_role(&mast_proto::ScheduledRunResults::role_for(
+            &info.task_id,
+        ))
+    }
+
+    /// Stamp the revisions that Background scheduled runs published before
+    /// stamps existed, while their publishing chat still proves it, so the
+    /// provenance outlives that chat. Only artifacts this device owns are
+    /// rewritten. `chat` limits it to that chat's revisions. Never called from
+    /// a read: reads leave the registry untouched. Returns how many artifacts
+    /// were rewritten, or the first write that failed (later ones are not
+    /// attempted, and a retry resumes where it stopped).
+    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> Outcome<usize> {
+        let artifacts = self.workspace().all_artifacts();
+        let pending: Vec<String> = artifacts
+            .into_iter()
+            .filter(|a| a.device_id == self.device_id() && a.archived_at.is_none())
+            .filter(|a| {
+                a.role
+                    .as_deref()
+                    .is_some_and(mast_proto::ScheduledRunResults::is_results_role)
+            })
+            .filter(|a| {
+                a.revisions.iter().any(|r| {
+                    r.scheduled_task.is_none()
+                        && r.by.kind == WorkOutlineActorKind::Agent
+                        && chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat))
+                })
+            })
+            .map(|a| a.id)
+            .collect();
+        let mut written = 0;
+        for id in pending {
+            let _gate = lock(&self.inner.gate);
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            let Some(key) = view
+                .role
+                .as_deref()
+                .map(mast_proto::ScheduledRunResults::normalize_role)
+                .and_then(|role| mast_proto::ScheduledRunResults::key_of_role(&role))
+            else {
+                continue;
+            };
+            let mut changed = false;
+            for revision in view
+                .revisions
+                .iter_mut()
+                .filter(|r| r.scheduled_task.is_none())
+                .filter(|r| chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat)))
+            {
+                if self.run_stamp(&revision.by).as_deref() == Some(key.as_str()) {
+                    revision.scheduled_task = Some(key.clone());
+                    changed = true;
+                }
+            }
+            if changed {
+                if self.inner.fail_stamp_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(ArtifactError::io("provenance stamp write failed (injected)"));
+                }
+                self.workspace()
+                    .put_artifact(&view)
+                    .map_err(|e| ArtifactError::io(e.to_string()))?;
+                written += 1;
+            }
+        }
+        Ok(written)
+    }
+
+    /// Stamp what `chat` published before the chat is deleted, since the stamp
+    /// is what keeps a pre-stamp result readable afterwards.
+    /// An error means a stamp could not be written, and the caller must not
+    /// delete the chat.
+    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) -> Outcome<()> {
+        self.backfill_run_stamps(Some(chat_id)).map(drop)
+    }
+
+    /// Run [`Self::backfill_run_stamps`] for every chat once the registry has
+    /// joined its room: before that, chats and artifacts may not all be here
+    /// yet. With no edge configured the registry is complete at once.
+    pub fn spawn_backfill_run_stamps(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if !service.workspace().registry_synced() {
+                    continue;
+                }
+                let attempt = service.clone();
+                match tokio::task::spawn_blocking(move || attempt.backfill_run_stamps(None)).await {
+                    Ok(Ok(_)) => break,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "run stamp backfill failed; will retry");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// The bytes of the newest revision exactly as recorded: its stored
+    /// snapshot, else the live file when that still hashes to the revision.
+    /// Never a newer file paired with an older revision's metadata.
+    pub(crate) fn revision_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
+        let current = artifact
+            .current()
+            .ok_or_else(|| ArtifactError::not_found("the artifact has no revisions"))?;
+        if let Ok(bytes) = std::fs::read(self.snapshot_path(&artifact.id, &current.hash)) {
+            return Ok(bytes);
+        }
+        let live = read_file(Path::new(&artifact.stored_path))?;
+        if content_hash(&live) == current.hash {
+            Ok(live)
+        } else {
+            Err(ArtifactError::not_found("the revision's content is not available"))
+        }
     }
 
     fn normalize_review_hashes(&self, chat_id: &str, review: &mut mast_proto::ReviewSidecar) {
@@ -2798,17 +2945,28 @@ impl ArtifactsService {
         args: &PublishArgs,
         operation_id: &str,
     ) -> Outcome<()> {
-        let Some(item) = caller.work_item_id.as_deref() else {
-            return Ok(());
-        };
-        let Some(info) = self
+        let background = self
             .workspace()
             .chat(&caller.chat_id)
             .ok()
             .flatten()
             .and_then(|chat| chat.scheduled_task_info)
-            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)
-        else {
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background);
+        // The results role is how readers recognise a scheduled result, so only
+        // a Background run may write it, whatever the chat's work item.
+        if background.is_none()
+            && mast_proto::ScheduledRunResults::is_results_role(
+                args.role.as_deref().unwrap_or_default(),
+            )
+        {
+            return Err(ArtifactError::invalid(
+                "the scheduled-results role is reserved for Background scheduled runs",
+            ));
+        }
+        let Some(item) = caller.work_item_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(info) = background else {
             return Ok(());
         };
         let expected = crate::scheduled_tasks::results::resolve(

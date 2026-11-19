@@ -196,6 +196,9 @@ struct Inner {
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     token_usage: OnceLock<crate::token_usage::TokenUsage>,
+    /// Text for the agent to see before a new chat's first prompt (the
+    /// briefing index); wired at engine assembly, absent in bare tests.
+    chat_start_notice: Mutex<Option<ChatStartNotice>>,
     /// `~/.mast/settings.json`, consulted only by runs in Rules mode.
     permission_rules: Mutex<Arc<crate::permission_rules::PermissionRules>>,
     /// Per-project accounts; unset in bare test engines (everything runs on Default).
@@ -320,6 +323,15 @@ fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<
     }).collect()
 }
 
+/// What a new chat's agent is shown before its first prompt. `enabled` is a
+/// cheap check made before anything else; `text` builds the notice for a chat.
+/// Neither may hold anything that leads back to the sessions engine.
+#[derive(Clone)]
+pub struct ChatStartNotice {
+    pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub text: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
 fn prepare_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> (String, Vec<(std::path::PathBuf, u128)>) {
     if prompt.trim_start().starts_with('/') { return (prompt.to_owned(), Vec::new()); }
     let changes = journal.pending_skill_changes(chat_id);
@@ -336,6 +348,8 @@ fn acknowledge_skill_notices(journal: &RunJournal, chat_id: &str, changes: &[(st
 }
 
 impl SessionsEngine {
+    pub fn set_chat_start_notice(&self, notice: ChatStartNotice) { *lock(&self.inner.chat_start_notice) = Some(notice); }
+
     pub fn set_token_usage(&self, usage: crate::token_usage::TokenUsage) { let _ = self.inner.token_usage.set(usage); }
     pub fn token_usage(&self) -> Option<crate::token_usage::TokenUsage> { self.inner.token_usage.get().cloned() }
 
@@ -401,6 +415,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 token_usage: OnceLock::new(),
+                chat_start_notice: Mutex::new(None),
                 permission_rules: Mutex::new(Arc::new(crate::permission_rules::PermissionRules::new(
                     crate::permission_rules::PermissionRules::default_path(),
                 ))),
@@ -1193,6 +1208,19 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        // The briefing index goes with a main chat's first turn only, never
+        // ahead of a leading slash command. With the setting off nothing more
+        // is read; otherwise the first turn is the one whose message is the
+        // first user entry, which holds across retries and fresh restarts of
+        // that turn and never for a later turn that merely starts a session.
+        let start_notice = if side_chat || request.prompt.trim_start().starts_with('/') {
+            None
+        } else {
+            let notice = lock(&self.inner.chat_start_notice).clone();
+            notice
+                .filter(|notice| (notice.enabled)())
+                .filter(|_| handle.doc().first_user_message_id().as_deref() == Some(user_id.as_str()))
+        };
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1249,7 +1277,8 @@ impl SessionsEngine {
         let notices = delivered_prompt
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
-        request.prompt = format!("{notices}{}", request.prompt);
+        let start_notice = start_notice.and_then(|notice| (notice.text)(chat_id));
+        request.prompt = format!("{}{notices}{}", start_notice.unwrap_or_default(), request.prompt);
 
         let run_id = new_id();
         let agent_tools = self.agent_tools_for(chat_id, &run_id, harness.as_ref());
