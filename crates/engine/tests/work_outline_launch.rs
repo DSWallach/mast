@@ -2591,6 +2591,8 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     first.evaluate(&snapshot).await;
     first.evaluate(&snapshot).await;
     assert_eq!(first.offers_made(), 1);
+    let saved = std::fs::read_to_string(&store).expect("the offer is saved");
+    assert!(saved.contains(&item), "{saved}");
 
     // A restart (a new dispatcher over the same store) does not repeat it.
     let restarted = build(Some(store.clone()));
@@ -2601,5 +2603,22 @@ async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
     let fresh = build(None);
     fresh.evaluate(&snapshot).await;
     assert_eq!(fresh.offers_made(), 1);
+
+    // Once the item stops being ready, its remembered offer is pruned.
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": item,
+                    "changes": { "status": "completed" }, "operationId": "offer-done" }),
+        )
+        .await
+        .unwrap();
+    let after = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    restarted.evaluate(&after).await;
+    let pruned = std::fs::read_to_string(&store).expect("the store is rewritten");
+    assert!(!pruned.contains(&item), "{pruned}");
     rig.core.shutdown().await;
 }
