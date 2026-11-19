@@ -24,7 +24,11 @@ pub(super) struct Folder {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TileKind {
     File(usize),
-    More(Vec<usize>),
+    More {
+        folder: String,
+        files: Vec<usize>,
+        lines: u64,
+    },
     Folder(String),
 }
 
@@ -201,7 +205,11 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                     bounds: rect,
                 }),
                 Item::More(files) => result.push(Tile {
-                    kind: TileKind::More(files.iter().map(|f| f.id).collect()),
+                    kind: TileKind::More {
+                        folder: folder.path.clone(),
+                        lines: files.iter().map(|f| f.weight).sum(),
+                        files: files.iter().map(|f| f.id).collect(),
+                    },
                     bounds: rect,
                 }),
                 Item::Folder(child) => {
@@ -398,7 +406,7 @@ mod tests {
         let more = tiles
             .iter()
             .find_map(|tile| match &tile.kind {
-                TileKind::More(ids) => Some(ids),
+                TileKind::More { files, .. } => Some(files),
                 _ => None,
             })
             .unwrap();
@@ -433,7 +441,7 @@ mod tests {
         assert!(
             tiles
                 .iter()
-                .any(|tile| matches!(tile.kind, TileKind::More(_)))
+                .any(|tile| matches!(tile.kind, TileKind::More { .. }))
         );
         assert!(
             tiles.iter().all(|tile| tile.bounds.width >= MIN_TILE - 0.01
@@ -465,7 +473,7 @@ mod tests {
         assert!(
             tiles
                 .iter()
-                .any(|tile| matches!(tile.kind, TileKind::More(_)))
+                .any(|tile| matches!(tile.kind, TileKind::More { .. }))
         );
         assert!(
             tiles.iter().all(|tile| tile.bounds.width >= MIN_TILE - 0.01

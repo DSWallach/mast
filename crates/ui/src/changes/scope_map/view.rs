@@ -385,12 +385,28 @@ impl Changes {
                         ),
                     );
                 }
-                TileKind::More(files) => {
+                TileKind::More {
+                    folder,
+                    files,
+                    lines,
+                } => {
+                    let folder = folder.clone();
+                    let first = files[0];
+                    let count = files.len();
+                    let title = format!("{count} more files · {lines} changed lines");
                     canvas = canvas.child(
-                        base.border_1()
+                        base.id(("scope-map-more", first))
+                            .cursor_pointer()
+                            .border_1()
                             .border_color(theme.border)
                             .bg(theme.element_hover)
-                            .child(format!("{} more", files.len())),
+                            .child(format!("{count} more"))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| DiffHeaderTooltip(title.clone().into())).into()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.reveal_scope_folder(folder.clone(), first, window, cx)
+                            })),
                     );
                 }
                 TileKind::File(index) => {

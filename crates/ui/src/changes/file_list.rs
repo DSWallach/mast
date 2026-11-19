@@ -564,6 +564,19 @@ fn file_tree_rows(
 }
 
 impl Changes {
+    pub(super) fn reveal_scope_folder(&mut self, folder: String, file: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.file_tree_key();
+        let target = format!("{}/", folder.trim_end_matches('/'));
+        if let Some(collapsed) = self.file_tree_collapsed.get_mut(&key) {
+            collapsed.retain(|path| !target.starts_with(path));
+        }
+        self.file_filter.update(cx, |input, cx| input.set_text("", cx));
+        self.scope_map_selected = false;
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.changes_scope_map = false);
+        self.scope_map_reveal = Some((folder, file));
+        window.focus(&self.file_tree_focus, cx);
+        cx.notify();
+    }
     fn file_tree_key(&self) -> String {
         let owner = self.owner.as_ref().map(|owner| {
             (
@@ -678,6 +691,14 @@ impl Changes {
             .cloned()
             .unwrap_or_default();
         let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        if let Some((path, file)) = self.scope_map_reveal.take() {
+            let target = format!("{}/", path.trim_end_matches('/'));
+            let position = tree_rows.iter().position(|row| match row {
+                FileTreeRow::Folder { path, .. } => !target.starts_with("/") && (path == &target || path.starts_with(&target) || target.starts_with(path)),
+                FileTreeRow::File { index, .. } => *index == file,
+            });
+            if let Some(position) = position { self.file_tree_scroll.scroll_to_item(position, gpui::ScrollStrategy::Nearest); }
+        }
         let rows_key = tree_key.clone();
         let collapse_key = tree_key.clone();
         let expand_key = tree_key.clone();
@@ -837,6 +858,7 @@ impl Changes {
                         .collect::<Vec<_>>()
                 })
             })
+            .track_scroll(&self.file_tree_scroll)
             .flex_1()
             .min_h_0();
         div()
