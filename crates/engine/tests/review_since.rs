@@ -263,6 +263,10 @@ async fn hunks_that_merge_after_a_nearby_change_are_not_false_removals() {
     let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
     assert!(!snapshot.patch.contains(mast_engine::diff_sync::since::REMOVED_LABEL), "no false removal:\n{}", snapshot.patch);
     assert!(snapshot.patch.contains("+ELEVEN") && snapshot.patch.contains("+SEVENTEEN"), "the new changes show:\n{}", snapshot.patch);
+    // The unchanged runs inside the regrouped hunk are not shown as additions.
+    assert!(!snapshot.patch.contains("+FIVE") && !snapshot.patch.contains("+TWENTY"), "unchanged runs are not new:\n{}", snapshot.patch);
+    let file = snapshot.files.iter().find(|f| f.path == "long.txt").unwrap();
+    assert_eq!((file.additions, file.deletions), (2, 2));
 }
 
 #[tokio::test]
@@ -333,4 +337,44 @@ async fn a_dropped_binary_file_is_reported_with_a_note() {
     assert!(got.contains(&"blob.bin".to_owned()) && got.contains(&"d.txt".to_owned()), "{got:?}");
     assert!(snapshot.patch.contains("binary, rename or mode-only change no longer in the PR"), "{}", snapshot.patch);
     assert!(snapshot.patch.contains(mast_engine::diff_sync::since::REMOVED_LABEL));
+}
+
+#[tokio::test]
+async fn dropping_one_of_two_identical_runs_is_seen() {
+    let (_tmp, root, repos) = long_repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    // The same one-line insertion in two places: two runs with identical content.
+    let with_dup = |lines: &[usize]| -> String {
+        (1..=30).flat_map(|n| {
+            let mut out = vec![format!("l{n}\n")];
+            if lines.contains(&n) {
+                out.push("DUP\n".to_owned());
+            }
+            out
+        }).collect()
+    };
+    write(&root, "long.txt", &with_dup(&[5, 20]));
+    let old = commit(&root, "f1");
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "long.txt", &with_dup(&[5]));
+    let new = commit(&root, "f1 with one insertion");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    let label = mast_engine::diff_sync::since::REMOVED_LABEL;
+    assert_eq!(snapshot.patch.matches(label).count(), 1, "the dropped duplicate is reported once:\n{}", snapshot.patch);
+    assert!(snapshot.patch.contains("-DUP"));
+}
+
+#[tokio::test]
+async fn a_dropped_rename_only_rs_file_is_noted_as_a_meta_line() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    git(&root, &["mv", "d.txt", "moved.rs"]);
+    let old = commit(&root, "f1 renames d.txt to moved.rs");
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "c.txt", "1\n2\nC\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f1 without the rename");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert!(paths(&snapshot).contains(&"moved.rs".to_owned()), "{:?}", paths(&snapshot));
+    // The note is a `\` meta line (no line numbers), never a context line at line 0.
+    assert!(snapshot.patch.contains("@@ -0,0 +0,0 @@ Removed since you reviewed\n\\ binary, rename or mode-only change no longer in the PR\n"), "{}", snapshot.patch);
 }

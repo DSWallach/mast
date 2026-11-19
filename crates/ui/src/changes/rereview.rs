@@ -485,4 +485,17 @@ mod tests {
             });
         });
     }
+
+    #[test]
+    fn a_synthetic_removal_hunk_does_not_break_syntax_excerpts() {
+        // The engine's note for a dropped rename-only file: a 0,0 hunk with a `\` meta line.
+        let note = "diff --git a/moved.rs b/moved.rs\n--- a/moved.rs\n+++ b/moved.rs\n@@ -0,0 +0,0 @@ Removed since you reviewed\n\\ binary, rename or mode-only change no longer in the PR\n";
+        let (files, ..) = parse_diff_tree(note, &[]);
+        assert!(is_removal_file(&files[0]));
+        let _ = excerpt_highlights(&files[0], Lang::Rust);
+        // A context line numbered 0 (which indexed lines[-1]) is ignored too.
+        let zero = "diff --git a/z.rs b/z.rs\n--- a/z.rs\n+++ b/z.rs\n@@ -0,0 +0,0 @@\n ctx\n";
+        let (files, ..) = parse_diff_tree(zero, &[]);
+        let _ = excerpt_highlights(&files[0], Lang::Rust);
+    }
 }

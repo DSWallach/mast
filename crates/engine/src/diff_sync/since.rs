@@ -273,6 +273,7 @@ fn chunk_path(chunk: &str) -> String {
     })
 }
 
+#[cfg(test)]
 /// Identity of a hunk's changed lines under a path (line numbers and context ignored).
 fn hunk_key(path: &str, hunk: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -412,6 +413,19 @@ fn reversed_run(run: &Run<'_>) -> (String, u32, u32) {
     (header + &body, adds, dels)
 }
 
+/// A run as an ordinary hunk (used when git regrouped a hunk and only some of its runs are new).
+fn forward_run(run: &Run<'_>) -> String {
+    let adds = run.lines.iter().filter(|l| l.starts_with('+')).count() as u32;
+    let dels = run.lines.iter().filter(|l| l.starts_with('-')).count() as u32;
+    let context = (run.before.len() + run.after.len()) as u32;
+    let mut out = format!("@@ -{},{} +{},{} @@\n", run.old_start, context + dels, run.new_start, context + adds);
+    for line in run.before.iter().chain(&run.lines).chain(&run.after) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn count_changes(hunk: &str) -> (u32, u32) {
     hunk.lines().skip(1).fold((0, 0), |(adds, dels), line| match line.as_bytes().first() {
         Some(b'+') => (adds + 1, dels),
@@ -428,15 +442,19 @@ fn count_changes(hunk: &str) -> (u32, u32) {
 fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
     let old_chunks = split_patch(&before.patch);
     let new_chunks = split_patch(&after.patch);
-    let seen: HashSet<[u8; 32]> = old_chunks
-        .iter()
-        .flat_map(|file| file.hunks.iter().map(|hunk| hunk_key(&file.path, hunk)))
-        .collect();
-    let present_runs: HashSet<[u8; 32]> = new_chunks
-        .iter()
-        .flat_map(|file| file.hunks.iter().flat_map(|hunk| runs_of(&file.path, hunk)))
-        .map(|run| run.key)
-        .collect();
+    // Runs as multisets: dropping one of two identical runs must still be seen.
+    let mut old_runs: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    for file in &old_chunks {
+        for run in file.hunks.iter().flat_map(|hunk| runs_of(&file.path, hunk)) {
+            *old_runs.entry(run.key).or_default() += 1;
+        }
+    }
+    let mut present_runs: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    for file in &new_chunks {
+        for run in file.hunks.iter().flat_map(|hunk| runs_of(&file.path, hunk)) {
+            *present_runs.entry(run.key).or_default() += 1;
+        }
+    }
     let before_headers: HashSet<&str> = old_chunks
         .iter()
         .filter(|file| file.hunks.is_empty())
@@ -451,7 +469,8 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         let (mut adds, mut dels) = (0u32, 0u32);
         for hunk in &file.hunks {
             for run in runs_of(&file.path, hunk) {
-                if present_runs.contains(&run.key) {
+                if let Some(count) = present_runs.get_mut(&run.key).filter(|count| **count > 0) {
+                    *count -= 1;
                     continue;
                 }
                 let (text, a, d) = reversed_run(&run);
@@ -462,7 +481,7 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         }
         if file.hunks.is_empty() && !new_paths.contains(file.path.as_str()) {
             hunks.push(format!(
-                "@@ -0,0 +0,0 @@ {REMOVED_LABEL}\n (binary, rename or mode-only change no longer in the PR)\n"
+                "@@ -0,0 +0,0 @@ {REMOVED_LABEL}\n\\ binary, rename or mode-only change no longer in the PR\n"
             ));
         }
         if !hunks.is_empty() {
@@ -473,12 +492,30 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
     let mut patch = String::new();
     let mut counts: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
     for file in &new_chunks {
-        let kept: Vec<&str> = file
-            .hunks
-            .iter()
-            .copied()
-            .filter(|hunk| !seen.contains(&hunk_key(&file.path, hunk)))
-            .collect();
+        // A new hunk is kept whole when none of its runs existed before; when only some are
+        // new (git regrouped them), just the new runs are kept, so unchanged ones are not
+        // shown as additions.
+        let mut kept: Vec<String> = Vec::new();
+        for hunk in &file.hunks {
+            let runs = runs_of(&file.path, hunk);
+            let fresh: Vec<bool> = runs
+                .iter()
+                .map(|run| match old_runs.get_mut(&run.key).filter(|count| **count > 0) {
+                    Some(count) => {
+                        *count -= 1;
+                        false
+                    }
+                    None => true,
+                })
+                .collect();
+            if fresh.iter().all(|new| *new) {
+                if !runs.is_empty() {
+                    kept.push((*hunk).to_owned());
+                }
+            } else {
+                kept.extend(runs.iter().zip(&fresh).filter(|(_, new)| **new).map(|(run, _)| forward_run(run)));
+            }
+        }
         let headerless_change = file.hunks.is_empty() && !before_headers.contains(file.header);
         let dropped = removed.iter().position(|(path, ..)| *path == file.path);
         if kept.is_empty() && !headerless_change && dropped.is_none() {
@@ -492,8 +529,8 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         }
         let (mut adds, mut dels) = (0u32, 0u32);
         for hunk in kept {
-            patch.push_str(hunk);
-            let (a, d) = count_changes(hunk);
+            patch.push_str(&hunk);
+            let (a, d) = count_changes(&hunk);
             adds += a;
             dels += d;
         }
