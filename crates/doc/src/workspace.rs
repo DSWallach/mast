@@ -288,6 +288,10 @@ impl WorkspaceDoc {
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
         row.insert("scheduledTaskInfo", LoroValue::from(serde_json::to_value(&chat.scheduled_task_info)?))?;
         set_opt_str(&row, "scheduledTask", chat.scheduled_task.as_deref())?;
+        // Write-once marker: a stale full-row upsert must never clear it.
+        if let Some(successor) = chat.standing_role_successor.as_deref() {
+            row.insert("standingRoleSuccessor", successor)?;
+        }
         set_opt_str(&row, "sideOf", chat.side_of.as_deref())?;
         set_opt_str(
             &row,
@@ -799,6 +803,8 @@ pub(crate) struct RawChat {
     #[serde(rename = "scheduledTaskInfo")]
     scheduled_task_info: Option<mast_proto::ScheduledChat>,
     scheduled_task: Option<String>,
+    #[serde(default)]
+    standing_role_successor: Option<String>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -862,6 +868,7 @@ impl From<RawChat> for Chat {
             linked_ticket_source: raw.linked_ticket_source,
             scheduled_task: raw.scheduled_task,
             scheduled_task_info: raw.scheduled_task_info,
+            standing_role_successor: raw.standing_role_successor,
         }
     }
 }
@@ -977,6 +984,7 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             parent_chat_id: Some("parent-chat".into()),
             side_of: None,
             side_absorbed_through: None,

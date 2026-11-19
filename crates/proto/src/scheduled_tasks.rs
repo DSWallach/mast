@@ -298,13 +298,17 @@ fn latest_task_chats(
     latest.into_values()
 }
 
-/// Runs omitted from default views, including background and retired runs.
-/// Run history still reaches them.
+/// Runs omitted from default views, including background and retired runs,
+/// plus chats a standing role has rotated away from. Run history still
+/// reaches the runs, and `read_chat` still reaches the predecessors.
 pub fn hidden_task_chat_ids(chats: &[crate::Chat]) -> std::collections::HashSet<&str> {
     let latest = latest_task_chat_ids(chats);
     chats
         .iter()
-        .filter(|c| c.scheduled_task_info.is_some() && !latest.contains(c.id.as_str()))
+        .filter(|c| {
+            c.is_standing_role_predecessor()
+                || (c.scheduled_task_info.is_some() && !latest.contains(c.id.as_str()))
+        })
         .map(|c| c.id.as_str())
         .collect()
 }
@@ -361,6 +365,19 @@ mod tests {
         assert_eq!(
             hidden_task_chat_ids(&chats),
             std::collections::HashSet::from(["retired", "old"])
+        );
+    }
+    #[test]
+    fn standing_role_predecessors_are_hidden_with_old_runs() {
+        let mut old_role_chat = chat("rotated", "a", "x", 0);
+        old_role_chat.scheduled_task_info = None;
+        old_role_chat.standing_role_successor = Some("current".into());
+        let mut current = chat("current", "a", "x", 0);
+        current.scheduled_task_info = None;
+        let chats = vec![old_role_chat, current];
+        assert_eq!(
+            hidden_task_chat_ids(&chats),
+            std::collections::HashSet::from(["rotated"])
         );
     }
     #[test]

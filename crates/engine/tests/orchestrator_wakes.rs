@@ -1629,3 +1629,27 @@ async fn long_reports_are_cut_and_marked_and_orphans_cannot_report() {
     assert!(rig.wakes.report_to_parent("w1", "  ").await.is_err());
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
+    use mast_proto::StandingRoleKind;
+    let rig = Rig::new().await;
+    let workspace = &rig.core.workspace;
+    workspace.create_space("role-space", &rig.core.device_id, "/tmp", None, false).unwrap();
+    for id in ["role-source", "role-successor", "plain-source", "plain-successor"] {
+        workspace.create_chat_with_parent(id, Some("role-space"), Some(&rig.core.device_id), None, None, None).unwrap();
+    }
+    workspace.adopt_standing_role(StandingRoleKind::Manager, "project", "role-source", &[]).unwrap();
+
+    assert_eq!(workspace.rotate_standing_role_for_chat("plain-source", "plain-successor").unwrap(), None);
+    assert!(!workspace.chat("plain-source").unwrap().unwrap().archived);
+
+    let role = workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap().unwrap();
+    assert_eq!(role.current_chat_id.as_deref(), Some("role-successor"));
+    // A retried launch finds the role already moved.
+    assert_eq!(workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap(), Some(role));
+    let source = workspace.chat("role-source").unwrap().unwrap();
+    assert!(source.archived && source.is_standing_role_predecessor());
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("role-successor"));
+    rig.core.shutdown().await;
+}

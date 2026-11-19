@@ -1064,6 +1064,22 @@ impl AppState {
         }
     }
 
+    /// The chat now holding the role of the selected chat, when the selected
+    /// chat was rotated away from. `None` when nothing needs to change.
+    pub(crate) fn standing_role_selection_target(&self) -> Option<String> {
+        let selected = self.selected_chat.as_deref()?;
+        let current = mast_proto::StandingRole::resolve_current(&self.chats, selected);
+        (current != selected).then(|| current.to_owned())
+    }
+
+    /// An open pane on a chat a standing role rotated away from swaps to the
+    /// successor in place, with no click.
+    pub(crate) fn follow_standing_role_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.standing_role_selection_target() {
+            self.select_chat(Some(target), cx);
+        }
+    }
+
     /// Replace one chat title in the shared presentation state and return its
     /// previous value. The shell uses this for an immediate rename preview;
     /// the registry watch remains authoritative and will reconcile the same
@@ -1940,6 +1956,7 @@ impl AppState {
             .chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| !c.is_standing_role_predecessor())
             .filter(|c| c.scheduled_task_info.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
@@ -2075,6 +2092,7 @@ impl AppState {
                 .map(|s| discriminant(&s))
                 .hash(&mut h);
             chat.scheduled_task_info.hash(&mut h);
+            chat.standing_role_successor.hash(&mut h);
             discriminant(&self.display_status_for(chat, now)).hash(&mut h);
             if let Some(failures) = self
                 .session_for(&chat.id)
@@ -3570,6 +3588,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     #[cfg(feature = "startup-bench")]
                     startup_trace("chats_apply");
                     state.apply_chats(parsed);
+                    state.follow_standing_role_selection(cx);
                     state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
                     // A Chat's Space can arrive (or the selection vanish)
@@ -4804,6 +4823,7 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             parent_chat_id: None,
             side_of: None,
             side_absorbed_through: None,
@@ -6232,6 +6252,29 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn open_pane_follows_standing_role_rotation_to_the_current_chat() {
+        let mut state = AppState::new();
+        let mut first = chat("first", 0, None);
+        first.archived = true;
+        first.standing_role_successor = Some("second".into());
+        let mut second = chat("second", 1, None);
+        second.standing_role_successor = Some("third".into());
+        state.apply_chats(vec![first, second, chat("third", 2, None)]);
+        state.selected_chat = Some("first".into());
+        assert_eq!(state.standing_role_selection_target().as_deref(), Some("third"));
+        state.selected_chat = Some("third".into());
+        assert_eq!(state.standing_role_selection_target(), None);
+        state.selected_chat = None;
+        assert_eq!(state.standing_role_selection_target(), None);
+        assert!(
+            state
+                .overview_chats_with_archived(Utc::now(), true)
+                .iter()
+                .all(|(_, c)| !c.is_standing_role_predecessor())
+        );
     }
 
     #[test]

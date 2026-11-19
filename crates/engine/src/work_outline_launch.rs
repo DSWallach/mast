@@ -770,6 +770,11 @@ impl WorkItemLaunchService {
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
         if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
+            // A manual hand-off of a standing role's chat moves the role too.
+            // Replays of this launch find the role already moved.
+            self.workspace
+                .rotate_standing_role_for_chat(source, &chat_id)
+                .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let handle = self.doc_host.open(source).map_err(engine_error)?;
             handle.write_user_message(
                 &derive_id(op, "hand-off-notice"),

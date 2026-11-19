@@ -4,7 +4,7 @@
 //! tested, not asserted.
 
 use super::*;
-use mast_proto::{HarnessId, SandboxLevel, SessionStatus};
+use mast_proto::{HarnessId, SandboxLevel, SessionStatus, StandingRoleKind};
 
 fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
@@ -276,6 +276,7 @@ pub(super) fn chat(id: &str, device_id: &str) -> Chat {
         actual_model: None,
         scheduled_task: None,
         scheduled_task_info: None,
+        standing_role_successor: None,
         parent_chat_id: Some("parent-chat".into()),
         side_of: None,
         side_absorbed_through: None,
@@ -369,6 +370,113 @@ fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
     }
     assert!(doc.hand_off_chat_children("archived", "source", "archived", 1).is_err());
     assert_eq!(doc.chat("child").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+}
+
+fn role_doc(ids: &[&str]) -> RegistryDoc {
+    let mut doc = RegistryDoc::new("dev-a");
+    for id in ids {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some("space".into());
+        doc.upsert_chat(&row).unwrap();
+    }
+    doc
+}
+
+#[test]
+fn standing_role_adoption_is_idempotent_and_refuses_a_second_holder() {
+    let mut doc = role_doc(&["first", "other"]);
+    let role = doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    assert_eq!(role.id, "manager:project");
+    assert_eq!(role.chain, ["first"]);
+    assert_eq!(doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap(), role);
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, "project", "other", &[]).is_err());
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("first"));
+    // Roles of different kinds or scopes are independent records.
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Assistant, "project"), None);
+    doc.adopt_standing_role(StandingRoleKind::Assistant, "project", "other", &[]).unwrap();
+    assert_eq!(doc.standing_roles().len(), 2);
+    assert_eq!(doc.standing_role_of_chat("other").unwrap().role, StandingRoleKind::Assistant);
+}
+
+#[test]
+fn rotating_a_standing_role_leaves_one_current_chat_and_hides_the_predecessor() {
+    let mut doc = role_doc(&["first", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    let (role, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    assert!(!replayed);
+    assert_eq!(role.current_chat_id.as_deref(), Some("second"));
+    assert_eq!(role.chain, ["first", "second"]);
+    let first = doc.chat("first").unwrap().unwrap();
+    assert!(first.archived && first.is_standing_role_predecessor());
+    assert_eq!(first.standing_role_successor.as_deref(), Some("second"));
+    let second = doc.chat("second").unwrap().unwrap();
+    assert!(!second.archived && !second.is_standing_role_predecessor());
+
+    // A retried rotation changes nothing; a stale source is refused.
+    let (again, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    assert!(replayed);
+    assert_eq!(again, role);
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "third").is_err());
+
+    let (role, _) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "second", "third").unwrap();
+    assert_eq!(role.chain, ["first", "second", "third"]);
+    assert_eq!(role.predecessors(), ["first", "second"]);
+    let visible: Vec<_> = doc
+        .read_chats()
+        .unwrap()
+        .into_iter()
+        .filter(|c| !c.archived && !c.is_standing_role_predecessor())
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(visible, ["third"]);
+    assert_eq!(doc.standing_role_of_chat("first"), None);
+}
+
+#[test]
+fn stale_chat_upserts_cannot_clear_the_predecessor_marker() {
+    let mut doc = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    let stale = doc.chat("first").unwrap().unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    doc.upsert_chat(&stale).unwrap();
+    assert_eq!(doc.chat("first").unwrap().unwrap().standing_role_successor.as_deref(), Some("second"));
+}
+
+#[test]
+fn standing_role_rotation_refuses_unsafe_destinations() {
+    let mut doc = role_doc(&["first", "second", "archived", "elsewhere"]);
+    doc.set_chat_archived("archived", true).unwrap();
+    let mut elsewhere = doc.chat("elsewhere").unwrap().unwrap();
+    elsewhere.space_id = Some("other-space".into());
+    doc.upsert_chat(&elsewhere).unwrap();
+    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    for destination in ["archived", "elsewhere", "missing", "first"] {
+        assert!(
+            doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", destination).is_err(),
+            "{destination}"
+        );
+    }
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, "project", "second", "first").is_err());
+    assert!(doc.rotate_standing_role(StandingRoleKind::Assistant, "project", "first", "second").is_err());
+    assert!(!doc.chat("first").unwrap().unwrap().archived);
+    assert!(doc.adopt_standing_role(StandingRoleKind::Assistant, "project", "archived", &[]).is_err());
+}
+
+#[test]
+fn standing_role_rows_tolerate_newer_peers() {
+    let mut doc = role_doc(&["first"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    // A newer peer adds a field and a role kind this build does not know.
+    doc.write(KIND_STANDING_ROLES, "manager:project", OpKind::Update, fields([("futureField", json!(1))]));
+    doc.write(
+        KIND_STANDING_ROLES,
+        "reviewer:project",
+        OpKind::Upsert,
+        fields([("id", json!("reviewer:project")), ("role", json!("reviewer")), ("scopeItemId", json!("project"))]),
+    );
+    let roles = doc.standing_roles();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].current_chat_id.as_deref(), Some("first"));
 }
 
 pub(super) fn space(id: &str, device_id: &str, path: &str) -> Space {

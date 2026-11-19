@@ -775,6 +775,41 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.hand_off_chat_children(from, to, actor, at_ms))
     }
 
+    pub fn standing_role(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role(role, scope_item_id))
+    }
+
+    pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
+        self.read(|doc| doc.standing_role_chat(role, scope_item_id))
+    }
+
+    pub fn adopt_standing_role(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[mast_proto::StandingRoleModel],
+    ) -> Result<mast_proto::StandingRole, String> {
+        self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// If `from` holds a standing role, hand the role to `to` (archiving and
+    /// hiding `from`). `Ok(None)` when `from` holds no role, so ordinary
+    /// hand-offs are untouched. A replay returns the same role.
+    pub fn rotate_standing_role_for_chat(&self, from: &str, to: &str) -> Result<Option<mast_proto::StandingRole>, String> {
+        self.mutate(|doc| {
+            let held = doc.standing_role_of_chat(from);
+            let replay = || {
+                doc.standing_roles().into_iter().find(|role| {
+                    role.current_chat_id.as_deref() == Some(to)
+                        && role.chain.iter().rev().nth(1).map(String::as_str) == Some(from)
+                })
+            };
+            let Some(held) = held.or_else(replay) else { return Ok(None) };
+            doc.rotate_standing_role(held.role, &held.scope_item_id, from, to).map(|(role, _)| Some(role))
+        })
+    }
+
     /// Every durable PR linked to this chat. Independent link rows are
     /// authoritative; the legacy single-value slot is folded in as a fallback
     /// so pre-migration chats immediately read as a one-element collection.
@@ -1954,6 +1989,7 @@ impl WorkspaceHost {
                     .as_ref()
                     .map(|task| task.task_name.clone()),
                 scheduled_task_info,
+                standing_role_successor: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
@@ -2015,6 +2051,7 @@ impl WorkspaceHost {
             side_absorbed_through: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,

@@ -47,6 +47,8 @@ mod diff_review;
 pub mod friction;
 mod sidebar_pins;
 mod sidebar_sections;
+mod standing_roles;
+pub use standing_roles::KIND_STANDING_ROLES;
 pub mod work_outline;
 pub use work_outline::{
     KIND_INSTRUCTION_REVISION_APPLICATIONS, KIND_INSTRUCTION_REVISIONS,
@@ -1290,7 +1292,7 @@ impl RegistryDoc {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
         };
-        let set = fields([
+        let mut set = fields([
             ("id", json!(chat.id)),
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
@@ -1341,6 +1343,11 @@ impl RegistryDoc {
             ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
             ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
+        // Write-once marker: omitted when absent so a stale upsert cannot
+        // clear a rotation recorded since the read.
+        if let Some(successor) = &chat.standing_role_successor {
+            set.insert("standingRoleSuccessor".into(), json!(successor));
+        }
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
     }

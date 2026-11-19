@@ -41,6 +41,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         actual_model: None,
         scheduled_task: None,
         scheduled_task_info: None,
+        standing_role_successor: None,
         parent_chat_id: None,
         side_of: None,
         side_absorbed_through: None,
