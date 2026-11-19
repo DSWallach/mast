@@ -24,6 +24,10 @@ pub(in crate::changes) struct State {
     selected_tile: Option<usize>,
     #[cfg(test)]
     clicked: Option<usize>,
+    #[cfg(test)]
+    layout_computations: usize,
+    #[cfg(test)]
+    progress_scans: usize,
 }
 
 #[cfg(test)]
@@ -216,6 +220,35 @@ mod tests {
                 "2,000-file first layout: {elapsed:?}; {} tiles",
                 first.len()
             );
+        });
+        vcx.update(|window, cx| {
+            changes.update(cx, |changes, cx| {
+                let theme = Theme::of(cx).clone();
+                drop(changes.render_scope_map(&theme, window, cx));
+            })
+        });
+        let counts = changes.read_with(vcx, |changes, _| {
+            (
+                changes.scope_map_view.layout_computations,
+                changes.scope_map_view.progress_scans,
+            )
+        });
+        for _ in 0..3 {
+            vcx.update(|window, cx| {
+                changes.update(cx, |changes, cx| {
+                    let theme = Theme::of(cx).clone();
+                    drop(changes.render_scope_map(&theme, window, cx));
+                })
+            });
+        }
+        changes.read_with(vcx, |changes, _| {
+            assert_eq!(
+                (
+                    changes.scope_map_view.layout_computations,
+                    changes.scope_map_view.progress_scans
+                ),
+                counts
+            )
         });
     }
 }
@@ -452,6 +485,10 @@ impl Changes {
                 width: f32::from(bucket.0) * 32.0,
                 height: f32::from(bucket.1) * 32.0,
             };
+            #[cfg(test)]
+            {
+                self.scope_map_view.layout_computations += 1;
+            }
             let tiles = layout::layout(&data.root, bounds);
             let labels = tiles
                 .iter()
@@ -522,6 +559,10 @@ impl Changes {
         let marks = self.review_state.as_ref();
         let key = (parsed.key.clone(), self.review_state_generation);
         if self.scope_map_view.progress_key.as_ref() != Some(&key) {
+            #[cfg(test)]
+            {
+                self.scope_map_view.progress_scans += 1;
+            }
             let mut viewed = 0;
             let mut lines = 0;
             for file in &data.files {
