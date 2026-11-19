@@ -44,8 +44,13 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                // Any engine on the machine scans loopback listeners with a
+                // `HEAD /` probe (preview port discovery) and reaches this
+                // server too. That is not Edge traffic, so don't count it.
+                if !request[..n].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -663,23 +668,7 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     tokio::time::timeout(std::time::Duration::from_secs(30), runtime.shutdown())
         .await
         .expect("shutdown never returned — an Edge worker did not join");
-    // A request sent just before shutdown can still be in flight to the
-    // counting server, and lands late under load. Let those drain so only
-    // requests sent after shutdown count against the boundary.
-    let mut after = requests.load(Ordering::SeqCst);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let mut stable_since = tokio::time::Instant::now();
-        while stable_since.elapsed() < std::time::Duration::from_millis(500) {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let now = requests.load(Ordering::SeqCst);
-            if now != after {
-                after = now;
-                stable_since = tokio::time::Instant::now();
-            }
-        }
-    })
-    .await
-    .expect("edge still receiving requests after shutdown returned");
+    let after = requests.load(Ordering::SeqCst);
     drop(runtime);
 
     wait_until(
