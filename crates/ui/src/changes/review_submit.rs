@@ -45,7 +45,6 @@ pub(super) struct SubmitDialog {
     pub(super) rejected: Map<String, String>,
     /// The local checkout is not at the PR's head (unpushed commits).
     pub(super) local_ahead: bool,
-    pub(super) last_params: Option<SubmitReviewParams>,
     pub(super) phase: SubmitPhase,
 }
 
@@ -66,11 +65,13 @@ fn one_line(text: &str) -> String {
     out
 }
 
-/// Why GitHub's diff at the PR head cannot place a draft the local diff can.
-pub(super) fn unplaced_label(local_head: Option<&str>, pr_head: &str) -> &'static str {
-    match local_head {
-        Some(local) if !local.eq_ignore_ascii_case(pr_head) => "not pushed",
-        _ => "uncommitted or changed locally",
+/// The reason shown for a draft GitHub's diff can't place: the engine's own reason, except
+/// that a checkout ahead of the PR explains missing or different lines as "not pushed".
+pub(super) fn unplaced_label(local_ahead: bool, engine_reason: &str) -> String {
+    match engine_reason {
+        "changed locally" | "no diff on GitHub" if local_ahead => "not pushed".to_owned(),
+        "" => "can't be placed on GitHub".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -125,6 +126,35 @@ impl Changes {
             .unwrap_or_default()
     }
 
+    /// The local hunk's lines on the comment's side within the anchored lines and two either
+    /// side (only where the hunk has them), so GitHub's patch can confirm the neighbourhood.
+    fn diff_context(&self, path: &str, side: ReviewSide, start: u32, end: u32) -> Vec<mast_proto::ContextLine> {
+        const MAX: usize = 200;
+        let Some(parsed) = self.parsed.as_ref() else {
+            return Vec::new();
+        };
+        let number = |line: &DiffLine| match side {
+            ReviewSide::Left => line.old_no,
+            ReviewSide::Right => line.new_no,
+        };
+        let (from, to) = (start.saturating_sub(2), end.saturating_add(2));
+        for file in parsed.files.iter().filter(|file| file.path == path) {
+            for hunk in &file.hunks {
+                if !hunk.lines.iter().any(|line| number(line) == Some(end)) {
+                    continue;
+                }
+                return hunk
+                    .lines
+                    .iter()
+                    .filter_map(|line| Some((number(line).filter(|n| (from..=to).contains(n))?, line)))
+                    .take(MAX)
+                    .map(|(line, found)| mast_proto::ContextLine { line, text: found.text.clone() })
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
     fn submit_comment(&self, draft: &ReviewDraft, start: u32, end: u32, with_text: bool) -> SubmitReviewComment {
         let range = start < end;
         let text = |line| {
@@ -140,6 +170,7 @@ impl Changes {
             body: draft.body.clone(),
             line_text: text(end),
             start_text: if range { text(start) } else { String::new() },
+            context: if with_text { self.diff_context(&draft.anchor.file, draft.anchor.side, start, end) } else { Vec::new() },
         }
     }
 
@@ -199,7 +230,6 @@ impl Changes {
             validated: Set::new(),
             rejected: Map::new(),
             local_ahead: false,
-            last_params: None,
             // A request from an earlier open of this dialog is still running: show it, don't repeat it.
             phase: if resuming { SubmitPhase::Sending } else { SubmitPhase::Preparing },
         });
@@ -279,9 +309,9 @@ impl Changes {
         match result {
             Ok(reply) if !reply.head_sha.trim().is_empty() => {
                 dialog.local_ahead = local_head.as_deref().is_some_and(|h| !h.eq_ignore_ascii_case(&reply.head_sha));
-                let label = unplaced_label(local_head.as_deref(), &reply.head_sha);
+                let ahead = dialog.local_ahead;
                 dialog.validated = reply.placed.into_iter().collect();
-                dialog.rejected = reply.unplaced.into_iter().map(|u| (u.draft_id, label.to_owned())).collect();
+                dialog.rejected = reply.unplaced.into_iter().map(|u| (u.draft_id, unplaced_label(ahead, &u.reason))).collect();
                 dialog.head_sha = Some(reply.head_sha);
                 dialog.phase = SubmitPhase::Editing;
             }
@@ -349,7 +379,6 @@ impl Changes {
         };
         if let Some(dialog) = self.submit_dialog.as_mut() {
             dialog.phase = SubmitPhase::Sending;
-            dialog.last_params = Some(params.clone());
         }
         self.run_submit(params, false, cx);
     }
@@ -359,6 +388,9 @@ impl Changes {
     fn run_submit(&mut self, params: SubmitReviewParams, checking: bool, cx: &mut Context<Self>) {
         let target = params.target.clone();
         self.submit_inflight = Some(target.clone());
+        if !checking {
+            self.submit_params = Some(params.clone());
+        }
         let value = serde_json::to_value(&params).unwrap_or_default();
         let task = self.state.update(cx, |state, cx| state.chat_diff_rpc(methods::SUBMIT_REVIEW, value, cx));
         self.submit_task = Some(cx.spawn(async move |this, cx| {
@@ -401,25 +433,28 @@ impl Changes {
                 reprepare: error.contains("new commits"),
             },
         };
+        let mut phase = phase;
         if phase == SubmitPhase::Checking {
-            // Result unknown: ask GitHub whether the review landed before any new post.
-            let check = self
-                .submit_dialog
-                .as_ref()
-                .filter(|d| d.target == target)
-                .and_then(|d| d.last_params.clone())
-                .map(|mut params| {
+            // Result unknown: ask GitHub whether the review landed before any new post. The
+            // params travel with the task, so this runs even if the dialog was closed meanwhile.
+            match self.submit_params.clone() {
+                Some(mut params) => {
                     params.check_only = true;
-                    params
-                });
-            if let Some(params) = check {
-                if let Some(dialog) = self.submit_dialog.as_mut() {
-                    dialog.phase = SubmitPhase::Checking;
+                    if let Some(dialog) = self.submit_dialog.as_mut().filter(|d| d.target == target) {
+                        dialog.phase = SubmitPhase::Checking;
+                    }
+                    return self.run_submit(params, true, cx);
                 }
-                return self.run_submit(params, true, cx);
+                None => {
+                    phase = SubmitPhase::Failed {
+                        message: "Result unknown: couldn't confirm with GitHub. Retry checks again before posting.".into(),
+                        reprepare: false,
+                    };
+                }
             }
         }
         self.submit_inflight = None;
+        self.submit_params = None;
         let posted = matches!(phase, SubmitPhase::Posted { .. });
         if posted {
             // The engine removed the drafts it sent; reload the rest and the threads.
@@ -445,6 +480,23 @@ impl Changes {
         }
         if !self.can_submit_review() && self.submit_dialog.is_none() {
             return None;
+        }
+        if self.state.read(cx).engine_is_remote() {
+            // Another process's engine refuses human-only methods on this connection.
+            return Some(
+                div()
+                    .id("changes-submit-review-remote")
+                    .flex_none()
+                    .h(px(20.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Submit from the Mac running Mast".into())).into())
+                    .child(SharedString::from("Submit review\u{2026}"))
+                    .into_any_element(),
+            );
         }
         let trigger = div()
             .id("changes-submit-review-trigger")
@@ -697,7 +749,8 @@ mod tests {
     struct Script {
         drafts: Mutex<Vec<ReviewDraft>>,
         submits: Mutex<VecDeque<Result<serde_json::Value, String>>>,
-        reject: Mutex<Vec<String>>,
+        /// (draft id, the engine's reason) pairs GitHub's diff cannot place.
+        reject: Mutex<Vec<(String, String)>>,
         prepare_error: Mutex<Option<String>>,
         calls: Mutex<Vec<(String, serde_json::Value)>>,
     }
@@ -752,8 +805,11 @@ mod tests {
                         return Err(error);
                     }
                     let reject = script.reject.lock().unwrap().clone();
-                    let (unplaced, placed): (Vec<_>, Vec<_>) = ids(&params).into_iter().partition(|id| reject.contains(id));
-                    let unplaced: Vec<_> = unplaced.into_iter().map(|id| serde_json::json!({"draftId": id, "reason": "not in diff"})).collect();
+                    let (unplaced, placed): (Vec<_>, Vec<_>) = ids(&params).into_iter().partition(|id| reject.iter().any(|(r, _)| r == id));
+                    let unplaced: Vec<_> = unplaced
+                        .into_iter()
+                        .map(|id| serde_json::json!({"draftId": id, "reason": reject.iter().find(|(r, _)| *r == id).unwrap().1}))
+                        .collect();
                     Ok(serde_json::json!({"headSha": "abc123", "placed": placed, "unplaced": unplaced}))
                 }
                 m if m == methods::SUBMIT_REVIEW => {
@@ -850,17 +906,19 @@ mod tests {
     #[gpui::test]
     fn drafts_github_cannot_place_are_held_back_with_a_reason(cx: &mut gpui::TestAppContext) {
         let (changes, vcx, script) = setup(cx);
-        script.reject.lock().unwrap().push("placed".into());
+        script.reject.lock().unwrap().push(("placed".into(), "changed locally".into()));
         open(&changes, vcx);
         changes.update(vcx, |c, _| {
             let dialog = c.submit_dialog.as_ref().unwrap();
             let (comments, held) = c.submit_selection(dialog, false);
             assert!(comments.is_empty());
-            assert!(held.iter().any(|(d, r)| d.id == "placed" && r == "uncommitted or changed locally"));
+            assert!(held.iter().any(|(d, r)| d.id == "placed" && r == "changed locally"));
         });
-        assert_eq!(unplaced_label(Some("def"), "abc123"), "not pushed");
-        assert_eq!(unplaced_label(Some("ABC123"), "abc123"), "uncommitted or changed locally");
-        assert_eq!(unplaced_label(None, "abc123"), "uncommitted or changed locally");
+        assert_eq!(unplaced_label(true, "changed locally"), "not pushed");
+        assert_eq!(unplaced_label(true, "no diff on GitHub"), "not pushed");
+        assert_eq!(unplaced_label(false, "no diff on GitHub"), "no diff on GitHub");
+        assert_eq!(unplaced_label(true, "spans hunks"), "spans hunks");
+        assert_eq!(unplaced_label(false, "changed locally"), "changed locally");
     }
 
     #[gpui::test]
@@ -1071,10 +1129,91 @@ mod tests {
     #[gpui::test]
     fn an_empty_review_is_refused_without_a_call(cx: &mut gpui::TestAppContext) {
         let (changes, vcx, script) = setup(cx);
-        script.reject.lock().unwrap().push("placed".into());
+        script.reject.lock().unwrap().push(("placed".into(), "changed locally".into()));
         open(&changes, vcx);
         click(&changes, vcx);
         assert!(script.submit_calls().is_empty());
         assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { reprepare: false, .. })));
+    }
+
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl mast_rpc::RpcService for Noop {
+        async fn handle(&self, _: &str, _: serde_json::Value) -> Result<mast_rpc::RpcReply, mast_rpc::RpcError> {
+            mast_rpc::RpcReply::value(&true)
+        }
+    }
+
+    #[gpui::test]
+    fn reopening_during_a_post_still_checks_a_timed_out_result(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Err("gh timed out".into()));
+        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"u","sentDraftIds":["placed"]})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        // Away and back while the post runs: the dialog is dropped and reopened mid-flight.
+        changes.update(vcx, |c, _| c.review_target = Some("pr:o/r#2".into()));
+        render(&changes, vcx);
+        assert_eq!(phase(&changes, vcx), None);
+        changes.update(vcx, |c, _| c.review_target = Some(TARGET.into()));
+        vcx.update(|window, cx| changes.update(cx, |c, cx| c.open_submit_review(window, cx)));
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Sending));
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent.len(), 2, "the timeout ran its check");
+        assert_eq!(sent[1]["checkOnly"], true);
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { already: true, .. })), "not stuck on Sending");
+        changes.read_with(&*vcx, |c, _| assert!(c.submit_inflight.is_none() && c.submit_params.is_none()));
+    }
+
+    #[gpui::test]
+    fn each_unplaced_draft_shows_the_engines_own_reason(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        changes.update(vcx, |c, cx| {
+            let mut second = c.local_review_drafts[TARGET][0].clone();
+            second.id = "second".into();
+            c.local_review_drafts.get_mut(TARGET).unwrap().push(second);
+            c.rebuild_draft_index(cx);
+        });
+        script.reject.lock().unwrap().extend([("placed".to_owned(), "spans hunks".to_owned()), ("second".to_owned(), "no diff on GitHub".to_owned())]);
+        open(&changes, vcx);
+        changes.update(vcx, |c, _| {
+            let dialog = c.submit_dialog.as_ref().unwrap();
+            let (comments, held) = c.submit_selection(dialog, false);
+            assert!(comments.is_empty());
+            let reason = |id: &str| held.iter().find(|(d, _)| d.id == id).map(|(_, r)| r.clone());
+            assert_eq!(reason("placed").as_deref(), Some("spans hunks"));
+            assert_eq!(reason("second").as_deref(), Some("no diff on GitHub"));
+            assert_eq!(reason("lost").as_deref(), Some("its line is no longer in the diff"));
+        });
+    }
+
+    #[gpui::test]
+    fn prepare_sends_the_neighbouring_hunk_lines_for_context(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        let prepares = script.calls_of(methods::PREPARE_REVIEW_SUBMIT);
+        let context = prepares[0]["comments"][0]["context"].as_array().unwrap();
+        // install_diff's hunk has `-old +new`; the new side has one line.
+        assert_eq!(context.len(), 1);
+        assert_eq!((context[0]["line"].as_u64(), context[0]["text"].as_str()), (Some(1), Some("new")));
+    }
+
+    #[gpui::test]
+    fn the_submit_trigger_is_off_when_attached_to_another_engine(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        changes.update(vcx, |c, cx| {
+            let engine = crate::state::EngineHandle::from_test_client(mast_rpc::memory_client(Arc::new(Noop)));
+            c.state.update(cx, |state, _| state.set_test_engine(engine));
+            assert!(c.state.read(cx).engine_is_remote());
+            let theme = Theme::of(cx).clone();
+            assert!(c.render_submit_review(&theme, cx).is_some(), "shown, but as plain disabled text");
+        });
+        // No click handler exists on that element, and the open path is only reachable from the
+        // trigger; nothing was prepared or posted.
+        assert!(script.submit_calls().is_empty() && script.calls_of(methods::PREPARE_REVIEW_SUBMIT).is_empty());
     }
 }

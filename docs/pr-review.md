@@ -35,7 +35,8 @@ The engine wraps the localhost WebSocket port that agents are given, and every
 relay connection, in a gate that refuses them (`HUMAN_ONLY_METHODS`, applied
 where each transport is built, not per tool). They are also never forwardable
 to another device. A viewport attached over the local port, such as a terminal
-UI, therefore cannot submit either. Agents still have `gh` on their own, which
+UI or a Mast window attached to another process's engine, therefore cannot submit
+either; there the button is shown disabled ("Submit from the Mac running Mast"). Agents still have `gh` on their own, which
 Mast does not control.
 
 The dialog has a **Comment / Approve / Request changes** choice, an optional
@@ -51,11 +52,14 @@ block, so it posts as a suggestion.
   checks each draft's line (and its text) against them. The review is pinned to
   that head (`commit_id`); if the PR gains commits before you post, the post is
   refused and you re-check. If the head can't be read, Submit is off.
-- **Can't be placed.** A draft whose line GitHub's diff at that head doesn't
-  contain, or whose text differs, is listed with a reason, **not pushed** (the
-  local checkout is ahead of the PR) or **uncommitted or changed locally**. It is
-  never posted and stays a local draft. So do drafts added or moved after the
-  check, until you reopen the dialog.
+- **Can't be placed.** A draft is held back, with the engine's own reason, when
+  GitHub's diff at that head doesn't agree with it: the drafted line and up to
+  two lines of context either side (where the local hunk has them) must read the
+  same on GitHub. Reasons: **not pushed** (the local checkout is ahead of the PR),
+  **changed locally**, **no diff on GitHub** (the file isn't in the PR's diff, or
+  GitHub has no patch for it) and **spans hunks** (a range whose ends fall in
+  different hunks; it is never sent). Held drafts are never posted and stay local
+  drafts. So do drafts added or moved after the check, until you reopen the dialog.
 - **Click time.** On Submit, Mast re-reads the drafts and sends exactly what
   exists then, with current text. Only the drafts actually sent are removed.
 - **Pinned PR.** Submit and Retry use the PR, head and review target the dialog
@@ -74,10 +78,14 @@ block, so it posts as a suggestion.
 - **Retry and restart are safe.** Every review body ends with an invisible
   marker, `<!-- mast-review:<nonce> -->`. The nonce is per review target, saved
   in the registry, and kept until a post is confirmed and recorded, so it
-  survives a lost response and an engine restart. Every submit, the first
-  included, lists the PR's reviews first; if one carries this marker, Mast
-  records it as posted, removes the drafts it carries, sends nothing, and says
-  **Already posted** with the link. A `gh` call that times out is killed, not
+  survives a lost response and an engine restart (it is saved before the POST).
+  Every submit, the first included, lists the PR's reviews first; if one carries
+  this marker, Mast reads all of that review's comments (every page; a failed
+  read is an error, never "no match"; an outdated comment is matched by its
+  original line), records the review as posted, removes only the drafts it
+  carries, sends nothing, and says **Already posted** with the link. A partial
+  match keeps the unmatched drafts and the nonce is retired by the next submit,
+  which posts them as a new review; only a full match or a fresh post clears it. A `gh` call that times out is killed, not
   left running.
 - **Unknown result.** If a post ends without a clear answer (timeout, lost
   connection), the dialog says "Result unknown; checking…" and runs the same
