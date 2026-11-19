@@ -271,9 +271,11 @@ impl PopoutWindow {
                     shell.popout_open_file(owner, path, window, cx)
                 });
             }
-            FilesEvent::DefinitionCandidates(definitions) => {
+            FilesEvent::DefinitionCandidates { from_path, from_line, definitions } => {
+                let from_path = from_path.clone();
+                let from_line = *from_line;
                 let definitions = definitions.clone();
-                self.with_main(cx, move |shell, window, cx| shell.popout_open_definitions(owner, definitions, window, cx));
+                self.with_main(cx, move |shell, window, cx| shell.popout_open_definitions(owner, from_path, from_line, definitions, window, cx));
             }
             FilesEvent::OpenCommit(commit) => {
                 let commit = commit.clone();

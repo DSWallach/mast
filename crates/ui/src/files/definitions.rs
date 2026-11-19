@@ -322,7 +322,7 @@ impl super::FilesSurface {
                         let mut definitions: Vec<_> = result.matches.into_iter().map(|entry| (entry.path, entry.symbol)).collect();
                         definitions.sort_by_key(|(target, symbol)| definition_order(&path, target, symbol.start_line));
                         surface.definition_notice = None;
-                        cx.emit(super::FilesEvent::DefinitionCandidates(definitions));
+                        cx.emit(super::FilesEvent::DefinitionCandidates { from_path: path.clone(), from_line: surface.current_code_line(cx), definitions });
                         cx.notify();
                     }
                     Err(error) => surface.show_definition_notice(error, true, cx),

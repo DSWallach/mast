@@ -78,6 +78,7 @@ pub(super) struct WorkspaceSearch {
     list: gpui::ListState,
     rows: Vec<ResultRow>,
     definition_rows: Vec<ResultRow>,
+    definition_origin: Option<super::file_navigation::FileLocation>,
     changed: Vec<String>,
     has_diff: bool,
     case_sensitive: bool,
@@ -94,10 +95,10 @@ pub(super) struct WorkspaceSearch {
 }
 
 impl Shell {
-    pub(super) fn open_definition_candidates(&mut self, definitions: Vec<(String, mast_syntax::symbols::Symbol)>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_definition_candidates(&mut self, origin: Option<super::file_navigation::FileLocation>, definitions: Vec<(String, mast_syntax::symbols::Symbol)>, window: &mut Window, cx: &mut Context<Self>) {
         if definitions.len() == 1 {
             let (path, symbol) = definitions.into_iter().next().unwrap();
-            self.add_file_surface_at(path, Some(symbol.start_line), None, window, cx);
+            self.open_definition_location(origin, path, symbol.start_line, window, cx);
             return;
         }
         if definitions.is_empty() { return; }
@@ -106,10 +107,21 @@ impl Shell {
             search.task = None;
             search.rows = definitions.into_iter().map(|(path, symbol)| ResultRow { path, line: Some(symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(symbol) }).collect();
             search.definition_rows = search.rows.clone();
+            search.definition_origin = origin;
             search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
             search.status.clear();
         }
         cx.notify();
+    }
+    fn open_definition_location(&mut self, origin: Option<super::file_navigation::FileLocation>, path: String, line: u32, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(origin) = origin {
+            self.record_file_navigation(Some(origin), super::file_navigation::FileLocation { path: path.clone(), line }, cx);
+            self.replaying_file_navigation = true;
+            self.add_file_surface_at(path, Some(line), None, window, cx);
+            self.replaying_file_navigation = false;
+        } else {
+            self.add_file_surface_at(path, Some(line), None, window, cx);
+        }
     }
     fn refresh_workspace_symbols(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(context) = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat) else { return; };
@@ -135,7 +147,7 @@ impl Shell {
     pub(crate) fn fixture_definition_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_chat = "fixture-chat".into();
         let symbol = mast_syntax::symbols::Symbol { name: "review_hunk_identity".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 28, end_line: 30 };
-        self.open_definition_candidates(vec![("src/review.rs".into(), symbol.clone()), ("tests/review.rs".into(), mast_syntax::symbols::Symbol { start_line: 84, end_line: 87, ..symbol })], window, cx);
+        self.open_definition_candidates(None, vec![("src/review.rs".into(), symbol.clone()), ("tests/review.rs".into(), mast_syntax::symbols::Symbol { start_line: 84, end_line: 87, ..symbol })], window, cx);
     }
 
     #[cfg(feature = "snapshot")]
@@ -454,6 +466,7 @@ impl Shell {
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(300.0)),
             rows: Vec::new(),
             definition_rows: Vec::new(),
+            definition_origin: None,
             changed,
             has_diff,
             case_sensitive: false,
@@ -927,8 +940,13 @@ impl Shell {
         let line = row
             .line
             .or_else(|| parse_line_suffix(search.input.read(cx).text()).1);
+        let definition_origin = (search.mode == SearchMode::Definitions).then(|| search.definition_origin.clone()).flatten();
         self.close_workspace_search(window, cx);
-        self.add_file_surface_at(row.path, line, None, window, cx);
+        if let Some(line) = line && let Some(origin) = definition_origin {
+            self.open_definition_location(Some(origin), row.path, line, window, cx);
+        } else {
+            self.add_file_surface_at(row.path, line, None, window, cx);
+        }
     }
 
     fn add_workspace_symbol_to_chat(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1226,8 +1244,9 @@ mod tests {
             });
             shell.active_chat = "chat".into();
             shell.add_file_surface_at("src/a.rs".into(), Some(2), None, window, cx);
+            shell.add_file_surface_at("src/other.rs".into(), Some(3), None, window, cx);
             let symbol = mast_syntax::symbols::Symbol { name: "call".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 10, end_line: 10 };
-            shell.open_definition_candidates(vec![("src/b.rs".into(), symbol.clone()), ("tests/b.rs".into(), symbol)], window, cx);
+            shell.open_definition_candidates(Some(super::super::file_navigation::FileLocation { path: "src/a.rs".into(), line: 2 }), vec![("src/b.rs".into(), symbol.clone()), ("tests/b.rs".into(), symbol)], window, cx);
             let search = shell.workspace_search.as_ref().unwrap();
             assert_eq!(search.mode, SearchMode::Definitions);
             assert_eq!(search.active, 0);

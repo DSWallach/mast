@@ -129,7 +129,7 @@ pub(crate) fn workspace_path_drag_ghost(
 pub enum FilesEvent {
     OpenFile(String),
     Jumped { path: String, from_line: u32, line: u32 },
-    DefinitionCandidates(Vec<(String, mast_syntax::symbols::Symbol)>),
+    DefinitionCandidates { from_path: String, from_line: u32, definitions: Vec<(String, mast_syntax::symbols::Symbol)> },
     OpenCommit(mast_proto::GitHistoryCommit),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),

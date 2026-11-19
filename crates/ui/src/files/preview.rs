@@ -3128,7 +3128,11 @@ impl FilesSurface {
                 editor.lsp_mut().show_document = Some(Rc::new(move |_, _, cx| {
                     selection.mark_navigation_handled();
                     let definitions = selection.selected().into_iter().map(|entry| (entry.path, entry.symbol)).collect();
-                    surface.update(cx, |_, cx| cx.emit(FilesEvent::DefinitionCandidates(definitions))).is_ok()
+                    surface.update(cx, |surface, cx| {
+                        if let Some(from_path) = surface.preview.active.clone() {
+                            cx.emit(FilesEvent::DefinitionCandidates { from_path, from_line: surface.current_code_line(cx), definitions });
+                        }
+                    }).is_ok()
                 }));
             });
         }

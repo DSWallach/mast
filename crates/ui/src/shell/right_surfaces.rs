@@ -827,7 +827,7 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_) | FilesEvent::Jumped { .. } | FilesEvent::DefinitionCandidates(_) | FilesEvent::OpenCommit(_))
+                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_) | FilesEvent::Jumped { .. } | FilesEvent::DefinitionCandidates { .. } | FilesEvent::OpenCommit(_))
                     && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
                     return;
@@ -837,7 +837,10 @@ impl Shell {
                     FilesEvent::Jumped { path, from_line, line } => {
                         this.record_file_navigation(Some(super::file_navigation::FileLocation { path: path.clone(), line: *from_line }), super::file_navigation::FileLocation { path: path.clone(), line: *line }, cx);
                     }
-                    FilesEvent::DefinitionCandidates(definitions) => this.open_definition_candidates(definitions.clone(), window, cx),
+                    FilesEvent::DefinitionCandidates { from_path, from_line, definitions } => {
+                        let origin = super::file_navigation::FileLocation { path: from_path.clone(), line: *from_line };
+                        this.open_definition_candidates(Some(origin), definitions.clone(), window, cx);
+                    }
                     FilesEvent::OpenCommit(commit) => this.add_commit_diff_surface(commit.clone(), Some(this.active_chat.clone()), cx),
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
