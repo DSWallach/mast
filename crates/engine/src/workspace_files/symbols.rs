@@ -260,10 +260,12 @@ async fn run_index(
                 }
             }
         }
-        for path in &updates {
-            recent.retain(|candidate| candidate != path);
-            recent.push(path.clone());
-            if recent.len() > FRESHNESS_BATCH_SIZE { recent.remove(0); }
+        if revision != 0 {
+            for path in &updates {
+                recent.retain(|candidate| candidate != path);
+                recent.push(path.clone());
+                if recent.len() > FRESHNESS_BATCH_SIZE { recent.remove(0); }
+            }
         }
         if updates.is_empty() && removed.is_empty() && !check_freshness {
             let truncated = paths_truncated || lock(&shared_index).truncated();
