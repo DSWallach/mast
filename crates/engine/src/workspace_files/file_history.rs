@@ -43,17 +43,19 @@ pub struct FileHistory {
     pub truncated: bool,
 }
 
-/// Blame cache key: (checkout id, HEAD, path, working-file stamp).
-pub(super) type BlameKey = (String, String, String, (u64, u128));
+/// Blame cache key: (checkout id, HEAD, path, working-file stamp, refs stamp).
+/// The refs stamp changes when any branch ref moves, so the branch-scoped chat
+/// guess is recomputed after ref changes (see `blame::refs_stamp`).
+pub(super) type BlameKey = (String, String, String, (u64, u128), u64);
 
 #[derive(Default)]
 pub struct FileHistoryCache {
-    pub(super) blames: tokio::sync::Mutex<HashMap<BlameKey, Arc<mast_proto::Blame>>>,
+    pub(super) blames: tokio::sync::Mutex<HashMap<BlameKey, Arc<super::blame::BlameEntry>>>,
+    /// checkout id → git common dir (resolved once, no spawn per blame hit).
+    pub(super) common_dirs: std::sync::Mutex<HashMap<String, std::path::PathBuf>>,
     pub(super) blame_flights: std::sync::Mutex<HashMap<BlameKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    /// (checkout id, sha) → local branches containing it (fallback guess).
-    pub(super) containing: std::sync::Mutex<HashMap<(String, String), Arc<Vec<String>>>>,
-    /// (sha, path, chat) → the turn that edited `path` (None cached too).
-    pub(super) turns: std::sync::Mutex<HashMap<(String, String, String), Option<String>>>,
+    /// (chat, turn start, turn end, path) → the turn that edited `path` (None cached too).
+    pub(super) turns: std::sync::Mutex<HashMap<(String, Option<String>, Option<String>, String), Option<String>>>,
     histories: tokio::sync::Mutex<HashMap<(String, String, String), Arc<FileHistory>>>,
     diffs: tokio::sync::Mutex<HashMap<(String, String, String, Option<String>), Arc<String>>>,
     history_flights: std::sync::Mutex<HashMap<(String, String, String), std::sync::Weak<tokio::sync::Mutex<()>>>>,
