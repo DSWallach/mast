@@ -264,7 +264,13 @@ mod tests {
         cx.update_window(host.into(), |_, window, cx| {
             window.refresh();
             let _ = window.draw(cx);
-            let bounds = editor.read(cx).input_bounds();
+            let editor = editor.read(cx);
+            let bounds = editor.input_bounds();
+            let text_start = editor.range_to_bounds(&(0..0)).unwrap().left() - editor.scroll_offset().x;
+            let gutter = point(bounds.left() + px(1.0), bounds.top() + px(8.0));
+            let text = point(text_start + px(1.0), bounds.top() + px(8.0));
+            assert!(!super::super::editor::pointer_in_text(editor, gutter));
+            assert!(super::super::editor::pointer_in_text(editor, text));
             let position = bounds.origin + point(px(20.0), px(8.0));
             assert!(bounds.contains(&position));
             window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
