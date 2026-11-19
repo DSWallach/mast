@@ -463,6 +463,7 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::CaptureAppshot => "Appshots",
         ShortcutId::SaveFile
         | ShortcutId::QuickOpen
+        | ShortcutId::QuickOpenSymbols
         | ShortcutId::AddCodeToChat
         | ShortcutId::SearchWorkspaceContent
         | ShortcutId::GoToLine
@@ -513,6 +514,7 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::QuickOpen => "Open a workspace file by name.",
+        ShortcutId::QuickOpenSymbols => "Open a workspace symbol by name.",
         ShortcutId::AddCodeToChat => "Add selected code to the chat.",
         ShortcutId::ReviewNextStep => "Next review step.",
         ShortcutId::ReviewPreviousStep => "Previous review step.",

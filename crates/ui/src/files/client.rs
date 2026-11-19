@@ -226,6 +226,14 @@ impl WorkspaceFilesClient {
             .map_err(FilesClientError::from)
     }
 
+    pub async fn watch_symbols(&self) -> Result<SearchSubscription, FilesClientError> {
+        let params = request_params(
+            &WatchWorkspaceFilesRequest { target: self.context.target.clone() },
+            self.context.target_device_id.as_deref(),
+        )?;
+        self.transport.subscribe_search(methods::WATCH_WORKSPACE_SYMBOLS, params).await.map_err(FilesClientError::from)
+    }
+
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,

@@ -155,6 +155,7 @@ actions!(
         ToggleFiles,
         OpenMyPrs,
         QuickOpen,
+        QuickOpenSymbols,
         AddCodeToChat,
         SearchWorkspaceContent,
         GoToLine,

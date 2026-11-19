@@ -47,6 +47,7 @@ pub enum ShortcutId {
     ToggleTerminal,
     OpenMyPrs,
     QuickOpen,
+    QuickOpenSymbols,
     AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
@@ -91,7 +92,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 29 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 30 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -101,6 +102,7 @@ impl ShortcutId {
         ShortcutId::ToggleTerminal,
         ShortcutId::OpenMyPrs,
         ShortcutId::QuickOpen,
+        ShortcutId::QuickOpenSymbols,
         ShortcutId::ReviewNextStep,
         ShortcutId::ReviewPreviousStep,
         ShortcutId::ReviewNextStepArrow,
@@ -193,6 +195,7 @@ impl ShortcutId {
             ShortcutId::GoToLine => "Go to line",
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
+            ShortcutId::QuickOpenSymbols => "Search symbols",
             ShortcutId::AddCodeToChat => "Add code to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
@@ -259,6 +262,7 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
+            ShortcutId::QuickOpenSymbols => "mod-shift-o",
             ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
@@ -377,6 +381,7 @@ pub struct KeymapConfig {
     pub go_to_line: String,
     pub search_workspace_content: String,
     pub quick_open: String,
+    pub quick_open_symbols: String,
     pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
@@ -479,6 +484,7 @@ impl Default for KeymapConfig {
             go_to_line: ShortcutId::GoToLine.default_combo().into(),
             search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
+            quick_open_symbols: ShortcutId::QuickOpenSymbols.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
@@ -543,6 +549,7 @@ impl KeymapConfig {
             ShortcutId::GoToLine => &self.go_to_line,
             ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
             ShortcutId::QuickOpen => &self.quick_open,
+            ShortcutId::QuickOpenSymbols => &self.quick_open_symbols,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
@@ -605,6 +612,7 @@ impl KeymapConfig {
             ShortcutId::GoToLine => self.go_to_line = combo,
             ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
             ShortcutId::QuickOpen => self.quick_open = combo,
+            ShortcutId::QuickOpenSymbols => self.quick_open_symbols = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,

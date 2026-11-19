@@ -45,6 +45,7 @@ fn file_score(path: &IndexedPath, query: &str) -> Option<i64> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchMode {
     Files,
+    Symbols,
     Content,
     Line,
 }
@@ -55,6 +56,11 @@ struct ResultRow {
     preview: String,
     ranges: Vec<(usize, usize)>,
     changed: bool,
+    symbol: Option<mast_syntax::symbols::Symbol>,
+}
+struct IndexedSymbol {
+    path: IndexedPath,
+    symbol: mast_syntax::symbols::Symbol,
 }
 pub(super) struct WorkspaceSearch {
     chat_id: String,
@@ -79,10 +85,61 @@ pub(super) struct WorkspaceSearch {
     query_started: std::time::Instant,
     rendered_generation: Option<u64>,
     task: Option<Task<()>>,
+    symbol_task: Option<Task<()>>,
+    symbols: Option<std::sync::Arc<Vec<IndexedSymbol>>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
+    fn subscribe_workspace_symbols(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.workspace_search.as_mut() else { return; };
+        let Some(context) = search.context.clone() else { search.status = "No workspace available".into(); return; };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { search.status = "Workspace service unavailable".into(); return; };
+        let client = WorkspaceFilesClient::new(engine, context.clone());
+        search.status = "Indexing symbols…".into();
+        search.symbol_task = Some(cx.spawn(async move |this, cx| {
+            let mut stream = match client.watch_symbols().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) {
+                            search.status = error.to_string(); cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
+            while let Some(mut frame) = stream.recv().await {
+                if let Some(error) = frame.get("error").and_then(|value| value.as_str()) {
+                    let error = error.to_owned();
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) { search.status = error; cx.notify(); }
+                    });
+                    continue;
+                }
+                let Some(files) = frame.as_object_mut().and_then(|object| object.remove("files")) else { continue; };
+                let entries = cx.background_executor().spawn(async move {
+                    let files = serde_json::from_value::<std::collections::BTreeMap<String, Vec<mast_syntax::symbols::Symbol>>>(files).ok()?;
+                    let mut entries = Vec::new();
+                    for (path, symbols) in files {
+                        let lower_path = path.to_lowercase();
+                        for symbol in symbols {
+                            entries.push(IndexedSymbol { path: IndexedPath { path: path.clone(), lower_path: format!("{} {lower_path}", symbol.name.to_lowercase()), lower_name: symbol.name.to_lowercase() }, symbol });
+                        }
+                    }
+                    Some(std::sync::Arc::new(entries))
+                }).await;
+                let Some(entries) = entries else { continue; };
+                if !this.update(cx, |this, cx| {
+                    let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) else { return false; };
+                    search.symbols = Some(entries);
+                    this.update_workspace_search(cx);
+                    true
+                }).unwrap_or(false) { break; }
+            }
+        }));
+    }
+
     pub(super) fn prewarm_workspace_search(&mut self, cx: &mut Context<Self>) {
         let context = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat);
         let engine = self.state.read(cx).engine().cloned();
@@ -260,6 +317,7 @@ impl Shell {
             ComposerInput::with_context(
                 match mode {
                     SearchMode::Files => "Search files…",
+                    SearchMode::Symbols => "Search symbols…",
                     SearchMode::Content => "Search in files…",
                     SearchMode::Line => "Line number…",
                 },
@@ -330,12 +388,18 @@ impl Shell {
             query_started: std::time::Instant::now(),
             rendered_generation: None,
             task: None,
+            symbol_task: None,
+            symbols: None,
             _subscriptions: subscriptions,
         });
         // Re-subscribe on an explicit open so the host requests a rate-limited
         // refresh even when this checkout was already prewarmed.
-        self.workspace_search_index_key = None;
-        self.prewarm_workspace_search(cx);
+        if mode == SearchMode::Symbols {
+            self.subscribe_workspace_symbols(cx);
+        } else {
+            self.workspace_search_index_key = None;
+            self.prewarm_workspace_search(cx);
+        }
         self.update_workspace_search(cx);
         cx.notify();
     }
@@ -382,6 +446,40 @@ impl Shell {
             cx.notify();
             return;
         }
+        if mode == SearchMode::Symbols {
+            let Some(symbols) = search.symbols.clone() else {
+                search.status = "Indexing symbols…".into();
+                cx.notify();
+                return;
+            };
+            if raw.chars().count() > 256 {
+                search.status = "Query must not exceed 256 characters".into();
+                cx.notify();
+                return;
+            }
+            let query = raw.to_lowercase();
+            search.task = Some(cx.spawn(async move |this, cx| {
+                let rows = cx.background_executor().spawn(async move {
+                    let mut matches: Vec<_> = symbols.iter().filter_map(|entry| {
+                        if query.is_empty() { Some((entry, 0)) } else { file_score(&entry.path, &query).map(|score| (entry, score)) }
+                    }).collect();
+                    let compare = |(a, a_score): &(&IndexedSymbol, i64), (b, b_score): &(&IndexedSymbol, i64)| b_score.cmp(a_score).then_with(|| a.path.lower_path.cmp(&b.path.lower_path)).then_with(|| a.symbol.start_line.cmp(&b.symbol.start_line));
+                    if matches.len() > 200 { matches.select_nth_unstable_by(200, compare); }
+                    matches.truncate(200);
+                    matches.sort_unstable_by(compare);
+                    matches.into_iter().map(|(entry, _)| ResultRow { path: entry.path.path.clone(), line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol.clone()) }).collect::<Vec<_>>()
+                }).await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.generation == generation) else { return; };
+                    search.rows = rows;
+                    search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+                    search.status = if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
+                    cx.notify();
+                });
+            }));
+            cx.notify();
+            return;
+        }
         let query = if mode == SearchMode::Files {
             parse_line_suffix(&raw).0
         } else {
@@ -404,6 +502,7 @@ impl Shell {
                     .into_iter()
                     .map(|path| ResultRow {
                         changed: search.changed.contains(&path),
+                        symbol: None,
                         path,
                         line: None,
                         preview: String::new(),
@@ -477,6 +576,7 @@ impl Shell {
                                         .filter(|entry| entry.kind == WorkspaceEntryKind::File)
                                         .map(|entry| ResultRow {
                                             changed: changed.contains(&entry.path),
+                                            symbol: None,
                                             path: entry.path,
                                             line: None,
                                             preview: String::new(),
@@ -534,6 +634,7 @@ impl Shell {
                 .into_iter()
                 .map(|(path, _)| ResultRow {
                     changed: search.changed.contains(&path.path),
+                    symbol: None,
                     path: path.path.clone(),
                     line: None,
                     preview: String::new(),
@@ -625,6 +726,7 @@ impl Shell {
                                         ranges,
                                     }) => search.rows.push(ResultRow {
                                         changed: changed.contains(&path),
+                                        symbol: None,
                                         path,
                                         line: u32::try_from(line).ok(),
                                         preview,
@@ -729,6 +831,54 @@ impl Shell {
         self.add_file_surface_at(row.path, line, None, window, cx);
     }
 
+    fn add_workspace_symbol_to_chat(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(search) = self.workspace_search.as_ref().filter(|s| s.mode == SearchMode::Symbols) else { return; };
+        let Some(row) = search.rows.get(index).cloned() else { return; };
+        let Some(symbol) = row.symbol else { return; };
+        let Some(context) = search.context.clone() else { return; };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
+        let Some(queue_permit) = crate::code_ref::try_queue_io() else {
+            self.workspace_search.as_mut().unwrap().status = "Too many code references are loading.".into(); cx.notify(); return;
+        };
+        let chat_id = search.chat_id.clone();
+        let state = self.state.clone();
+        if !state.update(cx, |state, cx| { let accepted = state.begin_code_ref_load(&chat_id); cx.notify(); accepted }) {
+            self.workspace_search.as_mut().unwrap().status = "Too many code references are loading.".into(); cx.notify(); return;
+        }
+        self.workspace_search.as_mut().unwrap().status = "Adding symbol…".into();
+        let client = WorkspaceFilesClient::new(engine.clone(), context.clone());
+        cx.spawn(async move |this, cx| {
+            let _queue_permit = queue_permit;
+            let _permit = crate::code_ref::acquire_io_permit().await;
+            let identity = crate::code_ref::repository_identity(&engine, &context).await;
+            let result = client.read_file(mast_proto::ReadWorkspaceFileRequest { target: context.target.clone(), path: row.path.clone() }).await;
+            let reference = match (identity, result) {
+                (Some(identity), Ok(file)) if !file.truncated && file.checkout_id == identity.checkout_id => {
+                    if let Some(source) = file.text {
+                        let path = row.path.clone();
+                        let expected = symbol.clone();
+                        cx.background_executor().spawn(async move {
+                            let current = mast_syntax::symbols::extract(&source, &path, 5_000).into_iter().find(|candidate| candidate.name == expected.name && candidate.start_line == expected.start_line)?;
+                            let range = mast_proto::CodeRefRange { start_line: current.start_line, end_line: current.end_line };
+                            let snippet = crate::code_ref::snippet(&source, range)?;
+                            Some(crate::code_ref::StagedCodeRef { id: uuid::Uuid::new_v4().to_string(), reference: mast_proto::CodeRef { version: 1, location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), repo_root: None, path }, kind: mast_proto::CodeRefKind::Symbol, range: Some(range), symbol: Some(mast_proto::CodeRefSymbol { name: current.name, kind: format!("{:?}", current.kind).to_lowercase() }), at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: crate::code_ref::content_hash(&source) } }, snippet })
+                        }).await
+                    } else { None }
+                }
+                _ => None,
+            };
+            state.update(cx, |state, cx| { state.end_code_ref_load(&chat_id); cx.notify(); });
+            let _ = this.update(cx, |this, cx| {
+                if FilesRequestContext::for_chat(this.state.read(cx), &chat_id).as_ref() != Some(&context) { return; }
+                if let Some(reference) = reference {
+                    this.state.update(cx, |state, cx| { state.add_code_ref(&chat_id, reference); cx.notify(); });
+                    if let Some(search) = this.workspace_search.as_mut() { search.status = "Added to chat".into(); }
+                } else if let Some(search) = this.workspace_search.as_mut() { search.status = "Symbol changed or could not be read.".into(); }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn render_workspace_search(
         &mut self,
         viewport: gpui::Size<Pixels>,
@@ -762,7 +912,8 @@ impl Shell {
                     "escape" => this.close_workspace_search(window, cx),
                     "enter" => {
                         let index = this.workspace_search.as_ref().map_or(0, |s| s.active);
-                        this.select_workspace_result(index, window, cx);
+                        if event.keystroke.modifiers.alt { this.add_workspace_symbol_to_chat(index, cx); }
+                        else { this.select_workspace_result(index, window, cx); }
                     }
                     "up" | "down" => {
                         if let Some(search) = this.workspace_search.as_mut() {
@@ -878,7 +1029,9 @@ impl Shell {
             _ => None,
         };
         let theme = Theme::of(cx).for_popup();
-        let label = if let Some(line) = row.line {
+        let label = if let Some(symbol) = &row.symbol {
+            format!("{}  {} · {}:{}", format!("{:?}", symbol.kind).to_lowercase(), symbol.name, row.path, symbol.start_line).into_any_element()
+        } else if let Some(line) = row.line {
             let prefix = format!("{line}: ");
             let offset = prefix.len();
             gpui::StyledText::new(format!("{prefix}{}", row.preview))
@@ -1375,6 +1528,7 @@ mod tests {
                     preview: String::new(),
                     ranges: Vec::new(),
                     changed: false,
+                    symbol: None,
                 })
                 .collect();
             search.list.reset_with_uniform_height(2, px(42.0));
@@ -1488,6 +1642,7 @@ mod tests {
                     preview: String::new(),
                     ranges: Vec::new(),
                     changed: false,
+                    symbol: None,
                 })
                 .collect();
             search.list.reset_with_uniform_height(2, px(42.0));
@@ -1517,6 +1672,7 @@ mod tests {
                 preview: String::new(),
                 ranges: Vec::new(),
                 changed: false,
+                symbol: None,
             });
             search.list.reset_with_uniform_height(1, px(42.0));
         })
@@ -1602,6 +1758,7 @@ mod tests {
                 preview: String::new(),
                 ranges: Vec::new(),
                 changed: false,
+                symbol: None,
             }];
             shell.select_workspace_result(0, window, cx);
             let id = match shell.resolved_right_active(cx) {
@@ -1623,6 +1780,7 @@ mod tests {
                 preview: "needle".into(),
                 ranges: vec![(0, 6)],
                 changed: false,
+                symbol: None,
             }];
             shell.select_workspace_result(0, window, cx);
             assert_eq!(
@@ -1631,6 +1789,15 @@ mod tests {
                     .pending_location_for_test(),
                 Some((19, None))
             );
+            shell.open_workspace_search(SearchMode::Files, window, cx);
+            let search = shell.workspace_search.as_mut().unwrap();
+            search.mode = SearchMode::Symbols;
+            search.rows = vec![ResultRow {
+                path: "src/main.rs".into(), line: Some(31), preview: String::new(), ranges: Vec::new(), changed: false,
+                symbol: Some(mast_syntax::symbols::Symbol { name: "example".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 31, end_line: 33 }),
+            }];
+            shell.select_workspace_result(0, window, cx);
+            assert_eq!(shell.file_surfaces[&id].read(cx).pending_location_for_test(), Some((31, None)));
             shell.open_workspace_search(SearchMode::Files, window, cx);
             shell.workspace_search.as_mut().unwrap().mode = SearchMode::Line;
             let input = shell.workspace_search.as_ref().unwrap().input.clone();

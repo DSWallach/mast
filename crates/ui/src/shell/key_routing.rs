@@ -37,6 +37,7 @@ pub fn apply_keymap(
     cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
     for (id, action) in [
         (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::QuickOpenSymbols, Box::new(QuickOpenSymbols) as Box<dyn Action>),
         (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
         (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
