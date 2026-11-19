@@ -427,11 +427,11 @@ impl Changes {
                         .scope_map_risks
                         .get(&file.path)
                         .filter(|note| !note.trim().is_empty());
-                    let (color, strength) = match file.status {
-                        FileStatus::Added => (theme.diff_add, 0.32),
-                        FileStatus::Deleted => (theme.diff_del, 0.32),
-                        FileStatus::Modified => (theme.diff_add, 0.18),
-                        FileStatus::Renamed => (theme.diff_del, 0.18),
+                    let color = match file.status {
+                        FileStatus::Added => theme.diff_add,
+                        FileStatus::Deleted => theme.diff_del,
+                        FileStatus::Modified => theme.text_muted,
+                        FileStatus::Renamed => theme.accent,
                     };
                     let index = *index;
                     let selector = format!(
@@ -441,7 +441,11 @@ impl Changes {
                     );
                     let title = format!(
                         "{} · +{} −{} · {}{}",
-                        file.path,
+                        file.old_path
+                            .as_ref()
+                            .filter(|old| *old != &file.path)
+                            .map(|old| format!("{old} → {}", file.path))
+                            .unwrap_or_else(|| file.path.clone()),
                         file.additions,
                         file.deletions,
                         if viewed { "Viewed" } else { "Not viewed" },
@@ -463,7 +467,8 @@ impl Changes {
                             } else {
                                 theme.border
                             })
-                            .bg(color.opacity(if viewed { strength * 0.4 } else { strength }))
+                            .bg(color.opacity(0.24))
+                            .opacity(if viewed { 0.45 } else { 1.0 })
                             .text_size(px(10.0))
                             .text_color(theme.text)
                             .child(SharedString::from(label))
