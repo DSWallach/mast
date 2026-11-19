@@ -4028,7 +4028,8 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let with_token = |key: &str, token: &str| {
         json!({ "idempotencyKey": key, "steps": steps, "confirmToken": token })
     };
-    let err = admin(&rig, &token, with_token("b2", &confirm)).await.unwrap_err();
+    // The token belongs to the execution that previewed it (same key, same steps).
+    let err = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap_err();
     assert!(err.contains("not approved"), "{err}");
     // The agent (admin or not) cannot resolve it itself.
     let err = tool(&rig, &token, "work_outline_resolve_user_action_request",
@@ -4037,24 +4038,26 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let err = admin(&rig, &token, json!({ "idempotencyKey": "b3",
         "steps": [{ "op": "resolve_request", "requestId": request_id }] })).await.unwrap_err();
     assert!(err.contains("nauthorized") || err.contains("approve"), "{err}");
-    // Different steps than the user saw: refused.
+    // Different steps than the user saw: a different batch, refused.
     let mut other = steps.clone();
     other[0]["title"] = json!("Sneaky");
-    let err = admin(&rig, &token, json!({ "idempotencyKey": "b4", "steps": other,
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b1", "steps": other,
         "confirmToken": confirm })).await.unwrap_err();
-    assert!(err.contains("differ"), "{err}");
+    assert!(err.contains("another batch"), "{err}");
 
     // The user resolves it.
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
         "op": "resolveUserActionRequest", "userActionRequestId": request_id,
         "outcome": "approved", "via": "card", "operationId": "user-approves" })).await.unwrap();
-    let done = admin(&rig, &token, with_token("b5", &confirm)).await.unwrap();
+    let done = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap();
     assert_eq!(done["applied"], 11, "{done}");
     assert!(ids.iter().all(|id| title_of(&rig, id) == "Renamed"));
 
-    // One use only.
+    // One batch only: another execution cannot use it, and the same one replays.
     let err = admin(&rig, &token, with_token("b6", &confirm)).await.unwrap_err();
-    assert!(err.contains("already used"), "{err}");
+    assert!(err.contains("another batch"), "{err}");
+    let again = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap();
+    assert_eq!(again["applied"], 11, "a retry of the same batch replays: {again}");
 
     // Expiry of an unused token.
     let steps2: Vec<Value> = ids.iter().map(|id| json!({ "op": "rename", "itemId": id, "title": "Again" })).collect();
@@ -4062,7 +4065,7 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let t2 = p2["confirmToken"].as_str().unwrap().to_owned();
     tokens.admin().advance_clock_ms(31 * 60 * 1000);
     grant(&rig, CHAT, None, false).await;
-    let err = admin(&rig, &token, json!({ "idempotencyKey": "b8", "steps": steps2,
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b7", "steps": steps2,
         "confirmToken": t2 })).await.unwrap_err();
     assert!(err.contains("expired"), "{err}");
 
@@ -4482,7 +4485,7 @@ async fn bulk_change_rejects_non_approval_resolutions() {
         .unwrap();
         let request_id = preview["requestId"].as_str().unwrap();
         rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":request_id, "outcome":outcome, "note":"no", "via":"card", "operationId":"user-declines"})).await.unwrap();
-        let err = admin(&rig, &token, json!({"idempotencyKey":"apply", "steps":steps, "confirmToken":preview["confirmToken"]})).await.unwrap_err();
+        let err = admin(&rig, &token, json!({"idempotencyKey":"preview", "steps":steps, "confirmToken":preview["confirmToken"]})).await.unwrap_err();
         assert!(err.contains("not approved"), "{outcome:?}: {err}");
         assert!(ids.iter().all(|id| title_of(&rig, id) != "Changed"));
     }
