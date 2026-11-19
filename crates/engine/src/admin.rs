@@ -2,15 +2,19 @@
 //! inverse mutations (for one-step undo of a sweep), and bulk-change
 //! approvals (contract amendment "admin chats").
 //!
-//! Only the RPC layer (`GrantAdmin`, `RevokeAdmin`) writes grants; no agent
-//! tool does. A grant names one chat and one Space, may expire, and is
+//! User RPCs manage grants, including moving an existing grant during a
+//! hand-off. A grant names one chat and one Space, may expire, and is
 //! re-checked on every agent call (and between the steps of a batch), so a
 //! revoke or expiry takes effect immediately.
 
+use crate::handoff_role_file::HandoffRoleFile;
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use mast_proto::{
     AdminAuditAction, AdminAuditTurn, AdminGrant, ADMIN_DEFAULT_DURATION_SECS, WorkOutlineMutation,
@@ -225,10 +229,18 @@ const MAX_FINISHED_BATCHES: usize = 512;
 /// forgetting one that has committed steps.
 const MAX_BATCH_RECORDS: usize = 4096;
 
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct StoredGrant {
+    #[serde(flatten)]
+    grant: AdminGrant,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
 #[derive(Default)]
 struct State {
-    grants: HashMap<String, AdminGrant>,
-    store: Option<PathBuf>,
+    grants: HashMap<String, StoredGrant>,
+    store: HandoffRoleFile,
     audit: Vec<TurnRecord>,
     approvals: HashMap<String, Approval>,
 }
@@ -258,14 +270,12 @@ impl AdminGrants {
     pub fn set_store(&self, path: PathBuf) {
         let now = self.now_ms();
         let mut state = lock(&self.state);
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(saved) = serde_json::from_slice::<Vec<AdminGrant>>(&bytes)
-        {
-            for grant in saved.into_iter().filter(|g| g.is_live(now)) {
-                state.grants.insert(grant.chat_id.clone(), grant);
+        let budget_path = path.with_file_name("admin-batch-budgets.json");
+        if let Some(saved) = state.store.load::<Vec<StoredGrant>>(path) {
+            for grant in saved.into_iter().filter(|g| g.grant.is_live(now)) {
+                state.grants.insert(grant.grant.chat_id.clone(), grant);
             }
         }
-        let budget_path = path.with_file_name("admin-batch-budgets.json");
         {
             let mut book = lock(&self.budgets);
             match std::fs::read(&budget_path) {
@@ -284,15 +294,12 @@ impl AdminGrants {
             }
             book.path = Some(budget_path);
         }
-        state.store = Some(path);
     }
 
     fn persist(state: &State) {
-        if let Some(path) = &state.store {
-            let list: Vec<&AdminGrant> = state.grants.values().collect();
-            if let Ok(bytes) = serde_json::to_vec(&list) {
-                let _ = std::fs::write(path, bytes);
-            }
+        let grants: Vec<_> = state.grants.values().collect();
+        if let Err(error) = state.store.save(grants) {
+            tracing::warn!(%error, "could not save admin grants");
         }
     }
 
@@ -314,9 +321,61 @@ impl AdminGrants {
             skip_bulk_confirmation,
         };
         let mut state = lock(&self.state);
-        state.grants.insert(chat_id.to_owned(), grant.clone());
+        state.grants.insert(
+            chat_id.to_owned(),
+            StoredGrant {
+                grant: grant.clone(),
+                revision: Some(crate::new_id()),
+            },
+        );
         Self::persist(&state);
         grant
+    }
+
+    pub(crate) fn observe_hand_off(&self, from: &str, space_id: &str) -> Option<StoredGrant> {
+        lock(&self.state)
+            .grants
+            .get(from)
+            .filter(|entry| entry.grant.space_id == space_id && entry.grant.is_live(self.now_ms()))
+            .cloned()
+    }
+
+    /// Reassign a live grant within its original Space. A direct grant to
+    /// the successor takes precedence.
+    pub(crate) fn transfer_for_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        space_id: &str,
+        observed: Option<&StoredGrant>,
+    ) -> io::Result<()> {
+        let now = self.now_ms();
+        let mut state = lock(&self.state);
+        if state.store.contains(to) {
+            return Ok(());
+        }
+        let mut grants = state.grants.clone();
+        if let Some(mut grant) = grants
+            .get(from)
+            .filter(|entry| {
+                Some(*entry) == observed
+                    && entry.grant.is_live(now)
+                    && entry.grant.space_id == space_id
+            })
+            .cloned()
+        {
+            grants.remove(from);
+            if !grants.get(to).is_some_and(|entry| entry.grant.is_live(now)) {
+                grant.grant.chat_id = to.to_owned();
+                grant.revision = Some(crate::new_id());
+                grants.insert(to.to_owned(), grant);
+            }
+        }
+        state
+            .store
+            .complete(to, grants.values().collect::<Vec<_>>())?;
+        state.grants = grants;
+        Ok(())
     }
 
     /// The default grant length, for callers without a choice.
@@ -338,7 +397,7 @@ impl AdminGrants {
         let now = self.now_ms();
         let mut state = lock(&self.state);
         match state.grants.get(chat_id) {
-            Some(g) if g.is_live(now) => Some(g.clone()),
+            Some(g) if g.grant.is_live(now) => Some(g.grant.clone()),
             Some(_) => {
                 state.grants.remove(chat_id);
                 Self::persist(&state);
@@ -352,11 +411,15 @@ impl AdminGrants {
         let now = self.now_ms();
         let mut state = lock(&self.state);
         let before = state.grants.len();
-        state.grants.retain(|_, g| g.is_live(now));
+        state.grants.retain(|_, g| g.grant.is_live(now));
         if state.grants.len() != before {
             Self::persist(&state);
         }
-        let mut list: Vec<AdminGrant> = state.grants.values().cloned().collect();
+        let mut list: Vec<AdminGrant> = state
+            .grants
+            .values()
+            .map(|entry| entry.grant.clone())
+            .collect();
         list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         list
     }

@@ -853,6 +853,13 @@ impl Default for AppState {
     }
 }
 
+/// Provisional Manager chats are hidden until activation. An earlier chat
+/// stays visible if the user kept it active during handoff.
+pub(crate) fn chat_hidden_by_standing_role(chat: &Chat) -> bool {
+    chat.standing_role_provisional().is_some()
+        || (chat.archived && chat.is_standing_role_predecessor())
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -1082,6 +1089,13 @@ impl AppState {
     /// chat was rotated away from. `None` when nothing needs to change.
     pub(crate) fn standing_role_selection_target(&self) -> Option<String> {
         let selected = self.selected_chat.as_deref()?;
+        if !self
+            .chats
+            .iter()
+            .any(|chat| chat.id == selected && chat.archived && chat.is_standing_role_predecessor())
+        {
+            return None;
+        }
         let current = mast_proto::StandingRole::resolve_current(&self.chats, selected);
         (current != selected).then(|| current.to_owned())
     }
@@ -1812,7 +1826,7 @@ impl AppState {
         self.chats
             .iter()
             .filter(|c| !c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
-            .filter(|c| !c.is_standing_role_predecessor())
+            .filter(|c| !chat_hidden_by_standing_role(c))
     }
 
     pub(crate) fn restore_composer_target(
@@ -1971,7 +1985,7 @@ impl AppState {
             .chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
-            .filter(|c| !c.is_standing_role_predecessor())
+            .filter(|c| !chat_hidden_by_standing_role(c))
             .filter(|c| c.scheduled_task_info.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
@@ -6293,15 +6307,18 @@ mod tests {
         state.apply_chats(vec![first, second, chat("third", 2, None)]);
         state.selected_chat = Some("first".into());
         assert_eq!(state.standing_role_selection_target().as_deref(), Some("third"));
+        state.selected_chat = Some("second".into());
+        assert_eq!(state.standing_role_selection_target(), None);
         state.selected_chat = Some("third".into());
         assert_eq!(state.standing_role_selection_target(), None);
         state.selected_chat = None;
         assert_eq!(state.standing_role_selection_target(), None);
+        assert!(state.visible_chats().any(|chat| chat.id == "second"));
         assert!(
             state
                 .overview_chats_with_archived(Utc::now(), true)
                 .iter()
-                .all(|(_, c)| !c.is_standing_role_predecessor())
+                .any(|(_, c)| c.id == "second")
         );
     }
 

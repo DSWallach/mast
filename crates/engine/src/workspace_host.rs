@@ -372,6 +372,11 @@ impl WorkspaceHost {
         let (spaces_tx, _) = watch::channel(state.spaces);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
+            local_handoffs: if local_authority {
+                doc.completed_sidebar_handoffs()
+            } else {
+                Vec::new()
+            },
             revision: 0,
             synced: false,
             initialized: preferences.is_some(),
@@ -903,6 +908,64 @@ impl WorkspaceHost {
     /// already replaced by a different chat is an error.
     pub fn rotate_standing_role_for_chat(&self, from: &str, to: &str) -> Result<Option<mast_proto::StandingRole>, String> {
         self.mutate(|doc| doc.rotate_standing_role_for_chat(from, to))
+    }
+
+    pub(crate) fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
+        self.read(|doc| doc.hand_off_recorded(from, to))
+    }
+
+    pub(crate) fn completed_user_hand_off_to(
+        &self,
+        from: &str,
+        requested: &str,
+        device: &str,
+        space: &str,
+        archive: Option<bool>,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            let chat = doc.chat(&successor).ok().flatten()?;
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            (row.fields
+                .get("userHandOffArchive")
+                .and_then(serde_json::Value::as_bool)
+                == archive
+                && chat.device_id == device
+                && chat.space_id.as_deref() == Some(space)
+                && chat.scheduled_task_info.is_none())
+            .then_some(successor)
+        })
+    }
+
+    pub(crate) fn completed_hand_off_retry_operation(
+        &self,
+        from: &str,
+        requested: &str,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            if successor == requested {
+                return None;
+            }
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            row.fields
+                .get("userHandOffOperationId")?
+                .as_str()
+                .map(str::to_owned)
+        })
+    }
+
+    pub(crate) fn complete_user_chat_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        requested: &str,
+        operation_id: &str,
+        archive: Option<bool>,
+    ) -> Result<(), String> {
+        self.mutate(|doc| {
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+        })
     }
 
     /// Every durable PR linked to this chat. Independent link rows are
@@ -3049,6 +3112,11 @@ impl WorkspaceHostInner {
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
+        let local_handoffs = if self.config.edge.is_some() {
+            Vec::new()
+        } else {
+            doc.completed_sidebar_handoffs()
+        };
         self.sidebar_preferences_tx.send_if_modified(|current| {
             // Readiness is sticky for this host. A caller that sampled stats
             // before another publisher acquired the lock must not regress it.
@@ -3057,6 +3125,7 @@ impl WorkspaceHostInner {
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
                 && current.sections == sections
+                && current.local_handoffs == local_handoffs
             {
                 return false;
             }
@@ -3066,6 +3135,7 @@ impl WorkspaceHostInner {
                 initialized,
                 pinned_session_ids: pins,
                 sections,
+                local_handoffs,
             };
             true
         });

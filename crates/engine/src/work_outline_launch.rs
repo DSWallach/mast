@@ -375,6 +375,27 @@ struct LaunchInputs<'a> {
     /// cannot be replayed as a plain one.
     #[serde(skip_serializing_if = "Option::is_none")]
     standing_role: &'a Option<mast_proto::StandingRoleKind>,
+    /// Explicit archive choices are part of a user hand-off operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hand_off_archive: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HandOffOrigin<'a> {
+    User {
+        archive: Option<bool>,
+        observed_roles: &'a crate::handoff_roles::RoleObservations,
+    },
+    Agent,
+}
+
+impl HandOffOrigin<'_> {
+    fn archive_choice(self) -> Option<bool> {
+        match self {
+            Self::User { archive, .. } => archive,
+            Self::Agent => None,
+        }
+    }
 }
 
 /// The launch workflow and Turn continuation. Cheap to clone.
@@ -486,12 +507,14 @@ impl WorkItemLaunchService {
         p: &CreateChatForWorkItemParams,
         wakes: &crate::orchestrator_wakes::OrchestratorWakes,
         source: &str,
+        origin: HandOffOrigin<'_>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let source_chat = self
             .workspace
             .chat(source)
             .map_err(engine_error)?
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
+        let requested_successor = derive_id(&p.operation_id, roles::CHAT);
         let mut successor = p.clone();
         let configuration = match self
             .workspace
@@ -516,7 +539,12 @@ impl WorkItemLaunchService {
         // A hand-off that stopped after workers moved is finished by asking
         // again with the same summary and settings, even from a reopened
         // dialog or after a restart that minted a fresh operation id.
-        if let Some(pending) = self.workspace.part_done_hand_off_from(source)
+        if let Some(operation) = self
+            .workspace
+            .completed_hand_off_retry_operation(source, &requested_successor)
+        {
+            successor.operation_id = operation;
+        } else if let Some(pending) = self.workspace.part_done_hand_off_from(source)
             && pending.operation_id != successor.operation_id
         {
             let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
@@ -527,6 +555,7 @@ impl WorkItemLaunchService {
                 worktree_choice: &successor.worktree_choice,
                 parent_chat_id: &successor.parent_chat_id,
                 standing_role: &successor.standing_role,
+                hand_off_archive: origin.archive_choice(),
             });
             if self
                 .workspace
@@ -535,14 +564,19 @@ impl WorkItemLaunchService {
                 successor.operation_id = pending.operation_id;
             }
         }
-        self.launch_chat_for_work_item(&successor, Some((wakes, source)))
+        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)))
             .await
     }
 
     async fn launch_chat_for_work_item(
         &self,
         p: &CreateChatForWorkItemParams,
-        hand_off: Option<(&crate::orchestrator_wakes::OrchestratorWakes, &str)>,
+        hand_off: Option<(
+            &crate::orchestrator_wakes::OrchestratorWakes,
+            &str,
+            HandOffOrigin<'_>,
+            &str,
+        )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
@@ -565,6 +599,7 @@ impl WorkItemLaunchService {
             worktree_choice: &p.worktree_choice,
             parent_chat_id: &p.parent_chat_id,
             standing_role: &p.standing_role,
+            hand_off_archive: hand_off.and_then(|(_, _, origin, _)| origin.archive_choice()),
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
@@ -663,7 +698,7 @@ impl WorkItemLaunchService {
         // the role cannot follow, or another part-done hand-off ends the
         // launch here, with nothing written. The gate held above serializes
         // launches; the reservation survives a restart.
-        if let Some((_, source)) = hand_off {
+        if let Some((_, source, _, _)) = hand_off {
             self.workspace
                 .reserve_standing_role_hand_off(source, &chat_id, op, Some(&space_id))
                 .map_err(conflict)?;
@@ -716,6 +751,38 @@ impl WorkItemLaunchService {
         }
 
         self.claim_inputs(op, &inputs_hash)?;
+        if let Some((
+            _,
+            source,
+            HandOffOrigin::User {
+                archive,
+                observed_roles,
+            },
+            _,
+        )) = hand_off
+        {
+            let from = self
+                .workspace
+                .chat(source)
+                .map_err(engine_error)?
+                .ok_or_else(|| {
+                    error(WorkOutlineErrorCode::NotFound, "Hand-off source not found")
+                })?;
+            if from.device_id != self.workspace.device_id()
+                || from.space_id.as_deref() != Some(space_id.as_str())
+            {
+                return Err(conflict(
+                    "Hand-off source does not belong to this Space and device",
+                ));
+            }
+            let intent = crate::handoff_roles::PendingHandoff::new(&from, &chat_id, archive)
+                .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+            self.sessions
+                .agent_tokens()
+                .pending_handoffs
+                .prepare(&intent, observed_roles)
+                .map_err(|err| engine_error(err.into()))?;
+        }
 
         // ── 2. effective configuration + validation + capability ──
         let existing_binding = self
@@ -778,12 +845,12 @@ impl WorkItemLaunchService {
 
         // The successor exists now, so the full destination rules apply
         // before workers move or a second turn can be queued.
-        if let Some((_, source)) = hand_off {
+        if let Some((_, source, _, _)) = hand_off {
             self.workspace
                 .check_standing_role_hand_off(source, &chat_id, None)
                 .map_err(conflict)?;
         }
-        if let Some((wakes, source)) = hand_off {
+        if let Some((wakes, source, _, _)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
@@ -877,10 +944,6 @@ impl WorkItemLaunchService {
         }
         self.checkpoint(LaunchStep::RegistryPersisted)?;
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
-        if let Some((wakes, _)) = hand_off {
-            wakes.finish_orchestrator_hand_off(&chat_id);
-            wakes.evaluate(&chat_id, false).await;
-        }
         self.checkpoint(LaunchStep::TurnQueued)?;
 
         // ── 8. standing role ──
@@ -893,18 +956,20 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
-        if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
-            // A manual hand-off of a standing role's chat moves the role too.
-            // Replays of this launch find the role already moved.
-            self.workspace
-                .rotate_standing_role_for_chat(source, &chat_id)
-                .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
-            let handle = self.doc_host.open(source).map_err(engine_error)?;
-            handle.write_user_message(
-                &derive_id(op, "hand-off-notice"),
-                &format!("[Mast hand-off: {chat_id}]"),
-                chrono::Utc::now().timestamp_millis(),
-            ).map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+        if let Some((wakes, source, origin, requested)) = hand_off {
+            if state != WorkItemLaunchState::Rejected {
+                let handle = self.doc_host.open(source).map_err(engine_error)?;
+                handle
+                    .write_user_message(
+                        &derive_id(op, "hand-off-notice"),
+                        &format!("[Mast hand-off: {chat_id}]"),
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+                self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
+            }
+            wakes.finish_orchestrator_hand_off(&chat_id);
+            wakes.evaluate(&chat_id, false).await;
         }
         Ok(CreateChatForWorkItemReply {
             chat_id,
@@ -916,6 +981,60 @@ impl WorkItemLaunchService {
             state,
             detail,
         })
+    }
+
+    fn complete_hand_off(
+        &self,
+        source: &str,
+        successor: &str,
+        requested: &str,
+        operation_id: &str,
+        space_id: &str,
+        origin: HandOffOrigin<'_>,
+    ) -> Result<(), WorkOutlineError> {
+        let invalid = |detail: String| error(WorkOutlineErrorCode::Invalid, detail);
+        let HandOffOrigin::User { archive, .. } = origin else {
+            return self
+                .workspace
+                .rotate_standing_role_for_chat(source, successor)
+                .map(drop)
+                .map_err(invalid);
+        };
+        let chat = |id| {
+            self.workspace
+                .chat(id)
+                .map_err(engine_error)?
+                .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Hand-off chat not found"))
+        };
+        let from = chat(source)?;
+        let to = chat(successor)?;
+        if [&from, &to].iter().any(|chat| {
+            chat.space_id.as_deref() != Some(space_id)
+                || chat.device_id != self.workspace.device_id()
+        }) || to.scheduled_task_info.is_some()
+        {
+            return Err(conflict(
+                "Hand-off chats must belong to the same Space and device",
+            ));
+        }
+        let tokens = self.sessions.agent_tokens();
+        let intent = crate::handoff_roles::PendingHandoff::new(&from, successor, archive)
+            .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+        // Publish the registry completion only after recovery can find the
+        // roles and the successor's first turn is durable.
+        self.doc_host
+            .persist_chat_now(successor)
+            .map_err(engine_error)?;
+        self.workspace
+            .complete_user_chat_hand_off(source, successor, requested, operation_id, archive)
+            .map_err(invalid)?;
+        self.workspace
+            .persist_registry_now()
+            .map_err(engine_error)?;
+        tokens
+            .pending_handoffs
+            .finish(&self.workspace, &tokens, &intent, successor)
+            .map_err(engine_error)
     }
 
     /// Make a provisional first-start chat the role's chat: save its session

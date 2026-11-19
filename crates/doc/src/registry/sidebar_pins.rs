@@ -2,6 +2,156 @@ use super::*;
 use mast_proto::{SidebarPinChange, pin_order_key_between, valid_pin_order_key};
 
 impl RegistryDoc {
+    fn user_chat_hand_off_completed(&self, from: &str, to: &str) -> bool {
+        self.hand_off_recorded(from, to)
+            && self.overlay_row(KIND_CHATS, to).is_some_and(|row| {
+                row.fields
+                    .get("userHandOffCompleted")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            })
+    }
+
+    /// Resolve the successor for an attempted user hand-off. A request that
+    /// resumed a reserved hand-off can have a different derived chat ID.
+    pub fn completed_user_hand_off_to(&self, from: &str, requested: &str) -> Option<String> {
+        if self.user_chat_hand_off_completed(from, requested) {
+            return Some(requested.to_owned());
+        }
+        // Only a standing role's reserved hand-off can resume under a
+        // different operation ID. Its predecessor points to the real chat.
+        let successor = self.chat(from).ok().flatten()?.standing_role_successor?;
+        let row = self.overlay_row(KIND_CHATS, &successor)?;
+        let matches_request = row
+            .fields
+            .get("userHandOffRetryChatIds")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(requested)));
+        (matches_request && self.user_chat_hand_off_completed(from, &successor))
+            .then_some(successor)
+    }
+
+    pub fn completed_sidebar_handoffs(&self) -> Vec<mast_proto::CompletedSidebarHandoff> {
+        let mut completed: Vec<_> = self
+            .overlay_rows(KIND_CHATS)
+            .into_iter()
+            .filter_map(|row| {
+                if row
+                    .fields
+                    .get("userHandOffCompleted")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                {
+                    return None;
+                }
+                let source = row
+                    .fields
+                    .get("orchestratorHandOff")?
+                    .get("fromChatId")?
+                    .as_str()?
+                    .to_owned();
+                let retry_chat_ids = row
+                    .fields
+                    .get("userHandOffRetryChatIds")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                Some(mast_proto::CompletedSidebarHandoff {
+                    source,
+                    successor: row.id,
+                    retry_chat_ids,
+                })
+            })
+            .collect();
+        completed.sort_by(|a, b| a.successor.cmp(&b.successor));
+        completed
+    }
+
+    /// Move the pin in place and record completion in the same registry batch.
+    /// A replay must leave later pin and archive edits alone.
+    pub fn complete_user_chat_hand_off(
+        &mut self,
+        from: &str,
+        to: &str,
+        requested: &str,
+        operation_id: &str,
+        archive: Option<bool>,
+    ) -> Result<(), String> {
+        use super::sidebar_sections::LOCATIONS;
+
+        if !self.hand_off_recorded(from, to) {
+            return Err("the chat hand-off was not recorded".into());
+        }
+        let mut completion = fields([("userHandOffCompleted", json!(true))]);
+        if to != requested {
+            let mut ids = self
+                .overlay_row(KIND_CHATS, to)
+                .and_then(|row| {
+                    row.fields
+                        .get("userHandOffRetryChatIds")
+                        .and_then(Value::as_array)
+                        .cloned()
+                })
+                .unwrap_or_default();
+            if !ids.iter().any(|id| id.as_str() == Some(requested)) {
+                ids.push(json!(requested));
+                completion.insert("userHandOffRetryChatIds".into(), json!(ids));
+            }
+        }
+        if self.user_chat_hand_off_completed(from, to) {
+            return if completion.len() == 1 {
+                Ok(())
+            } else {
+                self.commit_rows(vec![(
+                    KIND_CHATS,
+                    to.to_owned(),
+                    OpKind::Update,
+                    completion,
+                )])
+            };
+        }
+        completion.insert("userHandOffOperationId".into(), json!(operation_id));
+        completion.insert("userHandOffArchive".into(), json!(archive));
+        let mut rows = self.user_hand_off_role_rows(from, to, archive)?;
+        rows.push((KIND_CHATS, to.to_owned(), OpKind::Update, completion));
+        if let Some((_, order_key)) = self
+            .ordered_sidebar_pins()
+            .into_iter()
+            .find(|(id, _)| id == from)
+        {
+            rows.extend([
+                (
+                    LOCATIONS,
+                    from.to_owned(),
+                    OpKind::Upsert,
+                    fields([("location", json!(""))]),
+                ),
+                (
+                    LOCATIONS,
+                    to.to_owned(),
+                    OpKind::Upsert,
+                    fields([("location", json!("pinned"))]),
+                ),
+                (
+                    KIND_SIDEBAR_PINS,
+                    from.to_owned(),
+                    OpKind::Upsert,
+                    fields([("pinned", json!(false))]),
+                ),
+                (
+                    KIND_SIDEBAR_PINS,
+                    to.to_owned(),
+                    OpKind::Upsert,
+                    fields([("pinned", json!(true)), ("orderKey", json!(order_key))]),
+                ),
+            ]);
+        }
+        self.commit_rows(rows)
+    }
+
     pub fn sidebar_pins_initialized(&self) -> bool {
         self.overlay_row(KIND_PREFERENCES, SIDEBAR_PINS_STATE_ID)
             .is_some()

@@ -1,18 +1,29 @@
 //! The device's personal assistant chat: the device-local designation store.
 //!
-//! Only the RPC layer (`SetPersonalAssistant`, `ClearPersonalAssistant`)
-//! writes it; no agent tool does. Authenticate re-reads it on every agent
+//! User RPCs set or clear the designation and can move it during a hand-off.
+//! Authenticate re-reads it on every agent
 //! call, so a clear takes effect immediately.
 
+use crate::handoff_role_file::HandoffRoleFile;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use mast_proto::{Chat, PersonalAssistant};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct StoredAssistant {
+    #[serde(flatten)]
+    assistant: PersonalAssistant,
+    #[serde(default)]
+    revision: Option<String>,
+}
 
 #[derive(Default)]
 struct State {
-    current: Option<PersonalAssistant>,
-    store: Option<PathBuf>,
+    current: Option<StoredAssistant>,
+    store: HandoffRoleFile,
 }
 
 #[derive(Default)]
@@ -28,19 +39,14 @@ impl PersonalAssistantStore {
     /// Persist at `path` (device-local) and load the saved designation.
     pub fn set_store(&self, path: PathBuf) {
         let mut state = lock(&self.state);
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(saved) = serde_json::from_slice::<Option<PersonalAssistant>>(&bytes)
-        {
+        if let Some(saved) = state.store.load::<Option<StoredAssistant>>(path) {
             state.current = saved;
         }
-        state.store = Some(path);
     }
 
     fn persist(state: &State) {
-        if let Some(path) = &state.store
-            && let Ok(bytes) = serde_json::to_vec(&state.current)
-        {
-            let _ = std::fs::write(path, bytes);
+        if let Err(error) = state.store.save(&state.current) {
+            tracing::warn!(%error, "could not save personal assistant designation");
         }
     }
 
@@ -50,9 +56,45 @@ impl PersonalAssistantStore {
         let assistant =
             PersonalAssistant::for_chat(chat, chrono::Utc::now().timestamp_millis());
         let mut state = lock(&self.state);
-        state.current = Some(assistant.clone());
+        state.current = Some(StoredAssistant {
+            assistant: assistant.clone(),
+            revision: Some(crate::new_id()),
+        });
         Self::persist(&state);
         assistant
+    }
+
+    pub(crate) fn observe_hand_off(&self, from: &Chat, chats: &[Chat]) -> Option<StoredAssistant> {
+        lock(&self.state)
+            .current
+            .as_ref()
+            .filter(|entry| entry.assistant.covers(from, chats))
+            .cloned()
+    }
+
+    pub(crate) fn transfer_for_hand_off(
+        &self,
+        from: &Chat,
+        successor: &str,
+        chats: &[Chat],
+        observed: Option<&StoredAssistant>,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.store.contains(successor) {
+            return Ok(());
+        }
+        let mut current = state.current.clone();
+        if current.as_ref() == observed
+            && let Some(current) = &mut current
+            && current.assistant.covers(from, chats)
+        {
+            current.assistant.chat_id = successor.to_owned();
+            current.assistant.scheduled_task = None;
+            current.revision = Some(crate::new_id());
+        }
+        state.store.complete(successor, &current)?;
+        state.current = current;
+        Ok(())
     }
 
     pub fn clear(&self) {
@@ -63,7 +105,10 @@ impl PersonalAssistantStore {
     }
 
     pub fn get(&self) -> Option<PersonalAssistant> {
-        lock(&self.state).current.clone()
+        lock(&self.state)
+            .current
+            .as_ref()
+            .map(|entry| entry.assistant.clone())
     }
 
     /// `chat` is the assistant. `chats` is read only for a scheduled run the

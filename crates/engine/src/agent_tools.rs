@@ -190,6 +190,7 @@ pub struct AgentTokens {
     admin: crate::admin::AdminGrants,
     /// The user-designated personal assistant chat (device-local; RPC-written only).
     personal_assistant: crate::personal_assistant::PersonalAssistantStore,
+    pub(crate) pending_handoffs: crate::handoff_roles::PendingHandoffs,
 }
 
 impl AgentTokens {

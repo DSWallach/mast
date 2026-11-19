@@ -1272,6 +1272,248 @@ async fn user_hand_off_rpc_transfers_workers_and_replays() {
     assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_moves_pin_and_roles_with_either_archive_choice() {
+    use mast_proto::{SidebarPinChange, StandingRoleKind};
+    for archive in [false, true] {
+        let (rig, item) = role_rig("handoff-preferences").await;
+        let workspace = &rig.core.workspace;
+        let tokens = rig.core.sessions.agent_tokens();
+        let grant = tokens.admin().grant(CHAT, SPACE, Some(600), true);
+        let assistant = tokens
+            .personal_assistant()
+            .set(&workspace.chat(CHAT).unwrap().unwrap());
+        let pins = || workspace.sidebar_preferences_snapshot().pinned_session_ids;
+        let pin = |id: &str| {
+            workspace
+                .change_sidebar_pin(&SidebarPinChange::Pin {
+                    session_id: id.into(),
+                    before: None,
+                    after: None,
+                })
+                .unwrap()
+        };
+        pin(OTHER_CHAT);
+        pin(CHAT);
+        let original = pins();
+
+        let params = json!({
+            "chatId": CHAT, "summary": "Continue as manager", "operationId": "handoff-preferences",
+            "archive": archive,
+        });
+        let reply = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .await
+            .unwrap();
+        let successor = reply["chatId"].as_str().unwrap();
+        assert_eq!(workspace.chat(CHAT).unwrap().unwrap().archived, archive);
+        assert_eq!(
+            workspace
+                .standing_role_chat(StandingRoleKind::Manager, &item)
+                .as_deref(),
+            Some(successor)
+        );
+        assert_eq!(
+            pins(),
+            original
+                .into_iter()
+                .map(|id| if id == CHAT { successor.into() } else { id })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor.into(),
+                ..assistant
+            })
+        );
+        assert!(tokens.admin().live(CHAT).is_none());
+        assert_eq!(
+            tokens.admin().live(successor),
+            Some(mast_proto::AdminGrant {
+                chat_id: successor.into(),
+                ..grant
+            })
+        );
+        for (chat_id, is_successor) in [(CHAT, false), (successor, true)] {
+            let lease = tokens.mint(chat_id, "handoff-auth", SPACE, &rig.core.device_id);
+            let origin = rig
+                .client
+                .call(
+                    mast_proto::agent_tools::AUTHENTICATE_METHOD,
+                    json!({"token": lease.token()}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                origin["personalAssistant"].as_bool().unwrap_or(false),
+                is_successor
+            );
+            assert_eq!(
+                origin["adminSpaceId"].as_str(),
+                is_successor.then_some(SPACE)
+            );
+        }
+
+        // Replays preserve edits made after the original hand-off.
+        workspace.set_chat_archived(CHAT, false).unwrap();
+        pin(CHAT);
+        tokens
+            .personal_assistant()
+            .set(&workspace.chat(CHAT).unwrap().unwrap());
+        let renewed = tokens.admin().grant(CHAT, SPACE, None, false);
+        let edited_pins = pins();
+        let retry = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap();
+        assert_eq!(retry["chatId"], successor);
+        assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+        assert_eq!(pins(), edited_pins);
+        assert_eq!(tokens.admin().live(CHAT), Some(renewed));
+        assert_eq!(tokens.personal_assistant().get().unwrap().chat_id, CHAT);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_retries_a_failed_role_write_after_restart() {
+    for (file_name, error_text, admin_moved) in [
+        (
+            "admin-grants.json",
+            "Could not save the admin hand-off",
+            false,
+        ),
+        (
+            "personal-assistant.json",
+            "Could not save the personal assistant hand-off",
+            true,
+        ),
+    ] {
+        let rig = rig().await;
+        let data = std::fs::canonicalize(rig._tmp.path()).unwrap().join("data");
+        let tokens = rig.core.sessions.agent_tokens();
+        let source = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+        let grant = tokens.admin().grant(CHAT, SPACE, None, true);
+        let assistant = tokens.personal_assistant().set(&source);
+        let role_file = data.join(file_name);
+        let backup = role_file.with_extension("backup");
+        std::fs::rename(&role_file, &backup).unwrap();
+        std::fs::create_dir(&role_file).unwrap();
+
+        let params = json!({
+            "chatId": CHAT, "summary": "Continue with the same roles",
+            "operationId": "handoff-role-write", "archive": true,
+        });
+        let successor = derive_id("handoff-role-write", roles::CHAT);
+        let err = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(error_text), "{err}");
+        assert_eq!(tokens.admin().live(CHAT).is_none(), admin_moved);
+        assert_eq!(tokens.admin().live(&successor).is_some(), admin_moved);
+        assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
+
+        // A committed store must keep later edits even while the other
+        // store's original transfer still needs to be retried.
+        let renewed = admin_moved.then(|| tokens.admin().grant(CHAT, SPACE, None, false));
+        drop(tokens);
+        let Rig {
+            _tmp,
+            core,
+            client,
+            service,
+            ..
+        } = rig;
+        drop(client);
+        drop(service);
+        core.shutdown().await;
+        drop(core);
+        std::fs::remove_dir(&role_file).unwrap();
+        std::fs::rename(backup, role_file).unwrap();
+
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(GatedHarness::default()));
+        let restarted =
+            EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
+        // A new client needs neither the summary nor the old operation ID.
+        let tokens = restarted.sessions.agent_tokens();
+        assert!(restarted.workspace.chat(CHAT).unwrap().unwrap().archived);
+        assert_eq!(tokens.admin().live(CHAT), renewed);
+        assert_eq!(
+            tokens.admin().live(&successor),
+            Some(mast_proto::AdminGrant {
+                chat_id: successor.clone(),
+                ..grant
+            })
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor,
+                ..assistant
+            })
+        );
+        restarted.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_archives_plain_chat_without_assigning_roles_or_pin() {
+    let rig = rig().await;
+    let workspace = &rig.core.workspace;
+    let tokens = rig.core.sessions.agent_tokens();
+    let other = tokens
+        .personal_assistant()
+        .set(&workspace.chat(OTHER_CHAT).unwrap().unwrap());
+    tokens.admin().grant(CHAT, SPACE, Some(1), false);
+    tokens.admin().advance_clock_ms(1_000);
+
+    let params = json!({
+        "chatId": CHAT, "summary": "Continue plainly", "operationId": "plain-archive", "archive": true,
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
+    assert!(
+        workspace
+            .sidebar_preferences_snapshot()
+            .pinned_session_ids
+            .is_empty()
+    );
+    assert!(tokens.admin().live(successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(other));
+    let mut changed = params.clone();
+    changed["archive"] = json!(false);
+    let conflict = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, changed)
+        .await
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("operationConflict"),
+        "{conflict}"
+    );
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor);
+    let refused = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": CHAT, "summary": "Another chat", "operationId": "archived-new-operation", "archive": false,
+    })).await;
+    assert!(refused.is_err());
+}
+
 async fn role_rig(prefix: &str) -> (Rig, String) {
     use mast_proto::StandingRoleKind;
     let rig = rig().await;
@@ -1342,7 +1584,19 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     use mast_proto::StandingRoleKind;
     let (rig, item) = role_rig("role-crash").await;
     let workspace = &rig.core.workspace;
-    let params = json!({"chatId": CHAT, "summary":"Crash-safe hand-off", "operationId":"crash-a"});
+    let tokens = rig.core.sessions.agent_tokens();
+    let grant = tokens.admin().grant(CHAT, SPACE, None, false);
+    let assistant = tokens
+        .personal_assistant()
+        .set(&workspace.chat(CHAT).unwrap().unwrap());
+    workspace
+        .change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: CHAT.into(),
+            before: None,
+            after: None,
+        })
+        .unwrap();
+    let params = json!({"chatId": CHAT, "summary":"Crash-safe hand-off", "operationId":"crash-a", "archive":true});
     rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
     assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.is_err());
 
@@ -1350,6 +1604,10 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     // and its reservation names the successor.
     let pending = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).expect("reservation persisted");
     let successor = pending.to_chat_id.clone();
+    assert_eq!(tokens.admin().live(CHAT), Some(grant));
+    assert!(tokens.admin().live(&successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant));
+    assert_eq!(workspace.sidebar_preferences_snapshot().pinned_session_ids, [CHAT]);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(CHAT));
     assert_eq!(workspace.chat("role-crash-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
     assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
@@ -1362,9 +1620,33 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     assert!(other.is_err());
     assert_eq!(workspace.read_chats().unwrap().len(), chats);
 
+    let mut changed = params.clone();
+    changed["archive"] = json!(false);
+    let conflict = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, changed)
+        .await
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("operationConflict"),
+        "{conflict}"
+    );
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+
     // The same operation finishes: one successor, role moved, reservation cleared.
     let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
     assert_eq!(reply["chatId"], successor.as_str());
+    assert!(tokens.admin().live(CHAT).is_none());
+    assert!(tokens.admin().live(&successor).is_some());
+    assert_eq!(
+        tokens.personal_assistant().get().unwrap().chat_id,
+        successor
+    );
+    assert_eq!(
+        workspace.sidebar_preferences_snapshot().pinned_session_ids,
+        [successor.as_str()]
+    );
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
     assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
     assert!(workspace.chat(CHAT).unwrap().unwrap().is_standing_role_predecessor());
@@ -1382,16 +1664,39 @@ async fn an_interrupted_hand_off_resumes_under_a_new_operation_id_with_the_same_
     let (rig, item) = role_rig("role-resume").await;
     let workspace = &rig.core.workspace;
     rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
-    let first = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-a"});
+    let first = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-a", "archive": false,
+    });
     assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, first).await.is_err());
     let successor = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id;
     let chats = workspace.read_chats().unwrap().len();
 
+    let changed = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-changed", "archive": true,
+    });
+    assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, changed).await.is_err());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats);
+
     // A reopened dialog or a restarted Mast sends a fresh operation id, same inputs.
-    let again = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-fresh-id"});
-    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, again).await.unwrap();
+    let again = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-fresh-id", "archive": false,
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again.clone())
+        .await
+        .unwrap();
     assert_eq!(reply["chatId"], successor.as_str());
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    let row = workspace.registry_row(mast_doc::KIND_CHATS, &successor).unwrap();
+    assert_eq!(row.fields["userHandOffRetryChatIds"], json!([derive_id("resume-fresh-id", roles::CHAT)]));
     assert_eq!(workspace.read_chats().unwrap().len(), chats, "no second successor");
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
     assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
 }
@@ -1433,9 +1738,16 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
         "request":"Review the result", "idempotencyKey":"review-result"
     })).await.unwrap();
     let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
-    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium"});
+    let grant = tokens.admin().grant(CHAT, SPACE, None, false);
+    let assistant = tokens
+        .personal_assistant()
+        .set(&rig.core.workspace.chat(CHAT).unwrap().unwrap());
+    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium", "archive":true});
     let reply = tool(&rig, lease.token(), "hand_off_orchestrator", args.clone()).await.unwrap();
     let successor = reply["chatId"].as_str().unwrap();
+    assert_eq!(tokens.admin().live(CHAT), Some(grant));
+    assert!(tokens.admin().live(successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant));
     let config = rig.core.workspace.chat(successor).unwrap().unwrap().config.unwrap();
     assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("mock-1"));

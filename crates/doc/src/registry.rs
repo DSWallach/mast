@@ -42,6 +42,8 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+
+type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
 mod chat_diff_targets;
 mod diff_review;

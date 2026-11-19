@@ -63,6 +63,16 @@ pub struct SidebarPreferencesState {
     pub pinned_session_ids: Vec<String>,
     #[serde(default)]
     pub sections: Vec<SidebarSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_handoffs: Vec<CompletedSidebarHandoff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedSidebarHandoff {
+    pub source: String,
+    pub successor: String,
+    pub retry_chat_ids: Vec<String>,
 }
 
 impl SidebarPreferencesState {

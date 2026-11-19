@@ -172,6 +172,9 @@ pub struct HandOffOrchestratorParams {
     pub chat_id: String,
     pub summary: String,
     pub operation_id: String,
+    /// Absent for older clients, which archived ordinary chats separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

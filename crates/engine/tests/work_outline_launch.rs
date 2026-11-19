@@ -2007,6 +2007,36 @@ async fn first_manager_message_creates_the_chat_and_the_snapshot_shows_the_role(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let first = manager_params(&rig, "manager-before-handoff", "Start managing");
+    let source = launch(&rig, &first).await.unwrap().chat_id;
+    let params = json!({
+        "chatId": source, "summary": "Continue managing", "archive": false,
+        "operationId": "manager-successor",
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let workspace = &rig.core.workspace;
+    let predecessor = workspace.chat(&source).unwrap().unwrap();
+    assert!(!predecessor.archived);
+    assert_eq!(predecessor.standing_role_successor.as_deref(), Some(successor));
+    assert_eq!(manager_chat(&rig).as_deref(), Some(successor));
+    assert!(workspace.chat(successor).unwrap().unwrap().standing_role_provisional().is_none());
+
+    assert!(launch(&rig, &first).await.is_err());
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert_eq!(chat_count(&rig), 2);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn duplicate_manager_starts_and_retries_never_create_a_second_chat() {
     let rig = rig().await;
     mark_project(&rig).await;
