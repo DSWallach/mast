@@ -2039,9 +2039,11 @@ async fn manager_critical_context_without_status_keeps_predecessor_context() {
     let source = launch(&rig, &manager_params(&rig, "no-status-manager", "Initial project priority")).await.unwrap().chat_id;
     wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
     settle(&rig, &source).await;
-    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Recent decision context [hold]" }, "operationId": "no-status-turn" })).await.unwrap();
+    rig.mock.hold_matching(Some("Recent decision context"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Recent decision context" }, "operationId": "no-status-turn" })).await.unwrap();
     wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn start").await;
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
     rig.mock.release();
     wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "automatic successor without status").await;
     let successor = manager_chat(&rig).unwrap();
@@ -2051,6 +2053,86 @@ async fn manager_critical_context_without_status_keeps_predecessor_context() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(rig.core.workspace.chat(&source).unwrap().unwrap().standing_role_successor.as_deref(), Some(successor.as_str()));
+    let send = json!({ "chatId": source, "messageId": "after-handoff-user-message", "text": "Continue after rotation", "attachments": [], "holdForTurnEnd": true });
+    rig.client.call(methods::QUEUE_MESSAGE, send.clone()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !rig.mock.turns().iter().any(|turn| turn.prompt.contains("Continue after rotation")) {
+        assert!(tokio::time::Instant::now() < deadline, "post-handoff send stalled: source queue {:?}, successor queue {:?}, successor session {:?}", rig.core.doc_host.open(&source).unwrap().doc().read_queue(), rig.core.doc_host.open(&successor).unwrap().doc().read_queue(), rig.core.sessions.session_status(&successor));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rig.client.call(methods::QUEUE_MESSAGE, send).await.unwrap();
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Continue after rotation")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_eighty_percent_checkpoints_then_hands_off() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "checkpoint-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.mock.hold_matching(Some("Your last turn changed state"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Threshold work [hold]" }, "operationId": "checkpoint-trigger" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Threshold work [hold]")), "threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(80), Some(100)).unwrap();
+    rig.mock.release();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Your last turn changed state")), "checkpoint turn").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    let lease = rig.core.sessions.agent_tokens().mint(&source, "checkpoint-run", SPACE, &rig.core.device_id);
+    let sections = mast_proto::MANAGER_STATUS_SECTIONS.iter().map(|section| format!("## {section}\ncheckpoint evidence\n\n")).collect::<String>();
+    rig.client.call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({"token":lease.token(), "tool":"artifact_publish", "arguments": {
+        "title":"Manager status", "role":"manager-status", "content":format!("Updated: 2026-01-01\n\n{sections}"), "note":"checkpoint", "idempotencyKey":"checkpoint-status"
+    }})).await.unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "successor after checkpoint").await;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_defers_handoff_until_queued_user_message_runs() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "queued-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.mock.hold_matching(Some("Active turn"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Active turn" }, "operationId": "queued-active" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Active turn")), "active turn").await;
+    rig.client.call(methods::QUEUE_MESSAGE, json!({ "chatId": source, "messageId": "queued-user-decision", "text": "Queued user decision", "attachments": [], "holdForTurnEnd": true })).await.unwrap();
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(Some("Queued user decision"));
+    rig.mock.release();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Queued user decision")), "queued user message dispatched").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()), "handoff must wait for queued input");
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !manager_chat(&rig).is_some_and(|chat| chat != source) {
+        let handle = rig.core.doc_host.open(&source).unwrap();
+        assert!(tokio::time::Instant::now() < deadline, "handoff deferred: session {:?}, queue {:?}, commands {:?}, usage {:?}", rig.core.sessions.session_status(&source), handle.doc().read_queue(), handle.doc().read_commands(), handle.doc().context_usage());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Queued user decision") && turn.prompt.contains(&source)), "successor receives queued decision context").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_unknown_context_window_explains_manual_handoff() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "unknown-window-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Work without a reported window [hold]" }, "operationId": "unknown-window-turn" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Work without a reported window")), "turn start").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(200_000), None).unwrap();
+    rig.mock.release();
+    wait_for(|| rig.core.doc_host.open(&source).unwrap().doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("did not report its context window")))), "visible unknown window explanation").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
     rig.core.shutdown().await;
 }
 

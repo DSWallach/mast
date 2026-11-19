@@ -49,6 +49,11 @@ pub(crate) fn start(
                 {
                     continue;
                 }
+                let Ok(source_handle) = host.open(&session.chat_id) else { continue; };
+                // A drain can have removed a user row but not yet started its
+                // turn. Hold the same gate through the role rotation so a
+                // composer send cannot land on the predecessor in between.
+                let _source_queue = source_handle.drain_lock.lock().await;
                 let Some(role) = workspace.standing_role_of_chat(&session.chat_id) else {
                     continue;
                 };
@@ -62,6 +67,15 @@ pub(crate) fn start(
                     continue;
                 };
                 if chat.device_id != workspace.device_id() || chat.archived {
+                    continue;
+                }
+                // Let the current Manager consume queued input before rotating
+                // its role. An unreadable queue must also defer the handoff.
+                if sessions.turn_in_flight(&session.chat_id)
+                    || source_handle.doc().read_queue().ok()
+                        .is_none_or(|queue| !queue.is_empty())
+                    || source_handle.doc().read_commands().ok().is_none_or(|commands| commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Pending))
+                {
                     continue;
                 }
                 let Some(space) = chat.space_id.as_deref() else {
@@ -81,7 +95,18 @@ pub(crate) fn start(
                     .open(&session.chat_id)
                     .ok()
                     .and_then(|handle| handle.doc().context_usage())
-                    .and_then(|value| value.fraction().or_else(|| value.tokens.map(|tokens| crate::context_usage::pct_from_tokens(tokens) as f64)));
+                    .and_then(|value| value.fraction());
+                if usage.is_none() {
+                    let id = mast_proto::derive_id(&session.chat_id, "manager-context-window-unavailable");
+                    if let Err(error) = source_handle.write_user_message(
+                        &id,
+                        "[Mast system message: automatic Manager handoff is unavailable because this session did not report its context window. You can hand off manually.]",
+                        chrono::Utc::now().timestamp_millis(),
+                    ) {
+                        tracing::warn!(chat = %session.chat_id, %error, "could not report missing Manager context window");
+                    }
+                    continue;
+                }
                 let checkpoint = checkpoints.get(&session.chat_id);
                 let critical = usage.is_some_and(|fraction| fraction >= 0.92);
                 let ready = if critical {

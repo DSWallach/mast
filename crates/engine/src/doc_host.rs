@@ -698,6 +698,15 @@ pub struct TranscriptSnapshot {
 }
 
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
+fn command_payload_message_id(payload: &SessionCommandPayload) -> Option<&str> {
+    match payload {
+        SessionCommandPayload::Run { message_id, .. }
+        | SessionCommandPayload::RunWithInstructions { message_id, .. } => Some(message_id),
+        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+        _ => None,
+    }
+}
+
 pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
@@ -2912,6 +2921,64 @@ impl DocHost {
             .map(|(id, _)| id)
     }
 
+    /// Serialize composer Run/Steer commands with a Manager role rotation.
+    pub async fn queue_user_command(
+        &self, chat_id: &str, command_id: Option<&str>, payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        let chain = self.committed_handoff_chain(chat_id)?;
+        let target = chain.last().expect("chain has source");
+        let target_handle = self.open(target)?;
+        let _target = if target != chat_id { Some(target_handle.drain_lock.lock().await) } else { None };
+        if self.committed_handoff_chain(chat_id)? != chain { return Err(EngineError::Other("Manager handoff changed during send; retry".into())); }
+        if target != chat_id && matches!(&payload, SessionCommandPayload::Steer { .. }) {
+            return Err(EngineError::Other("The Manager changed during steering; send the message to the successor instead".into()));
+        }
+        if let Some(id) = command_id {
+            for previous in chain.iter().take(chain.len().saturating_sub(1)) {
+                if self.open(previous)?.doc.read_commands()?.iter().any(|command| command.id == id) { return Ok(id.into()); }
+            }
+        }
+        let message_id = match &payload {
+            SessionCommandPayload::Run { message_id, .. } | SessionCommandPayload::RunWithInstructions { message_id, .. } => Some(message_id.as_str()),
+            SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+            _ => None,
+        };
+        if let (Some(command_id), Some(message_id)) = (command_id, message_id) {
+            for previous in chain.iter().take(chain.len().saturating_sub(1)) {
+                let doc = self.open(previous)?;
+                if doc.doc.read_queue()?.iter().any(|row| row.id == message_id)
+                    || doc.doc.read_entries()?.iter().any(|entry| entry.id == message_id)
+                    || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(message_id))
+                { return Ok(command_id.into()); }
+            }
+        }
+        match command_id {
+            Some(id) => self.queue_command_with_transfers_and_id(target, id, payload, transfers),
+            None => self.queue_command_with_transfers(target, payload, transfers),
+        }
+    }
+
+    fn committed_handoff_chain(&self, chat_id: &str) -> Result<Vec<String>, EngineError> {
+        let workspace = self.workspace().ok_or_else(|| EngineError::Other("workspace unavailable during send".into()))?;
+        let chats = workspace.read_chats()?;
+        let mut chain = vec![chat_id.to_owned()];
+        loop {
+            let current = chain.last().expect("source exists");
+            let chat = chats.iter().find(|chat| &chat.id == current)
+                .ok_or_else(|| EngineError::Other("Manager handoff destination is unavailable; retry".into()))?;
+            let Some(next) = chat.standing_role_successor.as_deref() else { break; };
+            if chain.iter().any(|id| id == next) { return Err(EngineError::Other("Manager handoff chain is cyclic".into())); }
+            let successor = chats.iter().find(|candidate| candidate.id == next)
+                .ok_or_else(|| EngineError::Other("Manager handoff destination is not ready; retry".into()))?;
+            if successor.standing_role_provisional().is_some() { return Err(EngineError::Other("Manager handoff is not complete; retry".into())); }
+            chain.push(next.to_owned());
+        }
+        Ok(chain)
+    }
+
     /// [`Self::queue_command`] with a caller-derived command id (the Work
     /// Outline launch workflow derives it from its `operationId`).
     /// Idempotent by id: when an entry with `command_id` already exists the
@@ -3216,6 +3283,32 @@ impl DocHost {
             return Ok(id.to_owned());
         }
         self.queue_message_inner(chat_id, text, attachments, hold_for_turn_end, true, Some(id))
+    }
+
+    /// Serialize a composer submission with source-queue draining and Manager
+    /// rotation. A send waiting on a completed handoff follows its successor.
+    pub async fn queue_user_message(
+        &self, chat_id: &str, id: Option<&str>, text: &str,
+        attachments: Vec<String>, hold_for_turn_end: bool,
+    ) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        let chain = self.committed_handoff_chain(chat_id)?;
+        let target = chain.last().expect("chain has source");
+        let target_handle = self.open(target)?;
+        let _target = if target != chat_id { Some(target_handle.drain_lock.lock().await) } else { None };
+        if self.committed_handoff_chain(chat_id)? != chain { return Err(EngineError::Other("Manager handoff changed during send; retry".into())); }
+        if let Some(id) = id {
+            if id.is_empty() || id.len() > 64 { return Err(EngineError::Other("invalid message id".into())); }
+            for chat in &chain {
+                let doc = self.open(chat)?;
+                if doc.doc.read_queue()?.iter().any(|item| item.id == id)
+                    || doc.doc.read_entries()?.iter().any(|entry| entry.id == id)
+                    || doc.doc.read_commands()?.iter().any(|entry| command_payload_message_id(&entry.payload) == Some(id))
+                { return Ok(id.to_owned()); }
+            }
+        }
+        self.queue_message_inner(target, text, attachments, hold_for_turn_end, true, id)
     }
 
     /// Queue an orchestrator wake message. It is not a user message: it never
