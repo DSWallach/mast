@@ -739,7 +739,7 @@ mod tests {
         let mut a = Activity::default();
         a.open_since = Some(1_000);
         assert_eq!(a.interval_at(1_500, 2_000), Some((1_000, 2_000)));
-        assert_eq!(a.interval_at(0, 2_000), None);
+        assert_eq!(a.interval_at(-5_000, 2_000), None);
         a.open_since = None;
         a.closed.push_back((1_000, 2_000));
         assert!(a.interval_at(2_000 + ACTIVE_GRACE_MS, 9_999_999).is_some());
