@@ -75,6 +75,7 @@ mod ref_picker;
 mod ref_and_checkout_menus;
 mod review_state;
 mod review_drafts;
+mod review_submit;
 mod row_renderer;
 mod syntax_excerpts;
 mod split_pairing;
@@ -1331,6 +1332,9 @@ pub struct Changes {
     local_draft_comments: HashMap<String, Vec<ReviewComment>>,
     local_draft_ids: std::collections::HashSet<String>,
     local_outdated_drafts: Vec<mast_proto::ReviewDraft>,
+    submit_dialog: Option<review_submit::SubmitDialog>,
+    /// Per review target, kept until a post succeeds so a retry reuses its attempt id.
+    submit_nonces: HashMap<String, String>,
     comment_index: HashMap<String, Vec<ReviewComment>>,
     comment_sync_key: Option<CommentSyncKey>,
     draft_anchor_index: review_drafts::DraftAnchorIndex,
@@ -1630,6 +1634,8 @@ impl Changes {
             local_draft_comments: HashMap::new(),
             local_draft_ids: std::collections::HashSet::new(),
             local_outdated_drafts: Vec::new(),
+            submit_dialog: None,
+            submit_nonces: HashMap::new(),
             comment_index: HashMap::new(),
             comment_sync_key: None,
             draft_anchor_index: review_drafts::DraftAnchorIndex::default(),

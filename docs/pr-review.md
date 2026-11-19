@@ -20,7 +20,47 @@ republishing a suggestion so a dismissal remains dismissed even if its text
 changes. Older suggestions without an id get a derived id. Suggestions are
 local until accepted, edited, or dismissed; accepting creates a local draft.
 Existing GitHub review threads are fetched on demand and shown read-only.
-No draft, suggestion, or thread action posts to GitHub.
+Adding, editing, accepting or dismissing a draft or suggestion, and viewing
+threads, never posts to GitHub.
+
+## Submit review
+
+The only thing that writes to GitHub is **Submit review…**, in the Changes
+pane's context bar for a PR review (it appears once the PR's local drafts have
+loaded). It posts only when you click **Submit** in its dialog. No agent tool,
+MCP call or forwardable RPC can reach it: `SubmitReview` is a local-only RPC,
+and a test (`agent_surfaces_cannot_reach_the_review_post_path`) fails if an
+agent surface names it.
+
+The dialog has a **Comment / Approve / Request changes** choice, an optional
+summary, and a count of the draft comments that will be sent. One click sends
+one batched `POST /repos/{owner}/{repo}/pulls/{number}/reviews` through your own
+`gh` login (the same runner as the PR page; tokens are never read or shown).
+Each comment carries `path`, `line`, `side` and, for a range, `start_line` /
+`start_side`, resolved onto the PR's current diff. An accepted suggestion's body
+already holds its ```suggestion block, so it posts as a suggestion. The review is
+pinned to the head commit the lines were placed against (`commit_id`).
+
+- **Can't be placed.** A draft whose anchor no longer resolves on the current
+  diff (the outdated list) is named in the dialog and is **not** posted. It
+  stays a local draft; nothing is lost and it is never guessed onto a line.
+- **Success.** The drafts that were sent leave the draft list and are kept as a
+  local record (`PostedReview`: GitHub review id, URL, event, summary, the
+  comments sent), readable with `GetPostedReviews {target}`. Cached review
+  threads for the PR are dropped and reloaded, and the dialog shows **Open on
+  GitHub**.
+- **Failure.** Nothing is removed. The dialog shows the error (including
+  GitHub's validation message) and **Retry**.
+- **Retry is safe.** Every review body ends with an invisible marker,
+  `<!-- mast-review:<attempt id> -->`. Before posting, Mast lists the PR's
+  reviews and, if one already carries this attempt's marker (the first POST
+  landed but its response was lost), records it as posted and sends nothing.
+  The attempt id is derived from the review's content plus a per-PR nonce held
+  until a post succeeds, so edited content is a new review, never silently
+  merged into an old one.
+- **Pending review.** GitHub allows one pending review per user per PR. If you
+  already have one (started in the browser), Mast detects it before posting (or
+  from GitHub's rejection), sends nothing, and offers **Open pull request**.
 
 Mast can check out a pull request and start a review chat.
 
@@ -139,7 +179,7 @@ worktree `<path>` (`/workspace/.worktrees/<dir>` in the devcontainer)`` (under
 commit(s) behind origin/<b> — pull before you start` when behind. Mast adds
 the devcontainer note only when the Space has a `.devcontainer` folder.
 
-Nothing is posted to GitHub.
+Starting a review posts nothing to GitHub.
 
 A start with `fresh: true` (what the dialog's Start sends, since the user just
 picked an agent for it) never reuses a live review chat for the same PR and

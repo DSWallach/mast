@@ -1219,7 +1219,7 @@ pub(super) struct DraftAnchorIndex {
     positions: HashMap<(String, String, CommentSide, u32), String>,
 }
 
-fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
+pub(super) fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
     let tag = match side {
         CommentSide::Old => b'-',
         CommentSide::New => b'+',
@@ -1229,7 +1229,7 @@ fn line_hash(path: &str, side: CommentSide, text: &str) -> String {
 
 impl DraftAnchorIndex {
     /// Partition once per revision so unplaceable drafts remain available locally.
-    fn partition_drafts<'a>(
+    pub(super) fn partition_drafts<'a>(
         &self,
         drafts: &'a [ReviewDraft],
     ) -> (Vec<(&'a ReviewDraft, (u32, u32))>, Vec<&'a ReviewDraft>) {
@@ -1390,7 +1390,7 @@ impl ThreadIndex {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     struct ReviewCardFixture {
@@ -1421,7 +1421,7 @@ mod tests {
         }
     }
 
-    fn install_diff(changes: &mut Changes) -> String {
+    pub(in crate::changes) fn install_diff(changes: &mut Changes) -> String {
         use super::super::*;
         let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
         let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
