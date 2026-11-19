@@ -1824,6 +1824,19 @@ impl AgentToolsService {
         for (index, link) in args.links.iter_mut().enumerate() {
             truncate(&mut link.label, 40, format!("link {index} label"));
         }
+        let mut detail_truncated = false;
+        if let Some(detail) = args.detail.as_mut() {
+            const SUFFIX: &str = "… (full text in the chat)";
+            let max = mast_proto::user_action_limits::MAX_REQUEST_INFO_CHARS;
+            if detail.chars().count() > max {
+                let keep = max - SUFFIX.chars().count();
+                let cut = detail.char_indices().nth(keep).map_or(detail.len(), |(i, _)| i);
+                detail.truncate(cut);
+                detail.push_str(SUFFIX);
+                detail_truncated = true;
+                warnings.push(format!("detail truncated to {max} characters"));
+            }
+        }
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
         for link in &args.links {
             use mast_proto::RequestLinkTarget;
@@ -2078,7 +2091,7 @@ impl AgentToolsService {
                 if result.is_some() { break; }
             }
             let result = result.ok_or_else(|| error.expect("a replay always has an input"))?;
-            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings}));
+            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings, "detailTruncated": detail_truncated}));
         }
         let existing = request.dedupe_key.as_ref().and_then(|key| {
             snapshot.user_action_requests.iter().find(|r| r.is_unresolved()
@@ -2091,7 +2104,7 @@ impl AgentToolsService {
                 && existing.links == request.links && existing.facts == request.facts
                 && existing.options == request.options && existing.kind == Some(request.kind.unwrap_or_default())
                 && existing.priority == request.priority && !explicit_key {
-                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings}));
+                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings, "detailTruncated": detail_truncated}));
             }
             let mut request = request;
             if !explicit_key {
@@ -2116,6 +2129,7 @@ impl AgentToolsService {
             "userActionRequestId": reply.user_action_request_id,
             "workItemId": work_item_id,
             "warnings": warnings,
+            "detailTruncated": detail_truncated,
         }))
     }
 
