@@ -292,6 +292,32 @@ pub fn supports_path(path: &str) -> bool {
     )
 }
 
+/// Parse identifier nodes into byte ranges for hit testing. Call on a background worker.
+pub fn identifier_ranges(source: &str, path: &str) -> Vec<std::ops::Range<usize>> {
+    if source.len() > DEFAULT_MAX_SOURCE_BYTES { return Vec::new(); }
+    let Some(language_id) = language_for_path(path) else { return Vec::new(); };
+    let Some((language, _)) = compiled_tags(language_id) else { return Vec::new(); };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(language).is_err() { return Vec::new(); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    let mut progress = |_: &tree_sitter::ParseState| if std::time::Instant::now() >= deadline { std::ops::ControlFlow::Break(()) } else { std::ops::ControlFlow::Continue(()) };
+    let bytes = source.as_bytes();
+    let Some(tree) = parser.parse_with_options(&mut |offset, _| &bytes[offset..], None, Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress))) else { return Vec::new(); };
+    let mut cursor = tree.walk();
+    let mut ranges = Vec::new();
+    loop {
+        let node = cursor.node();
+        if node.kind().ends_with("identifier") && node.child_count() == 0 {
+            ranges.push(node.byte_range());
+        }
+        if cursor.goto_first_child() { continue; }
+        loop {
+            if cursor.goto_next_sibling() { break; }
+            if !cursor.goto_parent() { return ranges; }
+        }
+    }
+}
+
 /// Extract definitions from one file. The caller owns scheduling and caching.
 pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
     if source.len() > DEFAULT_MAX_SOURCE_BYTES || max_symbols == 0 || source.as_bytes().split(|byte| *byte == b'\n').any(|line| line.len() > 20_000) {
@@ -432,6 +458,14 @@ fn is_test(language: LanguageId, node: tree_sitter::Node<'_>, name: &str, source
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifiers_come_from_syntax_nodes() {
+        let source = "fn run() { let value = run(); // value\n let text = \"run\"; }";
+        let ranges = identifier_ranges(source, "a.rs");
+        let names: Vec<_> = ranges.iter().map(|range| &source[range.clone()]).collect();
+        assert_eq!(names, ["run", "value", "run", "text"]);
+    }
 
     #[test]
     fn rust_constants_are_indexed() {
