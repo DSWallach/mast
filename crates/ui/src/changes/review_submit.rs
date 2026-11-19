@@ -486,10 +486,10 @@ mod tests {
 
     /// A window over a PR review with one placeable and one unplaceable draft;
     /// `reply` scripts the SubmitReview response.
-    fn setup(
-        cx: &mut gpui::TestAppContext,
+    fn setup<'a>(
+        cx: &'a mut gpui::TestAppContext,
         reply: impl Fn() -> Result<serde_json::Value, String> + Send + Sync + 'static,
-    ) -> (gpui::Entity<Changes>, gpui::VisualTestContext, Calls) {
+    ) -> (gpui::Entity<Changes>, &'a mut gpui::VisualTestContext, Calls) {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
         let captured = calls.clone();
         cx.update(|cx| {
@@ -542,26 +542,27 @@ mod tests {
 
     #[gpui::test]
     fn dialog_counts_placed_drafts_and_lists_unplaced_ones(cx: &mut gpui::TestAppContext) {
-        let (changes, mut vcx, calls) = setup(cx, posted_reply);
-        assert!(changes.read_with(&vcx, |c, _| c.can_submit_review()));
-        open(&changes, &mut vcx);
-        changes.update(&mut vcx, |changes, cx| {
+        let (changes, vcx, calls) = setup(cx, posted_reply);
+        assert!(changes.read_with(&*vcx, |c, _| c.can_submit_review()));
+        open(&changes, vcx);
+        changes.update(vcx, |changes, cx| {
             let dialog = changes.submit_dialog.as_ref().unwrap();
             assert_eq!(dialog.comments.len(), 1);
             assert_eq!(dialog.comments[0].draft_id, "placed");
             assert_eq!(dialog.comments[0].line, 1);
             assert_eq!(dialog.unplaced.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["lost"]);
             // Rendering the trigger with the dialog open must not post anything.
-            let _ = changes.render_submit_review(Theme::of(cx), cx);
+            let theme = Theme::of(cx).clone();
+            let _ = changes.render_submit_review(&theme, cx);
         });
         assert!(submit_calls(&calls).is_empty(), "opening the dialog must not post");
     }
 
     #[gpui::test]
     fn submit_posts_once_clears_sent_drafts_and_keeps_unplaced(cx: &mut gpui::TestAppContext) {
-        let (changes, mut vcx, calls) = setup(cx, posted_reply);
-        open(&changes, &mut vcx);
-        changes.update(&mut vcx, |changes, cx| {
+        let (changes, vcx, calls) = setup(cx, posted_reply);
+        open(&changes, vcx);
+        changes.update(vcx, |changes, cx| {
             changes.set_submit_event(ReviewEvent::RequestChanges, cx);
             changes.submit_dialog.as_ref().unwrap().input.update(cx, |input, cx| input.set_text("Please fix", cx));
             changes.submit_review_now(cx);
@@ -573,7 +574,7 @@ mod tests {
         assert_eq!(sent[0]["body"], "Please fix");
         assert_eq!(sent[0]["comments"].as_array().unwrap().len(), 1);
         assert_eq!(sent[0]["comments"][0]["draftId"], "placed");
-        changes.read_with(&vcx, |c, _| {
+        changes.read_with(&*vcx, |c, _| {
             let dialog = c.submit_dialog.as_ref().unwrap();
             assert!(matches!(&dialog.phase, SubmitPhase::Posted { already: false, url } if url.ends_with("-9")));
             assert!(c.submit_nonces.is_empty());
@@ -582,7 +583,7 @@ mod tests {
         assert!(methods_called.iter().any(|m| m == methods::GET_REVIEW_DRAFTS), "drafts reload");
         assert!(methods_called.iter().any(|m| m == methods::GET_REVIEW_THREADS), "threads refresh");
         // A second click while Posted does nothing.
-        changes.update(&mut vcx, |c, cx| c.submit_review_now(cx));
+        changes.update(vcx, |c, cx| c.submit_review_now(cx));
         assert_eq!(submit_calls(&calls).len(), 1);
     }
 
@@ -590,57 +591,58 @@ mod tests {
     fn failure_keeps_drafts_and_retry_reuses_the_attempt_id(cx: &mut gpui::TestAppContext) {
         let attempts = Arc::new(Mutex::new(0));
         let counter = attempts.clone();
-        let (changes, mut vcx, calls) = setup(cx, move || {
+        let (changes, vcx, calls) = setup(cx, move || {
             let mut n = counter.lock().unwrap();
             *n += 1;
             if *n == 1 { Err("could not run gh: connection reset".into()) } else { posted_reply() }
         });
-        open(&changes, &mut vcx);
-        changes.update(&mut vcx, |c, cx| c.submit_review_now(cx));
+        open(&changes, vcx);
+        changes.update(vcx, |c, cx| c.submit_review_now(cx));
         vcx.run_until_parked();
-        changes.read_with(&vcx, |c, _| {
+        changes.read_with(&*vcx, |c, _| {
             assert!(matches!(&c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Failed(m) if m.contains("connection reset")));
             assert_eq!(c.local_review_drafts[TARGET].len(), 2, "nothing is lost");
             assert_eq!(c.submit_nonces.len(), 1);
         });
-        changes.update(&mut vcx, |c, cx| c.submit_review_now(cx));
+        changes.update(vcx, |c, cx| c.submit_review_now(cx));
         vcx.run_until_parked();
         let sent = submit_calls(&calls);
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0]["attemptId"], sent[1]["attemptId"], "retry must be idempotent on GitHub");
-        changes.read_with(&vcx, |c, _| {
+        changes.read_with(&*vcx, |c, _| {
             assert!(matches!(c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Posted { .. }));
         });
     }
 
     #[gpui::test]
     fn pending_review_conflict_keeps_everything_and_offers_the_pr(cx: &mut gpui::TestAppContext) {
-        let (changes, mut vcx, _calls) = setup(cx, || {
+        let (changes, vcx, _calls) = setup(cx, || {
             Ok(serde_json::json!({"outcome":"pending-conflict","url":"https://github.com/o/r/pull/1"}))
         });
-        open(&changes, &mut vcx);
-        changes.update(&mut vcx, |c, cx| c.submit_review_now(cx));
+        open(&changes, vcx);
+        changes.update(vcx, |c, cx| c.submit_review_now(cx));
         vcx.run_until_parked();
-        changes.update(&mut vcx, |c, cx| {
+        changes.update(vcx, |c, cx| {
             assert_eq!(
                 c.submit_dialog.as_ref().unwrap().phase,
                 SubmitPhase::Conflict { url: "https://github.com/o/r/pull/1".into() }
             );
             assert_eq!(c.local_review_drafts[TARGET].len(), 2);
-            let _ = c.render_submit_review(Theme::of(cx), cx);
+            let theme = Theme::of(cx).clone();
+            let _ = c.render_submit_review(&theme, cx);
         });
     }
 
     #[gpui::test]
     fn empty_review_is_refused_without_a_call(cx: &mut gpui::TestAppContext) {
-        let (changes, mut vcx, calls) = setup(cx, posted_reply);
-        changes.update(&mut vcx, |changes, _| {
+        let (changes, vcx, calls) = setup(cx, posted_reply);
+        changes.update(vcx, |changes, _| {
             changes.local_review_drafts.insert(TARGET.into(), Vec::new());
         });
-        open(&changes, &mut vcx);
-        changes.update(&mut vcx, |c, cx| c.submit_review_now(cx));
+        open(&changes, vcx);
+        changes.update(vcx, |c, cx| c.submit_review_now(cx));
         assert!(submit_calls(&calls).is_empty());
-        changes.read_with(&vcx, |c, _| {
+        changes.read_with(&*vcx, |c, _| {
             assert!(matches!(c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Failed(_)));
         });
     }
