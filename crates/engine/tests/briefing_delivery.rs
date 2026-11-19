@@ -504,7 +504,8 @@ async fn the_genuine_revision_outlives_the_history_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_result_from_before_stamps_is_stamped_while_its_chat_exists() {
+async fn a_result_from_before_stamps_is_verified_through_its_chat_and_stamped_when_the_chat_is_deleted()
+ {
     let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
     let assembled = assemble_with_result(&rig).await;
     // Simulate a result published before stamps existed.
@@ -516,17 +517,35 @@ async fn a_result_from_before_stamps_is_stamped_while_its_chat_exists() {
         rig.core.workspace.put_artifact(&view).unwrap();
     };
     clear_stamp();
-    // Chat still there: readable through the chat, and stamped by the read.
+    let before = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    let generation = rig.core.workspace.artifacts_generation();
+
+    // Readable through its chat, and reading changes nothing.
     assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    assert_eq!(
+        rig.core.workspace.artifact(&assembled.artifact_id).unwrap(),
+        before
+    );
+    assert_eq!(rig.core.workspace.artifacts_generation(), generation);
+
+    // Deleting the chat through the engine stamps what it published first.
+    assembled
+        .client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "deleteChat", "chatId": "run-pub" }),
+        )
+        .await
+        .unwrap();
     let view = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
     assert!(
         view.revisions.iter().all(|r| r.scheduled_task.is_some()),
         "{view:?}"
     );
-    assert!(rig.core.workspace.delete_chat("run-pub").unwrap());
     assert_genuine_result(&read_briefing(&rig, &assembled).await);
 
-    // Unstamped and its chat already gone: cannot be verified, so not returned.
+    // Unstamped with its chat already gone: cannot be verified, so not returned.
     clear_stamp();
     let none = read_briefing(&rig, &assembled).await;
     assert!(none["briefings"].as_array().unwrap().is_empty(), "{none}");

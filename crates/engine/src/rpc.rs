@@ -2217,6 +2217,9 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
+                // Results this chat published before stamps existed keep their
+                // provenance only if it is recorded before the chat goes.
+                self.artifacts.stamp_chat_publications(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
                 if let Some(usage) = self.sessions.token_usage() { usage.request_delete_chat(&chat_id); }

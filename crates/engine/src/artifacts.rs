@@ -1456,13 +1456,11 @@ impl ArtifactsService {
     /// Stamp the revisions that Background scheduled runs published before
     /// stamps existed, while their publishing chat still proves it, so the
     /// provenance outlives that chat. Only artifacts this device owns are
-    /// rewritten. `space_id` limits the scan; `None` scans every Space. Returns
-    /// how many artifacts were rewritten.
-    pub(crate) fn backfill_run_stamps(&self, space_id: Option<&str>) -> usize {
-        let artifacts = match space_id {
-            Some(space) => self.workspace().artifacts_of_space(space),
-            None => self.workspace().all_artifacts(),
-        };
+    /// rewritten. `chat` limits it to that chat's revisions. Never called from
+    /// a read: reads leave the registry untouched. Returns how many artifacts
+    /// were rewritten.
+    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> usize {
+        let artifacts = self.workspace().all_artifacts();
         let pending: Vec<String> = artifacts
             .into_iter()
             .filter(|a| a.device_id == self.device_id() && a.archived_at.is_none())
@@ -1472,9 +1470,11 @@ impl ArtifactsService {
                     .is_some_and(mast_proto::ScheduledRunResults::is_results_role)
             })
             .filter(|a| {
-                a.revisions
-                    .iter()
-                    .any(|r| r.scheduled_task.is_none() && r.by.kind == WorkOutlineActorKind::Agent)
+                a.revisions.iter().any(|r| {
+                    r.scheduled_task.is_none()
+                        && r.by.kind == WorkOutlineActorKind::Agent
+                        && chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat))
+                })
             })
             .map(|a| a.id)
             .collect();
@@ -1493,7 +1493,12 @@ impl ArtifactsService {
                 continue;
             };
             let mut changed = false;
-            for revision in view.revisions.iter_mut().filter(|r| r.scheduled_task.is_none()) {
+            for revision in view
+                .revisions
+                .iter_mut()
+                .filter(|r| r.scheduled_task.is_none())
+                .filter(|r| chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat)))
+            {
                 if self.run_stamp(&revision.by).as_deref() == Some(key.as_str()) {
                     revision.scheduled_task = Some(key.clone());
                     changed = true;
@@ -1504,6 +1509,31 @@ impl ArtifactsService {
             }
         }
         written
+    }
+
+    /// Stamp what `chat` published before the chat is deleted, since the stamp
+    /// is what keeps a pre-stamp result readable afterwards.
+    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) {
+        self.backfill_run_stamps(Some(chat_id));
+    }
+
+    /// Run [`Self::backfill_run_stamps`] for every chat once the registry has
+    /// joined its room: before that, chats and artifacts may not all be here
+    /// yet. With no edge configured the registry is complete at once.
+    pub fn spawn_backfill_run_stamps(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if service.workspace().registry_synced() {
+                    let service = service.clone();
+                    let _ = tokio::task::spawn_blocking(move || service.backfill_run_stamps(None)).await;
+                    break;
+                }
+            }
+        });
     }
 
     /// The bytes of the newest revision exactly as recorded: its stored
