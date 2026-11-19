@@ -230,6 +230,57 @@ impl Shell {
         }
     }
 
+    /// Show or hide the blame gutter in every open file surface (and the ones
+    /// opened later).
+    pub(super) fn set_blame_gutter_everywhere(
+        &mut self,
+        enabled: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.blame_gutter = enabled;
+        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
+        for surface in surfaces {
+            surface.update(cx, |surface, cx| surface.set_blame_gutter(enabled, cx));
+        }
+        cx.notify();
+    }
+
+    /// Open `chat_id`, then scroll its transcript to the turn (the user message
+    /// `turn_id`). The transcript may not have rows yet, so retry a few times
+    /// with growing gaps, then give up and leave the chat open.
+    pub(super) fn open_chat_at_turn(&mut self, chat_id: String, turn_id: Option<String>, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.clone(), cx);
+        let Some(turn_id) = turn_id else { return };
+        self.turn_scroll_task = Some(cx.spawn(async move |this, cx| {
+            for delay_ms in [0u64, 250, 750, 2000] {
+                if delay_ms > 0 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                let done = this
+                    .update(cx, |this, cx| {
+                        let transcript = this.transcript.clone();
+                        transcript.update(cx, |transcript, cx| {
+                            if transcript.chat_id() != Some(chat_id.as_str()) {
+                                return false;
+                            }
+                            match transcript.rows().iter().position(|row| row.entry_id.as_ref() == turn_id.as_str()) {
+                                Some(index) => {
+                                    transcript.scroll_to_row(index, cx);
+                                    true
+                                }
+                                None => false,
+                            }
+                        })
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub(super) fn set_files_word_wrap(
         &mut self,
         word_wrap: bool,
@@ -817,6 +868,9 @@ impl Shell {
                 cx,
             )
         });
+        if self.blame_gutter {
+            file.update(cx, |file, cx| file.set_blame_gutter(true, cx));
+        }
         let event_panel_key = panel_key.clone();
         let sub = cx.subscribe_in(
             &file,
@@ -848,6 +902,8 @@ impl Shell {
                             cx.open_url(&url);
                         }
                     }
+                    FilesEvent::OpenChat { chat_id, turn_id } => this.open_chat_at_turn(chat_id.clone(), turn_id.clone(), cx),
+                    FilesEvent::BlameGutterChanged(enabled) => this.set_blame_gutter_everywhere(*enabled, window, cx),
                     FilesEvent::TitleChanged => cx.notify(),
                     FilesEvent::FileRenamed { old_path, new_path } => {
                         this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)

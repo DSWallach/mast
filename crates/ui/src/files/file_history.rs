@@ -20,6 +20,8 @@ pub(super) struct FileHistoryView {
     status: String,
     generation: u64,
     task: Option<Task<()>>,
+    /// Commit to select once the history loads (blame click).
+    pending_commit: Option<String>,
 }
 
 impl FilesSurface {
@@ -71,6 +73,12 @@ impl FilesSurface {
                     }
                     Err(error) => view.status = error.to_string(),
                 }
+                let pending = view.pending_commit.take().and_then(|sha| {
+                    view.commits.iter().position(|entry| entry.commit.sha == sha)
+                });
+                if let Some(index) = pending {
+                    this.open_file_history_diff(index, cx);
+                }
                 cx.notify();
             });
         });
@@ -85,8 +93,22 @@ impl FilesSurface {
             status: "Loading history…".into(),
             generation: 0,
             task: Some(task),
+            pending_commit: None,
         });
         cx.notify();
+    }
+
+    /// Open the History tab with `sha` selected (loads the history first when
+    /// it is not open yet).
+    pub(super) fn open_file_history_at(&mut self, sha: String, cx: &mut Context<Self>) {
+        if self.file_history.is_none() {
+            self.toggle_file_history(cx);
+        }
+        let Some(view) = self.file_history.as_mut() else { return };
+        match view.commits.iter().position(|entry| entry.commit.sha == sha) {
+            Some(index) => self.open_file_history_diff(index, cx),
+            None => view.pending_commit = Some(sha),
+        }
     }
 
     fn open_file_history_diff(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -260,5 +282,43 @@ impl FilesSurface {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn blame_click_before_history_loads_selects_the_commit_afterwards(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (files, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+        });
+        files.update(cx, |files, cx| {
+            files.file_history = Some(FileHistoryView {
+                path: "a.rs".into(),
+                id: 1,
+                commits: Vec::new(),
+                list: ListState::new(0, ListAlignment::Top, px(180.0)),
+                diff_lines: Vec::new(),
+                diff_list: ListState::new(0, ListAlignment::Top, px(240.0)),
+                selected: None,
+                status: "Loading history…".into(),
+                generation: 0,
+                task: None,
+                pending_commit: None,
+            });
+            files.open_blame_commit("abc".into(), cx);
+            assert_eq!(
+                files.file_history.as_ref().unwrap().pending_commit.as_deref(),
+                Some("abc")
+            );
+        });
     }
 }

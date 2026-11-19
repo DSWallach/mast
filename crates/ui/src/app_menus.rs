@@ -214,6 +214,8 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
+        MenuItem::separator(),
+        MenuItem::action("Toggle Blame Gutter", shell::ToggleBlameGutter),
     ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.

@@ -157,6 +157,7 @@ actions!(
         OpenMyPrs,
         QuickOpen,
         QuickOpenSymbols,
+        ToggleBlameGutter,
         FileNavigationBack,
         FileNavigationForward,
         AddCodeToChat,
@@ -649,6 +650,10 @@ pub struct Shell {
     workspace_file_recents: std::collections::HashMap<String, Vec<String>>,
     file_navigation: std::collections::HashMap<String, file_navigation::FileNavigation>,
     replaying_file_navigation: bool,
+    /// Blame gutter in the code viewer (session-only, off by default).
+    blame_gutter: bool,
+    /// Keeps the open-chat-at-turn retries alive.
+    turn_scroll_task: Option<Task<()>>,
     workspace_search_indexes:
         std::collections::HashMap<String, std::sync::Arc<Vec<workspace_search::IndexedPath>>>,
     workspace_search_index_key: Option<String>,
@@ -1166,6 +1171,8 @@ impl Shell {
             workspace_file_recents: std::collections::HashMap::new(),
             file_navigation: std::collections::HashMap::new(),
             replaying_file_navigation: false,
+            blame_gutter: false,
+            turn_scroll_task: None,
             workspace_search_indexes: std::collections::HashMap::new(),
             workspace_search_index_key: None,
             workspace_search_index_engine: None,

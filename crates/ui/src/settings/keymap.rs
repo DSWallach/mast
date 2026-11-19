@@ -50,6 +50,7 @@ pub enum ShortcutId {
     QuickOpenSymbols,
     FileNavigationBack,
     FileNavigationForward,
+    ToggleBlameGutter,
     AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
@@ -94,7 +95,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 32 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 33 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -107,6 +108,7 @@ impl ShortcutId {
         ShortcutId::QuickOpenSymbols,
         ShortcutId::FileNavigationBack,
         ShortcutId::FileNavigationForward,
+        ShortcutId::ToggleBlameGutter,
         ShortcutId::ReviewNextStep,
         ShortcutId::ReviewPreviousStep,
         ShortcutId::ReviewNextStepArrow,
@@ -202,6 +204,7 @@ impl ShortcutId {
             ShortcutId::QuickOpenSymbols => "Search symbols",
             ShortcutId::FileNavigationBack => "Navigate back",
             ShortcutId::FileNavigationForward => "Navigate forward",
+            ShortcutId::ToggleBlameGutter => "Toggle blame",
             ShortcutId::AddCodeToChat => "Add code to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
@@ -269,6 +272,7 @@ impl ShortcutId {
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
             ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
+            ShortcutId::ToggleBlameGutter => "mod-alt-g",
             ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
             ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
@@ -392,6 +396,7 @@ pub struct KeymapConfig {
     pub quick_open_symbols: String,
     pub file_navigation_back: String,
     pub file_navigation_forward: String,
+    pub toggle_blame_gutter: String,
     pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
@@ -497,6 +502,7 @@ impl Default for KeymapConfig {
             quick_open_symbols: ShortcutId::QuickOpenSymbols.default_combo().into(),
             file_navigation_back: ShortcutId::FileNavigationBack.default_combo().into(),
             file_navigation_forward: ShortcutId::FileNavigationForward.default_combo().into(),
+            toggle_blame_gutter: ShortcutId::ToggleBlameGutter.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
@@ -564,6 +570,7 @@ impl KeymapConfig {
             ShortcutId::QuickOpenSymbols => &self.quick_open_symbols,
             ShortcutId::FileNavigationBack => &self.file_navigation_back,
             ShortcutId::FileNavigationForward => &self.file_navigation_forward,
+            ShortcutId::ToggleBlameGutter => &self.toggle_blame_gutter,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
@@ -629,6 +636,7 @@ impl KeymapConfig {
             ShortcutId::QuickOpenSymbols => self.quick_open_symbols = combo,
             ShortcutId::FileNavigationBack => self.file_navigation_back = combo,
             ShortcutId::FileNavigationForward => self.file_navigation_forward = combo,
+            ShortcutId::ToggleBlameGutter => self.toggle_blame_gutter = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
