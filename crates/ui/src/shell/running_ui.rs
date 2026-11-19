@@ -116,6 +116,7 @@ impl Shell {
             .chats
             .iter()
             .filter(|chat| !chat.archived && !chat.is_side_chat())
+            .filter(|chat| chat.standing_role_provisional().is_none())
         {
             let background = 0; // not tracked at session level yet
             let session = state.session_for(&chat.id);

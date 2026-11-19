@@ -185,6 +185,8 @@ impl Shell {
         let mut chats: Vec<_> = state
             .chats
             .iter()
+            // A Manager's first start is hidden until its message is queued.
+            .filter(|chat| chat.standing_role_provisional().is_none())
             .filter(|chat| {
                 let project = state
                     .space_for_chat(chat)

@@ -2735,6 +2735,7 @@ impl AgentToolsService {
             parent_chat_id: Some(context.grant.chat_id.clone()),
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         })
     }
 
@@ -2775,6 +2776,7 @@ impl AgentToolsService {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         }, source, selection.harness, selection.model, selection.reasoning))
     }
 }
@@ -2900,6 +2902,10 @@ impl SubtreeWalk<'_> {
                 continue;
             };
             if chat.archived && !self.include_archived {
+                continue;
+            }
+            // A Manager's first start is hidden until its message is queued.
+            if chat.standing_role_provisional().is_some() {
                 continue;
             }
             if chats.len() >= MAX_SUBTREE_ITEM_ROWS {
