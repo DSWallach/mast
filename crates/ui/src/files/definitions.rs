@@ -19,8 +19,9 @@ struct DefinitionState {
     revision: Option<u64>,
     path_generation: u64,
     cache: HashMap<String, Vec<Definition>>,
-    parsed: Option<(String, Vec<Range<usize>>)>,
+    parsed: Option<(String, Rc<Vec<Range<usize>>>)>,
     watch: Option<Task<()>>,
+    editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
     navigation_handled: bool,
 }
@@ -36,12 +37,21 @@ impl SymbolDefinitionProvider {
         Rc::new(Self { client, path: RefCell::new(path), state: Rc::default() })
     }
 
+    pub fn set_editor(&self, editor: gpui::WeakEntity<gpui_base::input::EditorState>) { self.state.borrow_mut().editor = Some(editor); }
+
     pub fn set_path(&self, path: String) {
         *self.path.borrow_mut() = path;
         let mut state = self.state.borrow_mut();
         state.path_generation = state.path_generation.wrapping_add(1);
         state.parsed = None;
         state.cache.clear();
+        state.selected.clear();
+    }
+
+    pub fn invalidate_source(&self) {
+        let mut state = self.state.borrow_mut();
+        state.path_generation = state.path_generation.wrapping_add(1);
+        state.parsed = None;
         state.selected.clear();
     }
 
@@ -55,17 +65,33 @@ impl SymbolDefinitionProvider {
         if self.state.borrow().watch.is_some() { return; }
         let client = self.client.clone();
         let state = Rc::downgrade(&self.state);
-        let task = cx.spawn(async move |_| {
-            let Ok(mut stream) = client.watch_symbols().await else { return; };
-            while let Some(frame) = stream.recv().await {
-                let Some(state) = state.upgrade() else { return; };
-                let revision = frame.get("revision").and_then(|value| value.as_u64());
-                let mut state = state.borrow_mut();
-                if state.revision != revision {
-                    state.revision = revision;
+        let task = cx.spawn(async move |cx| {
+            if let Ok(mut stream) = client.watch_symbols().await {
+                while let Some(frame) = stream.recv().await {
+                    let Some(state) = state.upgrade() else { return; };
+                    let revision = frame.get("revision").and_then(|value| value.as_u64());
+                    let editor = {
+                        let mut state = state.borrow_mut();
+                        if state.revision == revision { None } else {
+                            state.revision = revision;
+                            state.cache.clear();
+                            state.selected.clear();
+                            state.editor.clone()
+                        }
+                    };
+                    if let Some(editor) = editor { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }
+                }
+            }
+            if let Some(state) = state.upgrade() {
+                let editor = {
+                    let mut state = state.borrow_mut();
+                    state.revision = None;
                     state.cache.clear();
                     state.selected.clear();
-                }
+                    state.watch = None;
+                    state.editor.clone()
+                };
+                if let Some(editor) = editor { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }
             }
         });
         self.state.borrow_mut().watch = Some(task);
@@ -91,12 +117,13 @@ impl DefinitionProvider for SymbolDefinitionProvider {
             } else {
                 let parsed_source = source.clone();
                 let parsed_path = path.clone();
-                let ranges = cx.background_executor().spawn(async move { mast_syntax::symbols::identifier_ranges(&parsed_source, &parsed_path) }).await;
+                let ranges = Rc::new(cx.background_executor().spawn(async move { mast_syntax::symbols::identifier_ranges(&parsed_source, &parsed_path) }).await);
                 if state.borrow().path_generation != path_generation { return Ok(Vec::new()); }
                 state.borrow_mut().parsed = Some((source.clone(), ranges.clone()));
                 ranges
             };
-            let Some(range) = ranges.into_iter().find(|range| range.contains(&offset)) else { return Ok(Vec::new()); };
+            let index = ranges.partition_point(|range| range.end <= offset);
+            let Some(range) = ranges.get(index).filter(|range| range.contains(&offset)).cloned() else { return Ok(Vec::new()); };
             let name = source[range.clone()].to_string();
             let cached = state.borrow().cache.get(&name).cloned();
             let mut definitions = if let Some(cached) = cached { cached } else {
@@ -114,7 +141,7 @@ impl DefinitionProvider for SymbolDefinitionProvider {
             let origin = lsp_types::Range::new(rope.offset_to_position(range.start), rope.offset_to_position(range.end));
             let mut links = Vec::with_capacity(definitions.len());
             for definition in definitions {
-                let Some(uri) = url::Url::parse("file:///").ok().and_then(|base| base.join(&definition.path).ok()).and_then(|uri| uri.as_str().parse().ok()) else { continue; };
+                let uri = "file:///definition".parse().expect("valid definition URI");
                 let position = lsp_types::Position::new(definition.symbol.start_line.saturating_sub(1), 0);
                 let target = lsp_types::Range::new(position, position);
                 links.push(lsp_types::LocationLink { origin_selection_range: Some(origin), target_uri: uri, target_range: target, target_selection_range: target });
@@ -183,9 +210,16 @@ mod tests {
             assert_eq!(*result.borrow(), Some(1));
             assert_eq!(transport.queries.load(Ordering::SeqCst), expected);
         }
+        provider.invalidate_source();
+        assert!(provider.state.borrow().parsed.is_none());
+        assert!(provider.selected().is_empty());
         transport.sender.lock().unwrap().as_ref().unwrap().try_send(serde_json::json!({"revision": 2})).unwrap();
         cx.run_until_parked();
         assert!(provider.state.borrow().cache.is_empty());
+        transport.sender.lock().unwrap().take();
+        cx.run_until_parked();
+        assert!(provider.state.borrow().revision.is_none());
+        assert!(provider.state.borrow().watch.is_none());
     }
 
     #[gpui::test]

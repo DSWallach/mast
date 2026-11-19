@@ -77,6 +77,7 @@ pub(super) struct WorkspaceSearch {
     active: usize,
     list: gpui::ListState,
     rows: Vec<ResultRow>,
+    definition_rows: Vec<ResultRow>,
     changed: Vec<String>,
     has_diff: bool,
     case_sensitive: bool,
@@ -104,6 +105,7 @@ impl Shell {
         if let Some(search) = self.workspace_search.as_mut() {
             search.task = None;
             search.rows = definitions.into_iter().map(|(path, symbol)| ResultRow { path, line: Some(symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(symbol) }).collect();
+            search.definition_rows = search.rows.clone();
             search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
             search.status.clear();
         }
@@ -451,6 +453,7 @@ impl Shell {
             active: 0,
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(300.0)),
             rows: Vec::new(),
+            definition_rows: Vec::new(),
             changed,
             has_diff,
             case_sensitive: false,
@@ -512,7 +515,17 @@ impl Shell {
             cx.notify();
             return;
         }
-        if search.mode == SearchMode::Definitions { return; }
+        if search.mode == SearchMode::Definitions {
+            let query = search.input.read(cx).text().trim().to_lowercase();
+            search.rows = search.definition_rows.iter().filter(|row| {
+                query.is_empty() || row.path.to_lowercase().contains(&query) || row.symbol.as_ref().is_some_and(|symbol| symbol.name.to_lowercase().contains(&query))
+            }).cloned().collect();
+            search.active = 0;
+            search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+            search.status = if search.rows.is_empty() { "No definitions match".into() } else { String::new() };
+            cx.notify();
+            return;
+        }
         search.task = None;
         search.generation = search.generation.wrapping_add(1);
         search.query_started = std::time::Instant::now();
@@ -1219,6 +1232,12 @@ mod tests {
             assert_eq!(search.mode, SearchMode::Definitions);
             assert_eq!(search.active, 0);
             assert_eq!(search.rows.len(), 2);
+            let input = search.input.clone();
+            input.update(cx, |input, cx| input.set_text("tests/", cx));
+            shell.update_workspace_search(cx);
+            assert_eq!(shell.workspace_search.as_ref().unwrap().rows[0].path, "tests/b.rs");
+            input.update(cx, |input, cx| input.set_text("", cx));
+            shell.update_workspace_search(cx);
             shell.select_workspace_result(0, window, cx);
             let RightSurface::File(id) = shell.resolved_right_active(cx) else { panic!("definition not opened"); };
             assert_eq!(shell.file_surface_paths[&id], "src/b.rs");

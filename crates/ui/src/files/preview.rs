@@ -1310,6 +1310,8 @@ impl FilesSurface {
     }
 
     pub(super) fn on_editor_change(&mut self, path: &str, cx: &mut Context<Self>) {
+        let provider = self.definition_providers.get(path).cloned();
+        if let Some(provider) = &provider { provider.invalidate_source(); }
         let Some(editor) = self
             .preview
             .documents
@@ -1318,6 +1320,10 @@ impl FilesSurface {
         else {
             return;
         };
+        if provider.is_some() {
+            let editor = editor.downgrade();
+            cx.spawn(async move |_, cx| { let _ = editor.update(cx, |editor, cx| editor.clear_hover_state(cx)); }).detach();
+        }
         let source = editor.read(cx).value();
         let revision = {
             let Some(document) = self.preview.documents.get_mut(path) else {
@@ -3112,6 +3118,7 @@ impl FilesSurface {
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
         if let (Some(context), Some(engine)) = (self.request_context.clone(), self.state.read(cx).engine().cloned()) {
             let provider = super::definitions::SymbolDefinitionProvider::new(WorkspaceFilesClient::new(engine, context), path.to_owned());
+            provider.set_editor(editor.downgrade());
             let surface = cx.weak_entity();
             let selection = provider.clone();
             self.definition_providers.retain(|path, _| self.preview.documents.contains_key(path));
