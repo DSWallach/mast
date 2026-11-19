@@ -530,6 +530,9 @@ impl Shell {
                             search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
                             search.status = if updating { "Updating…".into() } else if truncated { "Symbol index reached its limit; results are incomplete.".into() } else if result.truncated { "Showing the first 200 matches".into() } else if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
                         }
+                        // Another panel's newer query on the same checkout replaced this one; keep the
+                        // current rows instead of showing an error.
+                        Err(error) if error.to_string().contains("symbol query superseded") => return,
                         Err(error) => search.status = error.to_string(),
                     }
                     cx.notify();

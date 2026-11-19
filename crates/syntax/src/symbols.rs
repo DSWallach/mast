@@ -152,7 +152,7 @@ impl SymbolIndex {
 }
 
 fn estimated_file_bytes(path: &str, file: &SymbolFile) -> usize {
-    // BTreeMap's node allocation is shared by several entries. Allow 128
+    // im::OrdMap's node allocation is shared by several entries. Allow 128
     // bytes per entry in addition to the path and symbol payload.
     128 + path.len() + file.lower_path.capacity()
         + file.symbols.capacity() * std::mem::size_of::<Symbol>()

@@ -371,7 +371,9 @@ fn update_shared_index(
     let index = lock(shared).as_ref().clone();
     let (index, revision, revisions, reads) = update_paths(root, index, revision, revisions, removed, updates, cancelled);
     let truncated = index.truncated();
-    *lock(shared) = Arc::new(index);
+    // Free the replaced index after releasing the lock; dropping a full index is many small frees.
+    let previous = std::mem::replace(&mut *lock(shared), Arc::new(index));
+    drop(previous);
     (revision, revisions, reads, truncated)
 }
 
