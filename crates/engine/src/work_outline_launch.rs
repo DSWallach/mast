@@ -300,6 +300,8 @@ pub enum LaunchStep {
     BindingCaptured,
     RevisionCreated,
     RevisionApplied,
+    /// The provisional chat, its binding and records are saved (role launches).
+    RegistryPersisted,
     TurnQueued,
     /// The new Chat holds the standing role (role launches only).
     RoleAdopted,
@@ -638,7 +640,16 @@ impl WorkItemLaunchService {
                         if candidate.id == chat_id {
                             continue;
                         }
-                        if self.doc_host.has_run_command(&candidate.id).map_err(engine_error)? {
+                        // Only the recorded launch command counts: a message
+                        // that reached the chat any other way is not a start.
+                        let launched = match candidate.standing_role_provisional_operation() {
+                            Some(operation) => self
+                                .doc_host
+                                .has_launch_command(&candidate.id, &derive_id(operation, roles::COMMAND))
+                                .map_err(engine_error)?,
+                            None => false,
+                        };
+                        if launched {
                             // An earlier start queued its message and stopped
                             // before adopting: surface it, and send nothing more.
                             self.doc_host.persist_chat_now(&candidate.id).map_err(engine_error)?;
@@ -771,8 +782,9 @@ impl WorkItemLaunchService {
             &validated.execution_root,
             p.config.clone(),
             p.parent_chat_id.as_deref(),
-            p.standing_role
-                .map(|kind| mast_proto::standing_role_provisional_tag(kind, &p.work_item_id)),
+            p.standing_role.map(|kind| {
+                mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op)
+            }),
         )?;
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
@@ -890,6 +902,14 @@ impl WorkItemLaunchService {
         {
             return Err(conflict(MANAGER_ALREADY_STARTED));
         }
+        // A role's first message is queued only once the chat that carries it
+        // is saved: the registry row, assignment and binding are what mark the
+        // chat provisional and tie it to its folder, and the queued command
+        // can start running at once.
+        if p.standing_role.is_some() {
+            self.workspace.persist_registry_now().map_err(engine_error)?;
+        }
+        self.checkpoint(LaunchStep::RegistryPersisted)?;
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         if let Some((wakes, _)) = hand_off {
             wakes.finish_orchestrator_hand_off(&chat_id);
@@ -906,6 +926,8 @@ impl WorkItemLaunchService {
             self.workspace
                 .activate_standing_role_chat(kind, &p.work_item_id, &chat_id, &[])
                 .map_err(conflict)?;
+            // The success the caller sees includes the adoption on disk.
+            self.workspace.persist_registry_now().map_err(engine_error)?;
         }
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
@@ -996,8 +1018,15 @@ impl WorkItemLaunchService {
                 mast_proto::check_execution_configuration(&over.configuration).err();
         }
         if let Some(choice) = &p.worktree_choice {
-            self.apply_worktree_choice(&mut resolved, choice, &p.operation_id)
-                .await?;
+            // A Manager start's worktree belongs to the role, not the attempt,
+            // so an interrupted attempt's clean checkout is reused by the next
+            // one with the same name instead of blocking it. The text has
+            // spaces, which an operation id never has.
+            let owner = match p.standing_role {
+                Some(kind) => format!("standing role worktree {} {}", kind.as_str(), p.work_item_id),
+                None => p.operation_id.clone(),
+            };
+            self.apply_worktree_choice(&mut resolved, choice, &owner).await?;
         }
         Ok(resolved)
     }
@@ -1328,7 +1357,7 @@ impl WorkItemLaunchService {
         match latest {
             None => self
                 .doc_host
-                .queue_command_with_id(chat_id, command_id, payload)
+                .queue_launch_command_with_id(chat_id, command_id, payload)
                 .map(drop)
                 .map_err(engine_error),
             Some(entry)
@@ -1394,6 +1423,13 @@ impl WorkItemLaunchService {
             .chat(&p.chat_id)
             .map_err(engine_error)?
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Chat not found"))?;
+        // A Manager's first start takes only its own launch's message.
+        if chat.standing_role_provisional().is_some() {
+            return Err(error(
+                WorkOutlineErrorCode::Invalid,
+                "This Manager has not started yet; start it from the project's Manager row",
+            ));
+        }
         // A malformed binding is bound-and-invalid: refuse, never treat the
         // Chat as unbound.
         let binding = self

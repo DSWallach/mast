@@ -2202,7 +2202,12 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
     harnesses.register(Arc::new(rig.mock.clone()));
     let core = EngineCore::assemble(&rig.root.join("data"), Arc::new(harnesses), HarnessId::Mock, None)
         .expect("engine core reassembles");
-    assert!(core.doc_host.has_run_command(&first).unwrap(), "the queued message was saved");
+    assert!(
+        core.doc_host
+            .has_launch_command(&first, &derive_id("manager-rst-a", roles::COMMAND))
+            .unwrap(),
+        "the queued message was saved"
+    );
     let launcher = WorkItemLaunchService::new(
         core.workspace.clone(),
         core.doc_host.clone(),
@@ -2218,4 +2223,120 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
         Some(first.as_str())
     );
     core.shutdown().await;
+}
+
+fn registry_on_disk(rig: &Rig) -> mast_doc::RegistryDoc {
+    let data = rig.root.join("data");
+    let dir = [data.join("profiles/local"), data.clone()]
+        .into_iter()
+        .find(|dir| dir.join("docs.sqlite3").exists())
+        .expect("the engine's docs database");
+    let store = mast_sync::DocsStore::open(&dir).expect("a second reader opens the database");
+    let bytes = store
+        .load_snapshot(mast_doc::REGISTRY_DOC_ID)
+        .unwrap()
+        .expect("a saved registry snapshot");
+    mast_doc::RegistryDoc::from_bytes(&bytes, "disk-reader").expect("the snapshot decodes")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provisional_chat_takes_no_continue_queue_or_relayed_message() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let a = manager_params(&rig, "manager-intake-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = provisional_chats(&rig).remove(0).id;
+
+    // The work-item continue path.
+    assert!(continue_chat(&rig, &chat, "continue-op", "sneak in").await.is_err());
+    // A direct queue with a caller-chosen command id (the path agents and
+    // scheduled runs use).
+    let payload = SessionCommandPayload::Run {
+        request: run_request("sneak in", "/tmp"),
+        message_id: "sneak-message".into(),
+    };
+    assert!(rig
+        .core
+        .doc_host
+        .queue_command_with_id(&chat, "sneak-command", payload.clone())
+        .is_err());
+    // A command relayed from another device.
+    let relayed = SessionCommandEntry {
+        id: "relay-command".into(),
+        payload,
+        issued_by: "dev-b".into(),
+        issued_at: 0,
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    assert!(rig.core.doc_host.ingest_relayed_command(&chat, relayed).await.is_err());
+    assert_eq!(commands(&rig, &chat).len(), 0, "nothing reached the chat");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_provisional_chat_and_its_binding_are_on_disk_before_the_message_is_queued() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    // Stop right before the first message is queued, with no flush and no
+    // graceful shutdown: only what the launch itself saved is on disk.
+    launcher.inject_fault(Some(LaunchStep::RegistryPersisted));
+    let a = manager_params(&rig, "manager-disk-a", "queued after the save");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = derive_id("manager-disk-a", roles::CHAT);
+
+    let disk = registry_on_disk(&rig);
+    let row = disk.chat(&chat).unwrap().expect("the chat row is on disk");
+    assert!(row.is_provisional_for(mast_proto::StandingRoleKind::Manager, &rig.item));
+    let inputs = disk.work_outline_inputs(SPACE, true);
+    assert!(inputs.assignments.iter().any(|a| a.id == chat), "the assignment is on disk");
+    assert!(
+        inputs.chat_execution_bindings.iter().any(|b| b.id == chat),
+        "the binding is on disk"
+    );
+    assert!(commands(&rig, &chat).is_empty(), "no message queued yet");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_manager_start_has_its_adoption_on_disk_when_it_returns() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let reply = launch(&rig, &manager_params(&rig, "manager-done", "Plan"))
+        .await
+        .unwrap();
+    // No flush and no shutdown first.
+    let disk = registry_on_disk(&rig);
+    assert_eq!(
+        disk.standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item).as_deref(),
+        Some(reply.chat_id.as_str())
+    );
+    let row = disk.chat(&reply.chat_id).unwrap().unwrap();
+    assert!(row.standing_role_provisional().is_none(), "the marker is cleared on disk too");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_start_reuses_the_clean_worktree_an_interrupted_attempt_created() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::ChatCreated));
+    let mut a = manager_params(&rig, "manager-wt-a", "first try");
+    a.worktree_choice = Some(WorktreeChoice::CreateNew { name: "manager wt".into() });
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+
+    // The next attempt asks for the same name and is not blocked by the
+    // worktree the interrupted one left behind.
+    let mut b = manager_params(&rig, "manager-wt-b", "second try");
+    b.worktree_choice = Some(WorktreeChoice::CreateNew { name: "manager wt".into() });
+    let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
+    assert!(reply.execution_root.contains(".worktrees"), "{}", reply.execution_root);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
 }

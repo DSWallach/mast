@@ -2860,6 +2860,18 @@ impl DocHost {
     /// (which queues through `queue_command_with_id`): until the role adopts it
     /// the chat is hidden, and a message sent to it would run where no one can
     /// see the answer.
+    /// For a provisional first-start chat, the id of its own launch's command
+    /// (empty when the marker names no operation); `None` for any other chat.
+    fn provisional_launch_command_id(&self, chat_id: &str) -> Option<String> {
+        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
+        chat.standing_role_provisional()?;
+        Some(
+            chat.standing_role_provisional_operation()
+                .map(|operation| mast_proto::derive_id(operation, mast_proto::roles::COMMAND))
+                .unwrap_or_default(),
+        )
+    }
+
     fn refuse_unstarted_role_chat(&self, chat_id: &str) -> Result<(), EngineError> {
         let provisional = self
             .workspace()
@@ -2897,6 +2909,19 @@ impl DocHost {
         command_id: &str,
         payload: SessionCommandPayload,
     ) -> Result<bool, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
+        self.queue_launch_command_with_id(chat_id, command_id, payload)
+    }
+
+    /// [`Self::queue_command_with_id`] for a standing role's own first launch,
+    /// the one sender a provisional Manager chat accepts. Every other caller
+    /// goes through the guarded entry point.
+    pub(crate) fn queue_launch_command_with_id(
+        &self,
+        chat_id: &str,
+        command_id: &str,
+        payload: SessionCommandPayload,
+    ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
         if handle
             .doc
@@ -2910,14 +2935,17 @@ impl DocHost {
             .map(|(_, appended)| appended)
     }
 
-    /// Whether the chat has a queued or applied first-turn command (a Run).
-    pub fn has_run_command(&self, chat_id: &str) -> Result<bool, EngineError> {
+    /// Whether the chat has the first-turn command `command_id` (a Run, with
+    /// or without instructions), queued or applied.
+    pub fn has_launch_command(&self, chat_id: &str, command_id: &str) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
         Ok(handle.doc.read_commands()?.iter().any(|c| {
-            matches!(
-                c.payload,
-                SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
-            )
+            c.id == command_id
+                && matches!(
+                    c.payload,
+                    SessionCommandPayload::Run { .. }
+                        | SessionCommandPayload::RunWithInstructions { .. }
+                )
         }))
     }
 
@@ -4513,6 +4541,20 @@ impl DocHost {
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
         let handle = self.open(chat_id)?;
+        // A provisional Manager chat takes no message from another device; its
+        // own launch queues locally and is never relayed.
+        if self.provisional_launch_command_id(chat_id).is_some()
+            && matches!(
+                entry.payload,
+                SessionCommandPayload::Run { .. }
+                    | SessionCommandPayload::RunWithInstructions { .. }
+                    | SessionCommandPayload::Steer { .. }
+            )
+        {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
         if !self.missing_attachments(&entry).is_empty() {
@@ -4955,6 +4997,32 @@ impl DocHost {
                         Some("interrupted before completion — retry to send again"),
                     );
                     skipped.insert(c.id.clone());
+                }
+            }
+            // A provisional Manager chat runs only its own launch's command. A
+            // message that reached its doc another way (sync from a peer) is
+            // rejected here, so it cannot run once the chat is adopted.
+            if let Some(launch_command) = self.provisional_launch_command_id(&handle.chat_id) {
+                for c in &commands {
+                    let message = matches!(
+                        c.payload,
+                        SessionCommandPayload::Run { .. }
+                            | SessionCommandPayload::RunWithInstructions { .. }
+                            | SessionCommandPayload::Steer { .. }
+                    );
+                    if message
+                        && c.status == SessionCommandStatus::Pending
+                        && c.id != launch_command
+                        && !skipped.contains(&c.id)
+                    {
+                        self.resolve_command(
+                            handle,
+                            &c.id,
+                            SessionCommandStatus::Rejected,
+                            Some("this Manager has not started yet"),
+                        );
+                        skipped.insert(c.id.clone());
+                    }
                 }
             }
             let Some(entry) = commands

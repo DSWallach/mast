@@ -2804,6 +2804,14 @@ impl WorkspaceHost {
         self.inner.save_snapshot();
     }
 
+    /// Persist the registry snapshot now and report whether it reached disk,
+    /// unlike [`Self::flush`], which logs a failure and moves on. A caller
+    /// that must not queue work until the rows it depends on survive a restart
+    /// (a standing role's first message) calls this first.
+    pub fn persist_registry_now(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
+    }
+
     /// Persist scheduled follow-up registry writes before acknowledging their
     /// queue entries in the scheduler database.
     pub(crate) fn persist_scheduled_followups(&self) -> Result<(), EngineError> {
