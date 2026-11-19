@@ -1290,6 +1290,12 @@ impl PrDash {
         result
     }
 
+    /// Discard a cached thread snapshot after a review has been submitted.
+    pub async fn invalidate_review_threads(&self, owner: &str, repo: &str, number: u64) {
+        let key = format!("{}/{}#{number}", owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+        self.inner.threads.lock().await.remove(&key);
+    }
+
     /// Persist the last good rows of each tab to `path` and load what an
     /// earlier run left there, so a cold start has rows to show.
     pub fn with_cache_file(self, path: std::path::PathBuf) -> Self {
