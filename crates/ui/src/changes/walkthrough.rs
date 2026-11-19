@@ -425,6 +425,19 @@ impl ReviewDocument {
     }
 }
 
+impl TourReview {
+    /// Risk notes keyed by the file paths used by the diff viewer.
+    fn risk_notes(&self) -> std::collections::HashMap<String, String> {
+        let mut notes = std::collections::HashMap::new();
+        for step in &self.steps {
+            if !step.risk_note.trim().is_empty() {
+                notes.entry(step.file.clone()).or_insert_with(|| step.risk_note.clone());
+            }
+        }
+        notes
+    }
+}
+
 fn note_body() -> gpui::Div {
     div()
         .when(true, crate::components::changes_body_text)
@@ -540,6 +553,9 @@ impl Walkthrough {
         changes.update(cx, |changes, _| {
             changes.review_walkthrough = true;
             changes.review_tour = true;
+            changes.scope_map_risks = review.risk_notes();
+            changes.scope_map_data.invalidate();
+            changes.refresh_scope_map_data();
         });
         let observer = cx.observe(&changes, |_, _, cx| cx.notify());
         let step_input = cx.new(|cx| {

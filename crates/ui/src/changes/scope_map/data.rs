@@ -1,6 +1,7 @@
 //! Revision-scoped inputs to the scope map.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use super::super::{DiffTreeNode, FileDiff, FileStatus};
 use super::layout::{Entry, Folder};
@@ -12,35 +13,35 @@ pub(super) struct File {
     pub additions: u32,
     pub deletions: u32,
     pub status: FileStatus,
-    pub viewed: bool,
     pub risk: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Totals {
-    pub files: usize,
-    pub viewed_files: usize,
-    pub additions: u64,
-    pub deletions: u64,
-    pub viewed_lines: u64,
+pub(in crate::changes) struct Totals {
+    pub(in crate::changes) files: usize,
+    pub(in crate::changes) additions: u64,
+    pub(in crate::changes) deletions: u64,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Data {
     pub root: Folder,
     pub files: Vec<File>,
-    pub folders: HashMap<String, Totals>,
+    pub folders: Arc<HashMap<String, Totals>>,
     pub totals: Totals,
 }
 
 /// The parsed diff key owns the expensive tree and rollups. Callers invalidate
-/// this when review marks or walkthrough notes change for the same diff.
+/// this when walkthrough notes change for the same diff.
 #[derive(Default)]
-pub(super) struct Cache {
+pub(in crate::changes) struct Cache {
     entry: Option<(String, Data)>,
 }
 
 impl Cache {
+    pub(super) fn get(&self) -> Option<&Data> {
+        self.entry.as_ref().map(|(_, data)| data)
+    }
     pub(super) fn get_or_build(&mut self, key: &str, build: impl FnOnce() -> Data) -> &Data {
         if self.entry.as_ref().is_none_or(|(cached, _)| cached != key) {
             self.entry = Some((key.to_owned(), build()));
@@ -48,7 +49,7 @@ impl Cache {
         &self.entry.as_ref().expect("cache was populated").1
     }
 
-    pub(super) fn invalidate(&mut self) {
+    pub(in crate::changes) fn invalidate(&mut self) {
         self.entry = None;
     }
 }
@@ -94,12 +95,8 @@ impl Builder {
 impl Totals {
     fn add(&mut self, file: &File) {
         self.files += 1;
-        self.viewed_files += usize::from(file.viewed);
         self.additions += u64::from(file.additions);
         self.deletions += u64::from(file.deletions);
-        if file.viewed {
-            self.viewed_lines += u64::from(file.additions) + u64::from(file.deletions);
-        }
     }
 }
 
@@ -107,7 +104,6 @@ impl Data {
     pub(super) fn new(
         files: &[FileDiff],
         layout: &[DiffTreeNode],
-        mut viewed: impl FnMut(usize, &FileDiff) -> bool,
         risks: &HashMap<String, String>,
     ) -> Self {
         fn indices(nodes: &[DiffTreeNode], output: &mut Vec<usize>) {
@@ -124,7 +120,7 @@ impl Data {
         let mut result = Self {
             root: Folder::default(),
             files: Vec::with_capacity(order.len()),
-            folders: HashMap::new(),
+            folders: Arc::new(HashMap::new()),
             totals: Totals::default(),
         };
         for index in order {
@@ -137,7 +133,6 @@ impl Data {
                 additions: source.additions,
                 deletions: source.deletions,
                 status: source.status,
-                viewed: viewed(index, source),
                 risk: risks
                     .get(&source.path)
                     .filter(|s| !s.trim().is_empty())
@@ -152,8 +147,7 @@ impl Data {
             );
             result.totals.add(&file);
             for (position, _) in file.path.match_indices('/') {
-                result
-                    .folders
+                Arc::make_mut(&mut result.folders)
                     .entry(file.path[..=position].to_owned())
                     .or_default()
                     .add(&file);
@@ -182,17 +176,14 @@ mod tests {
         let data = Data::new(
             &[a, b],
             &[DiffTreeNode::File(0), DiffTreeNode::File(1)],
-            |index, _| index == 0,
             &risks,
         );
         assert_eq!(
             data.totals,
             Totals {
                 files: 2,
-                viewed_files: 1,
                 additions: 3,
                 deletions: 2,
-                viewed_lines: 3
             }
         );
         assert_eq!(data.folders["src/"], data.totals);
@@ -208,14 +199,14 @@ mod tests {
         for key in ["a", "a", "b"] {
             cache.get_or_build(key, || {
                 builds += 1;
-                Data::new(&[], &[], |_, _| false, &HashMap::new())
+                Data::new(&[], &[], &HashMap::new())
             });
         }
         assert_eq!(builds, 2);
         cache.invalidate();
         cache.get_or_build("b", || {
             builds += 1;
-            Data::new(&[], &[], |_, _| false, &HashMap::new())
+            Data::new(&[], &[], &HashMap::new())
         });
         assert_eq!(builds, 3);
     }

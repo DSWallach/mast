@@ -1320,6 +1320,8 @@ pub struct Changes {
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
     review_walkthrough: bool,
+    scope_map_risks: HashMap<String, String>,
+    scope_map_data: scope_map::data::Cache,
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
     review_task: Option<Task<()>>,
@@ -1629,6 +1631,8 @@ impl Changes {
             review_closed: false,
             review_state: None,
             review_walkthrough: false,
+            scope_map_risks: HashMap::new(),
+            scope_map_data: scope_map::data::Cache::default(),
             walkthrough_target: None,
             review_tour: false,
             review_task: None,
@@ -1977,6 +1981,7 @@ impl Changes {
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.refresh_scope_map_data();
                 changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
                 changes.refresh_thread_rows(cx);
