@@ -49,6 +49,7 @@ pub enum ShortcutId {
     QuickOpen,
     QuickOpenSymbols,
     GoToDefinition,
+    GoToDefinitionAlternate,
     FileNavigationBack,
     FileNavigationForward,
     AddCodeToChat,
@@ -96,7 +97,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 33 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 34 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -108,6 +109,7 @@ impl ShortcutId {
         ShortcutId::QuickOpen,
         ShortcutId::QuickOpenSymbols,
         ShortcutId::GoToDefinition,
+        ShortcutId::GoToDefinitionAlternate,
         ShortcutId::FileNavigationBack,
         ShortcutId::FileNavigationForward,
         ShortcutId::ReviewNextStep,
@@ -205,6 +207,7 @@ impl ShortcutId {
             ShortcutId::QuickOpen => "Quick open",
             ShortcutId::QuickOpenSymbols => "Search symbols",
             ShortcutId::GoToDefinition => "Go to definition",
+            ShortcutId::GoToDefinitionAlternate => "Go to definition (alternate)",
             ShortcutId::FileNavigationBack => "Navigate back",
             ShortcutId::FileNavigationForward => "Navigate forward",
             ShortcutId::AddCodeToChat => "Add code to chat",
@@ -276,6 +279,7 @@ impl ShortcutId {
             ShortcutId::QuickOpen => "mod-o",
             ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
             ShortcutId::GoToDefinition => "f12",
+            ShortcutId::GoToDefinitionAlternate => "mod-alt-b",
             ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
             ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
@@ -401,6 +405,7 @@ pub struct KeymapConfig {
     pub quick_open: String,
     pub quick_open_symbols: String,
     pub go_to_definition: String,
+    pub go_to_definition_alternate: String,
     pub file_navigation_back: String,
     pub file_navigation_forward: String,
     pub add_code_to_chat: String,
@@ -508,6 +513,7 @@ impl Default for KeymapConfig {
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
             quick_open_symbols: ShortcutId::QuickOpenSymbols.default_combo().into(),
             go_to_definition: ShortcutId::GoToDefinition.default_combo().into(),
+            go_to_definition_alternate: ShortcutId::GoToDefinitionAlternate.default_combo().into(),
             file_navigation_back: ShortcutId::FileNavigationBack.default_combo().into(),
             file_navigation_forward: ShortcutId::FileNavigationForward.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
@@ -577,6 +583,7 @@ impl KeymapConfig {
             ShortcutId::QuickOpen => &self.quick_open,
             ShortcutId::QuickOpenSymbols => &self.quick_open_symbols,
             ShortcutId::GoToDefinition => &self.go_to_definition,
+            ShortcutId::GoToDefinitionAlternate => &self.go_to_definition_alternate,
             ShortcutId::FileNavigationBack => &self.file_navigation_back,
             ShortcutId::FileNavigationForward => &self.file_navigation_forward,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
@@ -644,6 +651,7 @@ impl KeymapConfig {
             ShortcutId::QuickOpen => self.quick_open = combo,
             ShortcutId::QuickOpenSymbols => self.quick_open_symbols = combo,
             ShortcutId::GoToDefinition => self.go_to_definition = combo,
+            ShortcutId::GoToDefinitionAlternate => self.go_to_definition_alternate = combo,
             ShortcutId::FileNavigationBack => self.file_navigation_back = combo,
             ShortcutId::FileNavigationForward => self.file_navigation_forward = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,

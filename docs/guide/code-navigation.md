@@ -6,7 +6,7 @@ In a code file, use the file-symbols button to open an outline, then select a ro
 
 ## Go to definition
 
-Hold `⌘` over an identifier to underline it when the symbol index has a matching definition, then click it. You can also put the cursor on a name and press `F12`, or choose **Go to Definition** from the editor's context menu. If several definitions share the name, choose one from the list; Mast ranks the current file first, then the same directory and nearby paths. Back and forward return to previous locations.
+Hold `⌘` over an identifier to underline it when the symbol index has a matching definition, then click it. You can also put the cursor on a name and press `F12` or `⌥⌘B`, or choose **Go to Definition** from the editor's context menu. If several definitions share the name, choose one from the list; Mast ranks the current file first, then the same directory and nearby paths. Back and forward return to previous locations.
 
 The first lookup starts indexing the checkout. While it is building, a click shows **Indexing…**; hover again after indexing finishes. `F12` and the context menu wait for indexing. Lookup matches names exactly and does not infer types or use a language server, so a result is a candidate rather than a guarantee of semantic resolution.
 

@@ -1190,6 +1190,7 @@ impl UiSettings {
                             (ShortcutId::QuickOpen, "quickOpen"),
                             (ShortcutId::QuickOpenSymbols, "quickOpenSymbols"),
                             (ShortcutId::GoToDefinition, "goToDefinition"),
+                            (ShortcutId::GoToDefinitionAlternate, "goToDefinitionAlternate"),
                             (ShortcutId::AddCodeToChat, "addCodeToChat"),
                             (ShortcutId::OpenOutline, "openOutline"),
                             (ShortcutId::ToggleOutlineFocus, "toggleOutlineFocus"),
