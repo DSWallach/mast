@@ -319,9 +319,12 @@ mod tests {
             surface.preview.active = Some(path.clone());
             surface.request_context = Some(context.clone());
             surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context }, cx);
-            assert_eq!(surface.definition_notice.as_deref(), Some("Indexing…"));
+            assert!(surface.definition_notice.is_none());
         }).unwrap();
         cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("Indexing…"))).unwrap();
         transport.sender.lock().unwrap().as_ref().unwrap().try_send(serde_json::json!({"revision": 1})).unwrap();
         cx.run_until_parked();
         host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("No definition found for missing"))).unwrap();
@@ -404,7 +407,20 @@ impl super::FilesSurface {
 
     fn start_definition_lookup(&mut self, client: WorkspaceFilesClient, lookup: DefinitionLookup, cx: &mut gpui::Context<Self>) {
         let DefinitionLookup { path, name, cursor, source: original_source, context } = lookup;
-        self.show_definition_notice("Indexing…".into(), false, cx);
+        self.definition_notice_generation = self.definition_notice_generation.wrapping_add(1);
+        let notice_generation = self.definition_notice_generation;
+        self.definition_notice = None;
+        let snapshot_ready = Rc::new(std::cell::Cell::new(false));
+        let notice_ready = snapshot_ready.clone();
+        cx.spawn(async move |surface, cx| {
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+            if notice_ready.get() { return; }
+            let _ = surface.update(cx, |surface, cx| {
+                if surface.definition_notice_generation == notice_generation {
+                    surface.show_definition_notice("Indexing…".into(), false, cx);
+                }
+            });
+        }).detach();
         self.definition_task = Some(cx.spawn(async move |surface, cx| {
             let result = async {
                 let mut stream = client.watch_symbols().await.map_err(|error| error.to_string())?;
@@ -413,8 +429,10 @@ impl super::FilesSurface {
                     if let Some(error) = frame.get("error").and_then(|value| value.as_str()) { return Err(error.to_string()); }
                     if frame.get("revision").and_then(|value| value.as_u64()).is_some() { break; }
                 }
+                snapshot_ready.set(true);
                 client.query_definitions(name.clone(), path.clone()).await.map_err(|error| error.to_string())
             }.await;
+            snapshot_ready.set(true);
             let _ = surface.update(cx, |surface, cx| {
                 let current = surface.preview.documents.get(&path).and_then(|document| document.editor.as_ref()).is_some_and(|editor| {
                     let editor = editor.read(cx);
