@@ -729,6 +729,7 @@ mod pinned_session_tests {
 
     fn pin_snapshot(revision: u64, pins: &[&str]) -> mast_proto::SidebarPreferencesState {
         mast_proto::SidebarPreferencesState {
+            local_handoffs: Vec::new(),
             sections: vec![],
             revision,
             synced: true,

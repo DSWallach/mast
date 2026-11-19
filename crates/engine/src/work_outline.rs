@@ -203,6 +203,229 @@ pub struct WorkOutlineService {
     workflow_pack: crate::workflow_pack_service::WorkflowPackService,
 }
 
+/// What a project manager's step may touch, re-checked by the registry
+/// writer under its lock so a concurrent move or hand-off cannot slip a
+/// target out of the project between the check and the write.
+#[derive(Debug, Clone, Default)]
+pub struct ManagerGuard {
+    pub chat_id: String,
+    /// The project item the role is scoped to.
+    pub root: String,
+    /// Items that must be at or below `root`.
+    pub inside: Vec<String>,
+    /// Items that must be strictly below `root`.
+    pub strict: Vec<String>,
+    /// Chats a step reassigns: each must be assigned inside `root` right now.
+    pub chats: Vec<String>,
+    /// The one item (the project) a bulk approval request may be raised on.
+    pub request_item: Option<String>,
+    /// `(op, item, expected)` of the step: re-counted against the current tree
+    /// under the lock (a create counts the template it expands under its
+    /// parent), and refused if `step_plan_digest` no longer equals `expected`
+    /// (the preview's digest; empty = unchecked).
+    pub effects: Vec<(String, String, String)>,
+    /// The batch's shared budget: the step is refused if it would affect more
+    /// than what is left, and its effects are debited once it commits.
+    pub budget: Option<std::sync::Arc<crate::admin::BatchBudget>>,
+}
+
+/// Digest of what a step will touch. The preview binds the approval to it and
+/// the writer re-checks it under its lock, so the same count over different
+/// items, or the same shape under different template rules, does not keep an
+/// old approval.
+///
+/// An archive or restore binds the ids of its whole subtree. A template apply
+/// binds the template's full content and every row of the subtree it can adopt
+/// or rewrite (id, title, rule node, flags, destination and instructions), and a
+/// create binds its parent's template content, since that decides what the new
+/// item expands to.
+pub fn step_plan_digest(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    fn subtree(snapshot: &WorkOutlineSnapshot, id: &str, depth: usize, out: &mut Vec<String>) {
+        out.push(id.to_owned());
+        if depth > snapshot.items.len() {
+            return;
+        }
+        if let Some(item) = snapshot.item(id) {
+            for child in &item.child_ids {
+                subtree(snapshot, child, depth + 1, out);
+            }
+        }
+    }
+    let mut ids = vec![item_id.to_owned()];
+    let mut text = format!("{op}|{}", step_effects(snapshot, op, item_id));
+    match op {
+        "archive" | "restore" => {
+            ids.clear();
+            subtree(snapshot, item_id, 0, &mut ids);
+        }
+        "template_apply" | "create" => {
+            let item = snapshot.item(item_id);
+            let template = match op {
+                "create" => item.and_then(|i| i.container_template.as_ref()),
+                _ => item.and_then(|i| i.container_template.as_ref()).or_else(|| {
+                    item.and_then(|i| i.parent_work_item_id.as_deref())
+                        .and_then(|parent| snapshot.item(parent))
+                        .and_then(|parent| parent.container_template.as_ref())
+                }),
+            };
+            text.push_str(&format!("|tpl:{}", template.and_then(|t| serde_json::to_string(t).ok()).unwrap_or_default()));
+            if op == "template_apply" {
+                ids.clear();
+                subtree(snapshot, item_id, 0, &mut ids);
+                ids.sort();
+                for id in &ids {
+                    let Some(row) = snapshot.item(id) else { continue };
+                    let instructions: Vec<String> = snapshot
+                        .instructions
+                        .iter()
+                        .filter(|i| i.work_item_id.as_deref() == Some(id.as_str()))
+                        .map(|i| format!("{}={}", i.id, i.text))
+                        .collect();
+                    // The planner reads live structure: where the row sits (parent,
+                    // sibling order), whether it is archived, and what it says.
+                    text.push_str(&format!(
+                        "|row:{id}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                        row.parent_work_item_id.as_deref().unwrap_or(""),
+                        row.order_key,
+                        row.archived_at.is_some(),
+                        row.title,
+                        row.template_node_id.as_deref().unwrap_or(""),
+                        row.is_project,
+                        row.worker_destination_id.as_deref().unwrap_or(""),
+                        row.child_ids.join(","),
+                        instructions.join(";"),
+                    ));
+                }
+            } else if let Some(parent) = item {
+                // A create lands last among the parent's children: their order
+                // and status are inputs too.
+                for child in parent.child_ids.iter().filter_map(|id| snapshot.item(id)) {
+                    text.push_str(&format!("|kid:{}:{}:{}", child.id, child.order_key, child.archived_at.is_some()));
+                }
+            }
+        }
+        _ => {}
+    }
+    ids.sort();
+    text.push_str(&format!("|ids:{}", ids.join(",")));
+    format!("{:x}", Sha256::digest(text))
+}
+
+/// Items one step affects against `snapshot`: an archive or restore covers the
+/// whole subtree, and a template apply puts the template's nodes under each
+/// child (a child following its parent's template gets one copy). A
+/// conservative count: it never undercounts what the writer will touch.
+pub fn step_effects(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> usize {
+    fn subtree(snapshot: &WorkOutlineSnapshot, id: &str, depth: usize) -> usize {
+        let Some(item) = snapshot.item(id) else { return 1 };
+        if depth > snapshot.items.len() {
+            return 1;
+        }
+        1 + item.child_ids.iter().map(|c| subtree(snapshot, c, depth + 1)).sum::<usize>()
+    }
+    match op {
+        "archive" | "restore" => subtree(snapshot, item_id, 0),
+        // A new child under a container template expands the template under it.
+        "create" => snapshot
+            .item(item_id)
+            .and_then(|parent| parent.container_template.as_ref())
+            .map_or(1, |template| template.root.node_count()),
+        "template_apply" => {
+            let Some(item) = snapshot.item(item_id) else { return 1 };
+            match &item.container_template {
+                Some(template) => item.child_ids.len().max(1) * template.root.node_count(),
+                None => item
+                    .parent_work_item_id
+                    .as_deref()
+                    .and_then(|parent| snapshot.item(parent))
+                    .and_then(|parent| parent.container_template.as_ref())
+                    .map_or(1, |template| template.root.node_count()),
+            }
+        }
+        _ => 1,
+    }
+}
+
+impl ManagerGuard {
+    pub fn verify(
+        &self,
+        doc: &mast_doc::RegistryDoc,
+        space_id: &str,
+        synced: bool,
+    ) -> Result<usize, WorkOutlineError> {
+        let holds = doc.standing_role_of_chat(&self.chat_id).is_some_and(|role| {
+            role.role == mast_proto::StandingRoleKind::Manager && role.scope_item_id == self.root
+        });
+        if !holds {
+            return Err(WorkOutlineError::unauthorized(
+                "the manager role was handed off or ended; nothing was changed",
+            ));
+        }
+        let snapshot = doc.work_outline_snapshot(space_id, synced);
+        if snapshot.item(&self.root).is_none_or(|item| item.archived_at.is_some()) {
+            return Err(WorkOutlineError::unauthorized("the managed project no longer exists"));
+        }
+        let outside = |id: &String, strict: bool| {
+            snapshot.item(id).is_none()
+                || !snapshot.is_within(&self.root, id)
+                || (strict && *id == self.root)
+        };
+        if self.inside.iter().any(|id| outside(id, false)) || self.strict.iter().any(|id| outside(id, true)) {
+            return Err(WorkOutlineError::unauthorized(
+                "a target is no longer inside the managed project; nothing was changed",
+            ));
+        }
+        // A chat being reassigned must be in the project as of this write,
+        // not as of the call's opening snapshot.
+        let chat_outside = |chat: &String| {
+            !snapshot.assignments.iter().any(|a| {
+                a.chat_id == *chat
+                    && a.work_item_id.as_deref().is_some_and(|item| snapshot.is_within(&self.root, item))
+            })
+        };
+        if self.chats.iter().any(chat_outside) {
+            return Err(WorkOutlineError::unauthorized(
+                "a chat is no longer assigned inside the managed project; nothing was changed",
+            ));
+        }
+        if let Some(item) = &self.request_item
+            && (*item != self.root || snapshot.item(item).is_none())
+        {
+            return Err(WorkOutlineError::unauthorized("approval requests belong on the managed project item"));
+        }
+        // Last, because it reserves: the step may affect no more items than
+        // the batch has left. Reserved before the write (and persisted), so a
+        // crash after it can only over-count; the caller refunds if the write
+        // does not commit.
+        if self
+            .effects
+            .iter()
+            .any(|(op, item, expected)| !expected.is_empty() && step_plan_digest(&snapshot, op, item) != *expected)
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "the items this step affects changed since the preview; ask again. Nothing was changed",
+            ));
+        }
+        let charge: usize = self.effects.iter().map(|(op, item, _)| step_effects(&snapshot, op, item)).sum();
+        if let Some(budget) = &self.budget
+            && !budget.reserve(charge)
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "the change affects more items than were approved, or its budget could not be saved; ask again. Nothing was changed",
+            ));
+        }
+        Ok(charge)
+    }
+
+    /// Give back a reservation whose write did not commit.
+    pub fn refund(&self, charge: usize) {
+        if let Some(budget) = &self.budget {
+            budget.refund(charge);
+        }
+    }
+}
+
 impl WorkOutlineService {
     /// Workflow pack import previews, applies, undo and receipts.
     pub fn workflow_pack(&self) -> &crate::workflow_pack_service::WorkflowPackService {
@@ -347,6 +570,20 @@ impl WorkOutlineService {
         })
     }
 
+    /// The reply of `mutation` if an earlier attempt already committed it
+    /// (the same replay check `mutate_as` makes), else `None`.
+    pub fn committed_reply(&self, mutation: &WorkOutlineMutation) -> Option<WorkOutlineMutateReply> {
+        let operation_id = mutation.operation_id().to_owned();
+        let recent = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, reply)) = recent.get(&operation_id) {
+            return Some(reply.clone());
+        }
+        drop(recent);
+        self.workspace
+            .ledger_holds(&ledger_operation_key(&operation_id))
+            .then(|| replay_reply(mutation))
+    }
+
     /// Apply one mutation as `actor` (kill switch, replay ledger, then one
     /// registry write). Agent actors (`kind: agent`, `chatId` required) are
     /// authorized under the registry lock by the doc layer; user actors are
@@ -366,6 +603,18 @@ impl WorkOutlineService {
         mutation: &WorkOutlineMutation,
         actor: &WorkOutlineActor,
         admin_space: Option<&str>,
+    ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
+        self.mutate_guarded(mutation, actor, admin_space, None)
+    }
+
+    /// [`Self::mutate_as_admin`] with a manager guard that the registry
+    /// writer re-checks under its own lock, immediately before the write.
+    pub fn mutate_guarded(
+        &self,
+        mutation: &WorkOutlineMutation,
+        actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
+        guard: Option<&ManagerGuard>,
     ) -> Result<WorkOutlineMutateReply, WorkOutlineError> {
         if writes_disabled() {
             return Err(WorkOutlineError::new(
@@ -415,7 +664,7 @@ impl WorkOutlineService {
             }
             _ => self
                 .workspace
-                .work_outline_mutate_admin(mutation, actor, admin_space, &keys)?,
+                .work_outline_mutate_admin(mutation, actor, admin_space, guard, &keys)?,
         };
         recent.insert(operation_id, hash, reply.clone());
         Ok(reply)

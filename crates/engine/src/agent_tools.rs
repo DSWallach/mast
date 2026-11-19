@@ -164,6 +164,7 @@ impl AgentGrant {
             device_id: self.device_id.clone(),
             admin_space_id: None,
             personal_assistant: false,
+            manager_scope_item_id: None,
         }
     }
 }
@@ -191,6 +192,7 @@ pub struct AgentTokens {
     personal_assistant: crate::personal_assistant::PersonalAssistantStore,
     /// Per manager chat: whether the turn in flight owes a status revision.
     manager_status: crate::manager_status::StatusTracker,
+    pub(crate) pending_handoffs: crate::handoff_roles::PendingHandoffs,
 }
 
 impl AgentTokens {
@@ -739,6 +741,9 @@ struct CallContext<'a> {
     /// The chat is the user's personal assistant on this call: its chat
     /// tools reach every Space.
     personal_assistant: bool,
+    /// The project item whose subtree this chat manages on this call (it
+    /// holds a manager role right now), else `None`.
+    manager_scope: Option<String>,
     /// The chat's title, for attribution.
     chat_title: String,
 }
@@ -1081,6 +1086,7 @@ impl AgentToolsService {
         let mut origin = context.grant.origin();
         origin.admin_space_id = context.admin_space.clone();
         origin.personal_assistant = context.personal_assistant;
+        origin.manager_scope_item_id = context.manager_scope.clone();
         Ok(origin)
     }
 
@@ -1108,13 +1114,46 @@ impl AgentToolsService {
             .tokens
             .personal_assistant()
             .is_assistant(&chat, || self.workspace.read_chats().unwrap_or_default());
+        // One precedence rule: a grant the user made on purpose (a Space
+        // admin grant, or the personal-assistant designation) wins everywhere,
+        // so the manager's narrower reach never applies on top of it.
+        let manager_scope = if admin_space.is_some() || personal_assistant {
+            None
+        } else {
+            self.manager_scope_of(&chat)
+        };
         Ok(CallContext {
             grant,
             workspace: &self.workspace,
             admin_space,
             personal_assistant,
+            manager_scope,
             chat_title: chat.title.clone().unwrap_or_default(),
         })
+    }
+
+    /// The project a manager chat manages right now: its role's scope item,
+    /// only while the chat still holds that role (a superseded predecessor
+    /// and a chat with no role get none) and the item is a live item of the
+    /// chat's own Space. Read from the synced role record on every call, so a
+    /// hand-off moves the grant and a rotation ends it at once.
+    pub(crate) fn manager_scope_of(&self, chat: &mast_proto::Chat) -> Option<String> {
+        let role = self.workspace.standing_role_of_chat(&chat.id)?;
+        if role.role != mast_proto::StandingRoleKind::Manager {
+            return None;
+        }
+        let space = chat.space_id.as_deref()?;
+        let snapshot = self.work_outline.snapshot(space);
+        snapshot
+            .item(&role.scope_item_id)
+            .filter(|item| item.archived_at.is_none())
+            .map(|item| item.id.clone())
+    }
+
+    /// [`Self::manager_scope_of`] for the chat with this id, read now.
+    pub(crate) fn manager_scope_now(&self, chat_id: &str) -> Option<String> {
+        let chat = self.workspace.chat(chat_id).ok().flatten()?;
+        self.manager_scope_of(&chat)
     }
 
     /// `AgentToolCall`: authenticate, authorize, and run one tool.
@@ -1255,10 +1294,21 @@ impl AgentToolsService {
         context: &CallContext,
         mutation: &WorkOutlineMutation,
     ) -> Result<WorkOutlineMutateReply, AgentToolError> {
+        self.apply_scoped(context, mutation, context.admin_space.as_deref(), None)
+    }
+
+    /// [`Self::apply`] with `admin_space` in force. Only `work_outline_admin`
+    /// passes a Space the chat has no admin grant for, after it has confined
+    /// every step to the manager's project.
+    fn apply_scoped(
+        &self,
+        context: &CallContext,
+        mutation: &WorkOutlineMutation,
+        admin_space: Option<&str>,
+        guard: Option<&crate::work_outline::ManagerGuard>,
+    ) -> Result<WorkOutlineMutateReply, AgentToolError> {
         let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
-        Ok(self
-            .work_outline
-            .mutate_as_admin(mutation, &actor, context.admin_space.as_deref())?)
+        Ok(self.work_outline.mutate_guarded(mutation, &actor, admin_space, guard)?)
     }
 
     fn resolve_work_item_id(&self, context: &CallContext, id: &str) -> Result<String, AgentToolError> {
@@ -2190,7 +2240,38 @@ impl AgentToolsService {
             handoff_sources.push(source.clone());
             cursor = source;
         }
-        json!({ "chatIds": chat_ids, "handoffSourceChatIds": handoff_sources })
+        json!({
+            "chatIds": chat_ids,
+            "handoffSourceChatIds": handoff_sources,
+            "managerChatIds": self.manager_scope_chats(context),
+        })
+    }
+
+    /// Every chat assigned inside the caller's managed project, or that held a
+    /// standing role scoped inside it (live or archived, never the caller), or none when the caller manages nothing.
+    pub(crate) fn manager_scope_chats(&self, context: &CallContext) -> Vec<String> {
+        let Some(root) = context.manager_scope.as_deref() else {
+            return Vec::new();
+        };
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let mut chats: Vec<String> = snapshot
+            .assignments
+            .iter()
+            .filter(|a| a.work_item_id.as_deref().is_some_and(|item| snapshot.is_within(root, item)))
+            .map(|a| a.chat_id.clone())
+            .collect();
+        // Every chat that held a role scoped inside the project, so the
+        // manager's own predecessors stay readable (they are archived and
+        // may no longer be assigned).
+        for role in self.workspace.standing_roles() {
+            if snapshot.is_within(root, &role.scope_item_id) {
+                chats.extend(role.chain.iter().cloned());
+            }
+        }
+        chats.retain(|id| *id != context.grant.chat_id);
+        chats.sort();
+        chats.dedup();
+        chats
     }
 
     fn answer_user_action_request(

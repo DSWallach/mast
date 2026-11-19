@@ -1964,6 +1964,18 @@ impl RegistryDoc {
                         "Agents may only raise requests from their own Chat",
                     ));
                 }
+                // A manager's guarded bulk approval sits on its project item,
+                // which can be above the manager chat's own item. The engine
+                // sets this for exactly that write, after re-checking the
+                // holder and the item under this lock.
+                if self.manager_request_item.as_deref() == Some(p.work_item_id.as_str()) {
+                    return match self.live_item(&p.work_item_id) {
+                        Ok(item) if item.space_id != space => Err(unauthorized(
+                            "Agents may only raise requests on an item of their Space",
+                        )),
+                        _ => Ok(()),
+                    };
+                }
                 if require_assigned()? != p.work_item_id {
                     return Err(unauthorized(
                         "Agents may only raise requests on their own work item",

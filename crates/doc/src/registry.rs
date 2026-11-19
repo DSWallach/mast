@@ -42,6 +42,8 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+
+type RegistryUpdate = (&'static str, String, OpKind, BTreeMap<String, Value>);
 pub mod artifacts;
 mod chat_diff_targets;
 mod diff_review;
@@ -448,6 +450,10 @@ pub struct RegistryDoc {
     /// `set_admin_scope`): the Space the calling agent administers. Never
     /// persisted, never read from a wire value.
     admin_space: Option<String>,
+    /// Set only for the span of one guarded manager write (see
+    /// `with_manager_request_item`): the project item a bulk approval
+    /// request may be raised on. Never persisted or read from the wire.
+    manager_request_item: Option<String>,
 }
 
 impl RegistryDoc {
@@ -457,6 +463,16 @@ impl RegistryDoc {
         self.admin_space = space_id.map(str::to_owned);
         let result = f(self);
         self.admin_space = None;
+        result
+    }
+
+    /// Run `f` with a manager's project item allowed as the target of one
+    /// bulk approval request (the engine passes it only after re-checking
+    /// the holder under the registry lock), then clear it.
+    pub fn with_manager_request_item<R>(&mut self, item: Option<&str>, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.manager_request_item = item.map(str::to_owned);
+        let result = f(self);
+        self.manager_request_item = None;
         result
     }
 
@@ -473,6 +489,7 @@ impl RegistryDoc {
             all_kinds_generation: 0,
             batches_written: 0,
             admin_space: None,
+            manager_request_item: None,
         }
     }
 

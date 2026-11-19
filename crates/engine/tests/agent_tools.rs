@@ -1346,6 +1346,248 @@ async fn user_hand_off_rpc_transfers_workers_and_replays() {
     assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_moves_pin_and_roles_with_either_archive_choice() {
+    use mast_proto::{SidebarPinChange, StandingRoleKind};
+    for archive in [false, true] {
+        let (rig, item) = role_rig("handoff-preferences").await;
+        let workspace = &rig.core.workspace;
+        let tokens = rig.core.sessions.agent_tokens();
+        let grant = tokens.admin().grant(CHAT, SPACE, Some(600), true);
+        let assistant = tokens
+            .personal_assistant()
+            .set(&workspace.chat(CHAT).unwrap().unwrap());
+        let pins = || workspace.sidebar_preferences_snapshot().pinned_session_ids;
+        let pin = |id: &str| {
+            workspace
+                .change_sidebar_pin(&SidebarPinChange::Pin {
+                    session_id: id.into(),
+                    before: None,
+                    after: None,
+                })
+                .unwrap()
+        };
+        pin(OTHER_CHAT);
+        pin(CHAT);
+        let original = pins();
+
+        let params = json!({
+            "chatId": CHAT, "summary": "Continue as manager", "operationId": "handoff-preferences",
+            "archive": archive,
+        });
+        let reply = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .await
+            .unwrap();
+        let successor = reply["chatId"].as_str().unwrap();
+        assert_eq!(workspace.chat(CHAT).unwrap().unwrap().archived, archive);
+        assert_eq!(
+            workspace
+                .standing_role_chat(StandingRoleKind::Manager, &item)
+                .as_deref(),
+            Some(successor)
+        );
+        assert_eq!(
+            pins(),
+            original
+                .into_iter()
+                .map(|id| if id == CHAT { successor.into() } else { id })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor.into(),
+                ..assistant
+            })
+        );
+        assert!(tokens.admin().live(CHAT).is_none());
+        assert_eq!(
+            tokens.admin().live(successor),
+            Some(mast_proto::AdminGrant {
+                chat_id: successor.into(),
+                ..grant
+            })
+        );
+        for (chat_id, is_successor) in [(CHAT, false), (successor, true)] {
+            let lease = tokens.mint(chat_id, "handoff-auth", SPACE, &rig.core.device_id);
+            let origin = rig
+                .client
+                .call(
+                    mast_proto::agent_tools::AUTHENTICATE_METHOD,
+                    json!({"token": lease.token()}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                origin["personalAssistant"].as_bool().unwrap_or(false),
+                is_successor
+            );
+            assert_eq!(
+                origin["adminSpaceId"].as_str(),
+                is_successor.then_some(SPACE)
+            );
+        }
+
+        // Replays preserve edits made after the original hand-off.
+        workspace.set_chat_archived(CHAT, false).unwrap();
+        pin(CHAT);
+        tokens
+            .personal_assistant()
+            .set(&workspace.chat(CHAT).unwrap().unwrap());
+        let renewed = tokens.admin().grant(CHAT, SPACE, None, false);
+        let edited_pins = pins();
+        let retry = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap();
+        assert_eq!(retry["chatId"], successor);
+        assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+        assert_eq!(pins(), edited_pins);
+        assert_eq!(tokens.admin().live(CHAT), Some(renewed));
+        assert_eq!(tokens.personal_assistant().get().unwrap().chat_id, CHAT);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_retries_a_failed_role_write_after_restart() {
+    for (file_name, error_text, admin_moved) in [
+        (
+            "admin-grants.json",
+            "Could not save the admin hand-off",
+            false,
+        ),
+        (
+            "personal-assistant.json",
+            "Could not save the personal assistant hand-off",
+            true,
+        ),
+    ] {
+        let rig = rig().await;
+        let data = std::fs::canonicalize(rig._tmp.path()).unwrap().join("data");
+        let tokens = rig.core.sessions.agent_tokens();
+        let source = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+        let grant = tokens.admin().grant(CHAT, SPACE, None, true);
+        let assistant = tokens.personal_assistant().set(&source);
+        let role_file = data.join(file_name);
+        let backup = role_file.with_extension("backup");
+        std::fs::rename(&role_file, &backup).unwrap();
+        std::fs::create_dir(&role_file).unwrap();
+
+        let params = json!({
+            "chatId": CHAT, "summary": "Continue with the same roles",
+            "operationId": "handoff-role-write", "archive": true,
+        });
+        let successor = derive_id("handoff-role-write", roles::CHAT);
+        let err = rig
+            .client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(error_text), "{err}");
+        assert_eq!(tokens.admin().live(CHAT).is_none(), admin_moved);
+        assert_eq!(tokens.admin().live(&successor).is_some(), admin_moved);
+        assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
+
+        // A committed store must keep later edits even while the other
+        // store's original transfer still needs to be retried.
+        let renewed = admin_moved.then(|| tokens.admin().grant(CHAT, SPACE, None, false));
+        drop(tokens);
+        let Rig {
+            _tmp,
+            core,
+            client,
+            service,
+            ..
+        } = rig;
+        drop(client);
+        drop(service);
+        core.shutdown().await;
+        drop(core);
+        std::fs::remove_dir(&role_file).unwrap();
+        std::fs::rename(backup, role_file).unwrap();
+
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(GatedHarness::default()));
+        let restarted =
+            EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
+        // A new client needs neither the summary nor the old operation ID.
+        let tokens = restarted.sessions.agent_tokens();
+        assert!(restarted.workspace.chat(CHAT).unwrap().unwrap().archived);
+        assert_eq!(tokens.admin().live(CHAT), renewed);
+        assert_eq!(
+            tokens.admin().live(&successor),
+            Some(mast_proto::AdminGrant {
+                chat_id: successor.clone(),
+                ..grant
+            })
+        );
+        assert_eq!(
+            tokens.personal_assistant().get(),
+            Some(mast_proto::PersonalAssistant {
+                chat_id: successor,
+                ..assistant
+            })
+        );
+        restarted.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_hand_off_archives_plain_chat_without_assigning_roles_or_pin() {
+    let rig = rig().await;
+    let workspace = &rig.core.workspace;
+    let tokens = rig.core.sessions.agent_tokens();
+    let other = tokens
+        .personal_assistant()
+        .set(&workspace.chat(OTHER_CHAT).unwrap().unwrap());
+    tokens.admin().grant(CHAT, SPACE, Some(1), false);
+    tokens.admin().advance_clock_ms(1_000);
+
+    let params = json!({
+        "chatId": CHAT, "summary": "Continue plainly", "operationId": "plain-archive", "archive": true,
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
+    assert!(
+        workspace
+            .sidebar_preferences_snapshot()
+            .pinned_session_ids
+            .is_empty()
+    );
+    assert!(tokens.admin().live(successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(other));
+    let mut changed = params.clone();
+    changed["archive"] = json!(false);
+    let conflict = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, changed)
+        .await
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("operationConflict"),
+        "{conflict}"
+    );
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor);
+    let refused = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": CHAT, "summary": "Another chat", "operationId": "archived-new-operation", "archive": false,
+    })).await;
+    assert!(refused.is_err());
+}
+
 async fn role_rig(prefix: &str) -> (Rig, String) {
     role_rig_in(rig().await, prefix).await
 }
@@ -1419,7 +1661,19 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     use mast_proto::StandingRoleKind;
     let (rig, item) = role_rig("role-crash").await;
     let workspace = &rig.core.workspace;
-    let params = json!({"chatId": CHAT, "summary":"Crash-safe hand-off", "operationId":"crash-a"});
+    let tokens = rig.core.sessions.agent_tokens();
+    let grant = tokens.admin().grant(CHAT, SPACE, None, false);
+    let assistant = tokens
+        .personal_assistant()
+        .set(&workspace.chat(CHAT).unwrap().unwrap());
+    workspace
+        .change_sidebar_pin(&mast_proto::SidebarPinChange::Pin {
+            session_id: CHAT.into(),
+            before: None,
+            after: None,
+        })
+        .unwrap();
+    let params = json!({"chatId": CHAT, "summary":"Crash-safe hand-off", "operationId":"crash-a", "archive":true});
     rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
     assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.is_err());
 
@@ -1427,6 +1681,10 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     // and its reservation names the successor.
     let pending = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).expect("reservation persisted");
     let successor = pending.to_chat_id.clone();
+    assert_eq!(tokens.admin().live(CHAT), Some(grant));
+    assert!(tokens.admin().live(&successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant));
+    assert_eq!(workspace.sidebar_preferences_snapshot().pinned_session_ids, [CHAT]);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(CHAT));
     assert_eq!(workspace.chat("role-crash-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
     assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
@@ -1439,9 +1697,33 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
     assert!(other.is_err());
     assert_eq!(workspace.read_chats().unwrap().len(), chats);
 
+    let mut changed = params.clone();
+    changed["archive"] = json!(false);
+    let conflict = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, changed)
+        .await
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("operationConflict"),
+        "{conflict}"
+    );
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+
     // The same operation finishes: one successor, role moved, reservation cleared.
     let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
     assert_eq!(reply["chatId"], successor.as_str());
+    assert!(tokens.admin().live(CHAT).is_none());
+    assert!(tokens.admin().live(&successor).is_some());
+    assert_eq!(
+        tokens.personal_assistant().get().unwrap().chat_id,
+        successor
+    );
+    assert_eq!(
+        workspace.sidebar_preferences_snapshot().pinned_session_ids,
+        [successor.as_str()]
+    );
+    assert!(workspace.chat(CHAT).unwrap().unwrap().archived);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
     assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
     assert!(workspace.chat(CHAT).unwrap().unwrap().is_standing_role_predecessor());
@@ -1459,16 +1741,39 @@ async fn an_interrupted_hand_off_resumes_under_a_new_operation_id_with_the_same_
     let (rig, item) = role_rig("role-resume").await;
     let workspace = &rig.core.workspace;
     rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
-    let first = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-a"});
+    let first = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-a", "archive": false,
+    });
     assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, first).await.is_err());
     let successor = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id;
     let chats = workspace.read_chats().unwrap().len();
 
+    let changed = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-changed", "archive": true,
+    });
+    assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, changed).await.is_err());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats);
+
     // A reopened dialog or a restarted Mast sends a fresh operation id, same inputs.
-    let again = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-fresh-id"});
-    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, again).await.unwrap();
+    let again = json!({
+        "chatId": CHAT, "summary": "Resume me", "operationId": "resume-fresh-id", "archive": false,
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again.clone())
+        .await
+        .unwrap();
     assert_eq!(reply["chatId"], successor.as_str());
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    let row = workspace.registry_row(mast_doc::KIND_CHATS, &successor).unwrap();
+    assert_eq!(row.fields["userHandOffRetryChatIds"], json!([derive_id("resume-fresh-id", roles::CHAT)]));
     assert_eq!(workspace.read_chats().unwrap().len(), chats, "no second successor");
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
     assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
 }
@@ -1510,9 +1815,16 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
         "request":"Review the result", "idempotencyKey":"review-result"
     })).await.unwrap();
     let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
-    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium"});
+    let grant = tokens.admin().grant(CHAT, SPACE, None, false);
+    let assistant = tokens
+        .personal_assistant()
+        .set(&rig.core.workspace.chat(CHAT).unwrap().unwrap());
+    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium", "archive":true});
     let reply = tool(&rig, lease.token(), "hand_off_orchestrator", args.clone()).await.unwrap();
     let successor = reply["chatId"].as_str().unwrap();
+    assert_eq!(tokens.admin().live(CHAT), Some(grant));
+    assert!(tokens.admin().live(successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant));
     let config = rig.core.workspace.chat(successor).unwrap().unwrap().config.unwrap();
     assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("mock-1"));
@@ -4105,7 +4417,8 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let with_token = |key: &str, token: &str| {
         json!({ "idempotencyKey": key, "steps": steps, "confirmToken": token })
     };
-    let err = admin(&rig, &token, with_token("b2", &confirm)).await.unwrap_err();
+    // The token belongs to the execution that previewed it (same key, same steps).
+    let err = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap_err();
     assert!(err.contains("not approved"), "{err}");
     // The agent (admin or not) cannot resolve it itself.
     let err = tool(&rig, &token, "work_outline_resolve_user_action_request",
@@ -4114,24 +4427,26 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let err = admin(&rig, &token, json!({ "idempotencyKey": "b3",
         "steps": [{ "op": "resolve_request", "requestId": request_id }] })).await.unwrap_err();
     assert!(err.contains("nauthorized") || err.contains("approve"), "{err}");
-    // Different steps than the user saw: refused.
+    // Different steps than the user saw: a different batch, refused.
     let mut other = steps.clone();
     other[0]["title"] = json!("Sneaky");
-    let err = admin(&rig, &token, json!({ "idempotencyKey": "b4", "steps": other,
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b1", "steps": other,
         "confirmToken": confirm })).await.unwrap_err();
-    assert!(err.contains("differ"), "{err}");
+    assert!(err.contains("another batch"), "{err}");
 
     // The user resolves it.
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({
         "op": "resolveUserActionRequest", "userActionRequestId": request_id,
         "outcome": "approved", "via": "card", "operationId": "user-approves" })).await.unwrap();
-    let done = admin(&rig, &token, with_token("b5", &confirm)).await.unwrap();
+    let done = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap();
     assert_eq!(done["applied"], 11, "{done}");
     assert!(ids.iter().all(|id| title_of(&rig, id) == "Renamed"));
 
-    // One use only.
+    // One batch only: another execution cannot use it, and the same one replays.
     let err = admin(&rig, &token, with_token("b6", &confirm)).await.unwrap_err();
-    assert!(err.contains("already used"), "{err}");
+    assert!(err.contains("another batch"), "{err}");
+    let again = admin(&rig, &token, with_token("b1", &confirm)).await.unwrap();
+    assert_eq!(again["applied"], 11, "a retry of the same batch replays: {again}");
 
     // Expiry of an unused token.
     let steps2: Vec<Value> = ids.iter().map(|id| json!({ "op": "rename", "itemId": id, "title": "Again" })).collect();
@@ -4139,7 +4454,7 @@ async fn bulk_changes_need_the_users_own_approval_with_a_single_use_token() {
     let t2 = p2["confirmToken"].as_str().unwrap().to_owned();
     tokens.admin().advance_clock_ms(31 * 60 * 1000);
     grant(&rig, CHAT, None, false).await;
-    let err = admin(&rig, &token, json!({ "idempotencyKey": "b8", "steps": steps2,
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "b7", "steps": steps2,
         "confirmToken": t2 })).await.unwrap_err();
     assert!(err.contains("expired"), "{err}");
 
@@ -4559,7 +4874,7 @@ async fn bulk_change_rejects_non_approval_resolutions() {
         .unwrap();
         let request_id = preview["requestId"].as_str().unwrap();
         rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":request_id, "outcome":outcome, "note":"no", "via":"card", "operationId":"user-declines"})).await.unwrap();
-        let err = admin(&rig, &token, json!({"idempotencyKey":"apply", "steps":steps, "confirmToken":preview["confirmToken"]})).await.unwrap_err();
+        let err = admin(&rig, &token, json!({"idempotencyKey":"preview", "steps":steps, "confirmToken":preview["confirmToken"]})).await.unwrap_err();
         assert!(err.contains("not approved"), "{outcome:?}: {err}");
         assert!(ids.iter().all(|id| title_of(&rig, id) != "Changed"));
     }
@@ -5704,4 +6019,930 @@ async fn a_chat_that_is_not_a_manager_is_never_reminded() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
     assert_eq!(nudges(&rig), 0);
+const HAND_CHAT: &str = "chat-hand-started";
+const OUTSIDE_CHAT: &str = "chat-other-project";
+
+/// CHAT holds the manager role of the project; HAND_CHAT was started by hand
+/// on a ticket inside it and OUTSIDE_CHAT on a ticket of the other project.
+async fn manager_rig() -> (Rig, ProjectRig) {
+    use mast_proto::StandingRoleKind;
+    let rig = rig().await;
+    let p = project_rig(&rig).await;
+    assign_chat(&rig, "mg-manager", CHAT, &p.planning).await;
+    for (chat, item) in [(HAND_CHAT, &p.ticket), (OUTSIDE_CHAT, &p.other_tickets)] {
+        rig.client
+            .call(
+                methods::MUTATE,
+                json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE, "deviceId": rig.core.device_id }),
+            )
+            .await
+            .unwrap();
+        assign_chat(&rig, &format!("mg-{chat}"), chat, item).await;
+    }
+    rig.core.workspace.adopt_standing_role(StandingRoleKind::Manager, &p.project, CHAT, &[]).unwrap();
+    (rig, p)
+}
+
+fn mint_token(rig: &Rig, chat: &str) -> (mast_engine::agent_tools::AgentTokenLease, String) {
+    let lease = rig.core.sessions.agent_tokens().mint(chat, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    (lease, token)
+}
+
+fn ids(value: &Value) -> Vec<String> {
+    value.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_reaches_the_chats_of_its_project_and_no_others() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    assert_eq!(auth_origin(&rig, &token).await["managerScopeItemId"], p.project.as_str());
+
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    let managed = ids(&scope["managerChatIds"]);
+    assert!(managed.contains(&HAND_CHAT.to_owned()), "{managed:?}");
+    assert!(!managed.contains(&OUTSIDE_CHAT.to_owned()) && !managed.contains(&CHAT.to_owned()), "{managed:?}");
+
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get(HAND_CHAT).is_some() && info["chats"].get(OUTSIDE_CHAT).is_none(), "{info}");
+    let refused = tool(&rig, &token, "chat_archive", json!({ "chatId": OUTSIDE_CHAT })).await.unwrap_err();
+    assert!(refused.contains("can only archive"), "{refused}");
+    // In scope: the finished-worker check applies, not the scope refusal.
+    match tool(&rig, &token, "chat_archive", json!({ "chatId": HAND_CHAT })).await {
+        Ok(_) => {}
+        Err(e) => assert!(e.contains("not archived:"), "{e}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_with_no_manager_role_gets_no_project_reach() {
+    let (rig, _p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, OTHER_CHAT);
+    assert!(auth_origin(&rig, &token).await.get("managerScopeItemId").is_none());
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&scope["managerChatIds"]).is_empty());
+    let err = admin(&rig, &token, json!({ "read": true })).await.unwrap_err();
+    assert!(err.contains("does not hold a project manager role"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_edits_only_its_projects_outline() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let step = |op: Value| json!({ "idempotencyKey": format!("mg-{}", op), "steps": [op] });
+
+    admin(&rig, &token, step(json!({ "op": "rename", "itemId": p.ticket, "title": "Renamed" }))).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "Renamed");
+    // A ref created inside the project is inside.
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-create", "steps": [
+        { "op": "create", "parentId": p.project, "title": "New", "ref": "n" },
+        { "op": "rename", "itemId": "$n", "title": "New 2" },
+    ]})).await.unwrap();
+
+    for (what, op) in [
+        ("rename outside", json!({ "op": "rename", "itemId": p.other_tickets, "title": "X" })),
+        ("rename root item", json!({ "op": "rename", "itemId": p.bystander, "title": "X" })),
+        ("create at the root", json!({ "op": "create", "title": "X" })),
+        ("create elsewhere", json!({ "op": "create", "parentId": p.other, "title": "X" })),
+        ("move out", json!({ "op": "move", "itemId": p.ticket, "parentId": p.other })),
+        ("move to the root", json!({ "op": "move", "itemId": p.ticket, "parentId": null })),
+        ("archive the project", json!({ "op": "archive", "itemId": p.project })),
+        ("space-wide instruction", json!({ "op": "instruction_add", "itemId": null, "text": "x" })),
+        ("steal a chat", json!({ "op": "assign_chat", "chatId": OUTSIDE_CHAT, "itemId": p.ticket })),
+        ("accept a proposal", json!({ "op": "proposal_accept", "proposalId": "abcdef123" })),
+    ] {
+        let err = admin(&rig, &token, step(op)).await.unwrap_err();
+        assert!(!err.is_empty(), "{what}");
+    }
+    assert_eq!(title_of(&rig, &p.other_tickets), "Other tickets");
+    assert_eq!(title_of(&rig, &p.bystander), "Bystander");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_none());
+    let err = admin(&rig, &token, step(json!({ "op": "rename", "itemId": p.other_tickets, "title": "X" }))).await.unwrap_err();
+    assert!(err.contains("outside your project"), "{err}");
+
+    let view = admin(&rig, &token, json!({ "read": true })).await.unwrap();
+    assert_eq!(view["roots"].as_array().unwrap().len(), 1);
+    assert_eq!(view["roots"][0]["id"], p.project.as_str());
+    assert!(!view.to_string().contains("Bystander"), "{view}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_bulk_change_still_needs_the_users_approval() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let steps: Vec<Value> = (0..11)
+        .map(|i| json!({ "op": "rename", "itemId": p.ticket, "title": format!("Bulk {i}") }))
+        .collect();
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "mg-bulk", "steps": steps })).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert_eq!(title_of(&rig, &p.ticket), "Ticket 1");
+    assert!(snapshot(&rig).user_action_requests.iter().any(|r| r.text.contains("by project manager")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_grant_moves_to_the_successor_and_leaves_the_predecessor() {
+    let (rig, p) = manager_rig().await;
+    let (_old_lease, old) = mint_token(&rig, CHAT);
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": CHAT, "summary": "Continue", "operationId": "mg-handoff" }))
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    let (_new_lease, new) = mint_token(&rig, &successor);
+
+    // The predecessor keeps its (still valid) token but not the reach.
+    assert!(auth_origin(&rig, &old).await.get("managerScopeItemId").is_none());
+    let err = admin(&rig, &old, json!({ "read": true })).await.unwrap_err();
+    assert!(err.contains("does not hold a project manager role"), "{err}");
+    let old_scope = tool(&rig, &old, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&old_scope["managerChatIds"]).is_empty());
+
+    assert_eq!(auth_origin(&rig, &new).await["managerScopeItemId"], p.project.as_str());
+    let new_scope = tool(&rig, &new, "chat_project_scope_chats", json!({})).await.unwrap();
+    let managed = ids(&new_scope["managerChatIds"]);
+    assert!(managed.contains(&HAND_CHAT.to_owned()));
+    // The archived predecessor stays reachable through its role's chain.
+    assert!(managed.contains(&CHAT.to_owned()), "{managed:?}");
+    admin(&rig, &new, json!({ "idempotencyKey": "mg-after", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "After hand-off" }
+    ]})).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "After hand-off");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_child_filed_in_another_project_is_not_reachable() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    rig.client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createChat", "chatId": "chat-moved-child", "spaceId": SPACE,
+                    "deviceId": rig.core.device_id, "parentChatId": CHAT }),
+        )
+        .await
+        .unwrap();
+    assign_chat(&rig, "mg-moved", "chat-moved-child", &p.other_tickets).await;
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(!ids(&scope["managerChatIds"]).contains(&"chat-moved-child".to_owned()));
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get("chat-moved-child").is_none(), "{info}");
+    let refused = tool(&rig, &token, "chat_archive", json!({ "chatId": "chat-moved-child" })).await.unwrap_err();
+    assert!(refused.contains("can only archive"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_writer_rechecks_the_manager_guard_under_its_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let archive = |op: &str, item: &str| {
+        WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: item.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = |chat: &str, inside: Vec<String>, strict: Vec<String>| ManagerGuard {
+        chat_id: chat.to_owned(),
+        root: p.project.clone(),
+        inside,
+        strict,
+        ..Default::default()
+    };
+    // A target that is outside the project (it moved out after the check).
+    let err = outline
+        .mutate_guarded(&archive("g-out", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![], vec![p.other_tickets.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    // The project item itself where a strict descendant is required.
+    let err = outline
+        .mutate_guarded(&archive("g-root", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![], vec![p.project.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer inside"), "{err:?}");
+    // A chat that does not hold the role (a predecessor or a role-less chat).
+    let err = outline
+        .mutate_guarded(&archive("g-holder", &p.ticket), &actor, Some(SPACE), Some(&guard(OTHER_CHAT, vec![], vec![p.ticket.clone()])))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("handed off or ended"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_none());
+    // The same write passes when the holder and the target are right.
+    outline
+        .mutate_guarded(&archive("g-ok", &p.ticket), &actor, Some(SPACE), Some(&guard(CHAT, vec![p.tickets.clone()], vec![p.ticket.clone()])))
+        .unwrap();
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_never_edits_the_project_item_but_adds_under_it() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for (what, op) in [
+        ("rename", json!({ "op": "rename", "itemId": p.project, "title": "X" })),
+        ("describe", json!({ "op": "describe", "itemId": p.project, "description": "X" })),
+        ("status", json!({ "op": "status", "itemId": p.project, "status": "completed" })),
+        ("destination", json!({ "op": "destination", "itemId": p.project, "destinationId": null })),
+        ("instruction", json!({ "op": "instruction_add", "itemId": p.project, "text": "x" })),
+        ("template", json!({ "op": "template_set", "itemId": p.project, "template": null })),
+    ] {
+        let err = admin(&rig, &token, json!({ "idempotencyKey": format!("mg-root-{what}"), "steps": [op] })).await.unwrap_err();
+        assert!(err.contains("project item itself"), "{what}: {err}");
+    }
+    assert_eq!(title_of(&rig, &p.project), "Project");
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-under-root", "steps": [
+        { "op": "create", "parentId": p.project, "title": "Added under the project" }
+    ]})).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_bulk_count_covers_a_cascading_archive_and_anchors_to_the_project() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("mg-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // One archive step, 12 items in its subtree: it needs approval.
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "mg-cascade", "steps": [
+        { "op": "archive", "itemId": p.tickets }
+    ]})).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // The request sits on the project item, not on wherever the manager chat is filed.
+    let request = snapshot(&rig).user_action_requests.iter().find(|r| r.text.contains("by project manager")).cloned().unwrap();
+    assert_eq!(request.work_item_id, p.project);
+    // Recent changes label the manager, not an admin grant.
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-label", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Labeled" }
+    ]})).await.unwrap();
+    let turns = rig.core.sessions.agent_tokens().admin().turns(Some(SPACE));
+    assert!(turns.iter().all(|t| t.label.starts_with("by project manager")), "{turns:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_guard_rechecks_chat_assignments_and_the_effect_budget_under_the_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let archive = |op: &str, item: &str| {
+        WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: item.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = ManagerGuard { chat_id: CHAT.into(), root: p.project.clone(), ..Default::default() };
+    // A chat moved out of the project since the opening snapshot.
+    let err = outline
+        .mutate_guarded(&archive("g2-chat", &p.ticket), &actor, Some(SPACE),
+            Some(&ManagerGuard { chats: vec![OUTSIDE_CHAT.into()], ..guard.clone() }))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer assigned"), "{err:?}");
+    // The subtree grew past what was approved: tickets now holds 1 + 11 items.
+    for i in 0..11 {
+        create_item(&rig, &format!("g2-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let err = outline
+        .mutate_guarded(&archive("g2-grew", &p.tickets), &actor, Some(SPACE),
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone(), String::new())], budget: Some(mast_engine::admin::BatchBudget::new(10)), ..guard.clone() }))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // A budget that covers it passes.
+    outline
+        .mutate_guarded(&archive("g2-ok", &p.tickets), &actor, Some(SPACE),
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone(), String::new())], budget: Some(mast_engine::admin::BatchBudget::new(13)), ..guard }))
+        .unwrap();
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_admin_grant_wins_over_the_manager_role_everywhere() {
+    let (rig, p) = manager_rig().await;
+    grant(&rig, CHAT, None, false).await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let origin = auth_origin(&rig, &token).await;
+    assert_eq!(origin["adminSpaceId"], SPACE);
+    assert!(origin.get("managerScopeItemId").is_none(), "{origin}");
+    // The manager's project list is empty, and the admin sees the whole Space.
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&scope["managerChatIds"]).is_empty());
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get(OUTSIDE_CHAT).is_some(), "admin reaches every chat: {info}");
+    let view = admin(&rig, &token, json!({ "read": true })).await.unwrap();
+    assert!(view.to_string().contains("Bystander"), "admin reads the whole Space: {view}");
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-admin-wins", "steps": [
+        { "op": "rename", "itemId": p.other_tickets, "title": "Admin renamed" }
+    ]})).await.unwrap();
+    assert_eq!(title_of(&rig, &p.other_tickets), "Admin renamed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_batch_budget_is_debited_under_the_lock_across_steps_and_retries() {
+    use mast_engine::admin::BatchBudget;
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let mut kids = Vec::new();
+    for i in 0..4 {
+        kids.push(create_item(&rig, &format!("bb-kid-{i}"), &format!("Budget kid {i}"), Some(&p.tickets)).await);
+    }
+    let budget = BatchBudget::new(3);
+    let step = |op: &str, kid: &str| {
+        let guard = ManagerGuard {
+            chat_id: CHAT.into(),
+            root: p.project.clone(),
+            effects: vec![("archive".into(), kid.to_owned(), String::new())],
+            budget: Some(budget.clone()),
+            ..Default::default()
+        };
+        let mutation = WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: kid.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        });
+        outline.mutate_guarded(&mutation, &actor, Some(SPACE), Some(&guard))
+    };
+    // Each committed step debits what it affected; the fourth would pass 3.
+    for (i, kid) in kids.iter().take(3).enumerate() {
+        step(&format!("bb-op-{i}"), kid).unwrap();
+    }
+    assert_eq!(budget.remaining(), 0);
+    let err = step("bb-op-3", &kids[3]).unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert!(snapshot(&rig).item(&kids[3]).unwrap().archived_at.is_none());
+    // A retry replays the committed step without charging it again.
+    step("bb-op-0", &kids[0]).unwrap();
+    assert_eq!(budget.remaining(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_whose_preview_grew_gets_its_own_approval_and_the_old_token_cannot_authorize_it() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("ap-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let first = admin(&rig, &token, json!({ "idempotencyKey": "ap-grow", "steps": steps })).await.unwrap();
+    assert_eq!(first["needsApproval"], true, "{first}");
+    assert_eq!(first["count"], 12);
+    // The tree grows, then the same steps are previewed again.
+    for i in 0..2 {
+        create_item(&rig, &format!("ap-more-{i}"), &format!("More {i}"), Some(&p.tickets)).await;
+    }
+    let second = admin(&rig, &token, json!({ "idempotencyKey": "ap-grow", "steps": steps })).await.unwrap();
+    assert_eq!(second["needsApproval"], true, "{second}");
+    assert_eq!(second["count"], 14);
+    assert_ne!(first["requestId"], second["requestId"], "a changed preview is a new request");
+    // The earlier token cannot authorize the larger batch.
+    let stale = admin(&rig, &token, json!({
+        "idempotencyKey": "ap-grow", "steps": steps, "confirmToken": first["confirmToken"]
+    })).await.unwrap_err();
+    assert!(stale.contains("preview changed"), "{stale}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_effects_counts_a_plain_create_as_one_and_an_archive_as_its_subtree() {
+    use mast_engine::work_outline::step_effects;
+    let (rig, p) = manager_rig().await;
+    // With no template on the parent a create is one item.
+    let snap = snapshot(&rig);
+    assert_eq!(step_effects(&snap, "create", &p.tickets), 1);
+    assert_eq!(step_effects(&snap, "rename", &p.ticket), 1);
+    assert_eq!(step_effects(&snap, "archive", &p.tickets), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_under_a_container_template_is_charged_its_whole_expansion() {
+    use mast_engine::admin::BatchBudget;
+    use mast_engine::work_outline::{ManagerGuard, step_effects};
+    use mast_proto::WorkOutlineMutation;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    // Every child of Tickets follows: the child itself plus Planning and Tickets (3 items).
+    admin(&rig, &token, json!({ "idempotencyKey": "tpl-set", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    assert_eq!(step_effects(&snapshot(&rig), "create", &p.tickets), 3);
+    // The preview counts the expansion: four creates are 12 items, over the
+    // threshold, though they are only four steps.
+    let steps: Vec<Value> = (0..4)
+        .map(|i| json!({ "op": "create", "parentId": p.tickets, "title": format!("Preview {i}") }))
+        .collect();
+    let preview = admin(&rig, &token, json!({ "idempotencyKey": "tpl-preview", "steps": steps })).await.unwrap();
+    assert_eq!(preview["needsApproval"], true, "{preview}");
+    assert_eq!(preview["count"], 12, "{preview}");
+
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let create = |op: &str, title: &str| -> WorkOutlineMutation {
+        serde_json::from_value(json!({
+            "op": "createWorkItem", "spaceId": SPACE, "title": title,
+            "parentWorkItemId": p.tickets, "operationId": op
+        })).unwrap()
+    };
+    let guard = |budget: &std::sync::Arc<BatchBudget>| ManagerGuard {
+        chat_id: CHAT.into(),
+        root: p.project.clone(),
+        inside: vec![p.tickets.clone()],
+        effects: vec![("create".into(), p.tickets.clone(), String::new())],
+        budget: Some(budget.clone()),
+        ..Default::default()
+    };
+    let children = |rig: &Rig| snapshot(rig).item(&p.tickets).unwrap().child_ids.len();
+    let before = children(&rig);
+
+    // An approval of 2 cannot cover a create that expands to 3: refused, nothing written.
+    let small = BatchBudget::new(2);
+    let err = outline
+        .mutate_guarded(&create("tpl-small", "Too big"), &actor, Some(SPACE), Some(&guard(&small)))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert_eq!(children(&rig), before, "no item was created");
+    assert_eq!(small.remaining(), 2, "a refused step charges nothing");
+
+    // A sufficient budget creates it and is charged the actual subtree size.
+    let enough = BatchBudget::new(5);
+    let reply = outline
+        .mutate_guarded(&create("tpl-ok", "Fits"), &actor, Some(SPACE), Some(&guard(&enough)))
+        .unwrap();
+    let created = reply.work_item_id.expect("the new item id");
+    let snap = snapshot(&rig);
+    fn subtree(snap: &WorkOutlineSnapshot, id: &str) -> usize {
+        1 + snap.item(id).unwrap().child_ids.iter().map(|c| subtree(snap, c)).sum::<usize>()
+    }
+    let actual = subtree(&snap, &created);
+    assert_eq!(actual, 3, "the child and its two template items");
+    assert_eq!(5 - enough.remaining(), actual, "charged exactly the subtree it created");
+}
+
+#[test]
+fn a_batch_budget_survives_a_restart_and_a_fresh_approval_adds_to_what_is_spent() {
+    use mast_engine::admin::AdminGrants;
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("admin-grants.json");
+    let first = AdminGrants::default();
+    first.set_store(store.clone());
+    let budget = first.batch_budget("exec-1", 10);
+    assert!(budget.reserve(4));
+    assert!(!budget.reserve(7), "only 6 are left");
+    assert_eq!(budget.remaining(), 6);
+    drop((budget, first));
+
+    // A restart keeps what the first attempt committed.
+    let second = AdminGrants::default();
+    second.set_store(store);
+    let budget = second.batch_budget("exec-1", 10);
+    assert_eq!(budget.remaining(), 6, "committed charges survive a restart");
+    // A fresh approval is for 12 more, on top of the 4 already spent.
+    budget.approve(12, &[]).unwrap();
+    assert_eq!(budget.remaining(), 12);
+    assert!(budget.reserve(12));
+    assert_eq!(budget.remaining(), 0);
+    // A reservation whose write did not commit is given back.
+    budget.refund(5);
+    assert_eq!(budget.remaining(), 5);
+}
+
+#[test]
+fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
+    use mast_engine::admin::AdminGrants;
+    let grants = AdminGrants::default();
+    let token = grants.open_approval("chat", "exec-a", "hash-a", "request-1", 12);
+    // The same count with a different resolved preview is not what was shown.
+    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b", None, &[]).unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+    // Another chat or another batch cannot use it.
+    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a", None, &[]).is_err());
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None, &[]).unwrap_err().contains("another batch"));
+    // The first claim is fresh; a retry of that batch resumes it even though its
+    // own earlier steps moved the preview; no other batch can take it over.
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a", None, &[]).unwrap(), ("request-1".into(), 12, true));
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved", None, &[]).unwrap(), ("request-1".into(), 12, false));
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None, &[]).is_err());
+
+    // Racing claims from many batches: exactly one gets it.
+    let token = grants.open_approval("chat", "exec-0", "hash", "request-2", 11);
+    let wins = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let (grants, token) = (&grants, &token);
+                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash", None, &[]).is_ok())
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
+    });
+    assert_eq!(wins, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_is_priced_in_order_before_its_first_write() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    // Priced against the opening tree this is 1 + 1 + 4 = 6 items. In order, the
+    // template set by step 2 makes each later create expand to 3: 1 + 1 + 12.
+    let mut steps = vec![
+        json!({ "op": "create", "parentId": p.project, "title": "Boxed", "ref": "b" }),
+        json!({ "op": "template_set", "itemId": "$b",
+                "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } } }),
+    ];
+    for i in 0..4 {
+        steps.push(json!({ "op": "create", "parentId": "$b", "title": format!("Box item {i}") }));
+    }
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "seq-1", "steps": steps })).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert_eq!(reply["count"], 14, "{reply}");
+    assert!(
+        !snapshot(&rig).items.iter().any(|i| i.title == "Boxed"),
+        "nothing was written before approval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_distinct_execution_of_the_same_steps_gets_its_own_approval_and_a_committed_retry_replays() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("ex-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let one = admin(&rig, &token, json!({ "idempotencyKey": "exec-one", "steps": steps })).await.unwrap();
+    let two = admin(&rig, &token, json!({ "idempotencyKey": "exec-two", "steps": steps })).await.unwrap();
+    assert_ne!(one["requestId"], two["requestId"], "each execution asks on its own");
+    // One execution's token cannot authorize another.
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "exec-two", "steps": steps, "confirmToken": one["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("another batch"), "{err}");
+
+    // A committed batch retried with the same key replays instead of charging again.
+    let rename = json!([{ "op": "rename", "itemId": p.ticket, "title": "Once" }]);
+    admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
+    admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "Once");
+}
+
+async fn user_approves(rig: &Rig, request_id: &str, operation: &str) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "resolveUserActionRequest", "userActionRequestId": request_id,
+                    "outcome": "approved", "via": "card", "operationId": operation }),
+        )
+        .await
+        .unwrap();
+}
+
+/// The execution key `work_outline_admin` derives for plain (ungrouped) steps.
+fn exec_key_of(chat: &str, key: &str, steps: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let actions: Vec<serde_json::Map<String, Value>> =
+        steps.as_array().unwrap().iter().map(|s| s.as_object().unwrap().clone()).collect();
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&actions).unwrap()));
+    format!("{chat}:{key}:{}", &hash[..16])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_batch_fails_closed_when_its_budget_cannot_be_saved_or_proven() {
+    // The budget cannot be written: the step is refused before it writes.
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let data = std::fs::canonicalize(rig._tmp.path()).unwrap().join("data");
+    std::fs::create_dir_all(data.join("admin-batch-budgets.json")).unwrap();
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "fc-store", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Never written" }
+    ]})).await.unwrap_err();
+    assert!(err.contains("budget could not be saved"), "{err}");
+    assert_eq!(title_of(&rig, &p.ticket), "Ticket 1", "nothing was written");
+
+    // A batch whose earlier steps already committed, with no budget record to
+    // prove what they spent, is not started over.
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let one = json!([{ "op": "rename", "itemId": p.ticket, "title": "FC one" }]);
+    admin(&rig, &token, json!({ "idempotencyKey": "fc-prefix", "steps": one })).await.unwrap();
+    let both = json!([
+        { "op": "rename", "itemId": p.ticket, "title": "FC one" },
+        { "op": "rename", "itemId": p.tickets, "title": "FC two" },
+    ]);
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "fc-prefix", "steps": both })).await.unwrap_err();
+    assert!(err.contains("budget record is gone"), "{err}");
+    assert_eq!(title_of(&rig, &p.tickets), "Tickets", "the unproven remainder did not run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_needs_fresh_approval_when_the_remaining_work_exceeds_the_remaining_allowance() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    admin(&rig, &token, json!({ "idempotencyKey": "ra-template", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    // Three creates under the template are 9 items: under the default of 10,
+    // but the batch has only 3 left of its allowance after 7 were spent.
+    let steps = json!([
+        { "op": "create", "parentId": p.tickets, "title": "RA one" },
+        { "op": "create", "parentId": p.tickets, "title": "RA two" },
+        { "op": "create", "parentId": p.tickets, "title": "RA three" },
+    ]);
+    let tokens = rig.core.sessions.agent_tokens();
+    let grants = tokens.admin();
+    let exec = exec_key_of(CHAT, "ra-batch", &steps);
+    assert!(grants.batch_budget(&exec, 10).reserve(7));
+    assert_eq!(grants.batch_remaining(&exec), Some(3));
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "ra-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "9 > the 3 that are left: {ask}");
+    assert_eq!(ask["count"], 9);
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "ra-approve").await;
+    let done = admin(&rig, &token, json!({
+        "idempotencyKey": "ra-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap();
+    assert_eq!(done["applied"], 3, "{done}");
+    // The approval was for 9 more on top of the 7 spent, and all of it was used.
+    assert_eq!(grants.batch_remaining(&exec), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_bound_to_what_the_user_was_shown_and_to_the_items_affected() {
+    use mast_engine::work_outline::{ManagerGuard, step_plan_digest};
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("pb-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let shown = admin(&rig, &token, json!({ "idempotencyKey": "pb-title", "steps": steps })).await.unwrap();
+    user_approves(&rig, shown["requestId"].as_str().unwrap(), "pb-approve-1").await;
+    // A displayed detail changes (the item's title), though the mutation and the
+    // count do not: the user approved something else.
+    admin(&rig, &token, json!({ "idempotencyKey": "pb-rename", "steps": [
+        { "op": "rename", "itemId": p.tickets, "title": "Renamed since shown" }
+    ]})).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "pb-title", "steps": steps, "confirmToken": shown["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+
+    // The same count over different items: a kid replaced by another.
+    let shown = admin(&rig, &token, json!({ "idempotencyKey": "pb-ids", "steps": steps })).await.unwrap();
+    user_approves(&rig, shown["requestId"].as_str().unwrap(), "pb-approve-2").await;
+    let first_kid = snapshot(&rig).item(&p.tickets).unwrap().child_ids.iter()
+        .find(|id| **id != p.ticket).cloned().unwrap();
+    admin(&rig, &token, json!({ "idempotencyKey": "pb-swap", "steps": [
+        { "op": "archive", "itemId": first_kid },
+        { "op": "create", "parentId": p.tickets, "title": "Replacement" },
+    ]})).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "pb-ids", "steps": steps, "confirmToken": shown["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+
+    // Under the writer's lock the affected items are checked again.
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let stale = step_plan_digest(&snapshot(&rig), "archive", &p.tickets);
+    create_item(&rig, "pb-late", "Added after", Some(&p.tickets)).await;
+    let guard = ManagerGuard {
+        chat_id: CHAT.into(),
+        root: p.project.clone(),
+        strict: vec![p.tickets.clone()],
+        effects: vec![("archive".into(), p.tickets.clone(), stale)],
+        budget: Some(mast_engine::admin::BatchBudget::new(100)),
+        ..Default::default()
+    };
+    let archive = WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+        work_item_id: p.tickets.clone(),
+        descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+        operation_id: "pb-guard".into(),
+    });
+    let err = outline.mutate_guarded(&archive, &actor, Some(SPACE), Some(&guard)).unwrap_err();
+    assert!(err.to_wire_message().contains("changed since the preview"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_claimed_only_when_the_approved_batch_runs_with_its_allowance() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("cl-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // One archive step that affects 12 items: over the default allowance of 10.
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "cl-batch", "steps": steps })).await.unwrap();
+    let confirm = ask["confirmToken"].clone();
+    let with_token = |extra: Value| {
+        let mut args = json!({ "idempotencyKey": "cl-batch", "steps": steps, "confirmToken": confirm });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    // Before the user approves, trying the token claims nothing.
+    let err = admin(&rig, &token, with_token(json!({}))).await.unwrap_err();
+    assert!(err.contains("not approved"), "{err}");
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "cl-approve").await;
+    // A dry run validates the approved batch and claims nothing either.
+    let dry = admin(&rig, &token, with_token(json!({ "dryRun": true }))).await.unwrap();
+    assert_eq!(dry["approved"], true, "{dry}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // The real run claims it and installs the allowance in one step, so the
+    // 12-item step is within budget and runs.
+    let done = admin(&rig, &token, with_token(json!({}))).await.unwrap();
+    assert_eq!(done["applied"], 1, "{done}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_retry_is_checked_against_the_plan_the_user_approved() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..2 {
+        create_item(&rig, &format!("pr-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // The first attempt was admitted (and, say, crashed) with this plan: archive
+    // the Tickets subtree, 4 items, well inside the allowance.
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let grants_owner = rig.core.sessions.agent_tokens();
+    let grants = grants_owner.admin();
+    let exec = exec_key_of(CHAT, "pr-batch", &steps);
+    let approved = step_plan_digest(&snapshot(&rig), "archive", &p.tickets);
+    grants.admit_batch(&exec, 10, &[approved], false).unwrap();
+    // The target changes before the retry; it still costs less than the allowance left.
+    create_item(&rig, "pr-late", "Added meanwhile", Some(&p.tickets)).await;
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "pr-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "the unfinished step no longer matches its plan: {ask}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none(), "nothing ran");
+    // Approving the changed plan replaces it, and the step then runs.
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "pr-approve").await;
+    let done = admin(&rig, &token, json!({
+        "idempotencyKey": "pr-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap();
+    assert_eq!(done["applied"], 1, "{done}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_size_template_substitution_changes_what_an_approval_is_bound_to() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let set = |key: &str, titles: [&str; 2]| {
+        json!({ "idempotencyKey": key, "steps": [{
+            "op": "template_set", "itemId": p.tickets,
+            "template": { "root": { "children": [{ "title": titles[0] }, { "title": titles[1] }] } }
+        }]})
+    };
+    admin(&rig, &token, set("ts-one", ["Planning", "Tickets"])).await.unwrap();
+    let before = snapshot(&rig);
+    let create_before = step_plan_digest(&before, "create", &p.tickets);
+    let apply_before = step_plan_digest(&before, "template_apply", &p.tickets);
+    // Same node count, different rules.
+    admin(&rig, &token, set("ts-two", ["Design", "Build"])).await.unwrap();
+    let after = snapshot(&rig);
+    assert_eq!(
+        mast_engine::work_outline::step_effects(&after, "create", &p.tickets),
+        mast_engine::work_outline::step_effects(&before, "create", &p.tickets),
+        "the count did not change"
+    );
+    assert_ne!(step_plan_digest(&after, "create", &p.tickets), create_before);
+    assert_ne!(step_plan_digest(&after, "template_apply", &p.tickets), apply_before);
+    // A row of the subtree replaced by another of the same size changes an apply too.
+    let apply_now = step_plan_digest(&after, "template_apply", &p.tickets);
+    admin(&rig, &token, json!({ "idempotencyKey": "ts-rename", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Same size, other title" }
+    ]})).await.unwrap();
+    assert_ne!(step_plan_digest(&snapshot(&rig), "template_apply", &p.tickets), apply_now);
+
+    // End to end: an approval for four creates is void once the rules are swapped
+    // for a same-size set.
+    let steps: Vec<Value> = (0..4)
+        .map(|i| json!({ "op": "create", "parentId": p.tickets, "title": format!("TS {i}") }))
+        .collect();
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "ts-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "{ask}");
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "ts-approve").await;
+    admin(&rig, &token, set("ts-three", ["Alpha", "Beta"])).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "ts-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+}
+
+#[test]
+fn batch_admission_fails_closed_on_an_unreadable_store_a_full_store_and_a_failed_claim() {
+    use mast_engine::admin::AdminGrants;
+    // An unreadable budget file: nothing is admitted and nothing spends.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("admin-batch-budgets.json"), b"not json").unwrap();
+    let broken = AdminGrants::default();
+    broken.set_store(dir.path().join("admin-grants.json"));
+    let err = broken.admit_batch("any", 10, &[], false).err().unwrap();
+    assert!(err.contains("unreadable"), "{err}");
+
+    // An unfinished batch is never forgotten, however many finished ones follow.
+    let grants = AdminGrants::default();
+    let keep = grants.admit_batch("unfinished", 10, &["plan".into()], false).unwrap();
+    for i in 0..700 {
+        grants.admit_batch(&format!("done-{i}"), 10, &[], false).unwrap().finish();
+    }
+    assert_eq!(grants.batch_state("unfinished").unwrap().1, vec!["plan".to_string()]);
+    assert!(keep.reserve(3));
+    // A batch that committed steps with no record is refused, not restarted.
+    let err = grants.admit_batch("forgotten", 10, &[], true).err().unwrap();
+    assert!(err.contains("budget record is gone"), "{err}");
+    // A store full of unfinished batches refuses new ones.
+    let full = AdminGrants::default();
+    for i in 0..4096 {
+        full.admit_batch(&format!("open-{i}"), 10, &[], false).unwrap();
+    }
+    assert!(full.admit_batch("one-too-many", 10, &[], false).err().unwrap().contains("too many"));
+
+    // A claim whose allowance cannot be saved claims nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let grants = AdminGrants::default();
+    grants.set_store(dir.path().join("admin-grants.json"));
+    let budget = grants.admit_batch("exec", 10, &[], false).unwrap();
+    let file = dir.path().join("admin-batch-budgets.json");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let token = grants.open_approval("chat", "exec", "hash", "request", 12);
+    let err = grants.claim_approval(&token, "chat", "exec", "hash", Some(&budget), &[]).unwrap_err();
+    assert!(err.contains("could not be saved"), "{err}");
+    assert!(!budget.reserve(1), "and nothing can spend while it cannot be saved");
+    assert_eq!(
+        grants.peek_approval(&token, "chat", "exec", "hash").unwrap(),
+        ("request".into(), 12, true),
+        "the token is still unclaimed"
+    );
+}
+
+#[test]
+fn a_stale_execution_cannot_spend_a_newer_approvals_allowance() {
+    use mast_engine::admin::AdminGrants;
+    let grants = AdminGrants::default();
+    let stale = grants.admit_batch("exec", 10, &["old".into()], false).unwrap();
+    let newer = grants.admit_batch("exec", 10, &[], false).unwrap();
+    // A concurrent execution's fresh approval replaces the plan and allowance.
+    newer.approve(20, &["new".into()]).unwrap();
+    assert!(!stale.reserve(1), "its plan was replaced: it spends nothing, even though allowance exists");
+    assert_eq!(newer.remaining(), 20);
+    assert!(newer.reserve(5));
+    assert_eq!(stale.remaining(), 15, "and none of the new allowance was taken");
+    assert_eq!(newer.plan(), vec!["new".to_string()]);
+    // An execution admitted after the approval is current.
+    let current = grants.admit_batch("exec", 10, &[], false).unwrap();
+    assert!(current.reserve(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_digest_binds_live_structure_sibling_order_and_archive_status() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-template", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    let a = create_item(&rig, "ds-a", "Row A", Some(&p.tickets)).await;
+    let b = create_item(&rig, "ds-b", "Row B", Some(&p.tickets)).await;
+    let digests = |rig: &Rig| {
+        let snap = snapshot(rig);
+        (step_plan_digest(&snap, "template_apply", &p.tickets), step_plan_digest(&snap, "create", &p.tickets))
+    };
+    let (apply0, create0) = digests(&rig);
+
+    // Reparent: the same rows and count, one of them now under another.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-reparent", "steps": [
+        { "op": "move", "itemId": a, "parentId": b }
+    ]})).await.unwrap();
+    let (apply1, create1) = digests(&rig);
+    assert_ne!(apply1, apply0, "reparenting changes what an apply walks");
+    assert_ne!(create1, create0, "and the parent's live children");
+
+    // Sibling order: the same rows, one moved to the front.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-order", "steps": [
+        { "op": "move", "itemId": b, "parentId": p.tickets, "position": "first" }
+    ]})).await.unwrap();
+    let (apply2, create2) = digests(&rig);
+    assert_ne!(apply2, apply1, "sibling order is an input of an apply");
+    assert_ne!(create2, create1, "and of where a create lands");
+
+    // Archive status: the planner only matches live rows.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-archive", "steps": [
+        { "op": "archive", "itemId": a }
+    ]})).await.unwrap();
+    let (apply3, _) = digests(&rig);
+    assert_ne!(apply3, apply2, "an archived row is not the same plan");
 }
