@@ -441,9 +441,27 @@ fn a_closed_main_window_comes_back_for_banners_and_popout_navigation(cx: &mut Te
     cx.update(|cx| assert!(!crate::has_main_window(cx)));
     let popout = cx.update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<PopoutWindow>()).unwrap());
     let transcript = popout_transcript(popout, cx);
-    transcript.update(cx, |_, cx| cx.emit(crate::transcript::TranscriptEvent::OpenChat("chat".into())));
+    transcript.update(cx, |_, cx| {
+        cx.emit(crate::transcript::TranscriptEvent::OpenSubagent {
+            chat_id: "chat".into(),
+            doc_id: "nested".into(),
+            title: "Nested".into(),
+            frozen: true,
+        })
+    });
     cx.run_until_parked();
     cx.update(|cx| assert!(crate::has_main_window(cx), "navigation is not silently dropped"));
+    // In the rebuilt window the tab lands in the owner chat's panel once its
+    // active chat is set.
+    let rebuilt = cx.update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<Shell>()).unwrap());
+    cx.update_window(rebuilt.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    rebuilt
+        .read_with(cx, |shell, _| {
+            assert_eq!(shell.active_chat, "chat");
+            assert!(shell.right_tabs.get("chat").is_some_and(|tabs| tabs.iter().any(|s| matches!(s, RightSurface::Subagent(_)))));
+        })
+        .unwrap();
 }
 
 #[gpui::test]
@@ -473,8 +491,20 @@ fn forwarded_subagent_opens_switch_the_main_window_to_the_owner_chat(cx: &mut Te
         })
     });
     cx.run_until_parked();
+    // The tab opens once the main window shows the owner chat (next frame).
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
     state.read_with(cx, |state, _| assert_eq!(state.selected_chat.as_deref(), Some("parent")));
-    window.read_with(cx, |shell, _| assert_eq!(shell.subagent_tabs.len(), 1, "the nested subagent opened in the main window")).unwrap();
+    window
+        .read_with(cx, |shell, _| {
+            assert_eq!(shell.active_chat, "parent");
+            assert_eq!(shell.subagent_tabs.len(), 1, "the nested subagent opened in the main window");
+            let panel = shell.right_tabs.get("parent").expect("the owner chat's panel");
+            assert!(panel.iter().any(|surface| matches!(surface, RightSurface::Subagent(_))));
+            assert!(shell.right_tabs.get("elsewhere").is_none_or(Vec::is_empty), "not the previous chat's panel");
+            assert!(shell.pending_popout_nav.is_empty());
+        })
+        .unwrap();
 }
 
 #[gpui::test]
@@ -520,4 +550,215 @@ fn the_same_subagent_in_both_windows_is_reference_counted(cx: &mut TestAppContex
     popout.update(cx, |_, window, _| window.remove_window()).unwrap();
     cx.run_until_parked();
     assert_eq!(watch_count(&window, cx), 0);
+}
+
+
+#[gpui::test]
+fn links_in_a_popped_out_subagent_switch_the_main_window_and_survive_a_rebuild(cx: &mut TestAppContext) {
+    init(cx);
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| crate::settings::init(Default::default(), dir.path(), cx));
+    let window = shell_window(cx, dir.path());
+    let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
+    cx.update(|cx| cx.set_global(crate::ReopenState { state: state.clone(), boot: boot(dir.path()) }));
+    window
+        .update(cx, |shell, _, cx| {
+            shell.active_chat = "parent".into();
+            shell.add_subagent_surface("parent".into(), "doc".into(), "Worker".into(), true, cx);
+            let surface = shell.resolved_right_active(cx);
+            assert!(shell.pop_out_surface(surface, cx));
+            shell.active_chat = "elsewhere".into();
+        })
+        .unwrap();
+    let popout = cx.update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<PopoutWindow>()).unwrap());
+    let transcript = popout_transcript(popout, cx);
+    let handler = transcript.read_with(cx, |transcript, _| transcript.link_ui().expect("a link handler"));
+    assert_eq!(handler.source_session.as_deref(), Some("parent"));
+    let activation = crate::markdown::render::LinkActivation {
+        target: crate::markdown::render::LinkTarget::new("docs", "https://example.com/docs"),
+        action: crate::markdown::render::LinkAction::Primary,
+        source_session: Some("parent".into()),
+    };
+    let outcome = cx
+        .update_window(popout.into(), |_, window, cx| (handler.handler)(&activation, window, cx))
+        .unwrap();
+    assert_eq!(outcome, crate::markdown::render::LinkOutcome::Internal, "queued until the owner chat shows");
+    state.read_with(cx, |state, _| assert_eq!(state.selected_chat.as_deref(), Some("parent")));
+
+    // With the main window closed the same handler rebuilds it first.
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!crate::has_main_window(cx)));
+    cx.update_window(popout.into(), |_, window, cx| (handler.handler)(&activation, window, cx)).unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| assert!(crate::has_main_window(cx), "link navigation rebuilt the main window"));
+}
+
+#[gpui::test]
+fn closing_the_main_window_releases_its_subagent_holds(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (engine, mut requests, _replies) = counting_engine(&runtime);
+    init(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let window = cx.add_window(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.set_test_engine(engine));
+        Shell::new(state, boot(dir.path()), cx)
+    });
+    let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
+    window
+        .update(cx, |shell, _, cx| {
+            shell.active_chat = "parent".into();
+            shell.add_subagent_surface("parent".into(), "popped".into(), "A".into(), false, cx);
+            let surface = shell.resolved_right_active(cx);
+            assert!(shell.pop_out_surface(surface, cx));
+            // The same doc again in the main window, plus one only the main window holds.
+            shell.add_subagent_surface("parent".into(), "popped".into(), "A".into(), false, cx);
+            shell.add_subagent_surface("parent".into(), "mine".into(), "B".into(), false, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let _ = drain(&mut requests);
+    state.read_with(cx, |state, _| assert_eq!(state.subagent_watch_count(), 2));
+    // Closing the main window releases its holds: "mine" ends, "popped" stays for the pop-out.
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.subagent_watch_count(), 1);
+        assert!(!state.subagent_rows_present("mine"));
+    });
+    let popout = cx.update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<PopoutWindow>()).unwrap());
+    popout.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.subagent_watch_count(), 0, "the last holder released the watch");
+        assert!(!state.subagent_rows_present("popped"), "rows are cleared");
+    });
+}
+
+#[gpui::test]
+fn a_frozen_snapshot_fetch_belongs_to_the_shared_entry(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (engine, mut requests, replies) = counting_engine(&runtime);
+    init(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let window = cx.add_window(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.set_test_engine(engine));
+        Shell::new(state, boot(dir.path()), cx)
+    });
+    let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
+    window
+        .update(cx, |shell, _, cx| {
+            shell.active_chat = "parent".into();
+            shell.add_subagent_surface("parent".into(), "done".into(), "Done".into(), true, cx);
+            let surface = shell.resolved_right_active(cx);
+            assert!(shell.pop_out_surface(surface, cx));
+            shell.add_subagent_surface("parent".into(), "done".into(), "Done".into(), true, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let mut fetches = Vec::new();
+    while let Ok(raw) = requests.try_recv() {
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        if value["method"] == mast_rpc::methods::FETCH_TOOL_BLOB {
+            fetches.push(value);
+        }
+    }
+    assert_eq!(fetches.len(), 1, "one blob fetch for two holders");
+    // The first holder (the main window's tab) closes before the reply.
+    window
+        .update(cx, |shell, window, cx| {
+            let surface = shell.resolved_right_active(cx);
+            shell.close_right_surface(surface, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let reply = serde_json::json!({"id": fetches[0]["id"], "ok": {"text": "[]"}});
+    runtime.block_on(async {
+        replies.send(reply.to_string()).await.unwrap();
+        while replies.capacity() < replies.max_capacity() {
+            tokio::task::yield_now().await;
+        }
+    });
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert!(state.subagent_rows_present("done"), "the pop-out still gets the snapshot");
+        assert_eq!(state.subagent_watch_count(), 0, "a snapshot needs no watch");
+    });
+    let popout = cx.update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<PopoutWindow>()).unwrap());
+    popout.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| assert!(!state.subagent_rows_present("done")));
+}
+
+#[gpui::test]
+fn closing_the_main_window_does_not_wait_on_a_dirty_popout(cx: &mut TestAppContext) {
+    init(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let window = shell_window(cx, dir.path());
+    let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
+    let popout = dirty_popout(state, cx);
+    window
+        .update(cx, |shell, _, cx| {
+            assert!(shell.prepare_window_close(cx), "only quit, relaunch and updates answer to pop-outs");
+            assert!(shell.pending_exit.is_none());
+            assert!(!shell.all_file_edits_flushed(cx), "the pop-out is still dirty for those paths");
+            assert!(shell.pending_exit_ready(cx));
+        })
+        .unwrap();
+    popout.read_with(cx, |popout, cx| assert!(popout.has_unsaved_changes(cx))).unwrap();
+}
+
+#[gpui::test]
+fn quit_continues_after_the_popout_save(cx: &mut TestAppContext) {
+    init(cx);
+    let quit = std::rc::Rc::new(std::cell::Cell::new(false));
+    cx.update(|cx| {
+        let quit = quit.clone();
+        cx.on_app_quit(move |_| {
+            quit.set(true);
+            async {}
+        })
+        .detach();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let window = shell_window(cx, dir.path());
+    let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
+    let popout = dirty_popout(state, cx);
+    window.update(cx, |_, window, _| window.activate_window()).unwrap();
+    cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));
+    cx.run_until_parked();
+    assert!(!quit.get(), "the dirty pop-out holds the quit");
+    window.update(cx, |shell, _, _| assert!(matches!(shell.pending_exit, Some(PendingExit::Quit)))).unwrap();
+    clean(popout, cx);
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    assert!(quit.get(), "the quit resumed once the pop-out was saved");
+}
+
+#[gpui::test]
+fn quit_continues_after_the_popout_save_with_no_main_window(cx: &mut TestAppContext) {
+    init(cx);
+    let quit = std::rc::Rc::new(std::cell::Cell::new(false));
+    cx.update(|cx| {
+        let quit = quit.clone();
+        cx.on_app_quit(move |_| {
+            quit.set(true);
+            async {}
+        })
+        .detach();
+    });
+    let state = cx.update(|cx| cx.new(|_| AppState::new()));
+    let popout = dirty_popout(state, cx);
+    cx.update(|cx| crate::app_menus::request_quit(cx));
+    cx.run_until_parked();
+    assert!(!quit.get());
+    popout.read_with(cx, |popout, _| assert!(popout.quit_pending())).unwrap();
+    clean(popout, cx);
+    cx.run_until_parked();
+    assert!(quit.get(), "the pop-out resumed the quit");
 }

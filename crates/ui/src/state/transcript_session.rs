@@ -182,6 +182,75 @@ impl AppState {
         self.sub_watch_tasks.len()
     }
 
+    /// Frozen-blob path for a finished subagent: fetch its uploaded transcript
+    /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc —
+    /// the blob upload is best-effort engine-side. Single-flight per doc and
+    /// owned by the state, so every holder (main-window tab, pop-out) gets the
+    /// rows and closing the first holder does not cancel it.
+    pub fn start_subagent_snapshot_fetch(&mut self, chat_id: &str, doc_id: &str, cx: &mut Context<Self>) {
+        if self.sub_fetch_tasks.contains_key(doc_id) {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.watch_subagent_doc(doc_id.to_string(), cx);
+            return;
+        };
+        let blob_ref = format!("{chat_id}/{doc_id}");
+        let doc_id = doc_id.to_string();
+        let key = doc_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let reply = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::FETCH_TOOL_BLOB,
+                serde_json::json!({ "blobRef": blob_ref }),
+                std::time::Duration::from_secs(20),
+            )
+            .await;
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    let value = reply.ok()?;
+                    let entries: Vec<SessionMessageEntry> =
+                        serde_json::from_str(value.get("text")?.as_str()?).ok()?;
+                    let update = mast_doc::TranscriptUpdate {
+                        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
+                        frame: TranscriptFrame::Reset { reset: entries },
+                        context_usage: None,
+                    };
+                    let prepared = crate::transcript::TranscriptPreparation::default()
+                        .prepare(&update)
+                        .ok()?;
+                    let TranscriptFrame::Reset { reset } = update.frame else {
+                        unreachable!()
+                    };
+                    Some((reset, prepared))
+                })
+                .await;
+            this.update(cx, |state, cx| {
+                // Every holder released while the fetch ran: nothing to fill.
+                if !state.sub_fetch_tasks.contains_key(&doc_id) {
+                    return;
+                }
+                match snapshot {
+                    Some((entries, prepared)) => {
+                        state.set_prepared_subagent_snapshot(doc_id, entries, prepared);
+                    }
+                    None => state.watch_subagent_doc(doc_id, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.sub_fetch_tasks.insert(key, task);
+    }
+
+    /// Tests: whether rows (a snapshot or a watch's replay) exist for the doc.
+    #[cfg(test)]
+    pub(crate) fn subagent_rows_present(&self, doc_id: &str) -> bool {
+        self.sub_transcripts.contains_key(doc_id)
+    }
+
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
@@ -213,6 +282,7 @@ impl AppState {
     fn remove_subagent_doc_watch(&mut self, doc_id: &str) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
+        self.sub_fetch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
         self.prepared_transcripts.remove(doc_id);
         self.transcript_baselines.remove(doc_id);

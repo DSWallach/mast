@@ -1107,24 +1107,22 @@ impl Shell {
             transcript.set_workspace_link_handler(links)
         });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        let shared = self.state.update(cx, |s, _| s.acquire_subagent_doc(&doc_id));
-        let fetch = if shared {
-            // A pop-out (or another tab) already feeds this doc.
-            None
-        } else if frozen {
-            self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
-        } else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.clone(), cx));
-            None
-        };
+        // The first holder starts the feed (live watch or frozen blob fetch);
+        // the state owns it, so it outlives any one window.
+        let first = !self.state.update(cx, |s, _| s.acquire_subagent_doc(&doc_id));
+        if first {
+            if frozen {
+                self.state.update(cx, |s, cx| s.start_subagent_snapshot_fetch(&chat_id, &doc_id, cx));
+            } else {
+                self.state.update(cx, |s, cx| s.watch_subagent_doc(doc_id.clone(), cx));
+            }
+        }
         self.subagent_tabs.insert(
             id,
             SubagentTab {
                 doc_id,
                 title: title.into(),
                 transcript,
-                _fetch: fetch,
                 _events: events,
             },
         );
@@ -1134,64 +1132,6 @@ impl Shell {
             .or_default()
             .push(RightSurface::Subagent(id));
         self.set_right_active(RightSurface::Subagent(id), cx);
-    }
-
-    /// Fetch a finished subagent's frozen transcript blob
-    /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
-    /// — the blob upload is best-effort engine-side.
-    pub(super) fn spawn_subagent_snapshot_fetch(
-        &self,
-        chat_id: &str,
-        doc_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<()>> {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.to_string(), cx));
-            return None;
-        };
-        let blob_ref = format!("{chat_id}/{doc_id}");
-        let state = self.state.clone();
-        let doc_id = doc_id.to_string();
-        Some(cx.spawn(async move |_, cx| {
-            let reply = crate::attachments::call_with_timeout(
-                &engine,
-                cx.background_executor(),
-                methods::FETCH_TOOL_BLOB,
-                serde_json::json!({ "blobRef": blob_ref }),
-                Duration::from_secs(20),
-            )
-            .await;
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move {
-                    let value = reply.ok()?;
-                    let entries: Vec<mast_doc::SessionMessageEntry> =
-                        serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = mast_doc::TranscriptUpdate {
-                        replay_baseline: Some(mast_doc::TranscriptBaseline::capture(&entries)),
-                        frame: mast_doc::TranscriptFrame::Reset { reset: entries },
-                        context_usage: None,
-                    };
-                    let prepared = crate::transcript::TranscriptPreparation::default()
-                        .prepare(&update)
-                        .ok()?;
-                    let mast_doc::TranscriptFrame::Reset { reset } = update.frame else {
-                        unreachable!()
-                    };
-                    Some((reset, prepared))
-                })
-                .await;
-            state.update(cx, |s, cx| {
-                match snapshot {
-                    Some((entries, prepared)) => {
-                        s.set_prepared_subagent_snapshot(doc_id, entries, prepared);
-                    }
-                    None => s.watch_subagent_doc(doc_id, cx),
-                }
-                cx.notify();
-            });
-        }))
     }
 
     /// A surface tab's ✕. The active fallback happens naturally through
@@ -1329,7 +1269,9 @@ impl Shell {
     pub(super) fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
         // Pop-outs hold files too: every exit path (quit, close window, update
         // install, relaunch, runtime change) answers to them as well.
-        let popouts_ready = crate::popout::prepare_exit(false, cx);
+        // Closing the main window leaves pop-outs open, so only its own files gate it.
+        let popouts_ready = matches!(action, PendingExit::CloseWindow)
+            || crate::popout::prepare_exit(false, cx);
         let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
@@ -1372,6 +1314,13 @@ impl Shell {
             });
             self.apply_nav(NavEntry::Chat(key), cx);
         }
+    }
+
+    /// Whether the pending exit may proceed: the main window's files are
+    /// saved and, unless only the window is closing, so are the pop-outs'.
+    pub(super) fn pending_exit_ready(&self, cx: &App) -> bool {
+        self.file_surfaces.values().all(|surface| !surface.read(cx).has_unsaved_changes())
+            && (matches!(self.pending_exit, Some(PendingExit::CloseWindow)) || crate::popout::all_flushed(cx))
     }
 
     pub(super) fn all_file_edits_flushed(&self, cx: &App) -> bool {

@@ -469,8 +469,6 @@ struct SubagentTab {
     doc_id: String,
     title: SharedString,
     transcript: Entity<Transcript>,
-    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    _fetch: Option<Task<()>>,
     /// Spawn chips INSIDE the subagent transcript open their own tabs.
     _events: Subscription,
 }
@@ -548,6 +546,8 @@ pub struct Shell {
     file_surface_seq: u64,
     pending_file_closes: std::collections::HashSet<RightSurface>,
     pending_exit: Option<PendingExit>,
+    /// Pop-out navigation waiting for its owner chat to show.
+    pending_popout_nav: Vec<(String, popout_host::PopoutNav)>,
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
@@ -1056,6 +1056,14 @@ impl Shell {
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
+        // Closing the main window releases its subagent tabs' holds on their
+        // docs; a pop-out showing the same doc keeps the feed.
+        cx.on_release(|shell: &mut Shell, cx| {
+            for tab in shell.subagent_tabs.values() {
+                shell.state.update(cx, |state, _| state.unwatch_subagent_doc(&tab.doc_id));
+            }
+        })
+        .detach();
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
             #[cfg(test)]
@@ -1097,6 +1105,7 @@ impl Shell {
             file_surface_seq: 0,
             pending_file_closes: std::collections::HashSet::new(),
             pending_exit: None,
+            pending_popout_nav: Vec::new(),
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),

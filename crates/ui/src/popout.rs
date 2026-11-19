@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, Global, MouseButton,
-    Pixels, SharedString, Subscription, Task, TitlebarOptions, Window, WindowBounds,
+    Pixels, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
     WindowControlArea, WindowHandle, WindowOptions, div, prelude::*, px, size,
 };
 
@@ -44,8 +44,6 @@ impl Global for PopoutFrames {}
 pub(crate) struct SubagentPopout {
     pub(crate) doc_id: String,
     pub(crate) transcript: Entity<Transcript>,
-    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    pub(crate) _fetch: Option<Task<()>>,
 }
 
 /// What a pop-out shows. Each variant is the same entity the right pane held.
@@ -135,6 +133,25 @@ pub(crate) fn open(
     Some(handle)
 }
 
+/// Link handling for a transcript living in a pop-out: forward to the main
+/// window (rebuilding it if closed) after it switches to the owner chat.
+fn popout_links(owner_chat: String) -> crate::markdown::render::LinkUi {
+    crate::markdown::render::LinkUi {
+        source_session: Some(owner_chat.clone()),
+        handler: std::rc::Rc::new(move |activation, _, cx| {
+            let Some(main) = crate::main_shell_or_reopen(cx) else {
+                return crate::markdown::render::LinkOutcome::Rejected;
+            };
+            let owner = owner_chat.clone();
+            main.update(cx, |shell, window, cx| {
+                window.activate_window();
+                shell.popout_activate_link(owner, activation, window, cx)
+            })
+            .unwrap_or(crate::markdown::render::LinkOutcome::Rejected)
+        }),
+    }
+}
+
 /// The window showing the main `Shell`, if ⌘W has not closed it.
 fn main_shell(cx: &App) -> Option<WindowHandle<Shell>> {
     cx.windows().into_iter().find_map(|window| window.downcast::<Shell>())
@@ -174,6 +191,13 @@ impl PopoutWindow {
             }
             PopoutSurface::Subagent(sub) => {
                 subscriptions.push(cx.subscribe(&sub.transcript, Self::on_transcript_event));
+                // The tab's link handler points at the main window's chat
+                // routing; rebind it to this window's forwarding path, which
+                // switches the main window to the owner chat and survives a
+                // rebuild of the main window.
+                sub.transcript.update(cx, |transcript, _| {
+                    transcript.set_workspace_link_handler(popout_links(owner_chat.clone()))
+                });
             }
         }
         // Shortcuts (⌘S, ⌘W) dispatch through the focus chain. Focus the root,

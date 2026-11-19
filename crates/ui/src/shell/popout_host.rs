@@ -5,6 +5,14 @@ use super::*;
 
 use crate::popout::{PopoutSurface, SubagentPopout};
 
+/// Navigation a pop-out asked for that waits for its owner chat to show.
+pub(super) enum PopoutNav {
+    File(String),
+    Commit(mast_proto::GitHistoryCommit),
+    Link(crate::markdown::render::LinkActivation),
+    Subagent { chat_id: String, doc_id: String, title: String, frozen: bool },
+}
+
 impl Shell {
     /// Whether `surface` can leave the main window today: File, Diff and
     /// Subagent tabs. Browser and artifact web views are positioned by this
@@ -50,12 +58,12 @@ impl Shell {
             }
             RightSurface::Subagent(id) => {
                 let Some(tab) = self.subagent_tabs.remove(&id) else { return false };
-                let SubagentTab { doc_id, title, transcript, _fetch, _events } = tab;
+                let SubagentTab { doc_id, title, transcript, _events } = tab;
                 // The pop-out re-subscribes the spawn chips; the main strip's
                 // hookup goes with the tab.
                 drop(_events);
                 (
-                    PopoutSurface::Subagent(SubagentPopout { doc_id, transcript, _fetch }),
+                    PopoutSurface::Subagent(SubagentPopout { doc_id, transcript }),
                     title,
                 )
             }
@@ -90,6 +98,60 @@ impl Shell {
         }
     }
 
+    /// Switch to the owner chat and run `nav` once `active_chat` has caught up
+    /// (the selection lands through the state observer, and a rebuilt main
+    /// window starts with no chat at all). The queue drains at render.
+    fn queue_popout_nav(&mut self, owner_chat: String, nav: PopoutNav, cx: &mut Context<Self>) {
+        self.popout_focus_chat(&owner_chat, cx);
+        // Sync `active_chat` now; the observer only runs after this update.
+        let state = self.state.clone();
+        self.on_state_changed(&state, cx);
+        self.pending_popout_nav.push((owner_chat, nav));
+        cx.notify();
+    }
+
+    /// Run queued pop-out navigation whose chat is now showing. Entries the
+    /// user has since navigated away from are dropped.
+    pub(super) fn drain_popout_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_popout_nav.is_empty() {
+            return;
+        }
+        let selected = self.state.read(cx).selected_chat.clone();
+        for (owner, nav) in std::mem::take(&mut self.pending_popout_nav) {
+            if self.active_chat == owner {
+                self.run_popout_nav(owner, nav, window, cx);
+            } else if selected.as_deref() == Some(owner.as_str()) {
+                self.pending_popout_nav.push((owner, nav));
+            }
+        }
+    }
+
+    fn run_popout_nav(&mut self, owner_chat: String, nav: PopoutNav, window: &mut Window, cx: &mut Context<Self>) {
+        match nav {
+            PopoutNav::File(path) => self.add_file_surface(path, window, cx),
+            PopoutNav::Commit(commit) => {
+                self.set_surfaces_open(true, cx);
+                self.add_commit_diff_surface(commit, Some(owner_chat), cx);
+            }
+            PopoutNav::Link(activation) => {
+                if let crate::markdown::render::LinkOutcome::External(url) =
+                    self.activate_session_link(&activation, window, cx)
+                {
+                    cx.open_url(&url);
+                }
+            }
+            PopoutNav::Subagent { chat_id, doc_id, title, frozen } => {
+                self.leave_overview_for_chat(cx);
+                self.add_subagent_surface(chat_id, doc_id, title, frozen, cx);
+            }
+        }
+    }
+
+    fn popout_chat_is_showing(&self, owner_chat: &str, cx: &App) -> bool {
+        self.active_chat == owner_chat
+            && self.state.read(cx).selected_chat.as_deref() == Some(owner_chat)
+    }
+
     pub(crate) fn popout_open_file(
         &mut self,
         owner_chat: String,
@@ -97,8 +159,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.popout_focus_chat(&owner_chat, cx);
-        self.add_file_surface(path, window, cx);
+        if self.popout_chat_is_showing(&owner_chat, cx) {
+            self.add_file_surface(path, window, cx);
+        } else {
+            self.queue_popout_nav(owner_chat, PopoutNav::File(path), cx);
+        }
     }
 
     pub(crate) fn popout_open_commit(
@@ -107,9 +172,12 @@ impl Shell {
         commit: mast_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
-        self.popout_focus_chat(&owner_chat, cx);
-        self.set_surfaces_open(true, cx);
-        self.add_commit_diff_surface(commit, Some(owner_chat), cx);
+        if self.popout_chat_is_showing(&owner_chat, cx) {
+            self.set_surfaces_open(true, cx);
+            self.add_commit_diff_surface(commit, Some(owner_chat), cx);
+        } else {
+            self.queue_popout_nav(owner_chat, PopoutNav::Commit(commit), cx);
+        }
     }
 
     /// A pop-out's save / discard prompt resolved: re-check a pending exit.
@@ -127,8 +195,12 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> crate::markdown::render::LinkOutcome {
-        self.popout_focus_chat(&owner_chat, cx);
-        self.activate_session_link(activation, window, cx)
+        if self.popout_chat_is_showing(&owner_chat, cx) {
+            return self.activate_session_link(activation, window, cx);
+        }
+        // Handled once the owner chat is showing; an external URL then opens.
+        self.queue_popout_nav(owner_chat, PopoutNav::Link(activation.clone()), cx);
+        crate::markdown::render::LinkOutcome::Internal
     }
 
     pub(crate) fn popout_transcript_event(
@@ -138,8 +210,17 @@ impl Shell {
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, TranscriptEvent::OpenSubagent { .. }) {
-            self.popout_focus_chat(&owner_chat, cx);
+        if let TranscriptEvent::OpenSubagent { chat_id, doc_id, title, frozen } = event
+            && !self.popout_chat_is_showing(&owner_chat, cx)
+        {
+            let nav = PopoutNav::Subagent {
+                chat_id: chat_id.clone(),
+                doc_id: doc_id.clone(),
+                title: title.clone(),
+                frozen: *frozen,
+            };
+            self.queue_popout_nav(owner_chat, nav, cx);
+            return;
         }
         self.on_transcript_event(transcript, event, cx)
     }

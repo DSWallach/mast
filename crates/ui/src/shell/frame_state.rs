@@ -15,7 +15,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> ShellFrame {
         self.render_time = Some(std::time::Instant::now());
-        if self.all_file_edits_flushed(cx)
+        self.drain_popout_nav(window, cx);
+        if self.pending_exit_ready(cx)
             && let Some(action) = self.pending_exit.take()
         {
             let shell = cx.weak_entity();
