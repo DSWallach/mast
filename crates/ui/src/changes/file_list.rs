@@ -699,7 +699,7 @@ impl Changes {
             let position = tree_rows.iter().enumerate().filter_map(|(index, row)| match row {
                 FileTreeRow::Folder { path, .. } if !target.starts_with('/') && (path == &target || path.starts_with(&target) || target.starts_with(path)) => Some((index, path.len())),
                 _ => None,
-            }).max_by_key(|(_, length)| *length).map(|(index, _)| index).or_else(|| tree_rows.iter().position(|row| matches!(row, FileTreeRow::File { index, .. } if *index == file)));
+            }).min_by_key(|(_, length)| length.abs_diff(target.len())).map(|(index, _)| index).or_else(|| tree_rows.iter().position(|row| matches!(row, FileTreeRow::File { index, .. } if *index == file)));
             if let Some(position) = position { self.file_tree_scroll.scroll_to_item(position, gpui::ScrollStrategy::Nearest); }
         }
         let rows_key = tree_key.clone();
