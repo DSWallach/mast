@@ -107,7 +107,6 @@ impl SymbolDefinitionProvider {
 impl DefinitionProvider for SymbolDefinitionProvider {
     fn definitions(&self, text: &Rope, offset: usize, _: &mut Window, cx: &mut App) -> Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
         self.start_watch(cx);
-        self.state.borrow_mut().selected.clear();
         let Some(revision) = self.state.borrow().revision else { return Task::ready(Ok(Vec::new())); };
         let path_generation = self.state.borrow().path_generation;
         let rope = text.clone();
@@ -216,6 +215,12 @@ mod tests {
             assert_eq!(*result.borrow(), Some(1));
             assert_eq!(transport.queries.load(Ordering::SeqCst), expected);
         }
+        // Moving to another word must not discard A while the editor still
+        // considers A's hover active and may skip another provider call.
+        host.update(cx, |_, window, cx| {
+            let _pending = provider.definitions(&Rope::from("fn call() {} fn other() {}"), 17, window, cx);
+            assert_eq!(provider.selected()[0].symbol.name, "call");
+        }).unwrap();
         provider.invalidate_source();
         assert!(provider.state.borrow().parsed.is_none());
         assert!(provider.selected().is_empty());
