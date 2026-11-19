@@ -359,13 +359,9 @@ impl FilesSurface {
                 .when_some(label, |el, label| {
                     el.child(div().truncate().child(label.text)).when_some(label.chip, |el, chip| {
                         el.child(
-                            div()
-                                .flex_none()
-                                .px(px(5.0))
-                                .rounded(px(4.0))
-                                .bg(theme.accent_wash)
-                                .text_color(if label.probably { theme.text_muted } else { theme.accent })
-                                .child(if label.probably { format!("~ {chip}") } else { chip }),
+                            crate::components::badge(theme, if label.probably { format!("~ {chip}") } else { chip })
+                                .py(px(0.0))
+                                .when(label.probably, |el| el.opacity(0.7)),
                         )
                     })
                 })

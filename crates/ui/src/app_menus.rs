@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
+    fn view_menu_offers_appearance_modes_and_the_blame_gutter() {
         let menus = app_menus();
         let view = menus
             .iter()
@@ -344,7 +344,8 @@ mod tests {
             vec![
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
-                AppearanceDark.name()
+                AppearanceDark.name(),
+                shell::ToggleBlameGutter.name()
             ]
         );
     }
