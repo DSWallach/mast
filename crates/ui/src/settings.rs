@@ -17,7 +17,6 @@ use mast_proto::{AuthState, WorkspaceScope};
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
-pub mod token_usage;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
@@ -27,6 +26,7 @@ pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod shortcuts;
+pub mod token_usage;
 pub mod widgets;
 pub mod workflow_pack;
 
@@ -591,6 +591,9 @@ pub enum SidebarSort {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowGeometry {
+    /// The rectangle below always describes the normal window.
+    #[serde(default)]
+    pub maximized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_uuid: Option<uuid::Uuid>,
     pub x: f32,
@@ -610,6 +613,7 @@ impl WindowGeometry {
 
     pub fn from_bounds(bounds: gpui::Bounds<gpui::Pixels>) -> Self {
         Self {
+            maximized: false,
             display_uuid: None,
             x: bounds.origin.x.into(),
             y: bounds.origin.y.into(),
@@ -649,11 +653,11 @@ impl WindowGeometry {
         let width = self.width.max(900.0).min(display.width);
         let height = self.height.max(600.0).min(display.height);
         Self {
-            display_uuid: self.display_uuid,
-            x: self.x.clamp(display.x, display.x + display.width - width),
-            y: self.y.clamp(display.y, display.y + display.height - height),
+            x: self.x.clamp(display.x, display.x + (display.width - width)),
+            y: self.y.clamp(display.y, display.y + (display.height - height)),
             width,
             height,
+            ..self
         }
     }
 
@@ -2670,20 +2674,27 @@ mod tests {
     #[test]
     fn window_geometry_round_trips_and_legacy_settings_default() {
         let dir = tempfile::tempdir().unwrap();
-        let geometry = WindowGeometry {
+        let normal = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: -1500.0,
             y: 40.0,
             width: 1200.0,
             height: 800.0,
         };
-        let settings = UiSettings {
-            window_geometry: Some(geometry),
-            ..Default::default()
+        assert_eq!(WindowGeometry::from_bounds(normal.bounds()), normal);
+        let maximized = WindowGeometry {
+            maximized: true,
+            ..normal
         };
-        settings.save(dir.path()).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).window_geometry, Some(geometry));
-        assert_eq!(WindowGeometry::from_bounds(geometry.bounds()), geometry);
+        for geometry in [normal, maximized] {
+            let settings = UiSettings {
+                window_geometry: Some(geometry),
+                ..Default::default()
+            };
+            settings.save(dir.path()).unwrap();
+            assert_eq!(UiSettings::load(dir.path()).window_geometry, Some(geometry));
+        }
         let legacy: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
         assert_eq!(legacy.window_geometry, None);
         assert_eq!(legacy.sidebar_width, 300.0);
@@ -2692,6 +2703,7 @@ mod tests {
     #[test]
     fn window_geometry_restores_display_identity_with_overlapping_local_coordinates() {
         let primary = WindowGeometry {
+            maximized: false,
             display_uuid: Some(uuid::Uuid::from_u128(1)),
             x: 0.0,
             y: 25.0,
@@ -2718,6 +2730,7 @@ mod tests {
     #[test]
     fn window_geometry_recenters_when_saved_display_is_disconnected() {
         let primary = WindowGeometry {
+            maximized: false,
             display_uuid: Some(uuid::Uuid::from_u128(1)),
             x: 0.0,
             y: 25.0,
@@ -2725,6 +2738,7 @@ mod tests {
             height: 900.0,
         };
         let saved = WindowGeometry {
+            maximized: true,
             display_uuid: Some(uuid::Uuid::from_u128(2)),
             x: 500.0,
             y: 300.0,
@@ -2749,7 +2763,16 @@ mod tests {
             height: 1600.0,
             ..saved
         };
-        assert_eq!(oversized.restore(&[primary], 0), Some((0, primary)));
+        assert_eq!(
+            oversized.restore(&[primary], 0),
+            Some((
+                0,
+                WindowGeometry {
+                    maximized: true,
+                    ..primary
+                }
+            ))
+        );
     }
 
     #[test]
@@ -2757,7 +2780,9 @@ mod tests {
         let saved: WindowGeometry =
             serde_json::from_str(r#"{"x":100,"y":80,"width":1200,"height":800}"#).unwrap();
         assert_eq!(saved.display_uuid, None);
+        assert!(!saved.maximized);
         let display = WindowGeometry {
+            maximized: false,
             display_uuid: Some(uuid::Uuid::from_u128(1)),
             x: 0.0,
             y: 25.0,
@@ -2779,6 +2804,7 @@ mod tests {
     #[test]
     fn window_geometry_rejects_invalid_values_without_resetting_settings() {
         let valid = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: 40.0,
             y: 50.0,
@@ -2817,6 +2843,7 @@ mod tests {
     #[test]
     fn window_geometry_preserves_position_on_negative_coordinate_display() {
         let display = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: -1920.0,
             y: -200.0,
@@ -2824,6 +2851,7 @@ mod tests {
             height: 1080.0,
         };
         let geometry = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: -1800.0,
             y: -100.0,
@@ -2836,6 +2864,7 @@ mod tests {
     #[test]
     fn window_geometry_fits_smaller_display_and_keeps_titlebar_visible() {
         let display = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: 0.0,
             y: 25.0,
@@ -2843,6 +2872,7 @@ mod tests {
             height: 720.0,
         };
         let geometry = WindowGeometry {
+            maximized: false,
             display_uuid: None,
             x: 2000.0,
             y: -1000.0,

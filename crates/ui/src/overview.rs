@@ -1476,6 +1476,7 @@ pub struct Overview {
     list_order: Vec<(String, usize)>,
     view_mode: OverviewMode,
     pub(crate) in_sidebar: bool,
+    compact_show_assistant: bool,
     sidebar_scope: Option<String>,
     /// Rows currently showing their expanded detail (toggled by a click,
     /// matching the reference's `expandedIds`/`toggleExpanded`). Never causes
@@ -1833,7 +1834,8 @@ impl Overview {
                 }
             }
             OutlineEvent::StartManager { space_id, item_id } => {
-                if let Err(notice) = this.start_manager_for_item(space_id.clone(), item_id.clone(), cx)
+                if let Err(notice) =
+                    this.start_manager_for_item(space_id.clone(), item_id.clone(), cx)
                 {
                     this.outline
                         .update(cx, |outline, cx| outline.show_error(notice, cx));
@@ -1880,6 +1882,7 @@ impl Overview {
             list_order: Vec::new(),
             view_mode: OverviewMode::Outline,
             in_sidebar: false,
+            compact_show_assistant: false,
             sidebar_scope: None,
             expanded: HashSet::new(),
             link_status: HashMap::new(),
@@ -2624,7 +2627,8 @@ impl Overview {
                 let user_action_required = row.is_some_and(|r| r.user_action_required);
                 // Keep side chats in the lookup so their durable work-item
                 // assignments do not look dangling, but never show a row.
-                let visible = !chat.is_side_chat() && shown_by_toggles
+                let visible = !chat.is_side_chat()
+                    && shown_by_toggles
                     && !hidden_runs.contains(chat.id.as_str())
                     && self
                         .sidebar_scope
@@ -2681,18 +2685,17 @@ impl Overview {
             .collect()
     }
 
-    /// Every Space the Outline shows (all of them: the Overview is the
-    /// All-spaces view), in display order, with its current load.
+    /// Every Space the sidebar Outline shows, in display order.
     fn outline_spaces(&self, cx: &gpui::App) -> Vec<OutlineSpace> {
+        self.outline_spaces_in_scope(self.sidebar_scope.as_deref(), cx)
+    }
+
+    fn outline_spaces_in_scope(&self, scope: Option<&str>, cx: &gpui::App) -> Vec<OutlineSpace> {
         let state = self.state.read(cx);
         let mut spaces: Vec<&Space> = state
             .spaces
             .iter()
-            .filter(|space| {
-                self.sidebar_scope
-                    .as_deref()
-                    .is_none_or(|scope| space.id == scope)
-            })
+            .filter(|space| scope.is_none_or(|scope| space.id == scope))
             .collect();
         spaces.sort_by_cached_key(|space| (space.display_name().to_lowercase(), space.id.clone()));
         spaces
@@ -3398,12 +3401,12 @@ impl Overview {
                         theme.element_hover,
                         6.0,
                     )
-                        .id(badge_id)
-                        .debug_selector(move || debug_id.clone())
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(3.0)),
+                    .id(badge_id)
+                    .debug_selector(move || debug_id.clone())
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0)),
                     LinkKind::Ticket,
                     ticket_source,
                 )
@@ -4312,8 +4315,7 @@ impl Overview {
         };
         let text = |value: String| SharedString::from(value).into_any_element();
         let chip = |text: String, color: gpui::Hsla, bg: gpui::Hsla| {
-            crate::components::outline_metadata_tag(color, bg, 6.0)
-                .child(SharedString::from(text))
+            crate::components::outline_metadata_tag(color, bg, 6.0).child(SharedString::from(text))
         };
         // `renderChips`/`renderToolChips`: an empty list renders a single
         // "none" chip rather than hiding the row.
@@ -5633,8 +5635,7 @@ impl Overview {
             )
             .color;
             let selector = format!("overview-row-needs-input-{chat_id}");
-            crate::components::overview_status_badge(selector, color)
-                .child("Needs input")
+            crate::components::overview_status_badge(selector, color).child("Needs input")
         });
         let stalled_pill = if let Some(failures) = &row.tool_failures {
             let color = crate::status_style::status_style(
@@ -5663,10 +5664,7 @@ impl Overview {
             )
             .color;
             let selector = format!("overview-row-stalled-{chat_id}");
-            Some(
-                crate::components::overview_status_badge(selector, color)
-                    .child("Stalled"),
-            )
+            Some(crate::components::overview_status_badge(selector, color).child("Stalled"))
         } else {
             None
         };
@@ -7061,7 +7059,7 @@ impl Overview {
         &self,
         cx: &gpui::App,
     ) -> Vec<crate::work_outline::required_actions::SpaceSnapshot> {
-        self.outline_spaces(cx)
+        self.outline_spaces_in_scope(None, cx)
             .into_iter()
             .filter_map(|space| {
                 Some(crate::work_outline::required_actions::SpaceSnapshot {
@@ -7238,7 +7236,12 @@ impl Overview {
         let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
         snapshot.external_references.clear();
         let project = "w-api";
-        snapshot.items.iter_mut().find(|i| i.id == project).unwrap().is_project = true;
+        snapshot
+            .items
+            .iter_mut()
+            .find(|i| i.id == project)
+            .unwrap()
+            .is_project = true;
         let chat = with_chat.then(|| "fixture-design".to_owned());
         if let Some(chat) = &chat {
             let mut assignment = snapshot.assignments.first().cloned().unwrap();
@@ -9368,7 +9371,10 @@ mod logic_tests {
     #[cfg(all(feature = "snapshot", target_os = "macos"))]
     impl Render for ScheduledTaskOverviewFixture {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().bg(Theme::of(cx).surface).child(self.0.clone())
+            div()
+                .size_full()
+                .bg(Theme::of(cx).surface)
+                .child(self.0.clone())
         }
     }
 
@@ -9440,32 +9446,44 @@ mod logic_tests {
                     let _ = crate::typography::register_fonts(cx);
                     let state = cx.new(|_| AppState::new());
                     state.update(cx, |s, _| {
-                        s.spaces = vec![serde_json::from_value(serde_json::json!({
-                            "id": "s1", "path": "/work/project", "deviceId": "host",
-                            "createdAt": "2026-11-16T12:00:00Z",
-                        })).unwrap()];
+                        s.spaces = vec![
+                            serde_json::from_value(serde_json::json!({
+                                "id": "s1", "path": "/work/project", "deviceId": "host",
+                                "createdAt": "2026-11-16T12:00:00Z",
+                            }))
+                            .unwrap(),
+                        ];
                         s.chats = [
                             ("latest", "Health check · latest run", 2),
                             ("earlier", "Health check · earlier run", 1),
                         ]
                         .into_iter()
-                        .map(|(id, title, created)| serde_json::from_value(serde_json::json!({
-                            "id": id, "title": title, "deviceId": "host", "spaceId": "s1",
-                            "archived": false, "createdAt": "2026-11-16T12:00:00Z",
-                            "scheduledTaskInfo": {
-                                "taskId": "routine", "taskName": "Health check", "runId": id,
-                                "sessionCreatedAt": created
-                            }
-                        })).unwrap())
+                        .map(|(id, title, created)| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "title": title, "deviceId": "host", "spaceId": "s1",
+                                "archived": false, "createdAt": "2026-11-16T12:00:00Z",
+                                "scheduledTaskInfo": {
+                                    "taskId": "routine", "taskName": "Health check", "runId": id,
+                                    "sessionCreatedAt": created
+                                }
+                            }))
+                            .unwrap()
+                        })
                         .collect();
                     });
                     let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
                     let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
                     let overview = cx.new(|cx| {
                         let mut overview = Overview::new(
-                            state, gpui::WeakEntity::new_invalid(), transcript, composer, cx,
+                            state,
+                            gpui::WeakEntity::new_invalid(),
+                            transcript,
+                            composer,
+                            cx,
                         );
-                        let mut item = crate::work_outline::store::fixture_snapshot("s1").items.remove(0);
+                        let mut item = crate::work_outline::store::fixture_snapshot("s1")
+                            .items
+                            .remove(0);
                         item.title = "Workspace health".into();
                         item.child_ids.clear();
                         item.chat_ids = vec!["earlier".into(), "latest".into()];

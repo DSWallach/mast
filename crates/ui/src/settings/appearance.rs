@@ -53,6 +53,7 @@ pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
     TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
     SidebarOutlineGroupsChanged(bool),
+    LayoutChanged(crate::ui_style::UiLayout),
 }
 
 impl FontKind {
@@ -2548,7 +2549,9 @@ impl Render for AppearancePage {
             widgets::option_card(&theme, icons::MONITOR, label, ui_settings.ui_layout == layout, preview)
                 .id(SharedString::from(format!("layout-{label}")))
                 .on_click(cx.listener(move |_, _, window, cx| {
-                    crate::ui_style::set_layout(layout, window, cx);
+                    if crate::ui_style::set_layout(layout, window, cx) {
+                        cx.emit(AppearanceSettingsEvent::LayoutChanged(layout));
+                    }
                     cx.notify();
                 }))
         }).collect::<Vec<_>>();
