@@ -1481,6 +1481,59 @@ impl ArtifactsService {
         ))
     }
 
+    /// Stamp the revisions that Background scheduled runs published before
+    /// stamps existed, while their publishing chat still proves it, so the
+    /// provenance outlives that chat. Only artifacts this device owns are
+    /// rewritten. `space_id` limits the scan; `None` scans every Space. Returns
+    /// how many artifacts were rewritten.
+    pub(crate) fn backfill_run_stamps(&self, space_id: Option<&str>) -> usize {
+        let artifacts = match space_id {
+            Some(space) => self.workspace().artifacts_of_space(space),
+            None => self.workspace().all_artifacts(),
+        };
+        let pending: Vec<String> = artifacts
+            .into_iter()
+            .filter(|a| a.device_id == self.device_id() && a.archived_at.is_none())
+            .filter(|a| {
+                a.role
+                    .as_deref()
+                    .is_some_and(mast_proto::ScheduledRunResults::is_results_role)
+            })
+            .filter(|a| {
+                a.revisions
+                    .iter()
+                    .any(|r| r.scheduled_task.is_none() && r.by.kind == WorkOutlineActorKind::Agent)
+            })
+            .map(|a| a.id)
+            .collect();
+        let mut written = 0;
+        for id in pending {
+            let _gate = lock(&self.inner.gate);
+            let Some(mut view) = self.workspace().artifact(&id) else {
+                continue;
+            };
+            let Some(key) = view
+                .role
+                .as_deref()
+                .map(mast_proto::ScheduledRunResults::normalize_role)
+                .and_then(|role| mast_proto::ScheduledRunResults::key_of_role(&role))
+            else {
+                continue;
+            };
+            let mut changed = false;
+            for revision in view.revisions.iter_mut().filter(|r| r.scheduled_task.is_none()) {
+                if self.run_stamp(&revision.by).as_deref() == Some(key.as_str()) {
+                    revision.scheduled_task = Some(key.clone());
+                    changed = true;
+                }
+            }
+            if changed && self.workspace().put_artifact(&view).is_ok() {
+                written += 1;
+            }
+        }
+        written
+    }
+
     /// The bytes of the newest revision exactly as recorded: its stored
     /// snapshot, else the live file when that still hashes to the revision.
     /// Never a newer file paired with an older revision's metadata.

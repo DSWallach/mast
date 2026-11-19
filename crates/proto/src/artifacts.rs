@@ -330,7 +330,8 @@ pub struct ArtifactView {
     /// Number of the newest revision (0 = none recorded).
     #[serde(default)]
     pub current_revision: u32,
-    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`].
+    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`], plus the
+    /// newest Background-run revision when it is older than that.
     #[serde(default)]
     pub revisions: Vec<ArtifactRevision>,
     /// The work item's (or chat's) plan. At most one per scope.

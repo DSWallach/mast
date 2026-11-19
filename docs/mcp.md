@@ -148,10 +148,13 @@ contentAvailable}], needYou}`.
 - Only a Background run of the task can have written a result. An ordinary chat
   cannot publish the reserved `scheduled-results:` role. Each revision a
   Background run publishes is stamped with its task identity, and the newest
-  stamped revision is the one returned, so a later edit by anyone else never
-  hides the last genuine result and deleting the publishing chat does not hide
-  it. Revisions recorded before the stamp existed are verified through their
-  chat while it remains.
+  stamped revision is the one returned. That revision is kept past the
+  artifact's revision-count and size limits, so later edits by anyone else never
+  push it out or hide it, and deleting the publishing chat does not hide it.
+  Revisions published before stamps existed are stamped, on the owning device,
+  at startup and on the next read while their publishing chat still exists; one
+  whose chat was already deleted before that cannot be verified and is not
+  returned.
 - An unknown task is an error that lists the tasks that do have results. Hosts
   that predate the tool answer `unknown agent tool`.
 
