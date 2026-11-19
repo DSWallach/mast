@@ -2142,7 +2142,7 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
-        let mut turn_boundary: Option<bool> = None;
+        let turn_boundary: Option<(bool, u64)>;
         let session = {
             let mut statuses = lock(&self.statuses);
             // A chat's first row is created already in the new status, so
@@ -2174,9 +2174,18 @@ impl Inner {
             // an active one settles: the same boundaries `started_at` and the
             // tool-failure ledger use, so a warm session's next prompt, steered
             // into a parked run on the same token, is a new turn.
+            // The turn's number is taken here, under the status lock, in the
+            // step that publishes the status: the next turn can only start
+            // after this, so numbers follow the order the session ran turns in,
+            // whatever order the reports below are made in.
+            let turns = self.agent_tokens.manager_status();
             turn_boundary = match (existed && was_active, status) {
-                (false, SessionStatus::Working | SessionStatus::AwaitingInput) => Some(true),
-                (true, SessionStatus::Idle | SessionStatus::Errored) => Some(false),
+                (false, SessionStatus::Working | SessionStatus::AwaitingInput) => {
+                    Some((true, turns.next_turn(chat_id)))
+                }
+                (true, SessionStatus::Idle | SessionStatus::Errored) => {
+                    Some((false, turns.current_turn(chat_id)))
+                }
                 _ => None,
             };
             if let Some(turn) = completed_turn {
@@ -2225,8 +2234,8 @@ impl Inner {
         // The Manager status check follows the session's own turn boundaries.
         // No lock is held here.
         match turn_boundary {
-            Some(true) => self.agent_tokens.manager_status().begin(chat_id),
-            Some(false) => self.agent_tokens.manager_status().end(chat_id),
+            Some((true, seq)) => self.agent_tokens.manager_status().begin(chat_id, seq),
+            Some((false, seq)) => self.agent_tokens.manager_status().end(chat_id, seq),
             None => {}
         }
     }

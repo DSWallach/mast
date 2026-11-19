@@ -73,6 +73,8 @@ pub enum Verdict {
     Published,
     /// State changed and no revision followed: ask once.
     Nudge { baseline: u32 },
+    /// A reminder for the chat is already on its way; asking again adds nothing.
+    Outstanding,
     /// The ask itself ended without a revision. Not asked again.
     Missed { baseline: u32 },
 }
@@ -92,6 +94,10 @@ pub struct RunBasis {
 
 pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
 
+/// Whether the queued message `(chat, message id)` has left the chat's queue,
+/// that is, been delivered to the agent.
+pub type DeliveryProbe = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 /// How often held turns are re-checked when no chat change wakes the watcher.
 /// Adoption normally follows within moments and wakes it through the chat
 /// change; this is only the net under changes that touch the role alone.
@@ -99,6 +105,10 @@ const DEFAULT_RECHECK: Duration = Duration::from_secs(30);
 
 /// One turn in flight: from the session turning active to it settling.
 struct Turn {
+    /// The session's number for the turn. Turns of a chat are numbered in the
+    /// order the session started them, so a late report about an earlier turn
+    /// can never close a later one. `0` for a turn with no session behind it.
+    seq: u64,
     /// The agent token's run that made the turn's state-changing calls, so
     /// that run ending closes the turn. A warm session keeps one token across
     /// many turns; the turn boundaries are the session's, not the token's.
@@ -123,18 +133,37 @@ pub struct EndedRun {
     forced: bool,
 }
 
+/// The reminder the tracker is waiting on for a chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ask {
+    baseline: u32,
+    /// The queued reminder's message id, once it is queued.
+    message_id: Option<String>,
+    /// The turn that delivered the reminder has started.
+    claimed: bool,
+}
+
 #[derive(Default)]
 struct State {
     turns: HashMap<String, Turn>,
-    /// Baseline of an ask that was queued and has not run to its end yet.
-    asked: HashMap<String, u32>,
+    /// The latest turn number handed out per chat, and the highest one whose
+    /// end has been reported.
+    seq: HashMap<String, u64>,
+    closed: HashMap<String, u64>,
+    asked: HashMap<String, Ask>,
+    /// Finished turns of a holder, awaiting their check.
     ended: Vec<EndedRun>,
+    /// One obligation per chat that is about to hold the role: its turns that
+    /// ended without it. It stays here, and keeps absorbing further turns,
+    /// until the chat holds the role and the obligation is taken for good.
+    held: HashMap<String, EndedRun>,
 }
 
 #[derive(Default)]
 pub struct StatusTracker {
     state: Mutex<State>,
     probe: Mutex<Option<RunProbe>>,
+    delivery: Mutex<Option<DeliveryProbe>>,
     wake: Arc<Notify>,
     recheck: Mutex<Option<Duration>>,
 }
@@ -144,6 +173,11 @@ impl StatusTracker {
     /// it is set nothing is tracked.
     pub fn set_probe(&self, probe: RunProbe) {
         *self.probe.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+
+    /// How the tracker tells that a queued reminder has been delivered.
+    pub fn set_delivery_probe(&self, probe: DeliveryProbe) {
+        *self.delivery.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 
     /// Override how often held turns are re-checked on the timer (tests).
@@ -163,43 +197,98 @@ impl StatusTracker {
         Some(probe(chat_id))
     }
 
+    fn delivered(&self, chat_id: &str, message_id: &str) -> bool {
+        let probe = self.delivery.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        probe.is_none_or(|probe| probe(chat_id, message_id))
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// A turn began: the session turned active. Its baseline is the record's
-    /// revision right now, or the original baseline when this turn is the ask.
-    /// A turn still open (its end was never reported) is closed first.
-    pub fn begin(&self, chat_id: &str) {
-        let basis = self.basis(chat_id);
+    /// Number the next turn of the chat. The session calls this under its own
+    /// status lock, in the same step that publishes the status, so the numbers
+    /// follow the order the session started its turns in.
+    pub fn next_turn(&self, chat_id: &str) -> u64 {
         let mut state = self.state();
-        if state.turns.contains_key(chat_id) {
+        let seq = state.seq.entry(chat_id.to_owned()).or_default();
+        *seq += 1;
+        *seq
+    }
+
+    /// The number of the chat's latest turn (`0` before any).
+    pub fn current_turn(&self, chat_id: &str) -> u64 {
+        self.state().seq.get(chat_id).copied().unwrap_or(0)
+    }
+
+    /// Number a turn and begin it (the session's start, as one step).
+    pub fn start_turn(&self, chat_id: &str) -> u64 {
+        let seq = self.next_turn(chat_id);
+        self.begin(chat_id, seq);
+        seq
+    }
+
+    /// End the chat's latest turn (the session's settle, as one step).
+    pub fn finish_turn(&self, chat_id: &str) {
+        self.end(chat_id, self.current_turn(chat_id));
+    }
+
+    /// Turn `seq` began: the session turned active. Its baseline is the
+    /// record's revision right now, or the original baseline when this turn
+    /// is the one that delivered the reminder. An earlier turn still open (its
+    /// end not reported yet) is closed first; a report for a turn that is
+    /// already open, or already over, changes nothing.
+    pub fn begin(&self, chat_id: &str, seq: u64) {
+        let basis = self.basis(chat_id);
+        let pending = self.state().asked.get(chat_id).cloned();
+        // Whether the reminder has been delivered is read before the lock is
+        // taken: it reads the chat's queue.
+        let delivered = pending
+            .as_ref()
+            .filter(|ask| !ask.claimed)
+            .and_then(|ask| ask.message_id.as_deref())
+            .map(|id| self.delivered(chat_id, id));
+        let mut state = self.state();
+        if seq > 0 && seq <= state.closed.get(chat_id).copied().unwrap_or(0) {
+            return;
+        }
+        if let Some(open) = state.turns.get(chat_id) {
+            if seq > 0 && open.seq >= seq {
+                return;
+            }
             Self::finish(&mut state, chat_id, basis.as_ref());
         }
         let Some(RunBasis { project: Some(project), revision, .. }) = basis else {
             return;
         };
-        let (baseline, owed, ask) = match state.asked.get(chat_id) {
-            Some(&asked) => (asked, true, true),
-            None => (revision, false, false),
+        let claims = delivered == Some(true)
+            && state.asked.get(chat_id).is_some_and(|ask| !ask.claimed);
+        let (baseline, owed, ask) = if claims {
+            let ask = state.asked.get_mut(chat_id).expect("checked above");
+            ask.claimed = true;
+            (ask.baseline, true, true)
+        } else {
+            (revision, false, false)
         };
         state.turns.insert(
             chat_id.to_owned(),
-            Turn { run_id: None, baseline, project, owed, ask },
+            Turn { seq, run_id: None, baseline, project, owed, ask },
         );
     }
 
     /// The run called a state-changing tool, so the turn it is in owes a
-    /// revision. A call with no turn open (the session's start was not seen)
-    /// opens one; a call from a different run than the open turn's closes it.
+    /// revision. The call belongs to the chat's latest turn: when that turn's
+    /// start has not been reported yet, this opens it, and the late report
+    /// finds it open.
     pub fn note_state_change(&self, chat_id: &str, run_id: &str) {
-        let stale = self
+        let current = self.current_turn(chat_id);
+        let needs_turn = self
             .state()
             .turns
             .get(chat_id)
-            .is_some_and(|t| t.run_id.as_deref().is_some_and(|open| open != run_id));
-        if stale || !self.turn_open(chat_id) {
-            self.begin(chat_id);
+            .is_none_or(|open| current > 0 && open.seq < current);
+        if needs_turn {
+            self.begin(chat_id, current);
         }
         if let Some(turn) = self.state().turns.get_mut(chat_id) {
             turn.run_id = Some(run_id.to_owned());
@@ -207,12 +296,20 @@ impl StatusTracker {
         }
     }
 
-    /// The session settled: the turn ended.
-    pub fn end(&self, chat_id: &str) {
+    /// Turn `seq` ended: the session settled. Ends the open turn only when it
+    /// is that turn or an earlier one; a late report about an earlier turn
+    /// never touches a later one.
+    pub fn end(&self, chat_id: &str, seq: u64) {
         let basis = self.basis(chat_id);
         {
             let mut state = self.state();
-            Self::finish(&mut state, chat_id, basis.as_ref());
+            if seq > 0 {
+                let closed = state.closed.entry(chat_id.to_owned()).or_default();
+                *closed = (*closed).max(seq);
+            }
+            if state.turns.get(chat_id).is_some_and(|open| seq == 0 || open.seq <= seq) {
+                Self::finish(&mut state, chat_id, basis.as_ref());
+            }
         }
         self.wake.notify_one();
     }
@@ -244,50 +341,77 @@ impl StatusTracker {
             ask: turn.ask,
             forced: basis.is_some_and(|b| !b.holds),
         };
-        Self::push(state, ended);
-    }
-
-    /// Queue an ended turn. Forced turns of one chat merge into one obligation:
-    /// they ask the same thing, a status now, so a list of them could only grow
-    /// without bound while a reservation stands.
-    fn push(state: &mut State, ended: EndedRun) {
-        if ended.forced
-            && let Some(held) = state.ended.iter_mut().find(|e| e.chat_id == ended.chat_id && e.forced)
-        {
-            held.baseline = held.baseline.max(ended.baseline);
-            held.end_revision = held.end_revision.max(ended.end_revision);
-            held.ask = held.ask && ended.ask;
-            return;
+        if ended.forced {
+            Self::absorb(state, ended);
+        } else {
+            state.ended.push(ended);
         }
-        state.ended.push(ended);
     }
 
-    /// Whether a run is in flight on the chat that is being tracked.
+    /// Fold a turn that ended without the role into the chat's one obligation.
+    /// They ask the same thing, a status now, so a list of them could only grow
+    /// without bound while a reservation stands.
+    fn absorb(state: &mut State, ended: EndedRun) {
+        match state.held.get_mut(&ended.chat_id) {
+            Some(held) => {
+                held.baseline = held.baseline.max(ended.baseline);
+                held.end_revision = held.end_revision.max(ended.end_revision);
+                held.ask = held.ask && ended.ask;
+            }
+            None => {
+                state.held.insert(ended.chat_id.clone(), ended);
+            }
+        }
+    }
+
+    /// Whether a turn is in flight on the chat that is being tracked.
     pub fn turn_open(&self, chat_id: &str) -> bool {
         self.state().turns.contains_key(chat_id)
     }
 
-    /// The baseline and project of the run in flight on the chat.
+    /// The baseline and project of the turn in flight on the chat.
     pub fn current_run(&self, chat_id: &str) -> Option<(u32, (String, String))> {
         self.state().turns.get(chat_id).map(|r| (r.baseline, r.project.clone()))
     }
 
     /// Turns that ended and still need their check, for the chat (tests).
     pub fn pending(&self, chat_id: &str) -> usize {
-        self.state().ended.iter().filter(|e| e.chat_id == chat_id).count()
+        let state = self.state();
+        state.ended.iter().filter(|e| e.chat_id == chat_id).count()
+            + usize::from(state.held.contains_key(chat_id))
     }
 
     fn take_ended(&self) -> Vec<EndedRun> {
         std::mem::take(&mut self.state().ended)
     }
 
-    /// Put a turn back for a later check: its chat is about to hold the role.
+    /// A holder's turn found to belong to a chat that is about to hold the
+    /// role: it joins that chat's obligation.
     fn hold(&self, mut ended: EndedRun) {
         ended.forced = true;
-        Self::push(&mut self.state(), ended);
+        Self::absorb(&mut self.state(), ended);
     }
 
-    /// Record the outcome of a turn's check.
+    fn held_chats(&self) -> Vec<String> {
+        self.state().held.keys().cloned().collect()
+    }
+
+    fn held(&self, chat_id: &str) -> Option<EndedRun> {
+        self.state().held.get(chat_id).cloned()
+    }
+
+    /// Take the chat's obligation for good, whatever it has absorbed up to this
+    /// instant. `None` when something else already took it.
+    fn take_held(&self, chat_id: &str) -> Option<EndedRun> {
+        self.state().held.remove(chat_id)
+    }
+
+    fn discard_held(&self, chat_id: &str) {
+        self.state().held.remove(chat_id);
+    }
+
+    /// Record the outcome of a turn's check. A reminder is reserved here, before
+    /// it is queued, so that two turns concluding at once ask once.
     pub fn conclude(&self, ended: &EndedRun, published: bool) -> Verdict {
         let mut state = self.state();
         if published {
@@ -296,13 +420,26 @@ impl StatusTracker {
         } else if ended.ask {
             state.asked.remove(&ended.chat_id);
             Verdict::Missed { baseline: ended.baseline }
+        } else if state.asked.contains_key(&ended.chat_id) {
+            Verdict::Outstanding
         } else {
-            state.asked.insert(ended.chat_id.clone(), ended.baseline);
+            state.asked.insert(
+                ended.chat_id.clone(),
+                Ask { baseline: ended.baseline, message_id: None, claimed: false },
+            );
             Verdict::Nudge { baseline: ended.baseline }
         }
     }
 
-    /// The ask could not be queued; allow the next state-changing turn to ask again.
+    /// The reminder was queued under `message_id`; the turn that delivers that
+    /// message, and no other, is the one it asked for.
+    pub fn reminder_queued(&self, chat_id: &str, message_id: &str) {
+        if let Some(ask) = self.state().asked.get_mut(chat_id) {
+            ask.message_id = Some(message_id.to_owned());
+        }
+    }
+
+    /// The reminder could not be queued; allow the next owing turn to ask again.
     pub fn ask_failed(&self, chat_id: &str) {
         self.state().asked.remove(chat_id);
     }
@@ -353,36 +490,18 @@ pub fn managed_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(Stri
     Some((space, role.scope_item_id))
 }
 
-/// The project of a chat the Manager role is about to adopt: a first start
-/// still carrying its provisional marker, or the successor a hand-off has
-/// reserved.
-fn pending_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(String, String)> {
-    let item = workspace
-        .chat(chat_id)
-        .ok()
-        .flatten()
-        .and_then(|chat| chat.standing_role_provisional_scope(StandingRoleKind::Manager).map(str::to_owned))
-        .or_else(|| {
-            workspace
-                .standing_role_awaiting(chat_id, StandingRoleKind::Manager)
-                .map(|role| role.scope_item_id)
-        })?;
-    let space = workspace.work_item_space(&item)?;
-    Some((space, item))
-}
-
 /// Where a turn on this chat belongs, how far its project's record has got and
-/// whether the chat holds the role.
+/// whether the chat holds the role: the project and the claim come from one
+/// registry snapshot, so adoption cannot land between them.
 pub fn run_basis(workspace: &WorkspaceHost, chat_id: &str) -> RunBasis {
-    let project = managed_project(workspace, chat_id).or_else(|| pending_project(workspace, chat_id));
-    let (revision, holds) = match &project {
-        Some((space, item)) => (
-            status_revision(workspace, space, item),
-            workspace.manager_claim(chat_id, item) == ManagerClaim::Holds,
-        ),
-        None => (0, false),
+    let Some((space, item, claim)) = workspace.manager_scope(chat_id) else {
+        return RunBasis::default();
     };
-    RunBasis { project, revision, holds }
+    RunBasis {
+        revision: status_revision(workspace, &space, &item),
+        holds: claim == ManagerClaim::Holds,
+        project: Some((space, item)),
+    }
 }
 
 enum Check {
@@ -425,12 +544,20 @@ impl ManagerStatusWatch {
     }
 }
 
-/// Install the probe and watch for turns that ended owing a revision.
+/// Install the probes and watch for turns that ended owing a revision.
 pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host: DocHost) -> ManagerStatusWatch {
     let probe_workspace = workspace.clone();
     tokens
         .manager_status()
         .set_probe(Arc::new(move |chat_id| run_basis(&probe_workspace, chat_id)));
+    let probe_docs = doc_host.clone();
+    tokens.manager_status().set_delivery_probe(Arc::new(move |chat_id, message_id| {
+        probe_docs
+            .open(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc().read_queue().ok())
+            .is_none_or(|queue| !queue.iter().any(|row| row.id == message_id))
+    }));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let chat_changes = workspace.watch_chats();
@@ -439,39 +566,40 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
         let wake = tracker.waker();
         let mut chats = chat_changes;
         loop {
-            let mut waiting = false;
+            // A holder's finished turns are checked once.
             for ended in tracker.take_ended() {
                 if stop.is_cancelled() {
                     return;
                 }
-                let published = match check(&workspace, &ended) {
-                    Check::Drop => continue,
-                    Check::Wait => {
-                        waiting = true;
-                        tracker.hold(ended);
-                        continue;
-                    }
-                    Check::Ready { published } => published,
-                };
-                let chat_id = ended.chat_id.clone();
-                match tracker.conclude(&ended, published) {
-                    Verdict::Nudge { baseline } => {
-                        if stop.is_cancelled() {
+                match check(&workspace, &ended) {
+                    Check::Drop => {}
+                    Check::Wait => tracker.hold(ended),
+                    Check::Ready { published } => {
+                        if !conclude_and_remind(tracker, &doc_host, &ended, published, &stop) {
                             return;
                         }
-                        let id = crate::new_id();
-                        if let Err(error) =
-                            doc_host.queue_context_message(&chat_id, &id, &manager_status_nudge_text(baseline))
-                        {
-                            tracing::warn!(chat = %chat_id, %error, "manager status nudge not queued");
-                            tracker.ask_failed(&chat_id);
+                    }
+                }
+            }
+            // A chat about to hold the role has one obligation, checked in
+            // place: it is taken only once the chat holds the role, with
+            // everything it has absorbed by then, and not before.
+            let mut waiting = false;
+            for chat_id in tracker.held_chats() {
+                let Some(held) = tracker.held(&chat_id) else {
+                    continue;
+                };
+                match check(&workspace, &held) {
+                    Check::Drop => tracker.discard_held(&chat_id),
+                    Check::Wait => waiting = true,
+                    Check::Ready { .. } => {
+                        let Some(taken) = tracker.take_held(&chat_id) else {
+                            continue;
+                        };
+                        if !conclude_and_remind(tracker, &doc_host, &taken, false, &stop) {
+                            return;
                         }
                     }
-                    Verdict::Missed { baseline } => {
-                        tracing::warn!(chat = %chat_id, baseline, role = MANAGER_STATUS_ROLE,
-                            "manager status still missing after one ask");
-                    }
-                    Verdict::Published => {}
                 }
             }
             let recheck = tracker.recheck_interval();
@@ -493,6 +621,39 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
     ManagerStatusWatch { cancel, handle }
 }
 
+/// Conclude a checked turn and queue the one reminder it earns. `false` when
+/// the watcher was stopped and must end.
+fn conclude_and_remind(
+    tracker: &StatusTracker,
+    doc_host: &DocHost,
+    ended: &EndedRun,
+    published: bool,
+    stop: &CancellationToken,
+) -> bool {
+    let chat_id = &ended.chat_id;
+    match tracker.conclude(ended, published) {
+        Verdict::Nudge { baseline } => {
+            if stop.is_cancelled() {
+                tracker.ask_failed(chat_id);
+                return false;
+            }
+            let id = crate::new_id();
+            match doc_host.queue_context_message(chat_id, &id, &manager_status_nudge_text(baseline)) {
+                Ok(message_id) => tracker.reminder_queued(chat_id, &message_id),
+                Err(error) => {
+                    tracing::warn!(chat = %chat_id, %error, "manager status nudge not queued");
+                    tracker.ask_failed(chat_id);
+                }
+            }
+        }
+        Verdict::Missed { baseline } => {
+            tracing::warn!(chat = %chat_id, baseline, role = MANAGER_STATUS_ROLE,
+                "manager status still missing after one ask");
+        }
+        Verdict::Published | Verdict::Outstanding => {}
+    }
+    true
+}
 
 #[cfg(test)]
 mod tests {
@@ -555,22 +716,24 @@ mod tests {
     #[test]
     fn a_turn_that_changed_state_without_a_revision_is_asked_once() {
         let (t, shared) = tracker(true, 2);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "r1");
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 2 });
-        // The ask is the next run: held to the same baseline, not asked twice.
-        t.begin("m");
-        t.end("m");
+        t.reminder_queued("m", "msg-1");
+        // The ask is the turn that delivers the reminder: held to the same
+        // baseline, not asked twice.
+        t.start_turn("m");
+        t.finish_turn("m");
         let ask = t.take_ended().remove(0);
         assert!(ask.ask);
         assert_eq!(published(&t, &ask, &[]), Verdict::Missed { baseline: 2 });
         // Afterwards a fresh state-changing turn can be asked again.
         set_revision(&shared, 2);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "r3");
-        t.end("m");
+        t.finish_turn("m");
         let next = t.take_ended().remove(0);
         assert!(!next.ask);
         assert_eq!(published(&t, &next, &[]), Verdict::Nudge { baseline: 2 });
@@ -579,10 +742,10 @@ mod tests {
     #[test]
     fn a_turn_that_publishes_while_it_runs_is_satisfied_and_clears_the_ask() {
         let (t, shared) = tracker(true, 1);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "r1");
         set_revision(&shared, 2);
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!((ended.baseline, ended.end_revision), (1, 2));
         assert_eq!(published(&t, &ended, &[2]), Verdict::Published);
@@ -593,13 +756,13 @@ mod tests {
         let (t, shared) = tracker(true, 1);
         // Turn A publishes revision 2, then turn B starts at once, before
         // anything has looked at A's end.
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "a");
         set_revision(&shared, 2);
-        t.end("m");
-        t.begin("m");
+        t.finish_turn("m");
+        t.start_turn("m");
         t.note_state_change("m", "b");
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended();
         assert_eq!(ended.len(), 2);
         let (a, b) = (&ended[0], &ended[1]);
@@ -613,13 +776,13 @@ mod tests {
     #[test]
     fn a_later_turns_publication_does_not_satisfy_an_earlier_one() {
         let (t, shared) = tracker(true, 1);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "a");
-        t.end("m"); // A ended at revision 1, published nothing
+        t.finish_turn("m"); // A ended at revision 1, published nothing
         set_revision(&shared, 2);
-        t.begin("m");
+        t.start_turn("m");
         set_revision(&shared, 3); // B publishes revisions 3
-        t.end("m");
+        t.finish_turn("m");
         let a = t.take_ended().remove(0);
         assert_eq!((a.baseline, a.end_revision), (1, 1));
         assert_eq!(published(&t, &a, &[3]), Verdict::Nudge { baseline: 1 });
@@ -628,10 +791,10 @@ mod tests {
     #[test]
     fn an_existing_record_seeds_the_baseline() {
         let (t, _shared) = tracker(true, 3);
-        t.begin("m");
+        t.start_turn("m");
         assert_eq!(t.current_run("m"), Some((3, ("s".to_owned(), "proj".to_owned()))));
         t.note_state_change("m", "r1");
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         // The earlier revisions 1..=3 cannot satisfy the turn.
         assert_eq!(published(&t, &ended, &[1, 2, 3]), Verdict::Nudge { baseline: 3 });
@@ -642,7 +805,7 @@ mod tests {
         let (t, _shared) = tracker(true, 4);
         t.note_state_change("m", "r1");
         assert!(t.turn_open("m"));
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!(ended.baseline, 4);
     }
@@ -650,10 +813,10 @@ mod tests {
     #[test]
     fn a_run_that_never_reported_its_end_is_closed_by_the_next_start() {
         let (t, shared) = tracker(true, 1);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "a");
         set_revision(&shared, 5);
-        t.begin("m");
+        t.start_turn("m");
         let ended = t.take_ended();
         assert_eq!(ended.len(), 1);
         assert_eq!((ended[0].baseline, ended[0].end_revision), (1, 5));
@@ -663,14 +826,14 @@ mod tests {
     #[test]
     fn a_turn_without_a_state_change_or_a_project_owes_nothing() {
         let (t, _s) = tracker(true, 0);
-        t.begin("m");
-        t.end("m");
+        t.start_turn("m");
+        t.finish_turn("m");
         assert!(t.take_ended().is_empty());
         let (t, _s) = tracker(false, 0);
-        t.begin("w");
+        t.start_turn("w");
         t.note_state_change("w", "r1");
         assert!(!t.turn_open("w"));
-        t.end("w");
+        t.finish_turn("w");
         assert!(t.take_ended().is_empty());
         // Without a probe nothing is tracked at all.
         let bare = StatusTracker::default();
@@ -682,13 +845,13 @@ mod tests {
     fn a_warm_session_ends_each_turn_at_the_session_boundary_not_the_token() {
         let (t, shared) = tracker(true, 1);
         // One token, `tok`, serves two turns of a parked session.
-        t.begin("m"); // turn one: the session turns active
+        t.start_turn("m"); // turn one: the session turns active
         t.note_state_change("m", "tok");
-        t.end("m"); // it parks: the turn is over, the token lives on
+        t.finish_turn("m"); // it parks: the turn is over, the token lives on
         set_revision(&shared, 2); // an unrelated publication between the turns
-        t.begin("m"); // turn two: a prompt steered into the parked run
+        t.start_turn("m"); // turn two: a prompt steered into the parked run
         t.note_state_change("m", "tok");
-        t.end("m");
+        t.finish_turn("m");
         t.end_run("m", "tok"); // the run finally ends: nothing left to close
         let ended = t.take_ended();
         assert_eq!(ended.len(), 2, "two turns, not one interval");
@@ -701,10 +864,10 @@ mod tests {
     #[test]
     fn a_runs_end_closes_only_the_turn_that_run_was_in() {
         let (t, _s) = tracker(true, 0);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "old-run");
-        t.end("m");
-        t.begin("m"); // the next turn belongs to a newer run
+        t.finish_turn("m");
+        t.start_turn("m"); // the next turn belongs to a newer run
         t.note_state_change("m", "new-run");
         t.end_run("m", "old-run"); // the old run's token is dropped late
         assert!(t.turn_open("m"), "the newer run's turn is untouched");
@@ -718,37 +881,161 @@ mod tests {
         set_holds(&shared, false);
         for n in 0..30u32 {
             set_revision(&shared, 4 + n);
-            t.begin("m");
+            t.start_turn("m");
             t.note_state_change("m", "tok");
-            t.end("m");
+            t.finish_turn("m");
             // Nothing has looked at them yet, and adoption may land at any time.
             assert_eq!(t.pending("m"), 1, "after {} turns", n + 1);
         }
         set_holds(&shared, true); // adoption lands before the watcher runs
-        let held = t.take_ended();
-        assert_eq!(held.len(), 1);
-        assert!(held[0].forced);
-        assert_eq!(held[0].baseline, 4 + 29);
+        assert!(t.take_ended().is_empty());
+        let held = t.take_held("m").expect("one obligation");
+        assert!(held.forced);
+        assert_eq!(held.baseline, 4 + 29);
         // A turn that ends while the chat holds the role is its own, checked on its window.
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "tok");
-        t.end("m");
+        t.finish_turn("m");
         assert!(!t.take_ended()[0].forced);
     }
 
     #[test]
-    fn a_turn_held_for_adoption_comes_back_owed_outright() {
+    fn the_adoption_obligation_survives_the_watchers_look_and_absorbs_turns_ending_meanwhile() {
+        let (t, shared) = tracker(true, 4);
+        set_holds(&shared, false);
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        // The watcher looks at the obligation; looking does not take it.
+        let looked = t.held("m").unwrap();
+        // Another turn ends before the watcher acts, then adoption lands.
+        set_revision(&shared, 6);
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        set_holds(&shared, true);
+        // The watcher takes it for good: it has absorbed the second turn.
+        let taken = t.take_held("m").unwrap();
+        assert_eq!((looked.baseline, taken.baseline), (4, 6));
+        assert_eq!(t.conclude(&taken, false), Verdict::Nudge { baseline: 6 });
+        assert!(t.take_held("m").is_none());
+        // A straggler that ended just before adoption but is reported after it
+        // finds a reminder already on its way.
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        let straggler = t.take_ended().remove(0);
+        assert_eq!(t.conclude(&straggler, false), Verdict::Outstanding);
+    }
+
+    #[test]
+    fn a_late_end_of_one_turn_never_closes_the_next() {
         let (t, _s) = tracker(true, 0);
-        t.begin("m");
+        let a = t.next_turn("m");
+        t.begin("m", a);
+        t.note_state_change("m", "tok");
+        // The session publishes A idle and starts B before A's end is reported.
+        let b = t.next_turn("m");
+        t.begin("m", b); // closes A
+        t.note_state_change("m", "tok"); // a call in B
+        t.end("m", a); // A's late report
+        assert!(t.turn_open("m"), "B is untouched");
+        assert_eq!(t.take_ended().len(), 1, "A was closed once, owing");
+        t.end("m", b);
+        assert!(!t.turn_open("m"));
+        assert_eq!(t.take_ended().len(), 1, "and B is checked on its own");
+    }
+
+    #[test]
+    fn a_start_report_that_arrives_after_its_end_opens_nothing() {
+        let (t, _s) = tracker(true, 0);
+        let a = t.next_turn("m");
+        t.end("m", a);
+        t.begin("m", a);
+        assert!(!t.turn_open("m"));
+    }
+
+    #[test]
+    fn a_tool_call_that_beats_its_turns_start_report_keeps_what_it_owes() {
+        let (t, _s) = tracker(true, 3);
+        let a = t.next_turn("m"); // the session started the turn
+        t.note_state_change("m", "tok"); // the agent's first call lands first
+        assert_eq!(t.current_run("m").unwrap().0, 3);
+        t.begin("m", a); // the late start report finds it open
+        t.finish_turn("m");
+        assert_eq!(t.take_ended().len(), 1);
+    }
+
+    #[test]
+    fn a_warm_prompt_whose_tool_call_beats_the_previous_turns_end_report_is_its_own_turn() {
+        let (t, shared) = tracker(true, 1);
+        let a = t.next_turn("m");
+        t.begin("m", a);
+        t.note_state_change("m", "tok");
+        // A settled and the next prompt was steered in; B's first call arrives
+        // before either report does.
+        set_revision(&shared, 2);
+        let b = t.next_turn("m");
+        t.note_state_change("m", "tok");
+        assert_eq!(t.current_run("m").unwrap().0, 2, "B starts from the revision now");
+        assert_eq!(t.take_ended().len(), 1, "A was closed with its own window");
+        t.end("m", a); // late
+        assert!(t.turn_open("m"));
+        t.end("m", b);
+        assert_eq!(t.take_ended().len(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_prompt_does_not_consume_the_reminder() {
+        let (t, _s) = tracker(true, 3);
+        let delivered = Arc::new(Mutex::new(false));
+        let flag = delivered.clone();
+        t.set_delivery_probe(Arc::new(move |_chat, id| {
+            assert_eq!(id, "msg-1");
+            *flag.lock().unwrap()
+        }));
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        let first = t.take_ended().remove(0);
+        assert_eq!(published(&t, &first, &[]), Verdict::Nudge { baseline: 3 });
+        t.reminder_queued("m", "msg-1");
+        // A prompt ahead of the reminder in the queue runs first.
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        let unrelated = t.take_ended().remove(0);
+        assert!(!unrelated.ask, "the reminder has not been delivered yet");
+        assert_eq!(published(&t, &unrelated, &[]), Verdict::Outstanding);
+        // Then the reminder is delivered, and the turn it starts is the ask.
+        *delivered.lock().unwrap() = true;
+        t.start_turn("m");
+        t.finish_turn("m");
+        let ask = t.take_ended().remove(0);
+        assert!(ask.ask);
+        assert_eq!(ask.baseline, 3, "held to the original turn's baseline");
+        assert_eq!(published(&t, &ask, &[]), Verdict::Missed { baseline: 3 });
+        // Only that one turn was the ask.
+        t.start_turn("m");
+        t.note_state_change("m", "tok");
+        t.finish_turn("m");
+        assert!(!t.take_ended().remove(0).ask);
+    }
+
+    #[test]
+    fn a_turn_held_for_adoption_becomes_the_chats_one_obligation() {
+        let (t, _s) = tracker(true, 0);
+        t.start_turn("m");
         t.note_state_change("m", "r1");
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!(t.pending("m"), 0);
         assert!(!ended.forced);
         t.hold(ended);
         assert_eq!(t.pending("m"), 1);
-        let back = t.take_ended().remove(0);
-        assert!(back.forced, "a turn that ended before the chat held the role cannot have published");
+        let held = t.take_held("m").expect("the obligation");
+        assert!(held.forced, "a turn that ended before the chat held the role cannot have published");
+        assert!(t.take_held("m").is_none(), "taken once");
     }
 
     #[test]
@@ -756,39 +1043,36 @@ mod tests {
         let (t, shared) = tracker(true, 4);
         for n in 0..40u32 {
             set_revision(&shared, 4 + n);
-            let run = format!("r{n}");
-            t.begin("m");
-            t.note_state_change("m", &run);
-            t.end("m");
+            t.start_turn("m");
+            t.note_state_change("m", "tok");
+            t.finish_turn("m");
             for ended in t.take_ended() {
                 t.hold(ended);
             }
             // Past any fixed list length the obligation is still there, once.
             assert_eq!(t.pending("m"), 1, "after {} turns", n + 1);
         }
-        let held = t.take_ended().remove(0);
-        assert!(held.forced);
-        assert_eq!(held.baseline, 4 + 39, "the newest turn's baseline");
+        assert_eq!(t.held("m").unwrap().baseline, 4 + 39, "the newest turn's baseline");
         // Another chat's held turn is its own obligation.
-        t.begin("other");
+        t.start_turn("other");
         t.note_state_change("other", "o1");
-        t.end("other");
+        t.finish_turn("other");
         for ended in t.take_ended() {
             t.hold(ended);
         }
-        assert_eq!((t.pending("m"), t.pending("other")), (0, 1));
+        assert_eq!((t.pending("m"), t.pending("other")), (1, 1));
     }
 
     #[test]
     fn a_failed_ask_lets_the_next_turn_ask_again() {
         let (t, _s) = tracker(true, 0);
-        t.begin("m");
+        t.start_turn("m");
         t.note_state_change("m", "r1");
-        t.end("m");
+        t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 0 });
         t.ask_failed("m");
-        t.begin("m");
+        t.start_turn("m");
         assert!(!t.state().turns["m"].ask);
     }
 

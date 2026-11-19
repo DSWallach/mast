@@ -883,17 +883,6 @@ impl WorkspaceHost {
         self.read(|doc| doc.part_done_hand_off_from(from))
     }
 
-    /// The role of `kind` that has reserved a hand-off to `chat_id` and not yet
-    /// rotated to it: the chat is that role's successor in the making.
-    pub fn standing_role_awaiting(&self, chat_id: &str, kind: mast_proto::StandingRoleKind) -> Option<mast_proto::StandingRole> {
-        self.read(|doc| {
-            doc.standing_roles().into_iter().filter(|role| role.role == kind).find(|role| {
-                doc.pending_standing_hand_off(role.role, &role.scope_item_id)
-                    .is_some_and(|pending| pending.to_chat_id == chat_id)
-            })
-        })
-    }
-
     /// Whether `chat_id` holds the Manager role of `scope_item_id`, is about to
     /// (a provisional first start or a reserved hand-off successor), or neither,
     /// read from one registry snapshot so adoption cannot land between the
@@ -918,6 +907,37 @@ impl WorkspaceHost {
             } else {
                 ManagerClaim::None
             }
+        })
+    }
+
+    /// The project a chat manages or is about to manage, as `(space id, project
+    /// item id, how the chat stands to the role)`, read from one registry
+    /// snapshot: the holder, a first start's provisional marker and a reserved
+    /// hand-off are all looked at together, so adoption cannot land between
+    /// them and lose the project.
+    pub fn manager_scope(&self, chat_id: &str) -> Option<(String, String, ManagerClaim)> {
+        self.read(|doc| {
+            let kind = mast_proto::StandingRoleKind::Manager;
+            if let Some(role) = doc.standing_role_of_chat(chat_id).filter(|role| role.role == kind) {
+                let space = doc.work_item_space(&role.scope_item_id)?;
+                return Some((space, role.scope_item_id, ManagerClaim::Holds));
+            }
+            let chat = doc.chat(chat_id).ok().flatten().filter(|chat| !chat.archived)?;
+            let item = chat
+                .standing_role_provisional_scope(kind)
+                .map(str::to_owned)
+                .or_else(|| {
+                    doc.standing_roles()
+                        .into_iter()
+                        .filter(|role| role.role == kind)
+                        .find(|role| {
+                            doc.pending_standing_hand_off(role.role, &role.scope_item_id)
+                                .is_some_and(|pending| pending.to_chat_id == chat_id)
+                        })
+                        .map(|role| role.scope_item_id)
+                })?;
+            let space = doc.work_item_space(&item)?;
+            Some((space, item, ManagerClaim::Pending))
         })
     }
 
