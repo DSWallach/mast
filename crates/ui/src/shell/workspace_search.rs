@@ -151,6 +151,7 @@ impl Shell {
                     return;
                 }
             };
+            let _ = client.refresh_symbols(false).await;
             while let Some(frame) = stream.recv().await {
                 if let Some(error) = frame.get("error").and_then(|value| value.as_str()) {
                     let error = error.to_owned();
@@ -440,7 +441,6 @@ impl Shell {
         if mode == SearchMode::Symbols {
             if self.workspace_symbol_error.is_some() { self.workspace_symbol_key = None; }
             self.subscribe_workspace_symbols(cx);
-            self.refresh_workspace_symbols(false, cx);
         } else {
             self.workspace_search_index_key = None;
             self.prewarm_workspace_search(cx);
@@ -497,6 +497,11 @@ impl Shell {
             return;
         }
         if mode == SearchMode::Symbols {
+            if self.workspace_symbol_index.is_none() {
+                search.status = self.workspace_symbol_error.clone().unwrap_or_else(|| "Indexing symbols…".into());
+                cx.notify();
+                return;
+            }
             if raw.chars().count() > 256 {
                 search.status = "Query must not exceed 256 characters".into();
                 cx.notify();

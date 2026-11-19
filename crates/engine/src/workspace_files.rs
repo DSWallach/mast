@@ -521,6 +521,7 @@ impl WorkspaceFiles {
                             _ = tokio::time::sleep_until(refresh_after), if refresh_pending => break,
                             _ = cancel.cancelled() => return,
                             _ = idle.tick() => {
+                                symbols::retire_idle_symbol_index(&index_service.inner.symbol_indexes, &workspace.checkout_id);
                                 if retire_idle_search_index(
                                     &index_service.inner.search_indexes,
                                     &workspace.checkout_id,

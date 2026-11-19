@@ -54,6 +54,16 @@ pub(super) struct SymbolIndexSlot {
     refresh: Arc<Notify>,
     force_refresh: Arc<AtomicBool>,
     index: Arc<std::sync::Mutex<SymbolIndex>>,
+    idle_checks: u8,
+}
+
+pub(super) fn retire_idle_symbol_index(indexes: &std::sync::Mutex<HashMap<String, SymbolIndexSlot>>, checkout_id: &str) {
+    let mut indexes = lock(indexes);
+    let Some(slot) = indexes.get_mut(checkout_id) else { return; };
+    if slot.sender.receiver_count() == 0 { slot.idle_checks = slot.idle_checks.saturating_add(1); } else { slot.idle_checks = 0; }
+    if slot.idle_checks >= 2 {
+        if let Some(slot) = indexes.remove(checkout_id) { slot.cancel.cancel(); }
+    }
 }
 
 impl WorkspaceFiles {
@@ -65,8 +75,12 @@ impl WorkspaceFiles {
         let accessed = self.inner.symbol_index_access.fetch_add(1, Ordering::Relaxed);
         let (receiver, sender) = {
             let mut indexes = lock(&self.inner.symbol_indexes);
+            if indexes.get(&workspace.checkout_id).is_some_and(|slot| slot.cancel.is_cancelled()) {
+                indexes.remove(&workspace.checkout_id);
+            }
             if let Some(slot) = indexes.get_mut(&workspace.checkout_id) {
                 slot.accessed = accessed;
+                slot.idle_checks = 0;
                 (slot.sender.subscribe(), None)
             } else {
                 if indexes.len() >= MAX_CHECKOUT_INDEXES {
@@ -78,7 +92,7 @@ impl WorkspaceFiles {
                 let refresh = Arc::new(Notify::new());
                 let force_refresh = Arc::new(AtomicBool::new(false));
                 let index = Arc::new(std::sync::Mutex::new(SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS)));
-                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone(), index: index.clone() });
+                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone(), index: index.clone(), idle_checks: 0 });
                 (receiver, Some((sender, cancel, refresh, force_refresh, index)))
             }
         };
@@ -194,7 +208,6 @@ async fn run_index(
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             _ = service.inner.cancel.cancelled() => return Ok(()),
-            _ = sender.closed(), if !first => return Ok(()),
             result = paths.changed(), if !first => {
                 if result.is_err() { return Err("workspace file index stopped".into()); }
                 paths_updated = true;
@@ -404,6 +417,23 @@ fn freshness_paths(known: &HashSet<String>, recent: &[String], all: bool) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_symbol_cache_reuses_file_index_retirement_ticks() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let cancel = CancellationToken::new();
+        let slots = std::sync::Mutex::new(HashMap::from([("checkout".into(), SymbolIndexSlot {
+            sender, cancel: cancel.clone(), accessed: 0, refresh: Arc::new(Notify::new()), force_refresh: Arc::new(AtomicBool::new(false)), index: Arc::new(std::sync::Mutex::new(SymbolIndex::new(1, 1, 1))), idle_checks: 0,
+        })]));
+        retire_idle_symbol_index(&slots, "checkout");
+        assert!(lock(&slots).contains_key("checkout"));
+        drop(receiver);
+        retire_idle_symbol_index(&slots, "checkout");
+        assert!(lock(&slots).contains_key("checkout"));
+        retire_idle_symbol_index(&slots, "checkout");
+        assert!(!lock(&slots).contains_key("checkout"));
+        assert!(cancel.is_cancelled());
+    }
 
     #[test]
     fn open_freshness_sample_is_bounded_for_large_checkout() {
