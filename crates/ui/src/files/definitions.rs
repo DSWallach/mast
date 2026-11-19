@@ -1,6 +1,6 @@
 //! Symbol-index-backed definition lookup for the editor.
 
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::{Duration, Instant}};
 
 use gpui::{App, Task, Window};
 use gpui_base::input::{DefinitionProvider, Rope, RopeExt};
@@ -21,6 +21,7 @@ struct DefinitionState {
     cache: HashMap<String, Vec<Definition>>,
     parsed: Option<(String, Rc<Vec<Range<usize>>>)>,
     watch: Option<Task<()>>,
+    watch_failed_at: Option<Instant>,
     editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
     navigation_handled: bool,
@@ -62,7 +63,10 @@ impl SymbolDefinitionProvider {
     pub(super) fn is_indexing(&self) -> bool { self.state.borrow().revision.is_none() }
 
     pub(super) fn start_watch(&self, cx: &mut App) {
-        if self.state.borrow().watch.is_some() { return; }
+        {
+            let state = self.state.borrow();
+            if state.watch.is_some() || state.watch_failed_at.is_some_and(|failed| failed.elapsed() < Duration::from_secs(60)) { return; }
+        }
         let client = self.client.clone();
         let state = Rc::downgrade(&self.state);
         let task = cx.spawn(async move |cx| {
@@ -74,6 +78,7 @@ impl SymbolDefinitionProvider {
                         let mut state = state.borrow_mut();
                         if state.revision == revision { None } else {
                             state.revision = revision;
+                            state.watch_failed_at = None;
                             state.cache.clear();
                             state.selected.clear();
                             state.editor.clone()
@@ -86,6 +91,7 @@ impl SymbolDefinitionProvider {
                 let editor = {
                     let mut state = state.borrow_mut();
                     state.revision = None;
+                    state.watch_failed_at = Some(Instant::now());
                     state.cache.clear();
                     state.selected.clear();
                     state.watch = None;
@@ -304,6 +310,30 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         host.update(cx, |surface, _, _| assert!(surface.definition_notice.is_none())).unwrap();
+    }
+
+    #[derive(Default)]
+    struct FailingWatchTransport(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl super::super::client::WorkspaceFilesTransport for FailingWatchTransport {
+        async fn call(&self, _: &str, _: serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> { unreachable!() }
+        async fn subscribe(&self, _: &str, _: serde_json::Value) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, mast_rpc::RpcError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(mast_rpc::RpcError::Closed)
+        }
+    }
+
+    #[gpui::test]
+    fn failed_watch_is_not_retried_on_each_hover(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, atomic::Ordering};
+        let transport = Arc::new(FailingWatchTransport::default());
+        let context = super::super::client::FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/fixture".into(), checkout_id: Some("checkout".into()) };
+        let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context), "src/a.rs".into());
+        cx.update(|cx| provider.start_watch(cx));
+        cx.run_until_parked();
+        for _ in 0..20 { cx.update(|cx| provider.start_watch(cx)); }
+        cx.run_until_parked();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]
