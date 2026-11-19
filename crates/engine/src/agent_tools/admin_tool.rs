@@ -881,13 +881,22 @@ impl AgentToolsService {
                     ..Default::default()
                 }
             });
-            let reply = self.apply_scoped(context, &built.mutation, Some(&space), guard.as_ref()).map_err(|e| {
+            let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+            let (reply, committed) = self.work_outline.mutate_guarded_with_receipt(
+                &built.mutation, &actor, Some(&space), guard.as_ref()
+            ).map_err(|e| {
                 invalid(format!(
                     "step {i} ({}) failed after {i} applied: {}",
                     built.summary,
                     e.to_wire_message()
                 ))
             })?;
+            if committed {
+                context.admin_committed.set(true);
+                if self.tokens.manager_status().test_hook("admin_after_commit", &context.grant.chat_id) {
+                    return Err(invalid("injected interruption after committed admin step"));
+                }
+            }
             if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id.clone()) {
                 refs.insert(name, id);
             }
@@ -984,19 +993,14 @@ impl AgentToolsService {
             });
         // The project item may sit above the manager chat's own item, so the
         // request is written under the same holder and target re-check.
-        let reply = match &manager_item {
-            Some(root) => {
-                let guard = crate::work_outline::ManagerGuard {
-                    chat_id: context.grant.chat_id.clone(),
-                    root: root.clone(),
-                    inside: vec![root.clone()],
-                    request_item: Some(root.clone()),
-                    ..Default::default()
-                };
-                self.apply_scoped(context, &request, Some(&context.grant.space_id), Some(&guard))?
-            }
-            None => self.apply(context, &request)?,
-        };
+        let guard = manager_item.as_ref().map(|root| crate::work_outline::ManagerGuard {
+            chat_id: context.grant.chat_id.clone(), root: root.clone(),
+            inside: vec![root.clone()], request_item: Some(root.clone()), ..Default::default()
+        });
+        let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+        let admin_space = if manager_item.is_some() { Some(context.grant.space_id.as_str()) } else { context.admin_space.as_deref() };
+        let (reply, committed) = self.work_outline.mutate_guarded_with_receipt(&request, &actor, admin_space, guard.as_ref())?;
+        if committed { context.admin_committed.set(true); }
         let request_id = reply
             .user_action_request_id
             .ok_or_else(|| invalid("the approval request was not created"))?;

@@ -5507,6 +5507,25 @@ async fn a_manager_turn_that_dispatches_without_a_status_is_nudged_once_and_publ
     rig.harness.release.notify_one();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_admin_read_and_dry_run_do_not_owe_a_reminder() {
+    let (rig, item) = role_rig("status-admin-read").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("inspect", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "manager run").await;
+    let token = run_token(&rig, 0);
+    let tracker = rig.core.sessions.agent_tokens();
+    admin(&rig, &token, json!({"read": true})).await.unwrap();
+    admin(&rig, &token, json!({"dryRun": true, "idempotencyKey": "preview", "steps": [
+        {"op": "create", "parentId": item, "title": "Preview only"}
+    ]})).await.unwrap();
+    assert_eq!(tracker.manager_status().generation(CHAT), 0);
+    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "read-only turn to close").await;
+    assert!(!tracker.manager_status().owes(CHAT));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(nudges(&rig), 0);
+}
+
 /// The watcher may not have seen the run start (or the turn may be over before
 /// it looks): the tool call itself opens the turn, and the end is read live.
 #[tokio::test(flavor = "multi_thread")]
@@ -6434,6 +6453,59 @@ async fn a_manager_edits_only_its_projects_outline() {
     assert_eq!(view["roots"].as_array().unwrap().len(), 1);
     assert_eq!(view["roots"][0]["id"], p.project.as_str());
     assert!(!view.to_string().contains("Bystander"), "{view}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_admin_batch_counts_committed_step_and_retry_only_new_work() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    let start = tracker.generation(CHAT);
+    let steps = json!({"idempotencyKey":"interrupted-status", "steps":[
+        {"op":"rename", "itemId":p.ticket, "title":"First committed"},
+        {"op":"rename", "itemId":p.tickets, "title":"Second committed"}
+    ]});
+    tracker.set_test_hook(Some(Arc::new(|event, _| event == "admin_after_commit")));
+    assert!(admin(&rig, &token, steps.clone()).await.is_err());
+    tracker.set_test_hook(None);
+    assert_eq!(tracker.generation(CHAT), start + 1);
+    assert_eq!(title_of(&rig, &p.ticket), "First committed");
+    rig.core.workspace.flush();
+    rig.service.work_outline().clear_recent_for_test();
+    admin(&rig, &token, steps.clone()).await.unwrap();
+    assert_eq!(tracker.generation(CHAT), start + 2, "retry counts only the new second step");
+    admin(&rig, &token, steps).await.unwrap();
+    assert_eq!(tracker.generation(CHAT), start + 2, "durable replay adds nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_status_generation_counts_commits_and_bulk_approval_but_not_replays() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let tokens = rig.core.sessions.agent_tokens();
+    let generation = || tokens.manager_status().generation(CHAT);
+    let start = generation();
+    let rename = json!({ "idempotencyKey": "status-rename", "steps": [
+        {"op": "rename", "itemId": p.ticket, "title": "Committed"}
+    ]});
+    admin(&rig, &token, rename.clone()).await.unwrap();
+    assert_eq!(generation(), start + 1);
+    // A lost response and retry reaches the durable replay boundary.
+    admin(&rig, &token, rename).await.unwrap();
+    assert_eq!(generation(), start + 1);
+    admin(&rig, &token, json!({ "idempotencyKey": "same-title", "steps": [
+        {"op": "rename", "itemId": p.ticket, "title": "Committed"}
+    ]})).await.unwrap();
+    assert_eq!(generation(), start + 1, "a no-op does not owe another status");
+    let steps: Vec<Value> = (0..11).map(|i| json!({"op":"rename", "itemId":p.ticket, "title":format!("Bulk {i}")})).collect();
+    let preview = json!({"idempotencyKey":"status-bulk", "dryRun":true, "steps":steps});
+    let asked = admin(&rig, &token, preview.clone()).await.unwrap();
+    assert_eq!(asked["needsApproval"], true);
+    assert_eq!(generation(), start + 2, "creating the Required Action is a change");
+    let repeated = admin(&rig, &token, preview).await.unwrap();
+    assert_eq!(asked["requestId"], repeated["requestId"]);
+    assert_eq!(generation(), start + 2, "replayed approval is not another change");
 }
 
 #[tokio::test(flavor = "multi_thread")]

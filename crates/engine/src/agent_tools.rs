@@ -743,6 +743,7 @@ struct CallContext<'a> {
     chat_title: String,
     /// The Manager status revision the call being run inserted, if it did.
     publish_receipt: std::cell::Cell<Option<u32>>,
+    admin_committed: std::cell::Cell<bool>,
 }
 
 impl CallContext<'_> {
@@ -1127,6 +1128,7 @@ impl AgentToolsService {
             manager_scope,
             chat_title: chat.title.clone().unwrap_or_default(),
             publish_receipt: std::cell::Cell::new(None),
+            admin_committed: std::cell::Cell::new(false),
         })
     }
 
@@ -1170,7 +1172,8 @@ impl AgentToolsService {
         let admitted_generation = (params.tool == tools::ARTIFACT_PUBLISH)
             .then(|| self.tokens.manager_status().generation(chat_id));
         let result = self.dispatch(&context, &params.tool, &arguments);
-        if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
+        if (result.is_ok() && crate::manager_status::is_state_changing(&params.tool))
+            || context.admin_committed.get() {
             self.tokens.manager_status().changed(chat_id);
         }
         if let (Some(admitted), Some(revision)) = (admitted_generation, context.publish_receipt.take()) {

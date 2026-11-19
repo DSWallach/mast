@@ -692,6 +692,7 @@ struct Inner {
     /// record, so two concurrent publishes cannot both pass the check.
     agent_publish_serial: Mutex<()>,
     manager_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    manager_commit_hook: Mutex<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>,
     render: Arc<RenderBroker>,
     /// Test seam: make provenance stamp writes fail.
     fail_stamp_writes: std::sync::atomic::AtomicBool,
@@ -716,6 +717,7 @@ impl ArtifactsService {
                 gate: Mutex::new(HashMap::new()),
                 agent_publish_serial: Mutex::new(()),
                 manager_publish_hook: Mutex::new(None),
+                manager_commit_hook: Mutex::new(None),
                 render: Arc::new(RenderBroker::default()),
                 fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
@@ -723,10 +725,16 @@ impl ArtifactsService {
         }
     }
 
-    /// Test seam invoked after Manager ownership is checked, before recording.
+    /// Test seam invoked after preparing the status, before the guarded commit.
     #[doc(hidden)]
     pub fn set_manager_publish_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *lock(&self.inner.manager_publish_hook) = hook;
+    }
+
+    /// Test seam for the guarded status commit.
+    #[doc(hidden)]
+    pub fn set_manager_commit_hook(&self, hook: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>) {
+        *lock(&self.inner.manager_commit_hook) = hook;
     }
 
     /// Test seam: while set, provenance stamp writes fail.
@@ -1131,8 +1139,14 @@ impl ArtifactsService {
             .map(Path::to_path_buf)
             .ok_or_else(|| ArtifactError::invalid("stored path has no folder"))?;
 
-        // Content.
-        if source != stored {
+        let manager_write = request.by.kind == WorkOutlineActorKind::Agent
+            && role.as_deref().is_some_and(mast_proto::is_manager_status_role);
+        let manager_stamp = self.manager_stamp(&request, role.as_deref());
+        if manager_write && manager_stamp.is_none() {
+            return Err(ArtifactError::invalid("the Manager role changed before the status was recorded"));
+        }
+        // Manager status content is written under the registry ownership guard below.
+        if !manager_write && source != stored {
             let current = std::fs::read(&stored).ok();
             if current.as_deref() != Some(bytes.as_slice()) {
                 write_atomic(&stored, &bytes)?;
@@ -1189,7 +1203,6 @@ impl ArtifactsService {
                 .is_some_and(|index| *index != companion_hashes);
         // A current Manager can attest to bytes written by an untrusted editor
         // even when those bytes already match the stored file.
-        let manager_stamp = self.manager_stamp(&request, role.as_deref());
         let needs_manager_attestation = manager_stamp.is_some()
             && view.current().is_some_and(|revision| !crate::briefing::manager_provenance(&view, revision));
         let changed = view.current().map(|r| r.hash.as_str()) != Some(hash.as_str())
@@ -1228,7 +1241,7 @@ impl ArtifactsService {
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
                     scheduled_task: self.run_stamp(&request.by),
-                    manager_status: manager_stamp,
+                    manager_status: manager_stamp.clone(),
                 },
             );
             if manifest.is_some() {
@@ -1244,12 +1257,33 @@ impl ArtifactsService {
         view.title = title;
         view.archived_at = None;
         let before = existing.as_ref();
-        if changed || before != Some(&view) {
-            view.updated_at = now;
-            view = self
-                .workspace()
-                .put_artifact(&view)
-                .map_err(|e| ArtifactError::io(e.to_string()))?;
+        let update_row = changed || before != Some(&view);
+        if update_row { view.updated_at = now; }
+        if manager_write {
+            let stamp = manager_stamp.as_ref().expect("checked above");
+            let item = request.work_item_id.as_deref().expect("manager stamp has item");
+            let hook = lock(&self.inner.manager_publish_hook).clone();
+            if let Some(hook) = hook { hook(); }
+            let commit_hook = lock(&self.inner.manager_commit_hook).clone();
+            view = self.workspace().commit_manager_status(item, &stamp.chat_id, &stamp.role_id, |doc| {
+                if let Some(hook) = &commit_hook { hook("guarded"); }
+                let previous = std::fs::read(&stored).ok();
+                let wrote = source != stored && previous.as_deref() != Some(bytes.as_slice());
+                if wrote { write_atomic(&stored, &bytes).map_err(|e| e.to_string())?; }
+                let result = if commit_hook.as_ref().is_some_and(|hook| hook("before_row")) {
+                    Err("injected Manager status registry failure".to_owned())
+                } else if update_row { doc.put_artifact(&view).map_err(|e| e.to_string()) } else { Ok(view.clone()) };
+                if result.is_err() && wrote {
+                    let restored = match previous {
+                        Some(bytes) => write_atomic(&stored, &bytes).map_err(|e| e.to_string()),
+                        None => std::fs::remove_file(&stored).map_err(|e| e.to_string()),
+                    };
+                    if let Err(error) = restored { return Err(format!("status registry write failed and file rollback failed: {error}")); }
+                }
+                result
+            }).map_err(ArtifactError::invalid)?;
+        } else if update_row {
+            view = self.workspace().put_artifact(&view).map_err(|e| ArtifactError::io(e.to_string()))?;
         }
         if request.pin_as_plan && !view.pinned_as_plan {
             self.workspace()
@@ -3055,10 +3089,6 @@ impl ArtifactsService {
             return Err(invalid("the project is in another Space"));
         }
         mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
-        let hook = lock(&self.inner.manager_publish_hook).clone();
-        if let Some(hook) = hook {
-            hook();
-        }
         // A private folder per call, removed on every path out.
         let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
         let source = dir.path().join("manager-status.md");

@@ -3129,27 +3129,28 @@ async fn only_the_call_that_inserted_a_revision_gets_a_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn handoff_after_status_ownership_check_never_receipts_an_unstamped_revision() {
+async fn handoff_after_status_ownership_check_rejects_write_and_preserves_artifact() {
     let rig = rig().await;
     rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("original"), "original"),
+    ).unwrap();
+    let id = first["artifactId"].as_str().unwrap();
+    let original = rig.core.workspace.artifact(id).unwrap();
+    let original_bytes = std::fs::read(first["storedPath"].as_str().unwrap()).unwrap();
     rig.core.workspace.reserve_standing_role_hand_off(CHAT, OTHER_CHAT, "handoff-status-race", None).unwrap();
     let workspace = rig.core.workspace.clone();
-    let did_handoff = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let happened = did_handoff.clone();
     rig.core.artifacts.set_manager_publish_hook(Some(Arc::new(move || {
         workspace.rotate_standing_role_for_chat(CHAT, OTHER_CHAT).unwrap();
-        happened.store(true, std::sync::atomic::Ordering::SeqCst);
     })));
-    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
-        &manager_caller(&rig), &status_publish_args(&status_document("handoff"), "handoff-status"),
-    ).unwrap();
+    let raced = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("handoff"), "handoff-status"),
+    );
     rig.core.artifacts.set_manager_publish_hook(None);
-    assert!(did_handoff.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(receipt, None, "an unstamped insertion cannot cover the old manager's changes");
-    let artifact = rig.core.workspace.artifact(reply["artifactId"].as_str().unwrap()).unwrap();
-    assert_eq!(artifact.current_revision, 1);
-    assert!(artifact.current().unwrap().manager_status.is_none());
-    assert!(mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).is_none());
+    assert!(raced.is_err(), "former Manager must be rejected");
+    assert_eq!(rig.core.workspace.artifact(id).unwrap(), original);
+    assert_eq!(std::fs::read(first["storedPath"].as_str().unwrap()).unwrap(), original_bytes);
     let mut successor = manager_caller(&rig);
     successor.chat_id = OTHER_CHAT.into();
     let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
@@ -3160,11 +3161,54 @@ async fn handoff_after_status_ownership_check_never_receipts_an_unstamped_revisi
     let trusted = mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).unwrap();
     assert_eq!(trusted.current_revision, 2);
     assert_eq!(trusted.current().unwrap().manager_status.as_ref().unwrap().chat_id, OTHER_CHAT);
-    // Once trusted, identical bytes remain an unchanged publish.
-    let (_, receipt) = rig.core.artifacts.agent_publish_with_receipt(
-        &successor, &status_publish_args(&status_document("handoff"), "successor-again"),
-    ).unwrap();
-    assert_eq!(receipt, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_status_commit_holds_role_guard_through_file_and_registry_write() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, OTHER_CHAT, "guarded-handoff", None).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume = std::sync::Mutex::new(resume_rx);
+    rig.core.artifacts.set_manager_commit_hook(Some(Arc::new(move |stage| {
+        if stage == "guarded" { entered_tx.send(()).unwrap(); resume.lock().unwrap().recv().unwrap(); }
+        false
+    })));
+    let service = rig.core.artifacts.clone();
+    let caller = manager_caller(&rig);
+    let publish = std::thread::spawn(move || service.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("guarded"), "guarded")));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let workspace = rig.core.workspace.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handoff = std::thread::spawn(move || { let result = workspace.rotate_standing_role_for_chat(CHAT, OTHER_CHAT); done_tx.send(result).unwrap(); });
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err(), "handoff waits for guarded write");
+    resume_tx.send(()).unwrap();
+    let (reply, receipt) = publish.join().unwrap().unwrap();
+    assert_eq!(receipt, Some(1));
+    done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    handoff.join().unwrap();
+    rig.core.artifacts.set_manager_commit_hook(None);
+    let artifact = rig.core.workspace.artifact(reply["artifactId"].as_str().unwrap()).unwrap();
+    assert_eq!(artifact.current().unwrap().manager_status.as_ref().unwrap().chat_id, CHAT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_manager_status_registry_write_restores_previous_file_and_row() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(&caller, &status_publish_args(&status_document("before"), "before")).unwrap();
+    let id = first["artifactId"].as_str().unwrap();
+    let path = first["storedPath"].as_str().unwrap();
+    let old = rig.core.workspace.artifact(id).unwrap();
+    let old_bytes = std::fs::read(path).unwrap();
+    rig.core.artifacts.set_manager_commit_hook(Some(Arc::new(|stage| stage == "before_row")));
+    assert!(rig.core.artifacts.agent_publish_with_receipt(&caller, &status_publish_args(&status_document("after"), "after")).is_err());
+    rig.core.artifacts.set_manager_commit_hook(None);
+    assert_eq!(std::fs::read(path).unwrap(), old_bytes);
+    assert_eq!(rig.core.workspace.artifact(id).unwrap(), old);
 }
 
 #[tokio::test(flavor = "multi_thread")]

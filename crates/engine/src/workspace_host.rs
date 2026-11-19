@@ -1307,9 +1307,17 @@ impl WorkspaceHost {
         guard: Option<&crate::work_outline::ManagerGuard>,
         ledger_keys: &[String],
     ) -> Result<mast_proto::WorkOutlineMutateReply, mast_proto::WorkOutlineError> {
+        self.work_outline_mutate_admin_with_receipt(mutation, actor, admin_space, guard, ledger_keys).map(|(reply, _)| reply)
+    }
+
+    pub(crate) fn work_outline_mutate_admin_with_receipt(
+        &self, mutation: &mast_proto::WorkOutlineMutation, actor: &mast_proto::WorkOutlineActor,
+        admin_space: Option<&str>, guard: Option<&crate::work_outline::ManagerGuard>, ledger_keys: &[String],
+    ) -> Result<(mast_proto::WorkOutlineMutateReply, bool), mast_proto::WorkOutlineError> {
         let now = Utc::now().timestamp_millis();
         let synced = self.registry_synced();
         self.mutate(|doc| {
+            let before = doc.work_outline_inputs_generation();
             let charge = match (guard, admin_space) {
                 (Some(guard), Some(space)) => guard.verify(doc, space, synced)?,
                 _ => 0,
@@ -1331,8 +1339,9 @@ impl WorkspaceHost {
                     return Err(error.into());
                 }
             };
+            let changed = doc.work_outline_inputs_generation() != before;
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
-            Ok(reply)
+            Ok((reply, changed))
         })
     }
 
@@ -1481,6 +1490,27 @@ impl WorkspaceHost {
     /// planning artifacts): unchanged ⇒ nothing plan-question sync reads changed.
     pub fn work_outline_kinds_generation(&self) -> u64 {
         self.read(|doc| doc.work_outline_kinds_generation())
+    }
+
+    /// Hold the registry lock across a Manager status file and row commit, so
+    /// a hand-off cannot pass the authorization check before that write.
+    pub(crate) fn commit_manager_status<R>(
+        &self, item: &str, chat: &str, role_id: &str,
+        write: impl FnOnce(&mut RegistryDoc) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let result = {
+            let mut doc = lock(&self.inner.reg);
+            let held = doc.standing_role(mast_proto::StandingRoleKind::Manager, item);
+            if !held.as_ref().is_some_and(|role| role.id == role_id && role.current_chat_id.as_deref() == Some(chat)) {
+                return Err("the Manager role changed before the status was recorded".into());
+            }
+            let result = write(&mut doc)?;
+            self.inner.settle_if_local(&mut doc);
+            result
+        };
+        self.inner.bump_changed();
+        if let Some(room) = lock(&self.inner.room).as_ref() { room.nudge(); }
+        Ok(result)
     }
 
     /// Create or update one artifact row (returns the row as written).
