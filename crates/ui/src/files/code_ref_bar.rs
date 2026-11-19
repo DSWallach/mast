@@ -525,8 +525,14 @@ mod tests {
         let shortcut = crate::settings::platform_combo("mod-shift-l");
         cx.simulate_keystrokes(window.into(), &shortcut);
         window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
-        state.read_with(cx, |state, _| assert!(state.code_refs("b").is_empty()));
+        state.read_with(cx, |state, _| {
+            assert!(state.code_refs("b").is_empty());
+            assert!(state.selected_execution_member("b").is_none());
+        });
+        window.update(cx, |surface, _, cx| surface.code_ref_message("Test error", false, cx)).unwrap();
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-a"));
+        cx.run_until_parked();
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
         cx.simulate_keystrokes(window.into(), &shortcut);
         for _ in 0..8 {
             runtime.block_on(tokio::task::yield_now());
@@ -548,7 +554,7 @@ mod tests {
 
     #[gpui::test]
     fn shortcut_without_selection_opens_outline(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
+        use gpui::{AppContext as _, Focusable as _};
         use std::{cell::Cell, rc::Rc};
         struct Host { surface: gpui::Entity<super::super::FilesSurface>, opened: Rc<Cell<bool>> }
         impl gpui::Render for Host {
@@ -566,17 +572,25 @@ mod tests {
         let opened = Rc::new(Cell::new(false));
         let (host, vcx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            let surface = cx.new(|cx| super::super::FilesSurface::new(state, "a".into(), false, 1000, 13.0, false, false, cx));
+            let surface = cx.new(|cx| super::super::FilesSurface::new_explorer(state, "a".into(), false, cx));
             Host { surface, opened: opened.clone() }
         });
         vcx.update(|window, cx| {
             let surface = host.read(cx).surface.clone();
-            let focus = surface.read(cx).tree_focus.clone();
+            window.draw(cx).clear();
+            let focus = surface.read(cx).search.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
             window.draw(cx).clear();
         });
+        let diagnostics = vcx.update(|window, cx| {
+            let surface = host.read(cx).surface.clone();
+            let focused = surface.read(cx).search.read(cx).focus_handle(cx).is_focused(window);
+            let key = gpui::Keystroke::parse(&crate::settings::platform_combo("mod-shift-l")).unwrap();
+            let bindings = window.possible_bindings_for_input(&[key]).iter().map(|binding| binding.action().name().to_string()).collect::<Vec<_>>();
+            (focused, bindings)
+        });
         vcx.simulate_keystrokes(&crate::settings::platform_combo("mod-shift-l"));
-        assert!(opened.get(), "Open Outline should receive the shortcut");
+        assert!(opened.get(), "Open Outline should receive the shortcut: {diagnostics:?}");
     }
 
     #[gpui::test]
