@@ -23,6 +23,7 @@ pub fn apply_keymap(
     // gpui-base installed at startup. Reinitialize the component layer before
     // rebuilding Mast's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
+    crate::files::code_find::bind_keys(cx);
     crate::composer::init(cx, composer_send_behavior);
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
@@ -37,6 +38,9 @@ pub fn apply_keymap(
     cx.bind_keys([KeyBinding::new("ctrl-h", gpui::Unbind("input::Replace".into()), Some("Input"))]);
     for (id, action) in [
         (ShortcutId::QuickOpen, Box::new(QuickOpen) as Box<dyn Action>),
+        (ShortcutId::QuickOpenSymbols, Box::new(QuickOpenSymbols) as Box<dyn Action>),
+        (ShortcutId::FileNavigationBack, Box::new(FileNavigationBack) as Box<dyn Action>),
+        (ShortcutId::FileNavigationForward, Box::new(FileNavigationForward) as Box<dyn Action>),
         (ShortcutId::AddCodeToChat, Box::new(AddCodeToChat) as Box<dyn Action>),
         (ShortcutId::SearchWorkspaceContent, Box::new(SearchWorkspaceContent) as Box<dyn Action>),
         (ShortcutId::GoToLine, Box::new(GoToLine) as Box<dyn Action>),
@@ -44,7 +48,7 @@ pub fn apply_keymap(
     ] {
         let combo = keymap.get(id);
         if combo.is_empty() { continue; }
-        let context = if id == ShortcutId::AddCodeToChat { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
+        let context = if matches!(id, ShortcutId::AddCodeToChat | ShortcutId::FileNavigationBack | ShortcutId::FileNavigationForward) { Some("Files") } else { (id == ShortcutId::ReplaceFile).then_some("Input") };
         let predicate = context.map(|value| std::rc::Rc::new(gpui::KeyBindingContextPredicate::parse(value).unwrap()));
         if let Ok(binding) = KeyBinding::load(&valid_or_default(combo, id.default_combo()), action, predicate, false, None, &gpui::DummyKeyboardMapper) {
             cx.bind_keys([binding]);

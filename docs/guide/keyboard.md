@@ -19,7 +19,20 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⌘1`–`⌘9` | Jump to session 1–9 |
 | `⇧⌘A` | Archive session |
 | `⌘S` | Save file |
+| `⌘O` | Open a workspace file |
+| `⌥⇧⌘O` | Search workspace symbols |
+| `⇧⌘F` | Search text in workspace files |
 | `⇧⌘R` | Reload browser page |
+
+## In a code file
+
+| Key | Does |
+| --- | --- |
+| `⌘F` | Find in the file |
+| `⌘G` / `⇧⌘G` | Next / previous match while find is open |
+| `⌘G` | Go to a line when find is closed |
+| `⌃-` / `⌃⇧-` | Back / forward through file locations |
+| `⌥↩` in symbol search | Add the selected symbol to the chat |
 
 ## Outline and chat
 

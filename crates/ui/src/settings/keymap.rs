@@ -47,6 +47,9 @@ pub enum ShortcutId {
     ToggleTerminal,
     OpenMyPrs,
     QuickOpen,
+    QuickOpenSymbols,
+    FileNavigationBack,
+    FileNavigationForward,
     AddCodeToChat,
     ReviewNextStep,
     ReviewPreviousStep,
@@ -91,7 +94,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 29 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 32 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -101,6 +104,9 @@ impl ShortcutId {
         ShortcutId::ToggleTerminal,
         ShortcutId::OpenMyPrs,
         ShortcutId::QuickOpen,
+        ShortcutId::QuickOpenSymbols,
+        ShortcutId::FileNavigationBack,
+        ShortcutId::FileNavigationForward,
         ShortcutId::ReviewNextStep,
         ShortcutId::ReviewPreviousStep,
         ShortcutId::ReviewNextStepArrow,
@@ -193,6 +199,9 @@ impl ShortcutId {
             ShortcutId::GoToLine => "Go to line",
             ShortcutId::SearchWorkspaceContent => "Search in files",
             ShortcutId::QuickOpen => "Quick open",
+            ShortcutId::QuickOpenSymbols => "Search symbols",
+            ShortcutId::FileNavigationBack => "Navigate back",
+            ShortcutId::FileNavigationForward => "Navigate forward",
             ShortcutId::AddCodeToChat => "Add code to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
@@ -259,6 +268,9 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
+            ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
+            ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
+            ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
@@ -377,6 +389,9 @@ pub struct KeymapConfig {
     pub go_to_line: String,
     pub search_workspace_content: String,
     pub quick_open: String,
+    pub quick_open_symbols: String,
+    pub file_navigation_back: String,
+    pub file_navigation_forward: String,
     pub add_code_to_chat: String,
     pub review_next_step: String,
     pub review_previous_step: String,
@@ -479,6 +494,9 @@ impl Default for KeymapConfig {
             go_to_line: ShortcutId::GoToLine.default_combo().into(),
             search_workspace_content: ShortcutId::SearchWorkspaceContent.default_combo().into(),
             quick_open: ShortcutId::QuickOpen.default_combo().into(),
+            quick_open_symbols: ShortcutId::QuickOpenSymbols.default_combo().into(),
+            file_navigation_back: ShortcutId::FileNavigationBack.default_combo().into(),
+            file_navigation_forward: ShortcutId::FileNavigationForward.default_combo().into(),
             add_code_to_chat: ShortcutId::AddCodeToChat.default_combo().into(),
             review_next_step: ShortcutId::ReviewNextStep.default_combo().into(),
             review_previous_step: ShortcutId::ReviewPreviousStep.default_combo().into(),
@@ -543,6 +561,9 @@ impl KeymapConfig {
             ShortcutId::GoToLine => &self.go_to_line,
             ShortcutId::SearchWorkspaceContent => &self.search_workspace_content,
             ShortcutId::QuickOpen => &self.quick_open,
+            ShortcutId::QuickOpenSymbols => &self.quick_open_symbols,
+            ShortcutId::FileNavigationBack => &self.file_navigation_back,
+            ShortcutId::FileNavigationForward => &self.file_navigation_forward,
             ShortcutId::AddCodeToChat => &self.add_code_to_chat,
             ShortcutId::ReviewNextStep => &self.review_next_step,
             ShortcutId::ReviewPreviousStep => &self.review_previous_step,
@@ -605,6 +626,9 @@ impl KeymapConfig {
             ShortcutId::GoToLine => self.go_to_line = combo,
             ShortcutId::SearchWorkspaceContent => self.search_workspace_content = combo,
             ShortcutId::QuickOpen => self.quick_open = combo,
+            ShortcutId::QuickOpenSymbols => self.quick_open_symbols = combo,
+            ShortcutId::FileNavigationBack => self.file_navigation_back = combo,
+            ShortcutId::FileNavigationForward => self.file_navigation_forward = combo,
             ShortcutId::AddCodeToChat => self.add_code_to_chat = combo,
             ShortcutId::ReviewNextStep => self.review_next_step = combo,
             ShortcutId::ReviewPreviousStep => self.review_previous_step = combo,
@@ -890,7 +914,9 @@ pub fn display_combo(combo: &str) -> String {
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
+    let minus = combo.ends_with("--");
+    let combo = if minus { &combo[..combo.len() - 1] } else { combo };
+    let result = combo
         .split('-')
         .map(|part| match part {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
@@ -905,7 +931,8 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("+")
+        .join("+");
+    if minus { format!("{result}-") } else { result }
 }
 
 /// Compact combo for badge surfaces (the sidebar jump hints): macOS spells
@@ -922,7 +949,7 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
         return display_combo_on(false, combo);
     }
     let mut parts: Vec<&str> = combo.split('-').collect();
-    let key = parts.pop().unwrap_or("");
+    let key = if combo.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().unwrap_or("") };
     let mut out = String::new();
     for glyph in ["ctrl", "alt", "shift", "mod"]
         .iter()

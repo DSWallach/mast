@@ -739,6 +739,31 @@ impl Shell {
         self.add_file_surface_at(path, None, None, window, cx);
     }
 
+    fn active_file_location(&self, cx: &App) -> Option<super::file_navigation::FileLocation> {
+        let RightSurface::File(id) = self.resolved_right_active(cx) else { return None; };
+        let file = self.file_surfaces.get(&id)?;
+        Some(super::file_navigation::FileLocation { path: self.file_surface_paths.get(&id)?.clone(), line: file.read(cx).current_code_line(cx) })
+    }
+
+    pub(super) fn record_file_navigation(&mut self, from: Option<super::file_navigation::FileLocation>, to: super::file_navigation::FileLocation, cx: &App) {
+        if self.replaying_file_navigation { return; }
+        let key = self.workspace_recent_key(cx);
+        if !self.file_navigation.contains_key(&key) && self.file_navigation.len() >= 32 {
+            if let Some(oldest) = self.file_navigation.keys().next().cloned() { self.file_navigation.remove(&oldest); }
+        }
+        let history = self.file_navigation.entry(key).or_default();
+        if let Some(from) = from { history.record(from); }
+        history.record(to);
+    }
+
+    pub(super) fn move_file_navigation(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.workspace_recent_key(cx);
+        let Some(location) = self.file_navigation.get_mut(&key).and_then(|history| history.move_by(forward)) else { return; };
+        self.replaying_file_navigation = true;
+        self.add_file_surface_at(location.path, Some(location.line), None, window, cx);
+        self.replaying_file_navigation = false;
+    }
+
     pub(super) fn add_file_surface_at(
         &mut self,
         path: String,
@@ -750,6 +775,12 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
+        let from = self.active_file_location(cx);
+        let target_line = line.unwrap_or_else(|| {
+            let lookup = (self.panel_key(cx), path.clone());
+            self.file_surface_keys.get(&lookup).and_then(|id| self.file_surfaces.get(id)).map(|file| file.read(cx).current_code_line(cx)).unwrap_or(1)
+        });
+        self.record_file_navigation(from, super::file_navigation::FileLocation { path: path.clone(), line: target_line }, cx);
         let recent_key = self.workspace_recent_key(cx);
         let recent = self.workspace_file_recents.entry(recent_key).or_default();
         recent.retain(|item| item != &path);
@@ -791,13 +822,17 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
+                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_) | FilesEvent::Jumped { .. } | FilesEvent::OpenCommit(_))
                     && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
                     return;
                 }
                 match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::Jumped { path, from_line, line } => {
+                        this.record_file_navigation(Some(super::file_navigation::FileLocation { path: path.clone(), line: *from_line }), super::file_navigation::FileLocation { path: path.clone(), line: *line }, cx);
+                    }
+                    FilesEvent::OpenCommit(commit) => this.add_commit_diff_surface(commit.clone(), Some(this.active_chat.clone()), cx),
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {

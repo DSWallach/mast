@@ -1186,6 +1186,7 @@ impl UiSettings {
                             (ShortcutId::GoToLine, "goToLine"),
                             (ShortcutId::SearchWorkspaceContent, "searchWorkspaceContent"),
                             (ShortcutId::QuickOpen, "quickOpen"),
+                            (ShortcutId::QuickOpenSymbols, "quickOpenSymbols"),
                             (ShortcutId::AddCodeToChat, "addCodeToChat"),
                             (ShortcutId::OpenOutline, "openOutline"),
                             (ShortcutId::ToggleOutlineFocus, "toggleOutlineFocus"),

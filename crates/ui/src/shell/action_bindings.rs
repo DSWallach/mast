@@ -124,6 +124,11 @@ impl Shell {
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
                 this.open_workspace_search(workspace_search::SearchMode::Files, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &QuickOpenSymbols, window, cx| {
+                this.open_workspace_search(workspace_search::SearchMode::Symbols, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FileNavigationBack, window, cx| this.move_file_navigation(false, window, cx)))
+            .on_action(cx.listener(|this, _: &FileNavigationForward, window, cx| this.move_file_navigation(true, window, cx)))
             .on_action(cx.listener(|this, _: &SearchWorkspaceContent, window, cx| {
                 this.open_workspace_search(workspace_search::SearchMode::Content, window, cx)
             }))

@@ -65,6 +65,11 @@ pub(super) fn forwardable(method: &str) -> bool {
             | methods::LIST_WORKSPACE_DIRECTORY
             | methods::SEARCH_WORKSPACE_FILES
             | methods::WATCH_WORKSPACE_SEARCH_FILES
+            | methods::WATCH_WORKSPACE_SYMBOLS
+            | methods::QUERY_WORKSPACE_SYMBOLS
+            | methods::REFRESH_WORKSPACE_SYMBOLS
+            | methods::LIST_WORKSPACE_FILE_HISTORY
+            | methods::GET_WORKSPACE_FILE_HISTORY_DIFF
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
@@ -146,6 +151,7 @@ pub(super) fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::WATCH_WORKSPACE_FILES
             | methods::WATCH_WORKSPACE_SEARCH_FILES
+            | methods::WATCH_WORKSPACE_SYMBOLS
             | methods::SEARCH_WORKSPACE_CONTENT
             | methods::UPDATE_STATUS
     )

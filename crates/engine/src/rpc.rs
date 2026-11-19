@@ -4389,6 +4389,47 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&page)
             }
+            methods::LIST_WORKSPACE_FILE_HISTORY => {
+                let request: crate::workspace_files::file_history::FileHistoryRequest = parse_params(params)?;
+                let history = self.workspace_files.file_history(request).await.map_err(RpcError::from)?;
+                RpcReply::value(history.as_ref())
+            }
+            methods::GET_WORKSPACE_FILE_HISTORY_DIFF => {
+                let request: crate::workspace_files::file_history::FileHistoryDiffRequest = parse_params(params)?;
+                let diff = self.workspace_files.file_history_diff(request).await.map_err(RpcError::from)?;
+                RpcReply::value(diff.as_ref())
+            }
+            methods::REFRESH_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::RefreshSymbolsRequest = parse_params(params)?;
+                self.workspace_files.refresh_symbols(request.target, request.force).await.map_err(RpcError::from)?;
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            methods::QUERY_WORKSPACE_SYMBOLS => {
+                let request: crate::workspace_files::symbols::QuerySymbolsRequest = parse_params(params)?;
+                let matches = self.workspace_files.query_symbols(request).await.map_err(RpcError::from)?;
+                RpcReply::value(&matches)
+            }
+            methods::WATCH_WORKSPACE_SYMBOLS => {
+                let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
+                let index = self.workspace_files.subscribe_symbols(request.target).await.map_err(RpcError::from)?;
+                let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
+                    loop {
+                        if !first && index.changed().await.is_err() { return None; }
+                        first = false;
+                        let value = index.borrow_and_update().clone();
+                        if let Some(value) = value {
+                            let frame = match value {
+                                Ok(symbols) => {
+                                    serde_json::json!({"revision": symbols.revision, "truncated": symbols.truncated, "updating": symbols.updating})
+                                },
+                                Err(error) => serde_json::json!({"error": error}),
+                            };
+                            return Some((frame, (index, false)));
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
             methods::WATCH_WORKSPACE_SEARCH_FILES => {
                 let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let index = self.workspace_files

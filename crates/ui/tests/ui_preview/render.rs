@@ -194,6 +194,8 @@ pub fn render(
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "tracker-expanded" => mast_ui::snapshot::tracker_expanded_fixture(data_dir, cx).into(),
                 "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
+                "symbol-search" => mast_ui::snapshot::symbol_search_fixture(data_dir, window, cx).into(),
+                "file-outline" => mast_ui::snapshot::file_outline_fixture(cx).into(),
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
                 "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),

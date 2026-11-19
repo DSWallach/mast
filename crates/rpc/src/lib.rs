@@ -548,6 +548,11 @@ pub mod methods {
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
     pub const WATCH_WORKSPACE_SEARCH_FILES: &str = "WatchWorkspaceSearchFiles";
+    pub const WATCH_WORKSPACE_SYMBOLS: &str = "WatchWorkspaceSymbols";
+    pub const QUERY_WORKSPACE_SYMBOLS: &str = "QueryWorkspaceSymbols";
+    pub const REFRESH_WORKSPACE_SYMBOLS: &str = "RefreshWorkspaceSymbols";
+    pub const LIST_WORKSPACE_FILE_HISTORY: &str = "ListWorkspaceFileHistory";
+    pub const GET_WORKSPACE_FILE_HISTORY_DIFF: &str = "GetWorkspaceFileHistoryDiff";
     pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";

@@ -83,6 +83,7 @@ mod chat_item_ui;
 mod closeout_ui;
 mod command_palette;
 mod workspace_search;
+mod file_navigation;
 mod files_panel;
 mod github_ui;
 mod hand_off_ui;
@@ -155,6 +156,9 @@ actions!(
         ToggleFiles,
         OpenMyPrs,
         QuickOpen,
+        QuickOpenSymbols,
+        FileNavigationBack,
+        FileNavigationForward,
         AddCodeToChat,
         SearchWorkspaceContent,
         GoToLine,
@@ -643,12 +647,21 @@ pub struct Shell {
     command_palette: Option<command_palette::CommandPalette>,
     workspace_search: Option<workspace_search::WorkspaceSearch>,
     workspace_file_recents: std::collections::HashMap<String, Vec<String>>,
+    file_navigation: std::collections::HashMap<String, file_navigation::FileNavigation>,
+    replaying_file_navigation: bool,
     workspace_search_indexes:
         std::collections::HashMap<String, std::sync::Arc<Vec<workspace_search::IndexedPath>>>,
     workspace_search_index_key: Option<String>,
     workspace_search_index_engine: Option<crate::state::EngineHandle>,
     workspace_search_index_error: Option<(String, String)>,
     workspace_search_index_task: Option<Task<()>>,
+    workspace_symbol_key: Option<String>,
+    workspace_symbol_engine: Option<crate::state::EngineHandle>,
+    workspace_symbol_index: Option<()>,
+    workspace_symbol_truncated: bool,
+    workspace_symbol_updating: bool,
+    workspace_symbol_error: Option<String>,
+    workspace_symbol_task: Option<Task<()>>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -1151,11 +1164,20 @@ impl Shell {
             command_palette: None,
             workspace_search: None,
             workspace_file_recents: std::collections::HashMap::new(),
+            file_navigation: std::collections::HashMap::new(),
+            replaying_file_navigation: false,
             workspace_search_indexes: std::collections::HashMap::new(),
             workspace_search_index_key: None,
             workspace_search_index_engine: None,
             workspace_search_index_error: None,
             workspace_search_index_task: None,
+            workspace_symbol_key: None,
+            workspace_symbol_engine: None,
+            workspace_symbol_index: None,
+            workspace_symbol_truncated: false,
+            workspace_symbol_updating: false,
+            workspace_symbol_error: None,
+            workspace_symbol_task: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
