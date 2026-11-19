@@ -19,6 +19,7 @@ use crate::{
 
 mod code_ref_bar;
 pub(crate) mod code_find;
+mod blame;
 mod file_history;
 pub mod client;
 pub mod document;
@@ -129,6 +130,9 @@ pub enum FilesEvent {
     OpenFile(String),
     Jumped { path: String, from_line: u32, line: u32 },
     OpenCommit(mast_proto::GitHistoryCommit),
+    /// Open a chat, scrolled to the turn when known (blame popover).
+    OpenChat { chat_id: String, turn_id: Option<String> },
+    BlameGutterChanged(bool),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
@@ -210,6 +214,7 @@ pub struct FilesSurface {
     preview: FilePreviewState,
     code_find: Option<code_find::CodeFind>,
     file_history: Option<file_history::FileHistoryView>,
+    blame: blame::BlameState,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
@@ -239,6 +244,7 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let blame_popover = self.render_blame_popover(&theme, cx);
         let code_find = if is_editor { self.render_code_find(window, cx) } else { None };
         div()
             .id(SharedString::from(format!(
@@ -261,6 +267,7 @@ impl Render for FilesSurface {
             .children(code_find)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
+            .children(blame_popover)
     }
 }
 
@@ -551,6 +558,7 @@ impl FilesSurface {
             ),
             code_find: None,
             file_history: None,
+            blame: blame::BlameState::default(),
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
             error: None,

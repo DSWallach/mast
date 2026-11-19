@@ -233,6 +233,8 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
+        MenuItem::separator(),
+        MenuItem::action("Toggle Blame Gutter", shell::ToggleBlameGutter),
     ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
@@ -350,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
+    fn view_menu_offers_appearance_modes_and_the_blame_gutter() {
         let menus = app_menus();
         let view = menus
             .iter()
@@ -361,7 +363,8 @@ mod tests {
             vec![
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
-                AppearanceDark.name()
+                AppearanceDark.name(),
+                shell::ToggleBlameGutter.name()
             ]
         );
     }

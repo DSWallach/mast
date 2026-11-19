@@ -8,6 +8,7 @@ pub mod agent;
 pub mod artifacts;
 pub mod chat_diff_target;
 pub mod code_ref;
+pub mod commit_provenance;
 pub mod diff_review;
 pub mod plan;
 pub mod plan_render;
@@ -59,6 +60,7 @@ pub use artifacts::{
 };
 pub use chat_diff_target::*;
 pub use code_ref::*;
+pub use commit_provenance::*;
 pub use diff_review::*;
 pub use entities::*;
 pub use friction::*;

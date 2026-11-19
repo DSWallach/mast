@@ -132,6 +132,9 @@ impl Shell {
             .on_action(cx.listener(|this, _: &SearchWorkspaceContent, window, cx| {
                 this.open_workspace_search(workspace_search::SearchMode::Content, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleBlameGutter, window, cx| {
+                this.set_blame_gutter_everywhere(!this.blame_gutter, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &GoToLine, window, cx| {
                 this.open_workspace_search(workspace_search::SearchMode::Line, window, cx)
             }))

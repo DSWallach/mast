@@ -85,6 +85,13 @@ pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> 
     file
 }
 
+pub fn file_blame_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_blame(cx));
+    file
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)

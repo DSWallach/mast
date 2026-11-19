@@ -601,3 +601,59 @@ async fn agent_tool_bind_on_the_assembled_engine_reaches_the_watch_and_the_diff(
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn head_move_of_a_bound_target_notifies_provenance_once_and_ticks_do_not() {
+    let f = fixture();
+    bind(&f, &f.root_wt);
+    let moves = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = moves.clone();
+    f.core.diff_sync.set_head_move_listener(Arc::new(move |head_move| {
+        sink.lock().unwrap().push(head_move);
+    }));
+    f.core.diff_sync.reconcile_now().await;
+    // Wait for the bound checkout's first capture (it only records the HEAD).
+    let sync = f.core.diff_sync.clone();
+    let cwd = text(&f.root_wt);
+    wait_for(|| {
+        sync.watch_diffs()
+            .borrow()
+            .iter()
+            .any(|diff| diff.cwd == cwd)
+            .then_some(())
+    })
+    .await;
+    assert!(moves.lock().unwrap().is_empty(), "the first capture is not a move");
+    // A sync tick with nothing changed notifies nothing.
+    f.core.diff_sync.sync_all();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(moves.lock().unwrap().is_empty());
+    // A commit in the bound worktree is one HEAD move, naming the chat.
+    let before = git(&f.root_wt, &["rev-parse", "HEAD"]);
+    std::fs::write(f.root_wt.join("new.txt"), "x\n").unwrap();
+    git(&f.root_wt, &["add", "."]);
+    git(&f.root_wt, &["commit", "-q", "-m", "bound commit"]);
+    let after = git(&f.root_wt, &["rev-parse", "HEAD"]);
+    f.core.diff_sync.sync_all();
+    let moves_ref = moves.clone();
+    wait_for(|| (!moves_ref.lock().unwrap().is_empty()).then_some(())).await;
+    {
+        let seen = moves.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].old, before);
+        assert_eq!(seen[0].new, after);
+        assert_eq!(seen[0].chats, vec![CHAT.to_string()]);
+    }
+    // A further tick without a move adds nothing.
+    f.core.diff_sync.sync_all();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(moves.lock().unwrap().len(), 1);
+    // A commit in an unbound checkout never notifies.
+    std::fs::write(f.sub_wt.join("n.txt"), "y\n").unwrap();
+    git(&f.sub_wt, &["add", "."]);
+    git(&f.sub_wt, &["commit", "-q", "-m", "unbound commit"]);
+    f.core.diff_sync.sync_all();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(moves.lock().unwrap().len(), 1);
+    f.core.shutdown().await;
+}

@@ -272,6 +272,10 @@ impl WorkspaceFilesClient {
         self.call(methods::LIST_WORKSPACE_FILE_HISTORY, &mast_engine::workspace_files::file_history::FileHistoryRequest { target: self.context.target.clone(), path }).await
     }
 
+    pub async fn file_blame(&self, path: String) -> Result<mast_proto::Blame, FilesClientError> {
+        self.call(methods::GET_WORKSPACE_FILE_BLAME, &mast_engine::workspace_files::file_history::FileHistoryRequest { target: self.context.target.clone(), path }).await
+    }
+
     pub async fn file_history_diff(&self, entry: &mast_engine::workspace_files::file_history::FileHistoryEntry) -> Result<String, FilesClientError> {
         self.call(methods::GET_WORKSPACE_FILE_HISTORY_DIFF, &mast_engine::workspace_files::file_history::FileHistoryDiffRequest { target: self.context.target.clone(), commit: entry.commit.sha.clone(), path: entry.path.clone(), previous_path: entry.previous_path.clone() }).await
     }

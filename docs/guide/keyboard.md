@@ -37,6 +37,7 @@ A pop-out handles `⌘S` (save) and `⌘W` (close the window; a file with unsave
 | `⌘G` / `⇧⌘G` | Next / previous match while find is open |
 | `⌘G` | Go to a line when find is closed |
 | `⌃-` / `⌃⇧-` | Back / forward through file locations |
+| `⌥⌘G` | Show or hide the blame gutter (also in View) |
 | `⌥↩` in symbol search | Add the selected symbol to the chat |
 
 ## Outline and chat

@@ -32,6 +32,7 @@ mod chat_persistence;
 pub mod chat_workspace_plan;
 pub mod context_usage;
 pub mod diff_sync;
+pub mod provenance;
 pub mod diff_targets;
 pub mod doc_host;
 pub mod execution_scope;
@@ -618,6 +619,36 @@ impl EngineCore {
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
+        // Commit → chat provenance: record on HEAD moves of bound worktrees.
+        {
+            let transcripts = doc_host.clone();
+            let reader: provenance::TranscriptReader =
+                Arc::new(move |chat_id| transcripts.peek_entries(chat_id));
+            workspace_files.set_transcript_reader(reader.clone());
+            let recorder = provenance::ProvenanceRecorder::new(workspace.clone(), reader);
+            let weak = Arc::downgrade(&recorder);
+            diff_sync.set_head_move_listener(Arc::new(move |head_move| {
+                if let Some(recorder) = weak.upgrade() {
+                    recorder.handle_in_background(head_move);
+                }
+            }));
+            let mut statuses = sessions.watch_sessions();
+            let weak = Arc::downgrade(&recorder);
+            tokio::spawn(async move {
+                // The task owns the recorder; the listener's Weak ends with it.
+                let recorder = recorder;
+                loop {
+                    {
+                        let snapshot = statuses.borrow_and_update().clone();
+                        recorder.observe_sessions(&snapshot, chrono::Utc::now().timestamp_millis());
+                    }
+                    if statuses.changed().await.is_err() {
+                        break;
+                    }
+                }
+                drop(weak);
+            });
+        }
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let artifacts = artifacts::ArtifactsService::new(workspace.clone());
         {
