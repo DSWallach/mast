@@ -16,6 +16,7 @@ pub(in crate::changes) struct State {
     revision: String,
     bucket: Option<Bucket>,
     layouts: HashMap<Bucket, Arc<Vec<Tile>>>,
+    labels: HashMap<Bucket, Arc<Vec<SharedString>>>,
     progress_key: Option<(String, u64)>,
     progress: (usize, u64),
     selected_tile: Option<usize>,
@@ -357,6 +358,7 @@ impl Changes {
     pub(in crate::changes) fn reset_scope_map_layout(&mut self) {
         self.scope_map_view.bucket = None;
         self.scope_map_view.layouts.clear();
+        self.scope_map_view.labels.clear();
         self.scope_map_view.progress_key = None;
     }
 
@@ -374,6 +376,7 @@ impl Changes {
         if self.scope_map_view.revision != parsed.key {
             self.scope_map_view.revision = parsed.key.clone();
             self.scope_map_view.layouts.clear();
+            self.scope_map_view.labels.clear();
             self.scope_map_view.bucket = None;
         }
         if self.scope_map_view.bucket == Some(bucket) {
@@ -389,9 +392,28 @@ impl Changes {
                 width: f32::from(bucket.0) * 32.0,
                 height: f32::from(bucket.1) * 32.0,
             };
-            self.scope_map_view
-                .layouts
-                .insert(bucket, Arc::new(layout::layout(&data.root, bounds)));
+            let tiles = layout::layout(&data.root, bounds);
+            let labels = tiles
+                .iter()
+                .map(|tile| match &tile.kind {
+                    TileKind::File(index) => parsed
+                        .files
+                        .get(*index)
+                        .map(|file| {
+                            file.path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&file.path)
+                                .to_owned()
+                        })
+                        .unwrap_or_default(),
+                    TileKind::Folder(path) => path.clone(),
+                    TileKind::More { files, .. } => format!("{} more", files.len()),
+                })
+                .map(SharedString::from)
+                .collect();
+            self.scope_map_view.labels.insert(bucket, Arc::new(labels));
+            self.scope_map_view.layouts.insert(bucket, Arc::new(tiles));
         }
         self.scope_map_view.bucket = Some(bucket);
         self.scope_map_view.selected_tile =
@@ -449,6 +471,10 @@ impl Changes {
             .cloned()
             .unwrap_or_default();
         let current_bucket = self.scope_map_view.bucket;
+        let labels = current_bucket
+            .and_then(|bucket| self.scope_map_view.labels.get(&bucket))
+            .cloned()
+            .unwrap_or_default();
         let weak = cx.weak_entity();
         let measure = gpui::canvas(
             |_, _, _| (),
@@ -498,7 +524,7 @@ impl Changes {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(theme.text_muted)
-                                .child(SharedString::from(path.clone())),
+                                .child(labels[tile_index].clone()),
                         ),
                     );
                 }
@@ -510,7 +536,7 @@ impl Changes {
                     let folder = folder.clone();
                     let first = files[0];
                     let count = files.len();
-                    let title = format!("{count} more files · {lines} changed lines");
+                    let lines = *lines;
                     canvas = canvas.child(
                         base.id(("scope-map-more", first))
                             .cursor_pointer()
@@ -521,9 +547,15 @@ impl Changes {
                                 |el| el.border_2().border_color(theme.accent),
                             )
                             .bg(theme.element_hover)
-                            .child(format!("{count} more"))
+                            .child(labels[tile_index].clone())
                             .tooltip(move |_, cx| {
-                                cx.new(|_| DiffHeaderTooltip(title.clone().into())).into()
+                                cx.new(|_| {
+                                    DiffHeaderTooltip(
+                                        format!("{count} more files · {lines} changed lines")
+                                            .into(),
+                                    )
+                                })
+                                .into()
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.scope_map_view.selected_tile = Some(tile_index);
@@ -547,32 +579,18 @@ impl Changes {
                         FileStatus::Renamed => theme.accent,
                     };
                     let index = *index;
-                    let selector = format!(
-                        "scope-map-file-{index}-{}-{}",
-                        if viewed { "viewed" } else { "unviewed" },
-                        if risk.is_some() { "risk" } else { "no-risk" }
-                    );
-                    let title = format!(
-                        "{} · +{} −{} · {}{}",
-                        file.old_path
-                            .as_ref()
-                            .filter(|old| *old != &file.path)
-                            .map(|old| format!("{old} → {}", file.path))
-                            .unwrap_or_else(|| file.path.clone()),
-                        file.additions,
-                        file.deletions,
-                        if viewed { "Viewed" } else { "Not viewed" },
-                        risk.map(|note| format!(" · {note}")).unwrap_or_default()
-                    );
-                    let label = file
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&file.path)
-                        .to_owned();
+                    let has_risk = risk.is_some();
+                    let tooltip_files = parsed.files.clone();
+                    let tooltip_risks = risks.clone();
                     canvas = canvas.child(
                         base.id(("scope-map-file", index))
-                            .debug_selector(move || selector.clone())
+                            .debug_selector(move || {
+                                format!(
+                                    "scope-map-file-{index}-{}-{}",
+                                    if viewed { "viewed" } else { "unviewed" },
+                                    if has_risk { "risk" } else { "no-risk" }
+                                )
+                            })
                             .cursor_pointer()
                             .border_1()
                             .border_color(if risk.is_some() {
@@ -588,9 +606,27 @@ impl Changes {
                             .opacity(if viewed { 0.45 } else { 1.0 })
                             .text_size(px(10.0))
                             .text_color(theme.text)
-                            .child(SharedString::from(label))
+                            .child(labels[tile_index].clone())
                             .tooltip(move |_, cx| {
-                                cx.new(|_| DiffHeaderTooltip(SharedString::from(title.clone())))
+                                let file = &tooltip_files[index];
+                                let path = file
+                                    .old_path
+                                    .as_ref()
+                                    .filter(|old| *old != &file.path)
+                                    .map(|old| format!("{old} → {}", file.path))
+                                    .unwrap_or_else(|| file.path.clone());
+                                let note = tooltip_risks
+                                    .as_ref()
+                                    .and_then(|notes| notes.get(&file.path))
+                                    .map(|note| format!(" · {note}"))
+                                    .unwrap_or_default();
+                                let title = format!(
+                                    "{path} · +{} −{} · {}{note}",
+                                    file.additions,
+                                    file.deletions,
+                                    if viewed { "Viewed" } else { "Not viewed" }
+                                );
+                                cx.new(|_| DiffHeaderTooltip(SharedString::from(title)))
                                     .into()
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
