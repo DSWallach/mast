@@ -256,6 +256,8 @@ impl AgentTokens {
                 ttl,
             },
         );
+        // A run starts when its token is minted, and ends when it is revoked.
+        self.manager_status.run_started(chat_id, run_id);
         AgentTokenLease {
             tokens: Arc::downgrade(self),
             key,
@@ -278,6 +280,8 @@ impl AgentTokens {
             .ok_or_else(AgentToolError::unauthenticated)?;
         if grant.expires_at.is_some_and(|at| Instant::now() >= at) {
             grants.remove(&key);
+            drop(grants);
+            self.manager_status.run_ended(&grant.chat_id, &grant.run_id);
             return Err(AgentToolError::unauthenticated());
         }
         Ok(grant)
@@ -289,7 +293,10 @@ impl AgentTokens {
     }
 
     fn revoke(&self, key: &TokenKey) {
-        lock(&self.grants).remove(key);
+        let grant = lock(&self.grants).remove(key);
+        if let Some(grant) = grant {
+            self.manager_status.run_ended(&grant.chat_id, &grant.run_id);
+        }
     }
 
     fn renew(&self, key: &TokenKey) {
@@ -1122,7 +1129,9 @@ impl AgentToolsService {
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
         let result = self.dispatch(&context, &params.tool, &arguments);
         if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
-            self.note_manager_state_change(&context);
+            self.tokens
+                .manager_status()
+                .note_state_change(&context.grant.chat_id, &context.grant.run_id);
         }
         result
             .map_err(|error| match error {
@@ -1132,20 +1141,6 @@ impl AgentToolsService {
                 } => AgentToolError::invalid(agent_tools::with_usage(&params.tool, &message)),
                 other => other,
             })
-    }
-
-    /// A state-changing call during a run: the chat's turn owes a Manager
-    /// status revision if the chat manages a project. Opens the turn when the
-    /// watcher has not seen the run start; ignored when no run is in flight.
-    fn note_manager_state_change(&self, context: &CallContext) {
-        let chat_id = &context.grant.chat_id;
-        if lock(&self.sessions).as_ref().is_some_and(|s| !s.turn_in_flight(chat_id)) {
-            return;
-        }
-        self.tokens.manager_status().note_state_change(chat_id, || {
-            crate::manager_status::managed_project(&self.workspace, chat_id)
-                .map_or(0, |(space, item)| crate::manager_status::status_revision(&self.workspace, &space, &item))
-        });
     }
 
     fn dispatch(

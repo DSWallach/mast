@@ -672,7 +672,7 @@ impl EngineCore {
             .set_store(data_dir.join("personal-assistant.json"));
         orchestrator_wakes.spawn_watchers();
         let manager_status_watch =
-            manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone(), sessions.clone());
+            manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone());
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));

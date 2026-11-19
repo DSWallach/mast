@@ -845,7 +845,7 @@ impl WorkspaceHost {
     /// Create the hidden first-start chat of a standing role. It carries the
     /// provisional marker from the moment it exists, so no surface that hides
     /// superseded role chats ever lists it.
-    pub(crate) fn create_provisional_role_chat(
+    pub fn create_provisional_role_chat(
         &self,
         chat_id: &str,
         space_id: &str,

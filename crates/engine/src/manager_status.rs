@@ -2,28 +2,31 @@
 //! changed state must end with a new revision of the record; when it does
 //! not, the engine asks once.
 //!
-//! The revision is read at the start of each turn and the check compares
-//! against that number, so a checkpoint published earlier in the same chat can
-//! never satisfy a later turn. The ask itself is a turn, and is checked
-//! against the revision of the turn it is asking about.
+//! A turn is a run, and a run's boundaries are its agent token's: minted when
+//! the run starts, dropped when it ends. The record's revision is read at the
+//! first and again at the second, so each turn is checked against exactly the
+//! revisions that existed while it ran. A checkpoint from an earlier turn, or
+//! a later turn's publication, can never satisfy it, however closely the runs
+//! follow each other. The ask itself is a turn, checked against the revision of
+//! the turn it asks about.
 //!
-//! A turn is tracked from whichever comes first: the watcher seeing the run
-//! in flight, or the run's first state-changing tool call. It ends when the
-//! live session is no longer in flight, whatever status snapshot woke the
-//! watcher, so a turn too fast for the watcher to see still gets checked.
+//! A first start's chat becomes the Manager only after its first turn is
+//! queued, so its project is read from its provisional marker, and a turn that
+//! ends before adoption is held until the chat is adopted.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use mast_proto::artifacts::ArtifactView;
 use mast_proto::{
     MANAGER_STATUS_ROLE, StandingRoleKind, manager_status_nudge_text,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_tools::AgentTokens;
 use crate::briefing::{BriefingKind, manager_provenance};
-use crate::sessions::SessionsEngine;
 use crate::{DocHost, WorkspaceHost};
 
 /// Agent tools that change project state. A manager turn that calls one owes
@@ -50,9 +53,7 @@ pub fn is_state_changing(tool: &str) -> bool {
 /// What the check decided at the end of a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Nothing owed: the turn changed no state, or it was not tracked.
-    NotOwed,
-    /// The turn published a revision after its baseline.
+    /// The turn published a revision while it ran.
     Published,
     /// State changed and no revision followed: ask once.
     Nudge { baseline: u32 },
@@ -60,114 +61,183 @@ pub enum Verdict {
     Missed { baseline: u32 },
 }
 
-#[derive(Default)]
-struct Entry {
-    in_turn: bool,
-    baseline: u32,
-    owed: bool,
-    /// Baseline of an ask that was queued and has not run to its end yet.
-    asked: Option<u32>,
+/// The project a run belongs to and the record's revision when it is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunBasis {
+    /// `(space id, project item id)`, when the chat manages a project or is
+    /// the first start that will.
+    pub project: Option<(String, String)>,
+    pub revision: u32,
 }
 
-impl Entry {
-    fn open(&mut self, revision: u32) {
-        self.in_turn = true;
-        match self.asked {
-            Some(baseline) => {
-                self.baseline = baseline;
-                self.owed = true;
-            }
-            None => {
-                self.baseline = revision;
-                self.owed = false;
-            }
-        }
-    }
+pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
+
+/// How long a turn that ended before its chat was adopted waits for adoption.
+const ADOPTION_WAIT: Duration = Duration::from_secs(60);
+
+struct Run {
+    run_id: String,
+    baseline: u32,
+    project: (String, String),
+    owed: bool,
+    ask: bool,
+}
+
+/// A turn that ended owing a status revision, waiting to be checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndedRun {
+    pub chat_id: String,
+    pub baseline: u32,
+    pub end_revision: u32,
+    pub project: (String, String),
+    pub ask: bool,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct State {
+    runs: HashMap<String, Run>,
+    /// Baseline of an ask that was queued and has not run to its end yet.
+    asked: HashMap<String, u32>,
+    ended: Vec<EndedRun>,
 }
 
 #[derive(Default)]
 pub struct StatusTracker {
-    chats: Mutex<HashMap<String, Entry>>,
+    state: Mutex<State>,
+    probe: Mutex<Option<RunProbe>>,
+    wake: Arc<Notify>,
 }
 
 impl StatusTracker {
-    /// A turn began on a manager chat; `revision` is the record's current
-    /// revision. A turn already opened by a tool call keeps its baseline.
-    pub fn turn_started(&self, chat_id: &str, revision: u32) {
-        let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = chats.entry(chat_id.to_owned()).or_default();
-        if !entry.in_turn {
-            entry.open(revision);
+    /// How runs are placed in a project and how far the record has got. Until
+    /// it is set nothing is tracked.
+    pub fn set_probe(&self, probe: RunProbe) {
+        *self.probe.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+
+    fn basis(&self, chat_id: &str) -> Option<RunBasis> {
+        let probe = self.probe.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        Some(probe(chat_id))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A run began: its token was minted. The turn's baseline is the record's
+    /// revision right now, or the original baseline when this run is the ask.
+    pub fn run_started(&self, chat_id: &str, run_id: &str) {
+        let basis = self.basis(chat_id);
+        let mut state = self.state();
+        if let Some(previous) = state.runs.get(chat_id) {
+            if previous.run_id == run_id {
+                return;
+            }
+            // The earlier run never reported its end.
+            let end = basis.as_ref().map_or(previous.baseline, |b| b.revision);
+            Self::finish(&mut state, chat_id, end);
         }
-    }
-
-    /// Whether a tracked turn is in flight on the chat.
-    pub fn turn_open(&self, chat_id: &str) -> bool {
-        self.chats
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(chat_id)
-            .is_some_and(|e| e.in_turn)
-    }
-
-    /// The chat called a state-changing tool during a run. Opens the turn when
-    /// the watcher has not yet seen it start; `revision` is read only then.
-    pub fn note_state_change(&self, chat_id: &str, revision: impl FnOnce() -> u32) {
-        let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = chats.entry(chat_id.to_owned()).or_default();
-        if !entry.in_turn {
-            entry.open(revision());
-        }
-        entry.owed = true;
-    }
-
-    /// The turn ended. `published_after` tells whether the manager published a
-    /// revision newer than the given baseline.
-    pub fn turn_finished(&self, chat_id: &str, published_after: impl FnOnce(u32) -> bool) -> Verdict {
-        let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = chats.get_mut(chat_id).filter(|e| e.in_turn) else {
-            return Verdict::NotOwed;
+        let Some(RunBasis { project: Some(project), revision }) = basis else {
+            return;
         };
-        entry.in_turn = false;
-        let baseline = entry.baseline;
-        let was_ask = entry.asked.is_some();
-        if !entry.owed {
-            return Verdict::NotOwed;
+        let (baseline, owed, ask) = match state.asked.get(chat_id) {
+            Some(&asked) => (asked, true, true),
+            None => (revision, false, false),
+        };
+        state.runs.insert(
+            chat_id.to_owned(),
+            Run { run_id: run_id.to_owned(), baseline, project, owed, ask },
+        );
+    }
+
+    /// The run called a state-changing tool, so its turn owes a revision.
+    pub fn note_state_change(&self, chat_id: &str, run_id: &str) {
+        if !self.is_current(chat_id, run_id) {
+            self.run_started(chat_id, run_id);
         }
-        entry.owed = false;
-        if published_after(baseline) {
-            entry.asked = None;
-            return Verdict::Published;
-        }
-        if was_ask {
-            entry.asked = None;
-            Verdict::Missed { baseline }
-        } else {
-            entry.asked = Some(baseline);
-            Verdict::Nudge { baseline }
+        if let Some(run) = self.state().runs.get_mut(chat_id).filter(|r| r.run_id == run_id) {
+            run.owed = true;
         }
     }
 
-    /// Drop a turn that belongs to a chat that is not a manager.
-    pub fn forget(&self, chat_id: &str) {
-        self.chats.lock().unwrap_or_else(|e| e.into_inner()).remove(chat_id);
+    fn is_current(&self, chat_id: &str, run_id: &str) -> bool {
+        self.state().runs.get(chat_id).is_some_and(|r| r.run_id == run_id)
+    }
+
+    /// The run ended: its token was dropped.
+    pub fn run_ended(&self, chat_id: &str, run_id: &str) {
+        let end = self.basis(chat_id).map_or(0, |b| b.revision);
+        {
+            let mut state = self.state();
+            if state.runs.get(chat_id).is_some_and(|r| r.run_id == run_id) {
+                Self::finish(&mut state, chat_id, end);
+            }
+        }
+        self.wake.notify_one();
+    }
+
+    fn finish(state: &mut State, chat_id: &str, end_revision: u32) {
+        let Some(run) = state.runs.remove(chat_id) else {
+            return;
+        };
+        if run.owed {
+            state.ended.push(EndedRun {
+                chat_id: chat_id.to_owned(),
+                baseline: run.baseline,
+                end_revision: end_revision.max(run.baseline),
+                project: run.project,
+                ask: run.ask,
+                at: Instant::now(),
+            });
+        }
+    }
+
+    /// Whether a run is in flight on the chat that is being tracked.
+    pub fn turn_open(&self, chat_id: &str) -> bool {
+        self.state().runs.contains_key(chat_id)
+    }
+
+    /// The baseline and project of the run in flight on the chat.
+    pub fn current_run(&self, chat_id: &str) -> Option<(u32, (String, String))> {
+        self.state().runs.get(chat_id).map(|r| (r.baseline, r.project.clone()))
+    }
+
+    /// Turns that ended and still need their check, for the chat (tests).
+    pub fn pending(&self, chat_id: &str) -> usize {
+        self.state().ended.iter().filter(|e| e.chat_id == chat_id).count()
+    }
+
+    fn take_ended(&self) -> Vec<EndedRun> {
+        std::mem::take(&mut self.state().ended)
+    }
+
+    fn hold(&self, ended: EndedRun) {
+        self.state().ended.push(ended);
+    }
+
+    /// Record the outcome of a turn's check.
+    pub fn conclude(&self, ended: &EndedRun, published: bool) -> Verdict {
+        let mut state = self.state();
+        if published {
+            state.asked.remove(&ended.chat_id);
+            Verdict::Published
+        } else if ended.ask {
+            state.asked.remove(&ended.chat_id);
+            Verdict::Missed { baseline: ended.baseline }
+        } else {
+            state.asked.insert(ended.chat_id.clone(), ended.baseline);
+            Verdict::Nudge { baseline: ended.baseline }
+        }
     }
 
     /// The ask could not be queued; allow the next state-changing turn to ask again.
     pub fn ask_failed(&self, chat_id: &str) {
-        if let Some(entry) = self.chats.lock().unwrap_or_else(|e| e.into_inner()).get_mut(chat_id) {
-            entry.asked = None;
-        }
+        self.state().asked.remove(chat_id);
     }
 
-    fn open_chats(&self) -> Vec<String> {
-        self.chats
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|(_, e)| e.in_turn)
-            .map(|(id, _)| id.clone())
-            .collect()
+    fn waker(&self) -> Arc<Notify> {
+        self.wake.clone()
     }
 }
 
@@ -188,12 +258,13 @@ pub fn status_revision(workspace: &WorkspaceHost, space_id: &str, item_id: &str)
     status_artifact(workspace, space_id, item_id).map_or(0, |a| a.current_revision)
 }
 
-/// Whether a Manager-stamped revision newer than `baseline` exists.
-pub fn published_after(artifact: Option<&ArtifactView>, baseline: u32) -> bool {
+/// Whether a Manager-stamped revision in `(baseline, end]` exists: one the
+/// turn itself published, not an earlier turn's or a later one's.
+pub fn published_between(artifact: Option<&ArtifactView>, baseline: u32, end: u32) -> bool {
     artifact.is_some_and(|a| {
         a.revisions
             .iter()
-            .any(|r| r.id > baseline && manager_provenance(a, r))
+            .any(|r| r.id > baseline && r.id <= end && manager_provenance(a, r))
     })
 }
 
@@ -205,6 +276,50 @@ pub fn managed_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(Stri
     }
     let space = workspace.work_item_space(&role.scope_item_id)?;
     Some((space, role.scope_item_id))
+}
+
+/// The project of a chat's first start that the role will adopt.
+fn pending_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(String, String)> {
+    let chat = workspace.chat(chat_id).ok().flatten()?;
+    let item = chat.standing_role_provisional_scope(StandingRoleKind::Manager)?;
+    let space = workspace.work_item_space(item)?;
+    Some((space, item.to_owned()))
+}
+
+/// Where a run on this chat belongs and how far its project's record has got.
+pub fn run_basis(workspace: &WorkspaceHost, chat_id: &str) -> RunBasis {
+    let project = managed_project(workspace, chat_id).or_else(|| pending_project(workspace, chat_id));
+    let revision = project
+        .as_ref()
+        .map_or(0, |(space, item)| status_revision(workspace, space, item));
+    RunBasis { project, revision }
+}
+
+enum Check {
+    /// Not a manager's turn any more (the role moved on): nothing to check.
+    Drop,
+    /// The chat is the role's first start and is not adopted yet.
+    Wait,
+    Ready { published: bool },
+}
+
+fn check(workspace: &WorkspaceHost, ended: &EndedRun) -> Check {
+    let (space, item) = &ended.project;
+    let holds = workspace
+        .standing_role(StandingRoleKind::Manager, item)
+        .is_some_and(|role| role.current_chat_id.as_deref() == Some(ended.chat_id.as_str()));
+    if holds {
+        let artifact = status_artifact(workspace, space, item);
+        return Check::Ready {
+            published: published_between(artifact.as_ref(), ended.baseline, ended.end_revision),
+        };
+    }
+    let pending = workspace
+        .chat(&ended.chat_id)
+        .ok()
+        .flatten()
+        .is_some_and(|chat| chat.is_provisional_for(StandingRoleKind::Manager, item));
+    if pending { Check::Wait } else { Check::Drop }
 }
 
 /// The running watcher, owned by the engine so shutdown can stop it before it
@@ -222,51 +337,36 @@ impl ManagerStatusWatch {
     }
 }
 
-/// Watches live session state and runs the check on manager chats. Idle
-/// snapshots only wake it: whether a turn is in flight is read live.
-pub fn spawn_watch(
-    tokens: Arc<AgentTokens>,
-    workspace: WorkspaceHost,
-    doc_host: DocHost,
-    sessions: SessionsEngine,
-) -> ManagerStatusWatch {
+/// Install the probe and watch for turns that ended owing a revision.
+pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host: DocHost) -> ManagerStatusWatch {
+    let probe_workspace = workspace.clone();
+    tokens
+        .manager_status()
+        .set_probe(Arc::new(move |chat_id| run_basis(&probe_workspace, chat_id)));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
-    let mut rx = sessions.watch_sessions();
     let handle = tokio::spawn(async move {
         let tracker = tokens.manager_status();
+        let wake = tracker.waker();
         loop {
-            let snapshot = rx.borrow_and_update().clone();
-            let mut chats: Vec<String> = tracker.open_chats();
-            chats.extend(
-                snapshot
-                    .iter()
-                    .filter(|s| sessions.turn_in_flight(&s.chat_id))
-                    .map(|s| s.chat_id.clone()),
-            );
-            chats.sort();
-            chats.dedup();
-            for chat_id in chats {
+            let mut waiting = false;
+            for ended in tracker.take_ended() {
                 if stop.is_cancelled() {
                     return;
                 }
-                let live = sessions.turn_in_flight(&chat_id);
-                let open = tracker.turn_open(&chat_id);
-                if live == open {
-                    continue;
-                }
-                let Some((space, item)) = managed_project(&workspace, &chat_id) else {
-                    if open && !live {
-                        tracker.forget(&chat_id);
+                let published = match check(&workspace, &ended) {
+                    Check::Drop => continue,
+                    Check::Wait => {
+                        if ended.at.elapsed() < ADOPTION_WAIT {
+                            waiting = true;
+                            tracker.hold(ended);
+                        }
+                        continue;
                     }
-                    continue;
+                    Check::Ready { published } => published,
                 };
-                if live {
-                    tracker.turn_started(&chat_id, status_revision(&workspace, &space, &item));
-                    continue;
-                }
-                let artifact = status_artifact(&workspace, &space, &item);
-                match tracker.turn_finished(&chat_id, |b| published_after(artifact.as_ref(), b)) {
+                let chat_id = ended.chat_id.clone();
+                match tracker.conclude(&ended, published) {
                     Verdict::Nudge { baseline } => {
                         if stop.is_cancelled() {
                             return;
@@ -283,128 +383,247 @@ pub fn spawn_watch(
                         tracing::warn!(chat = %chat_id, baseline, role = MANAGER_STATUS_ROLE,
                             "manager status still missing after one ask");
                     }
-                    Verdict::NotOwed | Verdict::Published => {}
+                    Verdict::Published => {}
                 }
             }
+            let retry = async {
+                if waiting {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
             tokio::select! {
                 _ = stop.cancelled() => return,
-                changed = rx.changed() => if changed.is_err() { return },
+                _ = wake.notified() => {}
+                _ = retry => {}
             }
         }
     });
     ManagerStatusWatch { cancel, handle }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mast_proto::artifacts::ArtifactRevision;
+    use mast_proto::{ManagerStatusStamp, WorkOutlineActor, WorkOutlineActorKind};
+
+    type Shared = Arc<Mutex<(Option<(String, String)>, u32)>>;
+
+    /// A tracker whose probe reads a project and a revision the test controls.
+    fn tracker(project: bool, revision: u32) -> (StatusTracker, Shared) {
+        let shared: Shared =
+            Arc::new(Mutex::new((project.then(|| ("s".to_owned(), "proj".to_owned())), revision)));
+        let tracker = StatusTracker::default();
+        let probe = shared.clone();
+        tracker.set_probe(Arc::new(move |_chat| {
+            let (project, revision) = probe.lock().unwrap().clone();
+            RunBasis { project, revision }
+        }));
+        (tracker, shared)
+    }
+
+    fn set_revision(shared: &Shared, revision: u32) {
+        shared.lock().unwrap().1 = revision;
+    }
+
+    fn status_with_stamped(ids: &[u32]) -> ArtifactView {
+        let stamp = Some(ManagerStatusStamp {
+            role_id: mast_proto::standing_role_id(StandingRoleKind::Manager, "proj"),
+            chat_id: "m".into(),
+        });
+        let agent = WorkOutlineActor { kind: WorkOutlineActorKind::Agent, ..Default::default() };
+        ArtifactView {
+            work_item_id: Some("proj".into()),
+            revisions: ids
+                .iter()
+                .rev()
+                .map(|&id| ArtifactRevision {
+                    id,
+                    by: agent.clone(),
+                    manager_status: stamp.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn published(tracker: &StatusTracker, ended: &EndedRun, stamped: &[u32]) -> Verdict {
+        let artifact = status_with_stamped(stamped);
+        let published = published_between(Some(&artifact), ended.baseline, ended.end_revision);
+        tracker.conclude(ended, published)
+    }
 
     #[test]
     fn a_turn_that_changed_state_without_a_revision_is_asked_once() {
-        let t = StatusTracker::default();
-        t.turn_started("m", 2);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |b| b > 2), Verdict::Nudge { baseline: 2 });
-        // The ask is a turn: it is held to the same baseline, and not asked twice.
-        t.turn_started("m", 2);
-        assert_eq!(t.turn_finished("m", |b| b > 2), Verdict::Missed { baseline: 2 });
+        let (t, shared) = tracker(true, 2);
+        t.run_started("m", "r1");
+        t.note_state_change("m", "r1");
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 2 });
+        // The ask is the next run: held to the same baseline, not asked twice.
+        t.run_started("m", "r2");
+        t.run_ended("m", "r2");
+        let ask = t.take_ended().remove(0);
+        assert!(ask.ask);
+        assert_eq!(published(&t, &ask, &[]), Verdict::Missed { baseline: 2 });
         // Afterwards a fresh state-changing turn can be asked again.
-        t.turn_started("m", 2);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |_| false), Verdict::Nudge { baseline: 2 });
+        set_revision(&shared, 2);
+        t.run_started("m", "r3");
+        t.note_state_change("m", "r3");
+        t.run_ended("m", "r3");
+        let next = t.take_ended().remove(0);
+        assert!(!next.ask);
+        assert_eq!(published(&t, &next, &[]), Verdict::Nudge { baseline: 2 });
     }
 
     #[test]
-    fn a_revision_published_in_the_turn_satisfies_it() {
-        let t = StatusTracker::default();
-        t.turn_started("m", 1);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |b| b == 1), Verdict::Published);
+    fn a_turn_that_publishes_while_it_runs_is_satisfied_and_clears_the_ask() {
+        let (t, shared) = tracker(true, 1);
+        t.run_started("m", "r1");
+        t.note_state_change("m", "r1");
+        set_revision(&shared, 2);
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        assert_eq!((ended.baseline, ended.end_revision), (1, 2));
+        assert_eq!(published(&t, &ended, &[2]), Verdict::Published);
     }
 
     #[test]
-    fn an_earlier_checkpoint_cannot_satisfy_a_later_turn() {
-        let t = StatusTracker::default();
-        // Turn one checkpoints: the record goes 1 -> 2.
-        t.turn_started("m", 1);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |b| b < 2), Verdict::Published);
-        // Turn two starts at revision 2, changes state, publishes nothing.
-        t.turn_started("m", 2);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |b| b < 2), Verdict::Nudge { baseline: 2 });
+    fn consecutive_turns_never_share_a_checkpoint() {
+        let (t, shared) = tracker(true, 1);
+        // Turn A publishes revision 2, then turn B starts at once, before
+        // anything has looked at A's end.
+        t.run_started("m", "a");
+        t.note_state_change("m", "a");
+        set_revision(&shared, 2);
+        t.run_ended("m", "a");
+        t.run_started("m", "b");
+        t.note_state_change("m", "b");
+        t.run_ended("m", "b");
+        let ended = t.take_ended();
+        assert_eq!(ended.len(), 2);
+        let (a, b) = (&ended[0], &ended[1]);
+        assert_eq!((a.baseline, a.end_revision), (1, 2));
+        assert_eq!((b.baseline, b.end_revision), (2, 2));
+        // The only stamped revision is A's. It satisfies A, not B.
+        assert_eq!(published(&t, a, &[2]), Verdict::Published);
+        assert_eq!(published(&t, b, &[2]), Verdict::Nudge { baseline: 2 });
     }
 
     #[test]
-    fn a_turn_without_state_change_owes_nothing() {
-        let t = StatusTracker::default();
-        t.turn_started("m", 0);
-        assert_eq!(t.turn_finished("m", |_| false), Verdict::NotOwed);
-        t.turn_started("m", 0);
-        assert_eq!(t.turn_finished("m", |_| false), Verdict::NotOwed);
+    fn a_later_turns_publication_does_not_satisfy_an_earlier_one() {
+        let (t, shared) = tracker(true, 1);
+        t.run_started("m", "a");
+        t.note_state_change("m", "a");
+        t.run_ended("m", "a"); // A ended at revision 1, published nothing
+        set_revision(&shared, 2);
+        t.run_started("m", "b");
+        set_revision(&shared, 3); // B publishes revisions 3
+        t.run_ended("m", "b");
+        let a = t.take_ended().remove(0);
+        assert_eq!((a.baseline, a.end_revision), (1, 1));
+        assert_eq!(published(&t, &a, &[3]), Verdict::Nudge { baseline: 1 });
     }
 
     #[test]
-    fn a_turn_too_fast_for_the_watcher_is_opened_by_its_tool_call() {
-        let t = StatusTracker::default();
-        // No turn_started: the first state-changing call opens the turn, with
-        // the revision read at that moment.
-        t.note_state_change("m", || 4);
+    fn an_existing_record_seeds_the_baseline() {
+        let (t, _shared) = tracker(true, 3);
+        t.run_started("m", "r1");
+        assert_eq!(t.current_run("m"), Some((3, ("s".to_owned(), "proj".to_owned()))));
+        t.note_state_change("m", "r1");
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        // The earlier revisions 1..=3 cannot satisfy the turn.
+        assert_eq!(published(&t, &ended, &[1, 2, 3]), Verdict::Nudge { baseline: 3 });
+    }
+
+    #[test]
+    fn a_state_change_opens_the_run_when_its_start_was_not_seen() {
+        let (t, _shared) = tracker(true, 4);
+        t.note_state_change("m", "r1");
         assert!(t.turn_open("m"));
-        // A later call in the same turn does not move the baseline.
-        t.note_state_change("m", || 9);
-        assert_eq!(t.turn_finished("m", |b| b > 4), Verdict::Nudge { baseline: 4 });
-        // The watcher arriving late keeps the baseline the call recorded.
-        t.note_state_change("n", || 7);
-        t.turn_started("n", 8);
-        assert_eq!(t.turn_finished("n", |b| b == 7), Verdict::Published);
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        assert_eq!(ended.baseline, 4);
     }
 
     #[test]
-    fn a_turn_on_a_chat_that_is_not_a_manager_can_be_dropped() {
-        let t = StatusTracker::default();
-        t.note_state_change("worker", || 0);
-        t.forget("worker");
-        assert!(!t.turn_open("worker"));
-        assert_eq!(t.turn_finished("worker", |_| false), Verdict::NotOwed);
+    fn a_run_that_never_reported_its_end_is_closed_by_the_next_start() {
+        let (t, shared) = tracker(true, 1);
+        t.run_started("m", "a");
+        t.note_state_change("m", "a");
+        set_revision(&shared, 5);
+        t.run_started("m", "b");
+        let ended = t.take_ended();
+        assert_eq!(ended.len(), 1);
+        assert_eq!((ended[0].baseline, ended[0].end_revision), (1, 5));
+        assert_eq!(t.current_run("m").unwrap().0, 5);
+    }
+
+    #[test]
+    fn a_turn_without_a_state_change_or_a_project_owes_nothing() {
+        let (t, _s) = tracker(true, 0);
+        t.run_started("m", "r1");
+        t.run_ended("m", "r1");
+        assert!(t.take_ended().is_empty());
+        let (t, _s) = tracker(false, 0);
+        t.run_started("w", "r1");
+        t.note_state_change("w", "r1");
+        assert!(!t.turn_open("w"));
+        t.run_ended("w", "r1");
+        assert!(t.take_ended().is_empty());
+        // Without a probe nothing is tracked at all.
+        let bare = StatusTracker::default();
+        bare.note_state_change("m", "r1");
+        assert!(!bare.turn_open("m"));
+    }
+
+    #[test]
+    fn a_turn_held_for_adoption_comes_back() {
+        let (t, _s) = tracker(true, 0);
+        t.run_started("m", "r1");
+        t.note_state_change("m", "r1");
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        assert_eq!(t.pending("m"), 0);
+        t.hold(ended.clone());
+        assert_eq!(t.pending("m"), 1);
+        assert_eq!(t.take_ended(), vec![ended]);
     }
 
     #[test]
     fn a_failed_ask_lets_the_next_turn_ask_again() {
-        let t = StatusTracker::default();
-        t.turn_started("m", 0);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |_| false), Verdict::Nudge { baseline: 0 });
+        let (t, _s) = tracker(true, 0);
+        t.run_started("m", "r1");
+        t.note_state_change("m", "r1");
+        t.run_ended("m", "r1");
+        let ended = t.take_ended().remove(0);
+        assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 0 });
         t.ask_failed("m");
-        t.turn_started("m", 0);
-        t.note_state_change("m", || 0);
-        assert_eq!(t.turn_finished("m", |_| false), Verdict::Nudge { baseline: 0 });
+        t.run_started("m", "r2");
+        assert!(!t.state().runs["m"].ask);
     }
 
     #[test]
-    fn only_manager_stamped_revisions_after_the_baseline_count() {
-        use mast_proto::artifacts::ArtifactRevision;
-        use mast_proto::{ManagerStatusStamp, WorkOutlineActor, WorkOutlineActorKind};
-        let mut a = ArtifactView { work_item_id: Some("proj".into()), ..Default::default() };
-        let stamp = Some(ManagerStatusStamp {
-            role_id: mast_proto::standing_role_id(StandingRoleKind::Manager, "proj"),
-            chat_id: "c".into(),
-        });
-        let rev = |id, kind, manager_status| ArtifactRevision {
-            id,
-            by: WorkOutlineActor { kind, ..Default::default() },
-            manager_status,
-            ..Default::default()
-        };
-        a.revisions = vec![
-            rev(3, WorkOutlineActorKind::Agent, None),
-            rev(2, WorkOutlineActorKind::User, stamp.clone()),
-            rev(1, WorkOutlineActorKind::Agent, stamp),
-        ];
-        // An unstamped agent revision, or a stamp on a user's, is not a publication.
-        assert!(!published_after(Some(&a), 1));
-        assert!(published_after(Some(&a), 0));
-        assert!(!published_after(None, 0));
+    fn only_manager_stamped_revisions_in_the_window_count() {
+        let mut a = status_with_stamped(&[1, 2]);
+        a.revisions.insert(
+            0,
+            ArtifactRevision {
+                id: 3,
+                by: WorkOutlineActor { kind: WorkOutlineActorKind::Agent, ..Default::default() },
+                ..Default::default()
+            },
+        );
+        assert!(published_between(Some(&a), 0, 3));
+        assert!(!published_between(Some(&a), 2, 3), "an unstamped revision is not a publication");
+        assert!(!published_between(Some(&a), 0, 0));
+        assert!(!published_between(None, 0, 9));
     }
 
     #[test]

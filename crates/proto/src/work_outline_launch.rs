@@ -156,6 +156,15 @@ impl crate::Chat {
             .map(|(_, operation)| operation)
     }
 
+    /// The scope item of the role this Chat is the not-yet-adopted first start
+    /// of, when it is one of `kind`.
+    pub fn standing_role_provisional_scope(&self, kind: crate::StandingRoleKind) -> Option<&str> {
+        let prefix = format!("{STANDING_ROLE_PROVISIONAL_PREFIX}{}:", kind.as_str());
+        let rest = self.standing_role_provisional()?.strip_prefix(prefix.as_str())?;
+        let item = rest.split_once('|').map_or(rest, |(item, _)| item);
+        (!item.is_empty()).then_some(item)
+    }
+
     /// Whether this Chat is a not-yet-adopted first start of exactly this role.
     pub fn is_provisional_for(&self, kind: crate::StandingRoleKind, scope_item_id: &str) -> bool {
         let tag = standing_role_provisional_tag(kind, scope_item_id);
@@ -259,11 +268,14 @@ mod tests {
         assert!(chat.is_standing_role_predecessor(), "hidden like a superseded chat");
         assert!(chat.is_provisional_for(Manager, "item-1"));
         assert!(!chat.is_provisional_for(Manager, "item-2"));
+        assert_eq!(chat.standing_role_provisional_scope(Manager), Some("item-1"));
+        assert_eq!(chat.standing_role_provisional_scope(crate::StandingRoleKind::Assistant), None);
         // The marker carries the creating operation, and an item whose id
         // extends another's is not confused with it.
         chat.standing_role_successor =
             Some(standing_role_provisional_marker(Manager, "item-1", "op-a"));
         assert!(chat.is_provisional_for(Manager, "item-1"));
+        assert_eq!(chat.standing_role_provisional_scope(Manager), Some("item-1"));
         assert_eq!(chat.standing_role_provisional_operation(), Some("op-a"));
         assert!(!chat.is_provisional_for(Manager, "item"));
         assert!(!chat.is_provisional_for(Manager, "item-10"));

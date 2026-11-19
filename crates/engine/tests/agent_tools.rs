@@ -5142,25 +5142,155 @@ async fn a_manager_turn_is_nudged_even_when_the_tool_call_beats_the_watcher() {
     rig.harness.release.notify_one();
 }
 
-/// A Manager's first turn is queued before its chat becomes the role holder.
-/// A state-changing call made in that window still owes a status once the
-/// role is adopted.
+fn nudge_prompts(rig: &Rig) -> Vec<String> {
+    rig.harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("did not publish a new Manager status"))
+        .map(|r| r.prompt.clone())
+        .collect()
+}
+
+async fn plant_stamped_status(rig: &Rig, id: &str, item: &str, revisions: u32) {
+    let role_id = mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item);
+    let agent = mast_proto::WorkOutlineActor {
+        kind: mast_proto::WorkOutlineActorKind::Agent,
+        chat_id: Some("earlier-manager".into()),
+        ..Default::default()
+    };
+    let view = mast_proto::ArtifactView {
+        id: id.into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(item.into()),
+        title: "Manager status".into(),
+        role: Some("manager-status".into()),
+        kind: mast_proto::ArtifactKind::Markdown,
+        current_revision: revisions,
+        revisions: (1..=revisions)
+            .rev()
+            .map(|n| mast_proto::ArtifactRevision {
+                id: n,
+                hash: format!("{n:064x}"),
+                at: i64::from(n),
+                by: agent.clone(),
+                manager_status: Some(mast_proto::ManagerStatusStamp {
+                    role_id: role_id.clone(),
+                    chat_id: "earlier-manager".into(),
+                }),
+                ..Default::default()
+            })
+            .collect(),
+        created_at: 1,
+        updated_at: 1,
+        ..Default::default()
+    };
+    rig.core.workspace.put_artifact(&view).unwrap();
+}
+
+/// An existing status record sets where a turn starts from: its earlier
+/// revisions never satisfy a turn that changed state and published nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tool_call_before_the_role_is_adopted_still_owes_a_status() {
+async fn an_existing_status_record_seeds_the_turns_baseline() {
+    let (rig, item) = role_rig("status-seeded").await;
+    plant_stamped_status(&rig, "status-seeded-doc", &item, 3).await;
+    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "s1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
+    let prompts = nudge_prompts(&rig);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("latest revision is 3"), "{}", prompts[0]);
+    rig.harness.release.notify_one();
+}
+
+/// Turn B starts the moment turn A ends. A's publication belongs to A: B
+/// changed state and published nothing, so B is reminded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_is_not_satisfied_by_the_previous_turns_publication() {
+    let (rig, _item) = role_rig("status-consecutive").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "turn A").await;
+    // B is queued before A ends, so it starts as soon as A is idle.
+    rig.core.doc_host.queue_command(CHAT, run_command("second", &rig.space_path)).unwrap();
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "A", "idempotencyKey": "a1" }))
+        .await
+        .unwrap();
+    tool(
+        &rig,
+        &token,
+        "artifact_publish",
+        json!({ "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "sa",
+                "content": status_document("09:00") }),
+    )
+    .await
+    .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "turn B").await;
+    assert_eq!(nudges(&rig), 0, "A published, so A owes nothing");
+    let token = run_token(&rig, 1);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "B", "idempotencyKey": "b1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 3, "the reminder for B").await;
+    let prompts = nudge_prompts(&rig);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("latest revision is 1"), "{}", prompts[0]);
+    rig.harness.release.notify_one();
+}
+
+/// A Manager's first turn is queued before its chat becomes the role holder,
+/// so it can end first. Its project comes from the provisional marker, the
+/// record that already exists sets its baseline, and the check waits for
+/// adoption instead of discarding the turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
     use mast_proto::StandingRoleKind;
     let rig = rig().await;
     let item = create_item(&rig, "status-first-item", "Manager", None).await;
-    assign_chat(&rig, "status-first-assignment", CHAT, &item).await;
-    rig.core.doc_host.queue_command(CHAT, run_command("first message", &rig.space_path)).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the first turn").await;
-    let token = run_token(&rig, 0);
-    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "p1" }))
+    plant_stamped_status(&rig, "status-first-doc", &item, 2).await;
+    let first = "first-manager-chat";
+    rig.core
+        .workspace
+        .create_provisional_role_chat(
+            first,
+            SPACE,
+            None,
+            rig.space_path.clone(),
+            mast_proto::standing_role_provisional_marker(StandingRoleKind::Manager, &item, "op-first"),
+        )
+        .unwrap();
+    assign_chat(&rig, "status-first-assignment", first, &item).await;
+
+    // The first turn: its token is minted while the chat is provisional.
+    let tokens = rig.core.sessions.agent_tokens();
+    let lease = tokens.mint(first, "run-first", SPACE, &rig.core.device_id);
+    assert_eq!(
+        tokens.manager_status().current_run(first),
+        Some((2, (SPACE.to_owned(), item.clone()))),
+        "the provisional chat's project and the existing revision"
+    );
+    tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "p1" }))
         .await
         .unwrap();
-    rig.core.workspace.adopt_standing_role(StandingRoleKind::Manager, &item, CHAT, &[]).unwrap();
-    rig.harness.release.notify_one();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
-    assert_eq!(nudges(&rig), 1);
+    // The turn ends before the chat is adopted.
+    drop(lease);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing is asked before adoption");
+
+    rig.core.workspace.activate_standing_role_chat(StandingRoleKind::Manager, &item, first, &[]).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder after adoption").await;
+    let prompts = nudge_prompts(&rig);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("latest revision is 2"), "{}", prompts[0]);
     rig.harness.release.notify_one();
 }
 
