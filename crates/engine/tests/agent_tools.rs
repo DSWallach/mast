@@ -198,9 +198,9 @@ async fn rig_for(fake_codex: bool) -> Rig {
     // Legacy unassociated chats exercise the authorization boundary. Tests
     // for current user creation go through Mutate below.
     for chat in [CHAT, OTHER_CHAT] {
-        core.workspace.create_chat(chat, Some(SPACE), Some(&core.device_id), None, None, &[]).unwrap();
+        core.workspace.create_chat(chat, Some(SPACE), Some(&core.device_id), None, None).unwrap();
     }
-    core.workspace.create_chat(PROJECTLESS, None, Some(&core.device_id), None, None, &[]).unwrap();
+    core.workspace.create_chat(PROJECTLESS, None, Some(&core.device_id), None, None).unwrap();
     Rig {
         _tmp: tmp,
         core,
@@ -5515,7 +5515,7 @@ fn a_batch_budget_survives_a_restart_and_a_fresh_approval_adds_to_what_is_spent(
     let budget = second.batch_budget("exec-1", 10);
     assert_eq!(budget.remaining(), 6, "committed charges survive a restart");
     // A fresh approval is for 12 more, on top of the 4 already spent.
-    budget.allow(12);
+    budget.approve(12, &[]).unwrap();
     assert_eq!(budget.remaining(), 12);
     assert!(budget.reserve(12));
     assert_eq!(budget.remaining(), 0);
