@@ -105,6 +105,12 @@ pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: 
     changes
 }
 
+pub fn scope_map_fixture(cx: &mut App) -> Entity<crate::changes::Changes> {
+    let changes = crate::changes::snapshot_populated_changes(cx);
+    changes.update(cx, |changes, cx| changes.prepare_scope_map_snapshot(cx));
+    changes
+}
+
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");

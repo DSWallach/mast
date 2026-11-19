@@ -113,6 +113,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "symbol-search",
         "file-outline",
         "changes-expanded",
+        "scope-map",
         "changes-collapsed",
         "changes-focus-resize",
         "details",
