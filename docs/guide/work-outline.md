@@ -98,6 +98,10 @@ The chat is created hidden, the way a replaced Manager chat is hidden, and becom
 
 A second start while the Manager exists is refused with the same message, so repeated clicks or retries never create two. A retry of the same attempt returns the same chat. The placeholder is left out of searches and the "Needs interaction" and similar filters, which show only the paths to chats that match; a Manager chat that matches still shows in its row. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
 
+## Work queue
+
+Every project has an ordered **work queue**. On an item inside the project, choose **Add to project queue** in its details. On the project, the **Work queue** section lists the queue with each entry's state (ready, running, blocked or done) and has **Up**, **Down** and **Remove**. When a ready item is at the front, the project's Manager is offered it: a project with no Manager has one started with that item as its first message, and a running Manager gets a wake. **Pause auto-start** stops offers for the project. See the [reference](../work-outline.md#project-work-queues).
+
 ## Undo
 
 `⌘Z` undoes your last outline change and `⇧⌘Z` redoes it. Undo is kept in memory for this session and only covers changes you made in the UI, not ones an agent made. If the item changed since, Mast refuses and says nothing was changed. **Recent Changes…** in the row menu lists them.

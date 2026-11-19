@@ -33,6 +33,9 @@ pub struct WorkQueueDispatcher {
     launch: WorkItemLaunchService,
     wakes: OrchestratorWakes,
     state: Arc<Mutex<State>>,
+    /// Where offers are remembered across restarts (absent in tests that
+    /// build the dispatcher without a data directory).
+    store: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -87,12 +90,28 @@ impl WorkQueueDispatcher {
         workspace: WorkspaceHost,
         launch: WorkItemLaunchService,
         wakes: OrchestratorWakes,
+        store: Option<std::path::PathBuf>,
     ) -> Self {
+        let offered = store
+            .as_deref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         Self {
             workspace,
             launch,
             wakes,
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(State { offered, ..State::default() })),
+            store,
+        }
+    }
+
+    /// Remember the offers so a restart does not repeat them.
+    fn save_offered(&self) {
+        let Some(path) = &self.store else { return };
+        let bytes = serde_json::to_vec(&lock(&self.state).offered).unwrap_or_default();
+        if let Err(error) = std::fs::write(path, bytes) {
+            tracing::warn!(%error, "work queue: could not save offered items");
         }
     }
 
@@ -155,9 +174,17 @@ impl WorkQueueDispatcher {
             .map(|entry| entry.work_item_id)
             .collect();
         let in_space: HashSet<&str> = snapshot.items.iter().map(|item| item.id.as_str()).collect();
-        lock(&self.state)
-            .offered
-            .retain(|id, _| still_ready.contains(id) || !in_space.contains(id.as_str()));
+        let changed = {
+            let mut state = lock(&self.state);
+            let before = state.offered.len();
+            state
+                .offered
+                .retain(|id, _| still_ready.contains(id) || !in_space.contains(id.as_str()));
+            state.offered.len() != before
+        };
+        if changed {
+            self.save_offered();
+        }
     }
 
     async fn evaluate_project(&self, snapshot: &WorkOutlineSnapshot, project: &WorkItemView, now: i64) {
@@ -177,10 +204,11 @@ impl WorkQueueDispatcher {
         match self.workspace.standing_role_chat(StandingRoleKind::Manager, &project.id) {
             Some(manager) => {
                 let summary = queue_wake_summary(project, &entry);
-                // Not hosted here: the hosting device offers it. Offering is
-                // recorded only once a device actually held the event.
+                // Not hosted here: the hosting device makes the offer. Once made,
+                // it is not repeated until the item stops being ready.
                 if self.wakes.note_queue_ready(&manager, &entry.work_item_id, &summary).await {
                     lock(&self.state).offered.insert(entry.work_item_id.clone(), key);
+                    self.save_offered();
                 }
             }
             None => self.start_manager(project, entry, key).await,
@@ -205,14 +233,21 @@ impl WorkQueueDispatcher {
         }
         // Stable per (project, item): a retry after a crash adopts the same
         // Manager instead of starting a second one.
+        // The launch binds an operation id to its prompt, so the prompt is part
+        // of the id: a renamed item starts a fresh attempt instead of
+        // conflicting with a half-done one.
+        let prompt = manager_start_prompt(project, &entry);
         let operation_id = format!(
             "qm-{}",
-            derive_id(&format!("queue-manager:{}:{}", project.id, entry.work_item_id), roles::CHAT)
+            derive_id(
+                &format!("queue-manager:{}:{}:{prompt}", project.id, entry.work_item_id),
+                roles::CHAT
+            )
         );
         let params = CreateChatForWorkItemParams {
             work_item_id: project.id.clone(),
             initial_prompt: WorkItemPrompt {
-                text: manager_start_prompt(project, &entry),
+                text: prompt,
                 attachments: Vec::new(),
             },
             config: None,
@@ -225,12 +260,14 @@ impl WorkQueueDispatcher {
             standing_role: Some(StandingRoleKind::Manager),
         };
         let result = self.launch.create_chat_for_work_item(&params).await;
+        let mut saved = false;
         {
             let mut state = lock(&self.state);
             state.launching.remove(&project.id);
             match &result {
                 Ok(_) => {
                     state.offered.insert(entry.work_item_id.clone(), key);
+                    saved = true;
                 }
                 // Someone else's Manager start won the race: it reads the
                 // queue on its own, and the next pass offers through a wake.
@@ -241,6 +278,9 @@ impl WorkQueueDispatcher {
                     "work queue: Manager start did not go through"
                 ),
             }
+        }
+        if saved {
+            self.save_offered();
         }
     }
 }

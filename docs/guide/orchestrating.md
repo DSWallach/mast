@@ -44,6 +44,10 @@ Upgrading preserves existing queued messages. Reminders queued by an earlier bui
 
 The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
 
+## Queue wakes
+
+When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again until it stops being ready and becomes ready again. A project with no Manager has one started by the queue instead. Users can pause this per project.
+
 ## Archive finished workers
 
 On a big project the workers pile up. A worker is **finished** (`archivable: true` in `list_chats` / `get_chat`, with an `archivableReason`) when it is idle, has no open Required Actions, and any one of these holds: its item is completed; its linked PR is merged or closed; its **Ready to merge** was resolved; or it has been idle for more than 3 days with its item completed or archived.

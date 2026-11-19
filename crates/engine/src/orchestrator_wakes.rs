@@ -1435,14 +1435,11 @@ impl OrchestratorWakes {
         self.after_ingest(recorded).await;
     }
 
-    /// A worker's report to its parent chat (`report_to_parent`, or
-    /// `send_message` to the parent): queued as a "worker report" event and
-    /// delivered in the next "Worker updates:" batch under the usual
-    /// idle / user-first rules. Parent only, same Space, and only when this
-    /// device hosts the parent (only the host delivers).
     /// Tell a project's Manager that a queued item is ready (project work
     /// queue). Only the device hosting the Manager delivers; the usual batching
-    /// and user-first rules apply. Returns whether the event was held.
+    /// and user-first rules apply. Returns whether this device hosts the
+    /// Manager, i.e. whether the offer is made here (even if the wake was
+    /// deduped or held back by the settings).
     pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str) -> bool {
         if !self.hosted_here(manager) {
             return false;
@@ -1463,9 +1460,14 @@ impl OrchestratorWakes {
         if held {
             self.after_ingest(HashSet::from([manager.to_owned()])).await;
         }
-        held
+        true
     }
 
+    /// A worker's report to its parent chat (`report_to_parent`, or
+    /// `send_message` to the parent): queued as a "worker report" event and
+    /// delivered in the next "Worker updates:" batch under the usual
+    /// idle / user-first rules. Parent only, same Space, and only when this
+    /// device hosts the parent (only the host delivers).
     pub async fn report_to_parent(
         &self,
         from: &str,

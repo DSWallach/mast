@@ -81,8 +81,8 @@ pub mod typesafe;
 pub mod uploads;
 pub mod work_outline;
 pub mod work_outline_launch;
-pub mod work_queue;
 pub mod work_outline_pr_links;
+pub mod work_queue;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
 mod watch_budget;
@@ -693,6 +693,7 @@ impl EngineCore {
                     .unwrap_or_else(|| execution_scope::ExecutionScopeService::new(workspace.clone(), repos.clone())),
             ),
             orchestrator_wakes.clone(),
+            Some(data_dir.join("work-queue-offers.json")),
         )
         .spawn_watcher(work_queue_cancel.clone());
         // Automatic Manager status reminders are disabled until their delivery

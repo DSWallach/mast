@@ -33,7 +33,8 @@ pub enum WakeEventKind {
     /// A worker exhausted its automatic continuation attempts.
     AutoContinueStopped,
     /// A queued item of the Manager's project is ready to start (project work
-    /// queue). Always wakes: the queue is the user's explicit request.
+    /// queue). It follows the chat's master wake switch only: no per-kind
+    /// setting, because queuing is the user's explicit request.
     QueueReady,
 }
 

@@ -1178,10 +1178,28 @@ impl RegistryDoc {
             ));
         }
         let becomes_project = p.changes.is_project.unwrap_or(item.is_project);
+        let mut queue_clears: Vec<String> = Vec::new();
         if let Some(is_project) = p.changes.is_project
             && item.is_project != is_project
         {
             set.insert("isProject".to_owned(), json!(is_project));
+            // Unmarking a project retires its queue and pause setting.
+            if !is_project {
+                if item.queue_paused {
+                    set.insert("queuePaused".to_owned(), Value::Null);
+                }
+                let tree = self.outline_tree(&item.space_id);
+                queue_clears = tree
+                    .items
+                    .iter()
+                    .filter(|(id, other)| {
+                        other.queue_order_key.is_some()
+                            && Self::tree_project_root(&tree, id.as_str()).as_deref()
+                                == Some(p.work_item_id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+            }
         }
         match &p.changes.worker_destination {
             FieldPatch::Unchanged => {}
@@ -1290,6 +1308,13 @@ impl RegistryDoc {
             set.insert("updatedAt".to_owned(), json!(now_ms));
             plan.insert(0, Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         }
+        for id in &queue_clears {
+            plan.push(Planned::update(
+                KIND_WORK_ITEMS,
+                id,
+                BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
+            ));
+        }
         self.commit(plan, &[])
     }
 
@@ -1356,6 +1381,14 @@ impl RegistryDoc {
         Self::plan_rekeys(&links, &placed.rekeys, &mut plan);
         let mut set = placement_set(dest, &placed.keys[0]);
         set.insert("updatedAt".to_owned(), json!(now_ms));
+        // A queued item that leaves its project's queue scope must not join
+        // the destination project's queue with a stale key.
+        if item.queue_order_key.is_some()
+            && Self::tree_project_root(&tree, &p.work_item_id)
+                != dest.and_then(|dest| Self::tree_project_root(&tree, dest))
+        {
+            set.insert("queueOrderKey".to_owned(), Value::Null);
+        }
         plan.push(Planned::update(KIND_WORK_ITEMS, &p.work_item_id, set));
         let extra: Vec<(&str, &str)> = dest.map(|d| (KIND_WORK_ITEMS, d)).into_iter().collect();
         self.commit(plan, &extra)

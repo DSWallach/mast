@@ -1,6 +1,5 @@
 //! Project work queues: the one derivation of a queue's entries and their
-//! state, shared by the engine's Manager auto-start, the agent tools and the
-//! project page. A queue is not stored; it is the queued items
+//! state, shared by the engine's Manager auto-start and the project page. A queue is not stored; it is the queued items
 //! (`workItems.queueOrderKey`) of one project in `(key, id)` order.
 
 use serde::{Deserialize, Serialize};

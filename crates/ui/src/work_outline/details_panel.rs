@@ -888,7 +888,13 @@ impl WorkItemDetails {
                 theme,
             )));
         }
-        let ids: Vec<String> = queue.iter().map(|entry| entry.work_item_id.clone()).collect();
+        // Up and Down skip finished entries: the registry only places an item
+        // relative to queued items that are still live.
+        let ids: Vec<String> = queue
+            .iter()
+            .filter(|entry| entry.state != QueueEntryState::Done)
+            .map(|entry| entry.work_item_id.clone())
+            .collect();
         for (ix, entry) in queue.iter().enumerate() {
             let state = match entry.state {
                 QueueEntryState::Ready => "ready",
@@ -897,8 +903,9 @@ impl WorkItemDetails {
                 QueueEntryState::Done => "done",
             };
             let id = entry.work_item_id.clone();
-            let up_to = ix.checked_sub(1).map(|i| ids[i].clone());
-            let down_to = ids.get(ix + 1).cloned();
+            let live_ix = ids.iter().position(|other| *other == id);
+            let up_to = live_ix.and_then(|i| i.checked_sub(1)).map(|i| ids[i].clone());
+            let down_to = live_ix.and_then(|i| ids.get(i + 1)).cloned();
             let (up_id, down_id, remove_id) = (id.clone(), id.clone(), id.clone());
             section = section.child(
                 crate::components::outline_detail_row(theme)
@@ -906,6 +913,8 @@ impl WorkItemDetails {
                         format!("{}. {} \u{2014} {state}", ix + 1, entry.title),
                         theme,
                     ))
+                    .when(live_ix.is_some(), |row| {
+                        row
                     .child(
                         crate::work_outline::hints::details_button(("work-queue-up", ix), "Up", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -916,7 +925,7 @@ impl WorkItemDetails {
                                 }
                             })),
                     )
-                    .child(
+                            .child(
                         crate::work_outline::hints::details_button(("work-queue-down", ix), "Down", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(anchor) = down_to.clone() {
@@ -926,6 +935,7 @@ impl WorkItemDetails {
                                 }
                             })),
                     )
+                    })
                     .child(
                         crate::work_outline::hints::details_button(("work-queue-remove", ix), "Remove", theme)
                             .on_click(cx.listener(move |this, _, _, cx| {

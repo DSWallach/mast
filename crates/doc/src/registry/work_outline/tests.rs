@@ -1999,3 +1999,93 @@ fn queue_pause_is_a_project_setting_users_toggle() {
     pause(&mut doc, "qp-3", &project, false).unwrap();
     assert!(!snap(&doc).item(&project).unwrap().queue_paused);
 }
+
+#[test]
+fn queued_item_leaves_the_queue_when_it_moves_out_of_its_project() {
+    let mut doc = doc_with_spaces("dev-a");
+    let p1 = create(&mut doc, "qm-p1", None, "P1");
+    let p2 = create(&mut doc, "qm-p2", None, "P2");
+    mark_project(&mut doc, "qm-m1", &p1);
+    mark_project(&mut doc, "qm-m2", &p2);
+    let a = create(&mut doc, "qm-a", Some(&p1), "A");
+    queue(&mut doc, "qm-q", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+
+    // A move inside the project keeps the place.
+    let sub = create(&mut doc, "qm-sub", Some(&p1), "Sub");
+    move_to(&mut doc, "qm-in", &a, Some(&sub), WorkOutlinePlacement::Last).unwrap();
+    assert_eq!(queue_titles(&doc, &p1), ["A"]);
+
+    // A move to another project drops it instead of queuing it there.
+    move_to(&mut doc, "qm-out", &a, Some(&p2), WorkOutlinePlacement::Last).unwrap();
+    assert_eq!(queue_titles(&doc, &p1), Vec::<String>::new());
+    assert_eq!(queue_titles(&doc, &p2), Vec::<String>::new());
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_order_key, None);
+}
+
+#[test]
+fn unmarking_a_project_retires_its_queue_and_pause() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qu-project", None, "Project");
+    mark_project(&mut doc, "qu-mark", &project);
+    let a = create(&mut doc, "qu-a", Some(&project), "A");
+    queue(&mut doc, "qu-q", &a, queue_place(WorkOutlinePlacement::Last)).unwrap();
+    apply(
+        &mut doc,
+        WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            work_item_id: project.clone(),
+            paused: true,
+            operation_id: "qu-pause".into(),
+        }),
+    )
+    .unwrap();
+    apply(
+        &mut doc,
+        WorkOutlineMutation::UpdateWorkItem(UpdateWorkItemParams {
+            work_item_id: project.clone(),
+            changes: mast_proto::WorkItemChanges {
+                is_project: Some(false),
+                ..Default::default()
+            },
+            operation_id: "qu-unmark".into(),
+        }),
+    )
+    .unwrap();
+    let snapshot = snap(&doc);
+    assert_eq!(snapshot.item(&a).unwrap().queue_order_key, None);
+    assert!(!snapshot.item(&project).unwrap().queue_paused);
+}
+
+#[test]
+fn agents_cannot_edit_a_queue_or_its_pause() {
+    let mut doc = doc_with_spaces("dev-a");
+    let project = create(&mut doc, "qa-project", None, "Project");
+    mark_project(&mut doc, "qa-mark", &project);
+    let a = create(&mut doc, "qa-a", Some(&project), "A");
+    doc.upsert_chat(&space_chat("agent-chat", Some(SPACE))).unwrap();
+    let agent = WorkOutlineActor {
+        kind: WorkOutlineActorKind::Agent,
+        device_id: "dev-a".into(),
+        chat_id: Some("agent-chat".into()),
+        message_id: None,
+    };
+    for mutation in [
+        WorkOutlineMutation::SetQueuePosition(mast_proto::SetQueuePositionParams {
+            work_item_id: a.clone(),
+            change: queue_place(WorkOutlinePlacement::Last),
+            operation_id: "qa-position".into(),
+        }),
+        WorkOutlineMutation::SetQueuePaused(mast_proto::SetQueuePausedParams {
+            work_item_id: project.clone(),
+            paused: true,
+            operation_id: "qa-pause".into(),
+        }),
+    ] {
+        assert!(
+            doc.apply_work_outline_mutation(&mutation, &agent, 1_700_000_000_000)
+                .is_err(),
+            "{} must be refused for agents",
+            mutation.op_name()
+        );
+    }
+    assert_eq!(snap(&doc).item(&a).unwrap().queue_order_key, None);
+}
