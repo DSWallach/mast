@@ -601,6 +601,7 @@ mod tests {
                 work_item_id: Some("item".into()),
                 output: ScheduledTaskOutput::Background,
                 after_success: Default::default(),
+                write_to_notion: None,
             },
             awaiting_request_id: None,
             awaiting_since: None,

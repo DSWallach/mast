@@ -1999,6 +1999,9 @@ async fn write_to_notion_setting_reaches_the_run_prompt_and_chat_and_survives_ol
         .unwrap();
     let off = saved.tasks.iter().find(|t| t.id == "off").unwrap();
     assert_eq!(off.draft.write_to_notion, Some(false));
+    core.shutdown().await;
+}
+
 fn failure_actions(core: &EngineCore, task: &str) -> Vec<UserActionRequestView> {
     let key = format!("scheduled-run-failed:{task}");
     mast_doc::materialize_work_outline(

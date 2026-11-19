@@ -374,11 +374,10 @@ impl RequiredActionsList {
         }
     }
 
-    pub(crate) fn external_dismiss(&mut self, request_id: String, via: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn external_dismiss(&mut self, request_id: String, _via: &'static str, cx: &mut Context<Self>) {
         if self.open_row(&request_id).is_none() || self.in_flight.contains(&request_id) || self.replied_to(&request_id).is_some() {
             return;
         }
-        self.resolution_via.insert(request_id.clone(), via.into());
         self.decide(request_id, "dismissed".into(), String::new(), cx);
     }
 
