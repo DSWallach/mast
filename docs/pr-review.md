@@ -105,6 +105,28 @@ block, so it posts as a suggestion.
 
 Mast can check out a pull request and start a review chat.
 
+## Re-review
+
+The review-state row (`DiffReviewState`) keeps, besides the viewed marks, `reviewedHead` (the PR head the reviewer last
+submitted a review at, or last caught up at), `reviewedAt` and `reviewedHunks` (the hunk identities of the diff at that head,
+capped at 4096; over the cap only the head is kept). `headSha` is different: it follows the PR head and drives mark
+carry-over (`reconcile_review_head`).
+
+- **Identity.** Hunks are keyed by `review_hunk_identity(path, changed lines)`; line numbers and context are excluded.
+  Phases 1-5 already did this, so nothing migrated. Marks survive a head change by identity.
+- **Baseline stamping.** `stamp_reviewed` runs on a successful submit (`commit_id`), on **Mark all reviewed**, and on a
+  mark change (`stamp_on_mark`) only when no changed-and-unviewed hunk remains. Otherwise marking one hunk would erase
+  the rest of the delta from the group. The snapshot comes from the last full diff for that head, never from the delta.
+- **Group.** `changed_since_files` lists files with an unviewed hunk outside `reviewedHunks`.
+- **Range diff.** `GetCheckoutDiff` with `mode: "since"` (`baseRef`, `commitSha` = old head, `headRef` = new head) runs
+  `diff_sync::since::capture_since_diff`. An ancestor old head gives `git diff old new`. Otherwise it is an interdiff: each
+  head against its own merge-base with the base ref, keeping the new head's hunks whose changed lines are absent from the
+  old head's diff of the same file. Missing commits are fetched through the existing read-only `git fetch origin <sha>`;
+  an unfetchable old head returns an error starting `old-head-unavailable` and the UI falls back to the full diff.
+  Output is capped by `MAX_PATCH_BYTES`; results are cached per (repository, old, new, merge-bases), 8 entries. The UI
+  requests one pair once (the pair is part of the scoped-diff key).
+- **Cleanup.** Closing or merging deletes the row (and with it the baseline) through the existing path.
+
 ## Entry points
 
 - **⌘P / ⇧⌘P (the PR page)**: ⌘P is `OpenMyPrs` (customizable in Settings →
