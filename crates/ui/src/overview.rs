@@ -7230,8 +7230,8 @@ impl Overview {
     /// Outline with `w-api` marked a project: `chat` gives its Manager the
     /// fixture chat `fixture-design` (model badge), `placeholder` leaves the
     /// Manager before its first message. `unselected` also makes `w-ui` a
-    /// project with a placeholder Manager and selects neither Manager, so
-    /// every row shows its resting fill.
+    /// project with a placeholder Manager, selects neither Manager so every
+    /// row shows its resting fill, and collapses `w-api`.
     #[cfg(feature = "snapshot")]
     pub(crate) fn show_snapshot_manager(
         &mut self,
@@ -7296,8 +7296,12 @@ impl Overview {
         } else {
             row_key::manager("fixture-space", project)
         };
-        self.outline
-            .update(cx, |outline, cx| outline.select(&selected, cx));
+        self.outline.update(cx, |outline, cx| {
+            if unselected {
+                outline.fixture_collapse(&row_key::item("fixture-space", project), cx);
+            }
+            outline.select(&selected, cx)
+        });
     }
 
     #[cfg(feature = "snapshot")]

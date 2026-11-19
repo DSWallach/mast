@@ -865,6 +865,11 @@ impl OutlineView {
         self.prune_multi();
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_collapse(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.set_collapsed(key, true, cx);
+    }
+
     fn set_collapsed(&mut self, key: &str, collapsed: bool, cx: &mut Context<Self>) {
         let changed = if collapsed {
             self.collapsed.insert(key.to_string())
@@ -2903,12 +2908,16 @@ impl OutlineView {
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .flex_none()
-                .text_color(if selected {
-                    theme.text
-                } else {
-                    theme.pinned_accent()
-                })
-                .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
+                // An svg paints only with its own text color.
+                .child(
+                    crate::icons::icon(crate::icons::PIN)
+                        .size(px(12.0))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.pinned_accent()
+                        }),
+                )
                 .hint("Pinned", HintKey::None)
         });
         let renaming = matches!(

@@ -1227,6 +1227,68 @@ mod tests {
         assert_eq!(session_rows(cx), (1, false));
     }
 
+    /// A pinned Manager keeps its row under a collapsed project and wears the
+    /// pin mark; the unpinned Manager does not.
+    #[gpui::test]
+    fn a_pinned_manager_stays_visible_under_its_collapsed_project(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = crate::work_outline::store::fixture_snapshot("s1");
+        fixture
+            .items
+            .iter_mut()
+            .find(|item| item.id == API)
+            .unwrap()
+            .is_project = true;
+        fixture.standing_roles.push(mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, API),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: API.into(),
+            current_chat_id: Some(CHAT_API.into()),
+            chain: vec![CHAT_API.into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+        });
+        let (shell, _outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        let manager = selector(format!("outline-row-{}", row_key::manager("s1", API)));
+        let pin_mark = selector(format!("outline-pinned-chat-{CHAT_API}"));
+        let disclosure = selector(format!("outline-disclosure-{}", row_key::item("s1", API)));
+        assert!(cx.debug_bounds(manager).is_some() && cx.debug_bounds(pin_mark).is_none());
+
+        shell.update(cx, |shell, cx| {
+            shell.set_chat_pinned(CHAT_API.into(), true, cx)
+        });
+        redraw(cx);
+        let mark = cx
+            .debug_bounds(pin_mark)
+            .expect("the pinned Manager shows the pin");
+        let row = cx.debug_bounds(manager).unwrap();
+        assert!(
+            mark.size.width > px(0.0) && row.contains(&mark.center()),
+            "{mark:?} in {row:?}"
+        );
+
+        let toggle = cx.debug_bounds(disclosure).unwrap().center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        redraw(cx);
+        assert!(cx.debug_bounds(manager).is_some());
+        assert!(
+            cx.debug_bounds(selector(format!(
+                "outline-row-{}",
+                row_key::item("s1", API_AUTH)
+            )))
+            .is_none()
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.set_chat_pinned(CHAT_API.into(), false, cx)
+        });
+        redraw(cx);
+        assert!(
+            cx.debug_bounds(manager).is_none(),
+            "unpinned, it folds with its project"
+        );
+    }
+
     /// Chat rows, the Space root, and the Unassociated group get their own
     /// menus; Chat rows reuse the sidebar Chat menu's actions.
     #[gpui::test]
