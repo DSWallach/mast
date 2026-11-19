@@ -2560,3 +2560,46 @@ async fn a_paused_queue_starts_no_manager_until_resumed() {
     wait_for(|| manager_chat(&rig).is_some(), "resume to start the Manager").await;
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_item_is_offered_once_across_repeats_and_restarts() {
+    use mast_engine::work_queue::WorkQueueDispatcher;
+    let rig = rig().await;
+    mark_project(&rig).await;
+    // The project already has a Manager, so queued work is offered by wake.
+    launch(&rig, &manager_params(&rig, "offer-manager", "Plan")).await.unwrap();
+    let item = create_child(&rig, "offer-item", "Offered ticket").await;
+    queue_item(&rig, "offer-queue", &item).await;
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let store = rig.root.join("offers-test.json");
+    let build = |store: Option<PathBuf>| {
+        WorkQueueDispatcher::new(
+            rig.core.workspace.clone(),
+            service(&rig),
+            rig.core.orchestrator_wakes.clone(),
+            store,
+        )
+    };
+
+    // Repeated passes make one offer, whatever the wake core's own dedupe
+    // window would let through.
+    let first = build(Some(store.clone()));
+    first.evaluate(&snapshot).await;
+    first.evaluate(&snapshot).await;
+    first.evaluate(&snapshot).await;
+    assert_eq!(first.offers_made(), 1);
+
+    // A restart (a new dispatcher over the same store) does not repeat it.
+    let restarted = build(Some(store.clone()));
+    restarted.evaluate(&snapshot).await;
+    assert_eq!(restarted.offers_made(), 0);
+
+    // Control: with nothing remembered, the same snapshot is offered again.
+    let fresh = build(None);
+    fresh.evaluate(&snapshot).await;
+    assert_eq!(fresh.offers_made(), 1);
+    rig.core.shutdown().await;
+}

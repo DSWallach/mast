@@ -44,6 +44,8 @@ struct State {
     offered: HashMap<String, String>,
     /// Projects with a Manager start in flight.
     launching: HashSet<String>,
+    /// Offers made to a hosted Manager (tests).
+    offers_made: usize,
 }
 
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -104,6 +106,12 @@ impl WorkQueueDispatcher {
             state: Arc::new(Mutex::new(State { offered, ..State::default() })),
             store,
         }
+    }
+
+    /// How many offers this dispatcher made to a Manager hosted here.
+    #[doc(hidden)]
+    pub fn offers_made(&self) -> usize {
+        lock(&self.state).offers_made
     }
 
     /// Remember the offers so a restart does not repeat them.
@@ -207,7 +215,10 @@ impl WorkQueueDispatcher {
                 // Not hosted here: the hosting device makes the offer. Once made,
                 // it is not repeated until the item stops being ready.
                 if self.wakes.note_queue_ready(&manager, &entry.work_item_id, &summary).await {
-                    lock(&self.state).offered.insert(entry.work_item_id.clone(), key);
+                    let mut state = lock(&self.state);
+                    state.offers_made += 1;
+                    state.offered.insert(entry.work_item_id.clone(), key);
+                    drop(state);
                     self.save_offered();
                 }
             }
