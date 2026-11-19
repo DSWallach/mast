@@ -77,6 +77,7 @@ mod review_state;
 mod review_drafts;
 mod review_submit;
 mod row_renderer;
+mod scope_map;
 mod syntax_excerpts;
 mod split_pairing;
 mod watch_lifecycle;
