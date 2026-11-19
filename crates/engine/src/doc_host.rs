@@ -1488,6 +1488,22 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// Read-only transcript entries of a chat on THIS device: from the open
+    /// handle when there is one (without touching its idle clock), else from
+    /// the persisted local snapshot. Never creates a doc, joins a room or
+    /// caches a handle; a chat with no local transcript (missing, or hosted on
+    /// another device) yields `None`.
+    pub fn peek_entries(&self, chat_id: &str) -> Option<Vec<SessionMessageEntry>> {
+        let open = lock(&self.inner.handles).get(chat_id).cloned();
+        if let Some(handle) = open {
+            return handle.doc().read_entries().ok();
+        }
+        let (bytes, _cursor, _epoch) = self.inner.store.load_snapshot_with_cursor(chat_id).ok()??;
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes).ok()?;
+        SessionDoc::from_doc(raw).read_entries().ok()
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and join the edge room when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {

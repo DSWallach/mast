@@ -37,6 +37,9 @@ impl ProvenanceSource {
 #[serde(rename_all = "camelCase")]
 pub struct CommitProvenance {
     pub sha: String,
+    /// Hash of the repository's git common dir (scopes the per-repo row cap).
+    #[serde(default)]
+    pub repo_id: String,
     /// `git patch-id --stable` of the commit; empty for empty/merge commits.
     pub patch_id: String,
     pub chat_id: String,

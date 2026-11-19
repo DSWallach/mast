@@ -808,7 +808,7 @@ async fn blame_attributes_lines_to_records_guesses_by_branch_and_caches() {
     // A record beats the guess.
     core.workspace
         .put_commit_provenance(&mast_proto::CommitProvenance {
-            sha: second.clone(), patch_id: String::new(), chat_id: "chat-blame".into(),
+            sha: second.clone(), repo_id: String::new(), patch_id: String::new(), chat_id: "chat-blame".into(),
             turn_start: None, turn_end: None, recorded_at: 1,
             source: mast_proto::ProvenanceSource::Recorded, remapped_from: None,
         })

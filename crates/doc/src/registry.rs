@@ -46,7 +46,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 pub mod artifacts;
 mod chat_diff_targets;
 mod commit_provenance;
-pub use commit_provenance::MAX_COMMIT_PROVENANCE_ROWS;
+pub use commit_provenance::MAX_COMMIT_PROVENANCE_ROWS_PER_REPO;
 mod review_drafts;
 pub use review_drafts::PostedRecord;
 mod diff_review;

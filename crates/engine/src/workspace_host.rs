@@ -823,9 +823,25 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.put_commit_provenance(record))?)
     }
 
-    pub fn prune_commit_provenance(&self) -> usize {
-        self.mutate(|doc| -> Result<usize, mast_doc::DocError> { Ok(doc.prune_commit_provenance()) })
-            .unwrap_or(0)
+    /// Write `records` in one registry mutation (first writer wins per sha),
+    /// then prune `repo_id` past its cap. Returns how many rows were new.
+    pub fn put_commit_provenance_batch(
+        &self,
+        records: &[mast_proto::CommitProvenance],
+        repo_id: &str,
+    ) -> Result<usize, EngineError> {
+        Ok(self.mutate(|doc| -> Result<usize, mast_doc::DocError> {
+            let mut written = 0;
+            for record in records {
+                if doc.put_commit_provenance(record)? {
+                    written += 1;
+                }
+            }
+            if written > 0 {
+                doc.prune_commit_provenance(repo_id);
+            }
+            Ok(written)
+        })?)
     }
 
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
