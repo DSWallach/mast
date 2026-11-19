@@ -59,6 +59,13 @@ pub fn standing_role_id(role: StandingRoleKind, scope_item_id: &str) -> String {
 }
 
 impl StandingRole {
+    /// Whether a rotation from `from` to `to` is already recorded: the role
+    /// holds `to` and `from` held it immediately before.
+    pub fn replays_rotation(&self, from: &str, to: &str) -> bool {
+        self.current_chat_id.as_deref() == Some(to)
+            && self.chain.iter().rev().nth(1).map(String::as_str) == Some(from)
+    }
+
     /// Chats that held the role before the current one, oldest first.
     pub fn predecessors(&self) -> &[String] {
         match self.chain.split_last() {

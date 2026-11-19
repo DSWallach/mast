@@ -793,21 +793,18 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
     }
 
+    /// Read-only precheck of a hand-off launch against the standing role
+    /// `from` holds. `to_space` stands in for a successor not yet created.
+    pub fn check_standing_role_hand_off(&self, from: &str, to: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.read(|doc| doc.check_standing_role_hand_off(from, to, to_space))
+    }
+
     /// If `from` holds a standing role, hand the role to `to` (archiving and
     /// hiding `from`). `Ok(None)` when `from` holds no role, so ordinary
-    /// hand-offs are untouched. A replay returns the same role.
+    /// hand-offs are untouched. A replay returns the same role; a source
+    /// already replaced by a different chat is an error.
     pub fn rotate_standing_role_for_chat(&self, from: &str, to: &str) -> Result<Option<mast_proto::StandingRole>, String> {
-        self.mutate(|doc| {
-            let held = doc.standing_role_of_chat(from);
-            let replay = || {
-                doc.standing_roles().into_iter().find(|role| {
-                    role.current_chat_id.as_deref() == Some(to)
-                        && role.chain.iter().rev().nth(1).map(String::as_str) == Some(from)
-                })
-            };
-            let Some(held) = held.or_else(replay) else { return Ok(None) };
-            doc.rotate_standing_role(held.role, &held.scope_item_id, from, to).map(|(role, _)| Some(role))
-        })
+        self.mutate(|doc| doc.rotate_standing_role_for_chat(from, to))
     }
 
     /// Every durable PR linked to this chat. Independent link rows are

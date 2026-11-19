@@ -579,6 +579,14 @@ impl WorkItemLaunchService {
                 "The work item is archived",
             ));
         }
+        // A hand-off from a chat that standing-role rules already replaced, or
+        // into a Space the role cannot follow, ends here: nothing is created,
+        // transferred or queued. The gate held above serializes launches.
+        if let Some((_, source)) = hand_off {
+            self.workspace
+                .check_standing_role_hand_off(source, &chat_id, Some(&space_id))
+                .map_err(conflict)?;
+        }
         if self
             .workspace
             .registry_row_state(mast_doc::KIND_CHATS, &chat_id)
@@ -684,6 +692,13 @@ impl WorkItemLaunchService {
         }
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
+        // The successor exists now, so the full destination rules apply
+        // before workers move or a second turn can be queued.
+        if let Some((_, source)) = hand_off {
+            self.workspace
+                .check_standing_role_hand_off(source, &chat_id, None)
+                .map_err(conflict)?;
+        }
         if let Some((wakes, source)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));

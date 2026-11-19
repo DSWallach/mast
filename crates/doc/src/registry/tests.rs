@@ -463,6 +463,45 @@ fn standing_role_rotation_refuses_unsafe_destinations() {
 }
 
 #[test]
+fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
+    let mut doc = role_doc(&["first", "second", "third", "plain", "archived"]);
+    doc.set_chat_archived("archived", true).unwrap();
+    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    // Ordinary chats are never constrained.
+    assert_eq!(doc.check_standing_role_hand_off("plain", "second", None), Ok(()));
+    assert_eq!(doc.rotate_standing_role_for_chat("plain", "second").unwrap(), None);
+    // Invalid destinations and a missing future chat in another Space fail up front.
+    assert!(doc.check_standing_role_hand_off("first", "archived", None).is_err());
+    assert!(doc.check_standing_role_hand_off("first", "first", None).is_err());
+    assert!(doc.check_standing_role_hand_off("first", "future", Some("other-space")).is_err());
+    assert_eq!(doc.check_standing_role_hand_off("first", "future", Some("space")), Ok(()));
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("first"));
+    assert!(!doc.chat("first").unwrap().unwrap().archived);
+
+    doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    // A replay passes; a second, different successor is an error, not an ordinary hand-off.
+    assert_eq!(doc.check_standing_role_hand_off("first", "second", None), Ok(()));
+    assert!(doc.check_standing_role_hand_off("first", "third", None).is_err());
+    assert!(doc.rotate_standing_role_for_chat("first", "third").is_err());
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("second"));
+    // The replay of an older hand-off after the role moved on is harmless.
+    doc.rotate_standing_role_for_chat("second", "third").unwrap().unwrap();
+    assert_eq!(doc.rotate_standing_role_for_chat("first", "second").unwrap(), None);
+}
+
+#[test]
+fn hand_off_replay_survives_the_source_being_archived() {
+    let mut doc = role_doc(&["source", "destination"]);
+    doc.hand_off_chat_children("source", "destination", "source", 1).unwrap();
+    doc.set_chat_archived("source", true).unwrap();
+    assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 2).unwrap(), (Vec::new(), true));
+    // An archived source with no recorded hand-off is still refused.
+    let mut fresh = role_doc(&["a", "b"]);
+    fresh.set_chat_archived("a", true).unwrap();
+    assert!(fresh.hand_off_chat_children("a", "b", "a", 1).is_err());
+}
+
+#[test]
 fn standing_role_rows_tolerate_newer_peers() {
     let mut doc = role_doc(&["first"]);
     doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();

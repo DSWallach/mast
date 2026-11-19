@@ -137,6 +137,101 @@ impl RegistryDoc {
         Ok(record)
     }
 
+    fn check_rotation_destination(
+        &self,
+        source: &Chat,
+        to: &str,
+        to_space: Option<&str>,
+    ) -> Result<(), String> {
+        let (unusable, space) = match self.chat(to).map_err(|e| e.to_string())? {
+            Some(destination) => (
+                destination.archived || destination.is_standing_role_predecessor(),
+                destination.space_id,
+            ),
+            None => (false, to_space.map(str::to_owned)),
+        };
+        if unusable {
+            return Err("an archived or superseded chat cannot take over a role".into());
+        }
+        if source.space_id.is_none() || source.space_id != space {
+            return Err("chats must belong to the same Space".into());
+        }
+        Ok(())
+    }
+
+    /// What handing `from` off to `to` would do to a standing role, without
+    /// writing. `Ok(None)`: nothing to rotate (an ordinary chat, or a retry
+    /// of a hand-off whose role has since moved on). `Ok(Some((role, true)))`:
+    /// the role already moved. Errors: `from` was already replaced by some
+    /// other chat, or the destination cannot take the role. `to_space` stands
+    /// in for a destination chat that does not exist yet.
+    fn plan_standing_role_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        to_space: Option<&str>,
+    ) -> Result<Option<(StandingRole, bool)>, String> {
+        if let Some(role) = self
+            .standing_roles()
+            .into_iter()
+            .find(|role| role.replays_rotation(from, to))
+        {
+            return Ok(Some((role, true)));
+        }
+        let source = self
+            .chat(from)
+            .map_err(|e| e.to_string())?
+            .ok_or("source chat does not exist")?;
+        if let Some(next) = source.standing_role_successor.as_deref() {
+            return if next == to {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "the source chat was already replaced by chat {next}"
+                ))
+            };
+        }
+        let Some(role) = self.standing_role_of_chat(from) else {
+            return Ok(None);
+        };
+        if from == to {
+            return Err("a chat cannot take over its own role".into());
+        }
+        self.check_rotation_destination(&source, to, to_space)?;
+        Ok(Some((role, false)))
+    }
+
+    /// Read-only precheck for a hand-off launch, run before anything is
+    /// written. The launch holds the engine's launch gate and the hand-off
+    /// runs on the source chat's host, so the plan stays true until
+    /// [`Self::rotate_standing_role_for_chat`] commits it.
+    pub fn check_standing_role_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        to_space: Option<&str>,
+    ) -> Result<(), String> {
+        self.plan_standing_role_hand_off(from, to, to_space)
+            .map(drop)
+    }
+
+    /// Rotate the role `from` holds (if any) to `to`. Same planning rules as
+    /// [`Self::check_standing_role_hand_off`], so a stale or invalid hand-off
+    /// is an error here rather than a silent no-op.
+    pub fn rotate_standing_role_for_chat(
+        &mut self,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<StandingRole>, String> {
+        match self.plan_standing_role_hand_off(from, to, None)? {
+            None => Ok(None),
+            Some((role, true)) => Ok(Some(role)),
+            Some((role, false)) => self
+                .rotate_standing_role(role.role, &role.scope_item_id, from, to)
+                .map(|(role, _)| Some(role)),
+        }
+    }
+
     /// Move the role from `from` to `to`, archiving and hiding `from` in the
     /// same batch. Returns the role and whether this was a replay (the role
     /// already named `to`). Callers create `to` and move workers first; this
@@ -150,9 +245,7 @@ impl RegistryDoc {
     ) -> Result<(StandingRole, bool), String> {
         let id = standing_role_id(role, scope_item_id);
         let mut record = self.standing_role_by_id(&id).ok_or("role does not exist")?;
-        if record.current_chat_id.as_deref() == Some(to)
-            && record.chain.iter().rev().nth(1).map(String::as_str) == Some(from)
-        {
+        if record.replays_rotation(from, to) {
             return Ok((record, true));
         }
         if from == to || record.current_chat_id.as_deref() != Some(from) {
@@ -162,16 +255,10 @@ impl RegistryDoc {
             .chat(from)
             .map_err(|e| e.to_string())?
             .ok_or("source chat does not exist")?;
-        let destination = self
-            .chat(to)
+        self.chat(to)
             .map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
-        if destination.archived || destination.is_standing_role_predecessor() {
-            return Err("an archived or superseded chat cannot take over a role".into());
-        }
-        if source.space_id.is_none() || source.space_id != destination.space_id {
-            return Err("chats must belong to the same Space".into());
-        }
+        self.check_rotation_destination(&source, to, None)?;
         record.current_chat_id = Some(to.to_owned());
         record.chain.push(to.to_owned());
         if record.chain.len() > MAX_CHAIN {

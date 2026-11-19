@@ -1648,6 +1648,9 @@ async fn hand_off_moves_a_standing_role_and_leaves_plain_chats_alone() {
     assert_eq!(role.current_chat_id.as_deref(), Some("role-successor"));
     // A retried launch finds the role already moved.
     assert_eq!(workspace.rotate_standing_role_for_chat("role-source", "role-successor").unwrap(), Some(role));
+    // A source a role already replaced cannot hand off to a different chat.
+    assert!(workspace.rotate_standing_role_for_chat("role-source", "plain-successor").is_err());
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("role-successor"));
     let source = workspace.chat("role-source").unwrap().unwrap();
     assert!(source.archived && source.is_standing_role_predecessor());
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("role-successor"));

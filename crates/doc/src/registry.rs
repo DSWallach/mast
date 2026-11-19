@@ -1426,7 +1426,13 @@ impl RegistryDoc {
             .ok_or("source chat does not exist")?;
         let destination = self.chat(to).map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
-        if from == to || source.archived || destination.archived {
+        // A retry of a recorded hand-off must still replay after the source
+        // was archived (a standing role archives it when it rotates).
+        let already_recorded = self.overlay_row(KIND_CHATS, to)
+            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+            .is_some_and(|p| p.get("fromChatId").and_then(Value::as_str) == Some(from)
+                && p.get("actorChatId").and_then(Value::as_str) == Some(actor));
+        if from == to || destination.archived || (source.archived && !already_recorded) {
             return Err("hand-off requires two distinct, active chats".into());
         }
         if source.space_id.is_none() || source.space_id != destination.space_id {

@@ -3812,7 +3812,7 @@ impl RpcService for EngineRpc {
                 let source = self.workspace.chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
-                if source.archived {
+                if source.archived && !source.is_standing_role_predecessor() {
                     return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
                 }
                 if source.device_id != self.workspace.device_id() {

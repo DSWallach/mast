@@ -1272,6 +1272,70 @@ async fn user_hand_off_rpc_transfers_workers_and_replays() {
     assert_eq!(entries.iter().filter(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text == &marker))).count(), 1);
 }
 
+async fn role_rig(prefix: &str) -> (Rig, String) {
+    use mast_proto::StandingRoleKind;
+    let rig = rig().await;
+    let item = create_item(&rig, &format!("{prefix}-item"), "Manager", None).await;
+    assign_chat(&rig, &format!("{prefix}-assignment"), CHAT, &item).await;
+    rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":format!("{prefix}-worker"), "spaceId":SPACE,
+        "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
+    rig.core.workspace.adopt_standing_role(StandingRoleKind::Manager, &item, CHAT, &[]).unwrap();
+    (rig, item)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn role_hand_off_rotates_the_role_replays_and_refuses_a_second_successor() {
+    use mast_proto::StandingRoleKind;
+    let (rig, item) = role_rig("role-seq").await;
+    let params = json!({"chatId": CHAT, "summary":"Continue as manager", "operationId":"role-handoff-a"});
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    let workspace = &rig.core.workspace;
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
+    let source = workspace.chat(CHAT).unwrap().unwrap();
+    assert!(source.archived && source.is_standing_role_predecessor());
+    assert_eq!(workspace.chat("role-seq-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+
+    // The retry of the same operation still replays after the source was archived.
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+
+    // A different successor for the replaced source creates, moves and queues nothing.
+    let chats_before = workspace.read_chats().unwrap().len();
+    let other = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": CHAT, "summary":"Continue elsewhere", "operationId":"role-handoff-b"
+    })).await;
+    assert!(other.is_err());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats_before);
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
+    assert_eq!(workspace.chat("role-seq-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Continue as manager")), "successor turn").await;
+    assert!(!rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Continue elsewhere")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_role_hand_offs_from_one_source_have_one_winner() {
+    use mast_proto::StandingRoleKind;
+    let (rig, item) = role_rig("role-race").await;
+    let chats_before = rig.core.workspace.read_chats().unwrap().len();
+    let call = |op: &str, summary: &str| rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": CHAT, "summary": summary, "operationId": op
+    }));
+    let (a, b) = tokio::join!(call("race-a", "Race winner A"), call("race-b", "Race winner B"));
+    assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "{a:?} / {b:?}");
+    let (winner, winning_prompt, losing_prompt) = match (&a, &b) {
+        (Ok(reply), _) => (reply["chatId"].as_str().unwrap().to_owned(), "Race winner A", "Race winner B"),
+        (_, Ok(reply)) => (reply["chatId"].as_str().unwrap().to_owned(), "Race winner B", "Race winner A"),
+        _ => unreachable!(),
+    };
+    let workspace = &rig.core.workspace;
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(winner.as_str()));
+    assert_eq!(workspace.read_chats().unwrap().len(), chats_before + 1);
+    assert_eq!(workspace.chat("role-race-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(winner.as_str()));
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains(winning_prompt)), "winning turn").await;
+    assert!(!rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains(losing_prompt)));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
     let rig = rig().await;
