@@ -2244,7 +2244,9 @@ impl Inner {
         // The Manager status reminder is judged when a turn closes. No lock is
         // held here.
         if let Some(delivered) = delivered_reminder {
+            self.agent_tokens.manager_status().test_hook("close", chat_id);
             self.agent_tokens.manager_status().turn_closed(chat_id, delivered.as_deref());
+            self.agent_tokens.manager_status().test_hook("closed", chat_id);
         }
     }
 
@@ -4388,6 +4390,39 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_session_closure_does_not_settle_next_turn_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path()).unwrap());
+        let engine = SessionsEngine::new("device".into(), journal, Arc::new(HarnessRegistry::new()));
+        let tokens = engine.agent_tokens();
+        let tracker = tokens.manager_status();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let resume_rx = Mutex::new(resume_rx);
+        tracker.set_test_hook(Some(Arc::new(move |event, _| {
+            if event == "close" {
+                entered_tx.send(()).unwrap();
+                resume_rx.lock().unwrap().recv().unwrap();
+            }
+            false
+        })));
+        engine.set_status("chat", SessionStatus::Working, true);
+        let old = engine.clone();
+        let closing = std::thread::spawn(move || old.set_status("chat", SessionStatus::Idle, false));
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let reminder = tracker.reserve_reminder("chat");
+        engine.set_status("chat", SessionStatus::Working, true);
+        tracker.reminder_confirmed("chat", &reminder);
+        resume_tx.send(()).unwrap();
+        closing.join().unwrap();
+        assert_eq!(tracker.reminder("chat").as_deref(), Some(reminder.as_str()));
+        assert!(tracker.owes("chat"));
+        tracker.set_test_hook(None);
+        engine.set_status("chat", SessionStatus::Idle, false);
+        assert!(!tracker.owes("chat"));
+    }
 
     #[test]
     fn usage_limit_cache_recovers_updates_and_clears() {

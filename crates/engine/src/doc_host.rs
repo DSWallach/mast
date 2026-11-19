@@ -3239,6 +3239,9 @@ impl DocHost {
         id: &str,
         text: &str,
     ) -> Result<String, EngineError> {
+        if self.sessions().is_some_and(|sessions| sessions.agent_tokens().manager_status().test_hook("queue", chat_id)) {
+            return Err(EngineError::Other("injected context queue failure".into()));
+        }
         self.queue_message_inner(chat_id, text, Vec::new(), true, false, Some(id))
     }
 

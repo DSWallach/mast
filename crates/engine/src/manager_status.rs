@@ -137,9 +137,27 @@ pub struct StatusTracker {
     queue: Mutex<Option<QueueProbe>>,
     wake: Arc<Notify>,
     recheck: Mutex<Option<Duration>>,
+    test_hook: Mutex<Option<Arc<dyn Fn(&str, &str) -> bool + Send + Sync>>>,
 }
 
 impl StatusTracker {
+    /// Install a deterministic lifecycle hook for integration tests.
+    #[doc(hidden)]
+    pub fn set_test_hook(&self, hook: Option<Arc<dyn Fn(&str, &str) -> bool + Send + Sync>>) {
+        *self.test_hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    #[doc(hidden)]
+    pub fn drain_test_wake(&self) {
+        use futures::FutureExt;
+        let _ = self.wake.notified().now_or_never();
+    }
+
+    pub(crate) fn test_hook(&self, event: &str, chat_id: &str) -> bool {
+        let hook = self.test_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        hook.is_some_and(|hook| hook(event, chat_id))
+    }
+
     /// How the tracker looks up a queued message in its chat's queue.
     pub fn set_queue_probe(&self, probe: QueueProbe) {
         *self.queue.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
@@ -511,6 +529,7 @@ pub fn spawn_watch(
                         }
                     }
                     Eval::Withdraw { message_id } => {
+                        tracker.test_hook("withdraw", &chat_id);
                         let removed = doc_host.withdraw_queued(&chat_id, &message_id).unwrap_or(false);
                         tracker.supersede_done(&chat_id, &message_id, removed);
                         if !removed {

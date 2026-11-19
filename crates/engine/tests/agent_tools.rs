@@ -6007,6 +6007,106 @@ async fn a_reminder_steered_into_an_active_turn_does_not_strand_later_reminders(
     wait_for(|| reminders() == 1, "the next turn's reminder").await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_old_session_closure_cannot_settle_a_newly_dispatched_reminder() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (rig, _) = role_rig("status-old-close").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    rig.core.doc_host.queue_command(CHAT, run_command("first turn", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "first run").await;
+    let entered = Arc::new(AtomicBool::new(false));
+    let hook_entered = entered.clone();
+    let completed = Arc::new(AtomicBool::new(false));
+    let hook_completed = completed.clone();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "close" && chat == CHAT {
+            hook_entered.store(true, Ordering::SeqCst);
+            resume_rx.lock().unwrap().recv().unwrap();
+        } else if event == "closed" && chat == CHAT {
+            hook_completed.store(true, Ordering::SeqCst);
+        }
+        false
+    })));
+    rig.harness.release.notify_one();
+    wait_for(|| entered.load(Ordering::SeqCst), "old closure paused").await;
+    let id = tracker.reserve_reminder(CHAT);
+    rig.core.doc_host.queue_message_with_id(CHAT, &id, "reminder", Vec::new(), true).await.unwrap();
+    wait_for(|| tracker.delivered_reminder(CHAT).as_deref() == Some(id.as_str()), "new run to confirm reminder").await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 2);
+    resume_tx.send(()).unwrap();
+    wait_for(|| completed.load(Ordering::SeqCst), "old closure report to finish").await;
+    tracker.set_test_hook(None);
+    assert_eq!(tracker.reminder(CHAT).as_deref(), Some(id.as_str()));
+    assert!(tracker.owes(CHAT));
+    rig.harness.release.notify_one();
+    wait_for(|| tracker.reminder(CHAT).is_none(), "new turn to settle its reminder").await;
+    assert!(!tracker.owes(CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watcher_retries_a_real_context_queue_failure_without_other_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (rig, _) = role_rig("status-queue-retry").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    tracker.set_recheck_interval(Duration::from_millis(30));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = attempts.clone();
+    let hook_tokens = tokens.clone();
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "queue" && chat == CHAT && seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            hook_tokens.manager_status().drain_test_wake();
+            return true;
+        }
+        false
+    })));
+    tracker.changed(CHAT);
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "retry to deliver reminder").await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(nudges(&rig), 1);
+    tracker.set_test_hook(None);
+    rig.harness.release.notify_one();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watcher_withdraws_covered_queue_row_and_wakes_for_newer_generation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (rig, _) = role_rig("status-withdraw-wake").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let tracker = tokens.manager_status();
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    rig.core.doc_host.pause_all_queues();
+    let withdrawing = Arc::new(AtomicBool::new(false));
+    let entered = withdrawing.clone();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    let hook_tokens = tokens.clone();
+    tracker.set_test_hook(Some(Arc::new(move |event, chat| {
+        if event == "withdraw" && chat == CHAT {
+            hook_tokens.manager_status().drain_test_wake();
+            entered.store(true, Ordering::SeqCst);
+            resume_rx.lock().unwrap().recv().unwrap();
+        }
+        false
+    })));
+    tracker.changed(CHAT);
+    wait_for(|| !handle.doc().read_queue().unwrap().is_empty(), "first reminder queued").await;
+    let first = tracker.reminder(CHAT).unwrap();
+    tracker.published(CHAT, 1, 1);
+    tracker.changed(CHAT);
+    wait_for(|| withdrawing.load(Ordering::SeqCst), "watcher to begin withdrawal").await;
+    resume_tx.send(()).unwrap();
+    wait_for(|| tracker.reminder(CHAT).is_some_and(|id| id != first), "newer reminder reserved").await;
+    wait_for(|| handle.doc().read_queue().unwrap().iter().any(|row| row.id != first), "newer reminder queued").await;
+    let queue = handle.doc().read_queue().unwrap();
+    assert!(!queue.iter().any(|row| row.id == first));
+    assert_eq!(queue.len(), 1);
+    tracker.set_test_hook(None);
+}
+
 /// A dispatch that fails puts its row back. The reminder stays reserved through
 /// the failure and the restore, and the row is queued again, not lost.
 #[tokio::test(flavor = "multi_thread")]
