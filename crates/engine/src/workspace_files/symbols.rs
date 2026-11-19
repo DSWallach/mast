@@ -135,6 +135,7 @@ impl WorkspaceFiles {
 
     pub async fn query_symbols(&self, request: QuerySymbolsRequest) -> Result<SymbolQueryResult, WorkspaceFilesError> {
         if request.query.chars().count() > 256 { return Err(WorkspaceFilesError::BadParams("symbol query too long".into())); }
+        if let Some(path) = request.source_path.as_deref() { WorkspaceRelativePath::file(path)?; }
         let receiver = self.subscribe_symbols(request.target.clone()).await?;
         let workspace = self.resolve_target(&request.target).await?;
         let (index, generation, expected) = {
@@ -149,7 +150,12 @@ impl WorkspaceFiles {
         let kinds = request.kinds;
         let source_path = request.source_path;
         let limit = request.limit.min(200);
-        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected, exact_name, kinds.as_deref(), source_path.as_deref())).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        static QUERY_WORKERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        let permit = QUERY_WORKERS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone().acquire_owned().await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let results = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            search_snapshot(&index, &query, limit, &generation, expected, exact_name, kinds.as_deref(), source_path.as_deref())
+        }).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         drop(receiver);
         results.ok_or_else(|| WorkspaceFilesError::Io("symbol query superseded".into()))
     }
