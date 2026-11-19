@@ -1125,11 +1125,18 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
+        // The turn a state-changing call belongs to is the one it is admitted
+        // in; a successful completion is attributed to that turn, whatever the
+        // session has done in the meantime.
+        let admitted = crate::manager_status::is_state_changing(&params.tool)
+            .then(|| self.tokens.manager_status().admit(&context.grant.chat_id));
         let result = self.dispatch(&context, &params.tool, &arguments);
-        if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
+        if result.is_ok()
+            && let Some(turn) = admitted
+        {
             self.tokens
                 .manager_status()
-                .note_state_change(&context.grant.chat_id, &context.grant.run_id);
+                .note_state_change(&context.grant.chat_id, &context.grant.run_id, turn);
         }
         result
             .map_err(|error| match error {

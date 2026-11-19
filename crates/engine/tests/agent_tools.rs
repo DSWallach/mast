@@ -66,6 +66,9 @@ struct GatedHarness {
 struct Warm {
     feed: Mutex<Option<mpsc::UnboundedSender<AgentEvent>>>,
     received: Mutex<Vec<String>>,
+    /// Runs the instant the run's mailbox yields a steered prompt, before the
+    /// harness confirms it: what the agent could do the moment it sees it.
+    on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl GatedHarness {
@@ -171,6 +174,9 @@ impl Harness for GatedHarness {
                         biased;
                         steer = controls.steering.recv() => match steer {
                             Some(message) => {
+                                if let Some(act) = warm.on_steer.lock().unwrap().as_ref() {
+                                    act();
+                                }
                                 warm.received.lock().unwrap().push(message.prompt);
                                 let boundary = AgentEvent::Steered {
                                     assistant_message_id: None,
@@ -5579,6 +5585,68 @@ async fn warm_turns_sharing_one_token_are_checked_separately() {
     wait_for(|| reminders().len() == 2, "the reminder for turn three").await;
     assert!(reminders()[1].contains("latest revision is 1"), "{}", reminders()[1]);
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1, "one run, one token, throughout");
+}
+
+/// A prompt steered into a parked run is numbered before the mailbox can show
+/// it to the agent. The hook runs the instant the harness receives the prompt,
+/// before the session has published Working: the call it makes is admitted into
+/// the new turn, and completes into it, not into the turn that just ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prompt_steered_into_a_parked_run_is_numbered_before_the_agent_can_act() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-prenumber").await;
+    let tokens = rig.core.sessions.agent_tokens();
+    let feed_done = || {
+        let done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("sess-warm".into()),
+        };
+        warm.feed.lock().unwrap().as_ref().expect("a live run").send(done).unwrap();
+    };
+    let reminders = || {
+        warm.received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("did not publish a new Manager status"))
+            .count()
+    };
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    // Turn one changes nothing, then parks.
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    let before = tokens.manager_status().current_turn(CHAT);
+
+    // The agent's first state-changing call lands as the prompt arrives.
+    let seen: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    {
+        let tokens = tokens.clone();
+        let seen = seen.clone();
+        *warm.on_steer.lock().unwrap() = Some(Box::new(move || {
+            let turn = tokens.manager_status().admit(CHAT);
+            tokens.manager_status().note_state_change(CHAT, "warm-run", turn);
+            *seen.lock().unwrap() = Some(turn);
+        }));
+    }
+    rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the steered turn").await;
+    wait_for(|| seen.lock().map(|s| s.is_some()).unwrap_or(false), "the harness to receive the prompt").await;
+    let admitted = seen.lock().unwrap().expect("the harness received the prompt");
+    assert!(admitted > before, "the arriving prompt's own turn, not the one that ended");
+    assert_eq!(admitted, tokens.manager_status().current_turn(CHAT), "the number the session then used");
+    assert!(tokens.manager_status().turn_open(CHAT));
+
+    // The call is owed on that turn: when it settles without a status, a
+    // reminder is steered in.
+    *warm.on_steer.lock().unwrap() = None;
+    feed_done();
+    wait_for(|| reminders() == 1, "the reminder for the steered turn").await;
 }
 
 /// Adoption can land before anyone has looked at the turns that ended without

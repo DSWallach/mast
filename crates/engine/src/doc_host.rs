@@ -3733,7 +3733,17 @@ impl DocHost {
         }
         let pin = handle.doc.queued_instructions(id);
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
-        let Some(item) = handle.doc.take_queued(id)? else {
+        self.note_dispatching(&handle.chat_id, id);
+        let taken = handle.doc.take_queued(id);
+        let Some(item) = (match taken {
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(error) => {
+                self.note_dispatch_failed(&handle.chat_id, id);
+                return Err(error.into());
+            }
+        }) else {
+            self.note_dispatch_failed(&handle.chat_id, id);
             return Ok(false);
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
@@ -3747,6 +3757,7 @@ impl DocHost {
             }
             // Put it back rather than swallowing what the user typed — at the
             // head, because the user just said this one was the urgent one.
+            self.note_dispatch_failed(&handle.chat_id, &item.id);
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
             return Err(err);
         }
@@ -3805,7 +3816,17 @@ impl DocHost {
             ));
         }
         let confirmed = handle.doc.queued_context_reset_confirmed(id);
-        let Some(item) = handle.doc.take_queued(id)? else {
+        self.note_dispatching(&handle.chat_id, id);
+        let taken = handle.doc.take_queued(id);
+        let Some(item) = (match taken {
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(error) => {
+                self.note_dispatch_failed(&handle.chat_id, id);
+                return Err(error.into());
+            }
+        }) else {
+            self.note_dispatch_failed(&handle.chat_id, id);
             return Ok(false);
         };
         let was_paused = handle.queue_paused.swap(false, Ordering::AcqRel);
@@ -3820,6 +3841,7 @@ impl DocHost {
             if was_paused {
                 handle.queue_paused.store(true, Ordering::Release);
             }
+            self.note_dispatch_failed(&handle.chat_id, &item.id);
             restore_queued(&handle, 0, &item, pin.as_ref(), confirmed, Some(&err));
             return Err(err);
         }
@@ -3833,6 +3855,35 @@ impl DocHost {
 
     /// A wake message still waiting in the queue is taken back out and its
     /// events handed back to the wake service.
+    /// The Manager status reminder, if `id` is it, is being taken for dispatch:
+    /// it is in flight, not cancelled, until the dispatch settles.
+    fn note_dispatching(&self, chat_id: &str, id: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().mark_dispatching(chat_id, id);
+        }
+    }
+
+    /// The dispatch of `id` did not happen and its row is back in the queue (or
+    /// was never taken).
+    fn note_dispatch_failed(&self, chat_id: &str, id: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.agent_tokens().manager_status().dispatch_failed(chat_id, id);
+        }
+    }
+
+    /// Take a queued row back out before it is dispatched. `false` when it is no
+    /// longer queued (it was dispatched, or taken for dispatch).
+    pub(crate) fn withdraw_queued(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        match handle.doc.take_queued(id)? {
+            Some(_) => {
+                handle.publish_queue();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) fn pull_pending_event_message(&self, chat_id: &str) {
         let turns = &self.inner.event_turns;
         let Some(message_id) = turns.pending_message(chat_id) else {
@@ -3977,10 +4028,15 @@ impl DocHost {
             let confirmed = handle.doc.queued_context_reset_confirmed(&head.id);
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
+            self.note_dispatching(&handle.chat_id, &head.id);
             let item = match handle.doc.take_queued(&head.id) {
                 Ok(Some(item)) => item,
-                Ok(None) => return,
+                Ok(None) => {
+                    self.note_dispatch_failed(&handle.chat_id, &head.id);
+                    return;
+                }
                 Err(error) => {
+                    self.note_dispatch_failed(&handle.chat_id, &head.id);
                     tracing::warn!(chat = %handle.chat_id, %error, "taking queue head failed");
                     return;
                 }
@@ -3991,6 +4047,7 @@ impl DocHost {
                 .await
             {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
+                self.note_dispatch_failed(&handle.chat_id, &item.id);
                 // A context reset waiting on the user gates the row itself
                 // (durable, visible, head-of-line); anything else pauses the
                 // queue as before.

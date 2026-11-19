@@ -29,7 +29,7 @@
 //! session's status funnel and by token drops, neither of which holds a
 //! workspace lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,12 +67,14 @@ pub fn is_state_changing(tool: &str) -> bool {
 }
 
 /// What the check decided at the end of a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// The turn published a revision while it ran.
-    Published,
-    /// State changed and no revision followed: ask once.
-    Nudge { baseline: u32 },
+    /// The turn published a revision while it ran. `supersede` names a reminder
+    /// that may still be queued, which the publication has made unnecessary.
+    Published { supersede: Option<String> },
+    /// State changed and no revision followed: ask once, with the message id
+    /// the tracker has already reserved for the reminder.
+    Nudge { baseline: u32, message_id: String },
     /// A reminder for the chat is already on its way; asking again adds nothing.
     Outstanding,
     /// The ask itself ended without a revision. Not asked again.
@@ -94,9 +96,17 @@ pub struct RunBasis {
 
 pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
 
-/// Whether the queued message `(chat, message id)` has left the chat's queue,
-/// that is, been delivered to the agent.
-pub type DeliveryProbe = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+/// Where a queued message stands in its chat's queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueRow {
+    Queued,
+    /// The row is not in the queue.
+    Absent,
+    /// The queue could not be read: nothing is known.
+    Unknown,
+}
+
+pub type QueueProbe = Arc<dyn Fn(&str, &str) -> QueueRow + Send + Sync>;
 
 /// How often held turns are re-checked when no chat change wakes the watcher.
 /// Adoption normally follows within moments and wakes it through the chat
@@ -109,6 +119,8 @@ struct Turn {
     /// order the session started them, so a late report about an earlier turn
     /// can never close a later one. `0` for a turn with no session behind it.
     seq: u64,
+    /// The queued message whose delivery started the turn, when one did.
+    source: Option<String>,
     /// The agent token's run that made the turn's state-changing calls, so
     /// that run ending closes the turn. A warm session keeps one token across
     /// many turns; the turn boundaries are the session's, not the token's.
@@ -133,14 +145,16 @@ pub struct EndedRun {
     forced: bool,
 }
 
-/// The reminder the tracker is waiting on for a chat.
+/// The reminder the tracker is waiting on for a chat. Its message id is chosen
+/// before the reminder exists, so no delivery can outrun the record of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ask {
     baseline: u32,
-    /// The queued reminder's message id, once it is queued.
-    message_id: Option<String>,
+    message_id: String,
+    /// The queue row has been taken for dispatch and has not settled either way.
+    dispatching: bool,
     /// The turn that delivered the reminder has started.
-    claimed: bool,
+    running: bool,
 }
 
 #[derive(Default)]
@@ -150,6 +164,9 @@ struct State {
     /// end has been reported.
     seq: HashMap<String, u64>,
     closed: HashMap<String, u64>,
+    /// Numbers reserved for prompts that are about to reach the agent, oldest
+    /// first, with the queued message each carries.
+    pending: HashMap<String, VecDeque<(u64, Option<String>)>>,
     asked: HashMap<String, Ask>,
     /// Finished turns of a holder, awaiting their check.
     ended: Vec<EndedRun>,
@@ -163,7 +180,7 @@ struct State {
 pub struct StatusTracker {
     state: Mutex<State>,
     probe: Mutex<Option<RunProbe>>,
-    delivery: Mutex<Option<DeliveryProbe>>,
+    queue: Mutex<Option<QueueProbe>>,
     wake: Arc<Notify>,
     recheck: Mutex<Option<Duration>>,
 }
@@ -175,9 +192,9 @@ impl StatusTracker {
         *self.probe.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 
-    /// How the tracker tells that a queued reminder has been delivered.
-    pub fn set_delivery_probe(&self, probe: DeliveryProbe) {
-        *self.delivery.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    /// How the tracker looks up a queued message in its chat's queue.
+    pub fn set_queue_probe(&self, probe: QueueProbe) {
+        *self.queue.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 
     /// Override how often held turns are re-checked on the timer (tests).
@@ -197,23 +214,63 @@ impl StatusTracker {
         Some(probe(chat_id))
     }
 
-    fn delivered(&self, chat_id: &str, message_id: &str) -> bool {
-        let probe = self.delivery.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        probe.is_none_or(|probe| probe(chat_id, message_id))
+    fn queue_row(&self, chat_id: &str, message_id: &str) -> QueueRow {
+        let probe = self.queue.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        probe.map_or(QueueRow::Unknown, |probe| probe(chat_id, message_id))
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Number the next turn of the chat. The session calls this under its own
-    /// status lock, in the same step that publishes the status, so the numbers
-    /// follow the order the session started its turns in.
-    pub fn next_turn(&self, chat_id: &str) -> u64 {
+    /// Number the turn that a prompt about to reach the agent will start, and
+    /// note the queued message it carries. Done before the agent can see the
+    /// prompt, so the agent's first tool call already finds its turn. Asking
+    /// again for the same message changes nothing.
+    pub fn reserve_turn(&self, chat_id: &str, source: Option<&str>) {
         let mut state = self.state();
+        if let Some(id) = source
+            && state.pending.get(chat_id).is_some_and(|q| q.iter().any(|(_, s)| s.as_deref() == Some(id)))
+        {
+            return;
+        }
         let seq = state.seq.entry(chat_id.to_owned()).or_default();
         *seq += 1;
-        *seq
+        let seq = *seq;
+        state
+            .pending
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push_back((seq, source.map(str::to_owned)));
+    }
+
+    /// The prompt was not delivered after all: give its number back, as far as
+    /// numbers can be (the number is spent, the reservation is dropped).
+    pub fn release_turn(&self, chat_id: &str, source: &str) {
+        let mut state = self.state();
+        if let Some(queue) = state.pending.get_mut(chat_id) {
+            queue.retain(|(_, s)| s.as_deref() != Some(source));
+        }
+    }
+
+    /// The session has no more prompts coming (its run is gone): drop numbers
+    /// reserved for prompts that never started a turn.
+    pub fn clear_pending(&self, chat_id: &str) {
+        self.state().pending.remove(chat_id);
+    }
+
+    /// Number the next turn of the chat: the oldest reserved number, or a new
+    /// one. The session calls this under its own status lock, in the same step
+    /// that publishes the status, so the numbers follow the order the session
+    /// started its turns in.
+    pub fn next_turn(&self, chat_id: &str) -> (u64, Option<String>) {
+        let mut state = self.state();
+        if let Some(reserved) = state.pending.get_mut(chat_id).and_then(|q| q.pop_front()) {
+            return reserved;
+        }
+        let seq = state.seq.entry(chat_id.to_owned()).or_default();
+        *seq += 1;
+        (*seq, None)
     }
 
     /// The number of the chat's latest turn (`0` before any).
@@ -221,10 +278,26 @@ impl StatusTracker {
         self.state().seq.get(chat_id).copied().unwrap_or(0)
     }
 
+    /// The turn a tool call belongs to as it is admitted: the one reserved for
+    /// the prompt that is arriving, else the turn in flight, else the latest.
+    pub fn admit(&self, chat_id: &str) -> u64 {
+        let state = self.state();
+        // A number is reserved only for a prompt going into a settled session,
+        // so a turn still open when one is waiting is over, its end not yet
+        // reported: the call belongs to the arriving prompt's turn.
+        if let Some((seq, _)) = state.pending.get(chat_id).and_then(|q| q.front()) {
+            return *seq;
+        }
+        if let Some(open) = state.turns.get(chat_id) {
+            return open.seq;
+        }
+        state.seq.get(chat_id).copied().unwrap_or(0)
+    }
+
     /// Number a turn and begin it (the session's start, as one step).
     pub fn start_turn(&self, chat_id: &str) -> u64 {
-        let seq = self.next_turn(chat_id);
-        self.begin(chat_id, seq);
+        let (seq, source) = self.next_turn(chat_id);
+        self.begin(chat_id, seq, source.as_deref());
         seq
     }
 
@@ -235,19 +308,12 @@ impl StatusTracker {
 
     /// Turn `seq` began: the session turned active. Its baseline is the
     /// record's revision right now, or the original baseline when this turn
-    /// is the one that delivered the reminder. An earlier turn still open (its
-    /// end not reported yet) is closed first; a report for a turn that is
-    /// already open, or already over, changes nothing.
-    pub fn begin(&self, chat_id: &str, seq: u64) {
+    /// is the one that delivered the reminder (its source is the reminder's
+    /// message). An earlier turn still open (its end not reported yet) is
+    /// closed first; a report for a turn that is already open, or already
+    /// over, changes nothing.
+    pub fn begin(&self, chat_id: &str, seq: u64, source: Option<&str>) {
         let basis = self.basis(chat_id);
-        let pending = self.state().asked.get(chat_id).cloned();
-        // Whether the reminder has been delivered is read before the lock is
-        // taken: it reads the chat's queue.
-        let delivered = pending
-            .as_ref()
-            .filter(|ask| !ask.claimed)
-            .and_then(|ask| ask.message_id.as_deref())
-            .map(|id| self.delivered(chat_id, id));
         let mut state = self.state();
         if seq > 0 && seq <= state.closed.get(chat_id).copied().unwrap_or(0) {
             return;
@@ -261,38 +327,45 @@ impl StatusTracker {
         let Some(RunBasis { project: Some(project), revision, .. }) = basis else {
             return;
         };
-        let claims = delivered == Some(true)
-            && state.asked.get(chat_id).is_some_and(|ask| !ask.claimed);
+        let claims = source.is_some()
+            && state.asked.get(chat_id).is_some_and(|ask| source == Some(ask.message_id.as_str()));
         let (baseline, owed, ask) = if claims {
             let ask = state.asked.get_mut(chat_id).expect("checked above");
-            ask.claimed = true;
+            ask.running = true;
+            ask.dispatching = false;
             (ask.baseline, true, true)
         } else {
             (revision, false, false)
         };
         state.turns.insert(
             chat_id.to_owned(),
-            Turn { seq, run_id: None, baseline, project, owed, ask },
+            Turn { seq, source: source.map(str::to_owned), run_id: None, baseline, project, owed, ask },
         );
     }
 
-    /// The run called a state-changing tool, so the turn it is in owes a
-    /// revision. The call belongs to the chat's latest turn: when that turn's
-    /// start has not been reported yet, this opens it, and the late report
-    /// finds it open.
-    pub fn note_state_change(&self, chat_id: &str, run_id: &str) {
-        let current = self.current_turn(chat_id);
-        let needs_turn = self
-            .state()
-            .turns
-            .get(chat_id)
-            .is_none_or(|open| current > 0 && open.seq < current);
-        if needs_turn {
-            self.begin(chat_id, current);
+    /// A state-changing tool call completed successfully. It belongs to `turn`,
+    /// the turn it was admitted in, whatever has happened since: when that
+    /// turn's start has not been reported yet this opens it, and the late
+    /// report finds it open; when that turn is already over there is nothing
+    /// left to owe.
+    pub fn note_state_change(&self, chat_id: &str, run_id: &str, turn: u64) {
+        let (open_seq, source) = {
+            let state = self.state();
+            let source = state
+                .pending
+                .get(chat_id)
+                .and_then(|q| q.iter().find(|(seq, _)| *seq == turn))
+                .and_then(|(_, source)| source.clone());
+            (state.turns.get(chat_id).map(|t| t.seq), source)
+        };
+        match open_seq {
+            Some(open) if turn == 0 || open == turn => {}
+            Some(open) if open > turn => return, // that turn is over
+            _ => self.begin(chat_id, turn, source.as_deref()),
         }
-        if let Some(turn) = self.state().turns.get_mut(chat_id) {
-            turn.run_id = Some(run_id.to_owned());
-            turn.owed = true;
+        if let Some(open) = self.state().turns.get_mut(chat_id).filter(|t| turn == 0 || t.seq == turn) {
+            open.run_id = Some(run_id.to_owned());
+            open.owed = true;
         }
     }
 
@@ -303,7 +376,7 @@ impl StatusTracker {
         let basis = self.basis(chat_id);
         {
             let mut state = self.state();
-            if seq > 0 {
+            if seq > 0 && state.seq.contains_key(chat_id) {
                 let closed = state.closed.entry(chat_id.to_owned()).or_default();
                 *closed = (*closed).max(seq);
             }
@@ -381,6 +454,11 @@ impl StatusTracker {
             + usize::from(state.held.contains_key(chat_id))
     }
 
+    /// The reminder tracked for the chat, if any (tests).
+    pub fn reminder(&self, chat_id: &str) -> Option<String> {
+        self.state().asked.get(chat_id).map(|ask| ask.message_id.clone())
+    }
+
     fn take_ended(&self) -> Vec<EndedRun> {
         std::mem::take(&mut self.state().ended)
     }
@@ -410,38 +488,112 @@ impl StatusTracker {
         self.state().held.remove(chat_id);
     }
 
-    /// Record the outcome of a turn's check. A reminder is reserved here, before
-    /// it is queued, so that two turns concluding at once ask once.
+    /// Record the outcome of a turn's check. A reminder is reserved here, under
+    /// its message id, before it is queued, so that two turns concluding at once
+    /// ask once and no delivery can outrun the record of it. A reminder stays
+    /// reserved until it settles: its own turn ends, or it is withdrawn or
+    /// cancelled before it was dispatched.
     pub fn conclude(&self, ended: &EndedRun, published: bool) -> Verdict {
+        // Where the reminder's row stands is read before the lock is taken.
+        let chat = &ended.chat_id;
+        let peeked = self.state().asked.get(chat).cloned();
+        let row = peeked
+            .as_ref()
+            .filter(|ask| !ask.dispatching && !ask.running)
+            .map(|ask| self.queue_row(chat, &ask.message_id));
         let mut state = self.state();
+        if ended.ask {
+            state.asked.remove(chat);
+            return if published {
+                Verdict::Published { supersede: None }
+            } else {
+                Verdict::Missed { baseline: ended.baseline }
+            };
+        }
+        let current = state.asked.get(chat).cloned();
+        // A reminder that was not in flight and has left the queue was cancelled.
+        if let (Some(now), Some(before)) = (&current, &peeked)
+            && now.message_id == before.message_id
+            && row == Some(QueueRow::Absent)
+            && !now.dispatching
+            && !now.running
+        {
+            state.asked.remove(chat);
+        }
+        let current = state.asked.get(chat).cloned();
         if published {
-            state.asked.remove(&ended.chat_id);
-            Verdict::Published
-        } else if ended.ask {
-            state.asked.remove(&ended.chat_id);
-            Verdict::Missed { baseline: ended.baseline }
-        } else if state.asked.contains_key(&ended.chat_id) {
-            Verdict::Outstanding
-        } else {
-            state.asked.insert(
-                ended.chat_id.clone(),
-                Ask { baseline: ended.baseline, message_id: None, claimed: false },
-            );
-            Verdict::Nudge { baseline: ended.baseline }
+            // The reminder is no longer needed. Withdraw it if it is still queued.
+            let supersede = current
+                .filter(|ask| !ask.dispatching && !ask.running)
+                .map(|ask| ask.message_id);
+            return Verdict::Published { supersede };
+        }
+        if current.is_some() {
+            return Verdict::Outstanding;
+        }
+        let message_id = crate::new_id();
+        state.asked.insert(
+            chat.clone(),
+            Ask { baseline: ended.baseline, message_id: message_id.clone(), dispatching: false, running: false },
+        );
+        Verdict::Nudge { baseline: ended.baseline, message_id }
+    }
+
+    /// A reminder withdrawn from the queue because a publication made it
+    /// unnecessary: it is settled. `removed` is false when it had already left
+    /// the queue, in which case it stays reserved until its own turn ends.
+    pub fn supersede_done(&self, chat_id: &str, message_id: &str, removed: bool) {
+        let mut state = self.state();
+        if removed && state.asked.get(chat_id).is_some_and(|ask| ask.message_id == message_id) {
+            state.asked.remove(chat_id);
         }
     }
 
-    /// The reminder was queued under `message_id`; the turn that delivers that
-    /// message, and no other, is the one it asked for.
-    pub fn reminder_queued(&self, chat_id: &str, message_id: &str) {
-        if let Some(ask) = self.state().asked.get_mut(chat_id) {
-            ask.message_id = Some(message_id.to_owned());
+    /// The reminder could not be queued: release it so the next owing turn asks.
+    pub fn ask_failed(&self, chat_id: &str, message_id: &str) {
+        let mut state = self.state();
+        if state.asked.get(chat_id).is_some_and(|ask| ask.message_id == message_id) {
+            state.asked.remove(chat_id);
         }
     }
 
-    /// The reminder could not be queued; allow the next owing turn to ask again.
-    pub fn ask_failed(&self, chat_id: &str) {
-        self.state().asked.remove(chat_id);
+    /// The queue row `message_id` is being taken for dispatch. If it is the
+    /// reminder, it is in flight, not cancelled, until the dispatch settles.
+    pub fn mark_dispatching(&self, chat_id: &str, message_id: &str) {
+        if let Some(ask) = self.state().asked.get_mut(chat_id).filter(|a| a.message_id == message_id) {
+            ask.dispatching = true;
+        }
+    }
+
+    /// The dispatch of `message_id` failed and the row went back to the queue.
+    pub fn dispatch_failed(&self, chat_id: &str, message_id: &str) {
+        let mut state = self.state();
+        if let Some(ask) = state.asked.get_mut(chat_id).filter(|a| a.message_id == message_id) {
+            ask.dispatching = false;
+        }
+        if let Some(queue) = state.pending.get_mut(chat_id) {
+            queue.retain(|(_, s)| s.as_deref() != Some(message_id));
+        }
+    }
+
+    /// Forget every chat that is not in `live`: its numbers, reservations,
+    /// obligation and reminder. The chats are gone, so a late report about one
+    /// finds nothing to open (the probe knows no such chat).
+    pub fn retain_chats(&self, live: &HashSet<String>) {
+        let mut state = self.state();
+        state.turns.retain(|chat, _| live.contains(chat));
+        state.seq.retain(|chat, _| live.contains(chat));
+        state.closed.retain(|chat, _| live.contains(chat));
+        state.pending.retain(|chat, _| live.contains(chat));
+        state.asked.retain(|chat, _| live.contains(chat));
+        state.held.retain(|chat, _| live.contains(chat));
+        state.ended.retain(|e| live.contains(&e.chat_id));
+    }
+
+    /// How many chats the tracker holds state for (tests).
+    pub fn tracked_chats(&self) -> usize {
+        let state = self.state();
+        state.seq.len()
     }
 
     fn waker(&self) -> Arc<Notify> {
@@ -529,6 +681,16 @@ fn check(workspace: &WorkspaceHost, ended: &EndedRun) -> Check {
     }
 }
 
+/// Where the queued message stands in its chat's real queue. A queue that
+/// cannot be read is `Unknown`, never mistaken for the row having left it.
+pub(crate) fn queue_row(doc_host: &DocHost, chat_id: &str, message_id: &str) -> QueueRow {
+    match doc_host.open(chat_id).ok().and_then(|handle| handle.doc().read_queue().ok()) {
+        Some(queue) if queue.iter().any(|row| row.id == message_id) => QueueRow::Queued,
+        Some(_) => QueueRow::Absent,
+        None => QueueRow::Unknown,
+    }
+}
+
 /// The running watcher, owned by the engine so shutdown can stop it before it
 /// queues anything else.
 pub struct ManagerStatusWatch {
@@ -551,13 +713,9 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
         .manager_status()
         .set_probe(Arc::new(move |chat_id| run_basis(&probe_workspace, chat_id)));
     let probe_docs = doc_host.clone();
-    tokens.manager_status().set_delivery_probe(Arc::new(move |chat_id, message_id| {
-        probe_docs
-            .open(chat_id)
-            .ok()
-            .and_then(|handle| handle.doc().read_queue().ok())
-            .is_none_or(|queue| !queue.iter().any(|row| row.id == message_id))
-    }));
+    tokens
+        .manager_status()
+        .set_queue_probe(Arc::new(move |chat_id, message_id| queue_row(&probe_docs, chat_id, message_id)));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let chat_changes = workspace.watch_chats();
@@ -613,7 +771,14 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
             tokio::select! {
                 _ = stop.cancelled() => return,
                 _ = wake.notified() => {}
-                changed = chats.changed() => if changed.is_err() { return },
+                changed = chats.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    // Chats that no longer exist take their tracking with them.
+                    let live: HashSet<String> = chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
+                    tracker.retain_chats(&live);
+                }
                 _ = retry => {}
             }
         }
@@ -621,8 +786,9 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
     ManagerStatusWatch { cancel, handle }
 }
 
-/// Conclude a checked turn and queue the one reminder it earns. `false` when
-/// the watcher was stopped and must end.
+/// Conclude a checked turn and queue the one reminder it earns, or withdraw the
+/// one a publication made unnecessary. `false` when the watcher was stopped and
+/// must end.
 fn conclude_and_remind(
     tracker: &StatusTracker,
     doc_host: &DocHost,
@@ -632,25 +798,28 @@ fn conclude_and_remind(
 ) -> bool {
     let chat_id = &ended.chat_id;
     match tracker.conclude(ended, published) {
-        Verdict::Nudge { baseline } => {
+        Verdict::Nudge { baseline, message_id } => {
             if stop.is_cancelled() {
-                tracker.ask_failed(chat_id);
+                tracker.ask_failed(chat_id, &message_id);
                 return false;
             }
-            let id = crate::new_id();
-            match doc_host.queue_context_message(chat_id, &id, &manager_status_nudge_text(baseline)) {
-                Ok(message_id) => tracker.reminder_queued(chat_id, &message_id),
-                Err(error) => {
-                    tracing::warn!(chat = %chat_id, %error, "manager status nudge not queued");
-                    tracker.ask_failed(chat_id);
-                }
+            // The id was reserved by `conclude`; the row is queued under it.
+            if let Err(error) =
+                doc_host.queue_context_message(chat_id, &message_id, &manager_status_nudge_text(baseline))
+            {
+                tracing::warn!(chat = %chat_id, %error, "manager status nudge not queued");
+                tracker.ask_failed(chat_id, &message_id);
             }
+        }
+        Verdict::Published { supersede: Some(message_id) } => {
+            let removed = doc_host.withdraw_queued(chat_id, &message_id).unwrap_or(false);
+            tracker.supersede_done(chat_id, &message_id, removed);
         }
         Verdict::Missed { baseline } => {
             tracing::warn!(chat = %chat_id, baseline, role = MANAGER_STATUS_ROLE,
                 "manager status still missing after one ask");
         }
-        Verdict::Published | Verdict::Outstanding => {}
+        Verdict::Published { supersede: None } | Verdict::Outstanding => {}
     }
     true
 }
@@ -679,6 +848,11 @@ mod tests {
 
     fn set_revision(shared: &Shared, revision: u32) {
         shared.lock().unwrap().1 = revision;
+    }
+
+    /// A state-changing call admitted and completed in the turn in flight.
+    fn note(t: &StatusTracker, chat: &str, run: &str) {
+        t.note_state_change(chat, run, t.admit(chat));
     }
 
     fn set_holds(shared: &Shared, holds: bool) {
@@ -717,38 +891,42 @@ mod tests {
     fn a_turn_that_changed_state_without_a_revision_is_asked_once() {
         let (t, shared) = tracker(true, 2);
         t.start_turn("m");
-        t.note_state_change("m", "r1");
+        note(&t, "m", "r1");
         t.finish_turn("m");
         let ended = t.take_ended().remove(0);
-        assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 2 });
-        t.reminder_queued("m", "msg-1");
+        let Verdict::Nudge { baseline: 2, message_id } = published(&t, &ended, &[]) else {
+            panic!("the first owing turn is asked");
+        };
+        assert_eq!(t.reminder("m").as_deref(), Some(message_id.as_str()), "reserved before it is queued");
         // The ask is the turn that delivers the reminder: held to the same
         // baseline, not asked twice.
+        t.reserve_turn("m", Some(&message_id));
         t.start_turn("m");
         t.finish_turn("m");
         let ask = t.take_ended().remove(0);
         assert!(ask.ask);
-        assert_eq!(published(&t, &ask, &[]), Verdict::Missed { baseline: 2 });
+        assert!(matches!(published(&t, &ask, &[]), Verdict::Missed { baseline: 2 }));
+        assert!(t.reminder("m").is_none(), "settled");
         // Afterwards a fresh state-changing turn can be asked again.
         set_revision(&shared, 2);
         t.start_turn("m");
-        t.note_state_change("m", "r3");
+        note(&t, "m", "r3");
         t.finish_turn("m");
         let next = t.take_ended().remove(0);
         assert!(!next.ask);
-        assert_eq!(published(&t, &next, &[]), Verdict::Nudge { baseline: 2 });
+        assert!(matches!(published(&t, &next, &[]), Verdict::Nudge { baseline: 2, .. }));
     }
 
     #[test]
     fn a_turn_that_publishes_while_it_runs_is_satisfied_and_clears_the_ask() {
         let (t, shared) = tracker(true, 1);
         t.start_turn("m");
-        t.note_state_change("m", "r1");
+        note(&t, "m", "r1");
         set_revision(&shared, 2);
         t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         assert_eq!((ended.baseline, ended.end_revision), (1, 2));
-        assert_eq!(published(&t, &ended, &[2]), Verdict::Published);
+        assert!(matches!(published(&t, &ended, &[2]), Verdict::Published { .. }));
     }
 
     #[test]
@@ -757,11 +935,11 @@ mod tests {
         // Turn A publishes revision 2, then turn B starts at once, before
         // anything has looked at A's end.
         t.start_turn("m");
-        t.note_state_change("m", "a");
+        note(&t, "m", "a");
         set_revision(&shared, 2);
         t.finish_turn("m");
         t.start_turn("m");
-        t.note_state_change("m", "b");
+        note(&t, "m", "b");
         t.finish_turn("m");
         let ended = t.take_ended();
         assert_eq!(ended.len(), 2);
@@ -769,15 +947,15 @@ mod tests {
         assert_eq!((a.baseline, a.end_revision), (1, 2));
         assert_eq!((b.baseline, b.end_revision), (2, 2));
         // The only stamped revision is A's. It satisfies A, not B.
-        assert_eq!(published(&t, a, &[2]), Verdict::Published);
-        assert_eq!(published(&t, b, &[2]), Verdict::Nudge { baseline: 2 });
+        assert!(matches!(published(&t, a, &[2]), Verdict::Published { .. }));
+        assert!(matches!(published(&t, b, &[2]), Verdict::Nudge { baseline: 2, .. }));
     }
 
     #[test]
     fn a_later_turns_publication_does_not_satisfy_an_earlier_one() {
         let (t, shared) = tracker(true, 1);
         t.start_turn("m");
-        t.note_state_change("m", "a");
+        note(&t, "m", "a");
         t.finish_turn("m"); // A ended at revision 1, published nothing
         set_revision(&shared, 2);
         t.start_turn("m");
@@ -785,7 +963,7 @@ mod tests {
         t.finish_turn("m");
         let a = t.take_ended().remove(0);
         assert_eq!((a.baseline, a.end_revision), (1, 1));
-        assert_eq!(published(&t, &a, &[3]), Verdict::Nudge { baseline: 1 });
+        assert!(matches!(published(&t, &a, &[3]), Verdict::Nudge { baseline: 1, .. }));
     }
 
     #[test]
@@ -793,17 +971,17 @@ mod tests {
         let (t, _shared) = tracker(true, 3);
         t.start_turn("m");
         assert_eq!(t.current_run("m"), Some((3, ("s".to_owned(), "proj".to_owned()))));
-        t.note_state_change("m", "r1");
+        note(&t, "m", "r1");
         t.finish_turn("m");
         let ended = t.take_ended().remove(0);
         // The earlier revisions 1..=3 cannot satisfy the turn.
-        assert_eq!(published(&t, &ended, &[1, 2, 3]), Verdict::Nudge { baseline: 3 });
+        assert!(matches!(published(&t, &ended, &[1, 2, 3]), Verdict::Nudge { baseline: 3, .. }));
     }
 
     #[test]
     fn a_state_change_opens_the_run_when_its_start_was_not_seen() {
         let (t, _shared) = tracker(true, 4);
-        t.note_state_change("m", "r1");
+        note(&t, "m", "r1");
         assert!(t.turn_open("m"));
         t.finish_turn("m");
         let ended = t.take_ended().remove(0);
@@ -814,7 +992,7 @@ mod tests {
     fn a_run_that_never_reported_its_end_is_closed_by_the_next_start() {
         let (t, shared) = tracker(true, 1);
         t.start_turn("m");
-        t.note_state_change("m", "a");
+        note(&t, "m", "a");
         set_revision(&shared, 5);
         t.start_turn("m");
         let ended = t.take_ended();
@@ -831,13 +1009,13 @@ mod tests {
         assert!(t.take_ended().is_empty());
         let (t, _s) = tracker(false, 0);
         t.start_turn("w");
-        t.note_state_change("w", "r1");
+        note(&t, "w", "r1");
         assert!(!t.turn_open("w"));
         t.finish_turn("w");
         assert!(t.take_ended().is_empty());
         // Without a probe nothing is tracked at all.
         let bare = StatusTracker::default();
-        bare.note_state_change("m", "r1");
+        note(&bare, "m", "r1");
         assert!(!bare.turn_open("m"));
     }
 
@@ -846,11 +1024,11 @@ mod tests {
         let (t, shared) = tracker(true, 1);
         // One token, `tok`, serves two turns of a parked session.
         t.start_turn("m"); // turn one: the session turns active
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m"); // it parks: the turn is over, the token lives on
         set_revision(&shared, 2); // an unrelated publication between the turns
         t.start_turn("m"); // turn two: a prompt steered into the parked run
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         t.end_run("m", "tok"); // the run finally ends: nothing left to close
         let ended = t.take_ended();
@@ -858,17 +1036,17 @@ mod tests {
         assert_eq!((ended[0].baseline, ended[0].end_revision), (1, 1));
         assert_eq!((ended[1].baseline, ended[1].end_revision), (2, 2));
         // The publication between them satisfies neither turn's window.
-        assert_eq!(published(&t, &ended[0], &[2]), Verdict::Nudge { baseline: 1 });
+        assert!(matches!(published(&t, &ended[0], &[2]), Verdict::Nudge { baseline: 1, .. }));
     }
 
     #[test]
     fn a_runs_end_closes_only_the_turn_that_run_was_in() {
         let (t, _s) = tracker(true, 0);
         t.start_turn("m");
-        t.note_state_change("m", "old-run");
+        note(&t, "m", "old-run");
         t.finish_turn("m");
         t.start_turn("m"); // the next turn belongs to a newer run
-        t.note_state_change("m", "new-run");
+        note(&t, "m", "new-run");
         t.end_run("m", "old-run"); // the old run's token is dropped late
         assert!(t.turn_open("m"), "the newer run's turn is untouched");
         t.end_run("m", "new-run");
@@ -882,7 +1060,7 @@ mod tests {
         for n in 0..30u32 {
             set_revision(&shared, 4 + n);
             t.start_turn("m");
-            t.note_state_change("m", "tok");
+            note(&t, "m", "tok");
             t.finish_turn("m");
             // Nothing has looked at them yet, and adoption may land at any time.
             assert_eq!(t.pending("m"), 1, "after {} turns", n + 1);
@@ -894,7 +1072,7 @@ mod tests {
         assert_eq!(held.baseline, 4 + 29);
         // A turn that ends while the chat holds the role is its own, checked on its window.
         t.start_turn("m");
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         assert!(!t.take_ended()[0].forced);
     }
@@ -904,40 +1082,40 @@ mod tests {
         let (t, shared) = tracker(true, 4);
         set_holds(&shared, false);
         t.start_turn("m");
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         // The watcher looks at the obligation; looking does not take it.
         let looked = t.held("m").unwrap();
         // Another turn ends before the watcher acts, then adoption lands.
         set_revision(&shared, 6);
         t.start_turn("m");
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         set_holds(&shared, true);
         // The watcher takes it for good: it has absorbed the second turn.
         let taken = t.take_held("m").unwrap();
         assert_eq!((looked.baseline, taken.baseline), (4, 6));
-        assert_eq!(t.conclude(&taken, false), Verdict::Nudge { baseline: 6 });
+        assert!(matches!(t.conclude(&taken, false), Verdict::Nudge { baseline: 6, .. }));
         assert!(t.take_held("m").is_none());
         // A straggler that ended just before adoption but is reported after it
         // finds a reminder already on its way.
         t.start_turn("m");
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         let straggler = t.take_ended().remove(0);
-        assert_eq!(t.conclude(&straggler, false), Verdict::Outstanding);
+        assert!(matches!(t.conclude(&straggler, false), Verdict::Outstanding));
     }
 
     #[test]
     fn a_late_end_of_one_turn_never_closes_the_next() {
         let (t, _s) = tracker(true, 0);
-        let a = t.next_turn("m");
-        t.begin("m", a);
-        t.note_state_change("m", "tok");
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        note(&t, "m", "tok");
         // The session publishes A idle and starts B before A's end is reported.
-        let b = t.next_turn("m");
-        t.begin("m", b); // closes A
-        t.note_state_change("m", "tok"); // a call in B
+        let b = t.next_turn("m").0;
+        t.begin("m", b, None); // closes A
+        note(&t, "m", "tok"); // a call in B
         t.end("m", a); // A's late report
         assert!(t.turn_open("m"), "B is untouched");
         assert_eq!(t.take_ended().len(), 1, "A was closed once, owing");
@@ -949,19 +1127,19 @@ mod tests {
     #[test]
     fn a_start_report_that_arrives_after_its_end_opens_nothing() {
         let (t, _s) = tracker(true, 0);
-        let a = t.next_turn("m");
+        let a = t.next_turn("m").0;
         t.end("m", a);
-        t.begin("m", a);
+        t.begin("m", a, None);
         assert!(!t.turn_open("m"));
     }
 
     #[test]
     fn a_tool_call_that_beats_its_turns_start_report_keeps_what_it_owes() {
         let (t, _s) = tracker(true, 3);
-        let a = t.next_turn("m"); // the session started the turn
-        t.note_state_change("m", "tok"); // the agent's first call lands first
+        let a = t.next_turn("m").0; // the session started the turn
+        note(&t, "m", "tok"); // the agent's first call lands first
         assert_eq!(t.current_run("m").unwrap().0, 3);
-        t.begin("m", a); // the late start report finds it open
+        t.begin("m", a, None); // the late start report finds it open
         t.finish_turn("m");
         assert_eq!(t.take_ended().len(), 1);
     }
@@ -969,14 +1147,15 @@ mod tests {
     #[test]
     fn a_warm_prompt_whose_tool_call_beats_the_previous_turns_end_report_is_its_own_turn() {
         let (t, shared) = tracker(true, 1);
-        let a = t.next_turn("m");
-        t.begin("m", a);
-        t.note_state_change("m", "tok");
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        note(&t, "m", "tok");
         // A settled and the next prompt was steered in; B's first call arrives
         // before either report does.
         set_revision(&shared, 2);
-        let b = t.next_turn("m");
-        t.note_state_change("m", "tok");
+        t.reserve_turn("m", Some("steer-b")); // reserved before the agent sees the prompt
+        note(&t, "m", "tok");
+        let b = t.next_turn("m").0;
         assert_eq!(t.current_run("m").unwrap().0, 2, "B starts from the revision now");
         assert_eq!(t.take_ended().len(), 1, "A was closed with its own window");
         t.end("m", a); // late
@@ -985,93 +1164,176 @@ mod tests {
         assert_eq!(t.take_ended().len(), 1);
     }
 
+    fn owed_turn(t: &StatusTracker) -> EndedRun {
+        t.start_turn("m");
+        note(t, "m", "tok");
+        t.finish_turn("m");
+        t.take_ended().remove(0)
+    }
+
+    /// A reminder reserved after an owing turn, plus the queue the tests control.
+    fn reminded(revision: u32) -> (StatusTracker, Shared, Arc<Mutex<QueueRow>>, String) {
+        let (t, shared) = tracker(true, revision);
+        let row = Arc::new(Mutex::new(QueueRow::Queued));
+        let probe = row.clone();
+        t.set_queue_probe(Arc::new(move |_chat, _id| *probe.lock().unwrap()));
+        let first = owed_turn(&t);
+        let Verdict::Nudge { message_id, .. } = t.conclude(&first, false) else {
+            panic!("asked");
+        };
+        (t, shared, row, message_id)
+    }
+
     #[test]
     fn an_unrelated_prompt_does_not_consume_the_reminder() {
-        let (t, _s) = tracker(true, 3);
-        let delivered = Arc::new(Mutex::new(false));
-        let flag = delivered.clone();
-        t.set_delivery_probe(Arc::new(move |_chat, id| {
-            assert_eq!(id, "msg-1");
-            *flag.lock().unwrap()
-        }));
+        let (t, _s, _row, id) = reminded(3);
+        // A prompt ahead of the reminder in the queue runs first: its source is
+        // some other message.
+        t.reserve_turn("m", Some("user-prompt"));
         t.start_turn("m");
-        t.note_state_change("m", "tok");
-        t.finish_turn("m");
-        let first = t.take_ended().remove(0);
-        assert_eq!(published(&t, &first, &[]), Verdict::Nudge { baseline: 3 });
-        t.reminder_queued("m", "msg-1");
-        // A prompt ahead of the reminder in the queue runs first.
-        t.start_turn("m");
-        t.note_state_change("m", "tok");
+        note(&t, "m", "tok");
         t.finish_turn("m");
         let unrelated = t.take_ended().remove(0);
-        assert!(!unrelated.ask, "the reminder has not been delivered yet");
-        assert_eq!(published(&t, &unrelated, &[]), Verdict::Outstanding);
-        // Then the reminder is delivered, and the turn it starts is the ask.
-        *delivered.lock().unwrap() = true;
+        assert!(!unrelated.ask);
+        assert!(matches!(t.conclude(&unrelated, false), Verdict::Outstanding));
+        // Then the reminder itself is delivered: the turn it starts is the ask.
+        t.reserve_turn("m", Some(&id));
         t.start_turn("m");
         t.finish_turn("m");
         let ask = t.take_ended().remove(0);
         assert!(ask.ask);
         assert_eq!(ask.baseline, 3, "held to the original turn's baseline");
-        assert_eq!(published(&t, &ask, &[]), Verdict::Missed { baseline: 3 });
+        assert!(matches!(t.conclude(&ask, false), Verdict::Missed { baseline: 3 }));
         // Only that one turn was the ask.
-        t.start_turn("m");
-        t.note_state_change("m", "tok");
-        t.finish_turn("m");
-        assert!(!t.take_ended().remove(0).ask);
+        assert!(!owed_turn(&t).ask);
     }
 
     #[test]
-    fn a_turn_held_for_adoption_becomes_the_chats_one_obligation() {
+    fn a_publication_while_the_reminder_is_queued_withdraws_it_and_leaves_no_duplicate() {
+        let (t, _s, _row, id) = reminded(3);
+        // An unrelated turn publishes before the reminder is delivered.
+        let other = owed_turn(&t);
+        let Verdict::Published { supersede: Some(withdrawn) } = t.conclude(&other, true) else {
+            panic!("the queued reminder is no longer needed");
+        };
+        assert_eq!(withdrawn, id);
+        // The reservation stays until the exact message settles.
+        assert_eq!(t.reminder("m").as_deref(), Some(id.as_str()));
+        // A later owing turn meanwhile is not asked a second time.
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // The withdrawal succeeded: the reminder is settled.
+        t.supersede_done("m", &id, true);
+        assert!(t.reminder("m").is_none());
+        // If it had already left the queue, the reservation would stay.
+        let (t, _s, _row, id) = reminded(3);
+        let other = owed_turn(&t);
+        assert!(matches!(t.conclude(&other, true), Verdict::Published { supersede: Some(_) }));
+        t.supersede_done("m", &id, false);
+        assert_eq!(t.reminder("m").as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn a_cancelled_reminder_is_released_but_one_in_flight_or_unreadable_is_not() {
+        // Cancelled: gone from the queue and never dispatched.
+        let (t, _s, row, id) = reminded(3);
+        *row.lock().unwrap() = QueueRow::Absent;
+        let next = owed_turn(&t);
+        let Verdict::Nudge { message_id, .. } = t.conclude(&next, false) else {
+            panic!("a cancelled reminder is asked again");
+        };
+        assert_ne!(message_id, id);
+        // A queue that cannot be read says nothing: still outstanding.
+        let (t, _s, row, _id) = reminded(3);
+        *row.lock().unwrap() = QueueRow::Unknown;
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // Taken for dispatch: absent from the queue but in flight, not cancelled.
+        let (t, _s, row, id) = reminded(3);
+        t.mark_dispatching("m", &id);
+        *row.lock().unwrap() = QueueRow::Absent;
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // The dispatch fails and the row goes back: queued again, still reserved.
+        t.dispatch_failed("m", &id);
+        *row.lock().unwrap() = QueueRow::Queued;
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // Retried: delivered by the exact message, it is the ask.
+        t.reserve_turn("m", Some(&id));
+        t.start_turn("m");
+        t.finish_turn("m");
+        assert!(t.take_ended().remove(0).ask);
+    }
+
+    #[test]
+    fn a_prompt_reserved_before_the_agent_sees_it_has_its_turn_when_the_first_call_lands() {
+        let (t, _s) = tracker(true, 3);
+        let a = t.start_turn("m");
+        t.finish_turn("m"); // the session parked after turn A
+        // The next prompt is steered into the parked run: reserved first.
+        t.reserve_turn("m", Some("steer-1"));
+        let admitted = t.admit("m");
+        assert!(admitted > a, "the arriving prompt's turn, not the one that ended");
+        // The agent's first call is admitted and completes before the session
+        // reports the turn started.
+        t.note_state_change("m", "tok", admitted);
+        assert!(t.turn_open("m"));
+        // The session then numbers the turn: the reserved number, same source.
+        let (seq, source) = t.next_turn("m");
+        assert_eq!((seq, source.as_deref()), (admitted, Some("steer-1")));
+        t.begin("m", seq, source.as_deref());
+        t.end("m", seq);
+        assert_eq!(t.take_ended().len(), 1, "the call was attributed to its own turn");
+        // A reservation that is released leaves nothing behind.
+        t.reserve_turn("m", Some("steer-2"));
+        t.release_turn("m", "steer-2");
+        let (_, source) = t.next_turn("m");
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn a_calls_completion_belongs_to_the_turn_it_was_admitted_in() {
         let (t, _s) = tracker(true, 0);
-        t.start_turn("m");
-        t.note_state_change("m", "r1");
-        t.finish_turn("m");
-        let ended = t.take_ended().remove(0);
-        assert_eq!(t.pending("m"), 0);
-        assert!(!ended.forced);
-        t.hold(ended);
-        assert_eq!(t.pending("m"), 1);
-        let held = t.take_held("m").expect("the obligation");
-        assert!(held.forced, "a turn that ended before the chat held the role cannot have published");
-        assert!(t.take_held("m").is_none(), "taken once");
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        let admitted = t.admit("m");
+        assert_eq!(admitted, a);
+        // The call is slow: turn A ends and turn B starts while it runs.
+        t.end("m", a);
+        let b = t.next_turn("m").0;
+        t.begin("m", b, None);
+        // Its completion is attributed to A, which is over: nothing is owed by B.
+        t.note_state_change("m", "tok", admitted);
+        t.end("m", b);
+        assert!(t.take_ended().is_empty(), "B owes nothing for A's call");
     }
 
     #[test]
-    fn many_held_turns_of_one_chat_keep_one_obligation_however_many_there_are() {
-        let (t, shared) = tracker(true, 4);
-        for n in 0..40u32 {
-            set_revision(&shared, 4 + n);
-            t.start_turn("m");
-            t.note_state_change("m", "tok");
-            t.finish_turn("m");
-            for ended in t.take_ended() {
-                t.hold(ended);
-            }
-            // Past any fixed list length the obligation is still there, once.
-            assert_eq!(t.pending("m"), 1, "after {} turns", n + 1);
+    fn state_for_chats_that_no_longer_exist_is_reclaimed_and_late_reports_do_not_bring_it_back() {
+        let (t, _s) = tracker(true, 0);
+        for chat in ["gone", "kept"] {
+            let a = t.next_turn(chat).0;
+            t.begin(chat, a, None);
+            t.note_state_change(chat, "tok", a);
         }
-        assert_eq!(t.held("m").unwrap().baseline, 4 + 39, "the newest turn's baseline");
-        // Another chat's held turn is its own obligation.
-        t.start_turn("other");
-        t.note_state_change("other", "o1");
-        t.finish_turn("other");
-        for ended in t.take_ended() {
-            t.hold(ended);
-        }
-        assert_eq!((t.pending("m"), t.pending("other")), (1, 1));
+        t.reserve_turn("gone", Some("m1"));
+        assert_eq!(t.tracked_chats(), 2);
+        t.retain_chats(&HashSet::from(["kept".to_owned()]));
+        assert_eq!(t.tracked_chats(), 1);
+        assert!(!t.turn_open("gone") && t.turn_open("kept"));
+        // A late end for the deleted chat does not recreate its state.
+        t.end("gone", 1);
+        assert_eq!(t.tracked_chats(), 1);
     }
 
     #[test]
     fn a_failed_ask_lets_the_next_turn_ask_again() {
         let (t, _s) = tracker(true, 0);
         t.start_turn("m");
-        t.note_state_change("m", "r1");
+        note(&t, "m", "r1");
         t.finish_turn("m");
         let ended = t.take_ended().remove(0);
-        assert_eq!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 0 });
-        t.ask_failed("m");
+        assert!(matches!(published(&t, &ended, &[]), Verdict::Nudge { baseline: 0, .. }));
+        let id = t.reminder("m").expect("reserved");
+        t.ask_failed("m", &id);
+        assert!(t.reminder("m").is_none());
         t.start_turn("m");
         assert!(!t.state().turns["m"].ask);
     }
@@ -1099,5 +1361,70 @@ mod tests {
         assert!(is_state_changing(mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT));
         assert!(!is_state_changing(mast_proto::agent_tools::tools::READ_SUBTREE));
         assert!(!is_state_changing(mast_proto::agent_tools::tools::BRIEFING_READ));
+    }
+    /// The tracker against a chat's real queue: a publication withdraws a
+    /// queued reminder, a cancellation releases it, and a row in flight is
+    /// neither.
+    #[tokio::test]
+    async fn the_reminder_follows_the_real_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = DocHost::new(
+            Arc::new(mast_sync::DocsStore::open(dir.path()).unwrap()),
+            crate::DocHostConfig {
+                device_id: "dev-test".into(),
+                default_harness: mast_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let (t, _s) = tracker(true, 3);
+        let probe_host = host.clone();
+        t.set_queue_probe(Arc::new(move |chat, id| queue_row(&probe_host, chat, id)));
+        let remind = |t: &StatusTracker| {
+            let ended = owed_turn(t);
+            let Verdict::Nudge { message_id, .. } = t.conclude(&ended, false) else {
+                panic!("asked");
+            };
+            host.queue_context_message("m", &message_id, "remind").unwrap();
+            message_id
+        };
+
+        // A publication while the row is queued withdraws it for real.
+        let id = remind(&t);
+        assert_eq!(queue_row(&host, "m", &id), QueueRow::Queued);
+        let other = owed_turn(&t);
+        let Verdict::Published { supersede: Some(withdrawn) } = t.conclude(&other, true) else {
+            panic!("withdraw");
+        };
+        assert!(host.withdraw_queued("m", &withdrawn).unwrap());
+        t.supersede_done("m", &withdrawn, true);
+        assert_eq!(queue_row(&host, "m", &id), QueueRow::Absent);
+        assert!(t.reminder("m").is_none());
+        assert!(!host.withdraw_queued("m", &id).unwrap(), "nothing left to withdraw");
+
+        // Cancelled by someone else: released, and asked again, once.
+        let id = remind(&t);
+        let handle = host.open("m").unwrap();
+        assert!(handle.doc().take_queued(&id).unwrap().is_some());
+        let Verdict::Nudge { message_id: again, .. } = t.conclude(&owed_turn(&t), false) else {
+            panic!("a cancelled reminder is asked again");
+        };
+        assert_ne!(again, id);
+
+        // Taken for dispatch: absent from the queue, in flight, not cancelled.
+        host.queue_context_message("m", &again, "remind").unwrap();
+        t.mark_dispatching("m", &again);
+        assert!(handle.doc().take_queued(&again).unwrap().is_some());
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // The dispatch fails and the row is restored: still the same reminder.
+        t.dispatch_failed("m", &again);
+        host.queue_context_message("m", &again, "remind").unwrap();
+        assert!(matches!(t.conclude(&owed_turn(&t), false), Verdict::Outstanding));
+        // Retried and delivered by the exact message: it is the ask.
+        t.mark_dispatching("m", &again);
+        assert!(handle.doc().take_queued(&again).unwrap().is_some());
+        t.reserve_turn("m", Some(&again));
+        t.start_turn("m");
+        t.finish_turn("m");
+        assert!(t.take_ended().remove(0).ask);
     }
 }

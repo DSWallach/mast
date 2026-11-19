@@ -227,17 +227,19 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Manager status** (`engine/src/manager_status.rs`): a turn is what the session calls one. The status
-  funnel numbers each turn under its lock and reports its start and end to `StatusTracker` (on
-  `AgentTokens`), so a warm session's steered prompts on one token are separate turns and a late report
-  about one turn cannot close the next. The tracker reads the status record's revision at both ends,
-  marks the turn owing a revision when it calls a state-changing agent tool, and a watcher checks each
-  owing turn against the Manager-stamped revisions its own chat published inside its window, queueing
-  one system message if none. The reminder is bound to its queued message id: only the turn that
-  delivers it is the ask. A first start or hand-off successor is placed in its project from its
-  provisional marker or reserved hand-off (one registry snapshot), and its turns that end before it holds
-  the role merge into one obligation. Published inline by `artifact_publish` (`content`), read through
-  `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
+- **Manager status** (`engine/src/manager_status.rs`): a turn is what the session calls one. The session
+  numbers each turn under its status lock, and numbers a prompt headed for a parked warm run before the
+  mailbox can show it to the agent, so starts, ends and tool calls are matched to turns by number: a late
+  report about one turn cannot close the next, and a call is attributed to the turn it was admitted in.
+  `StatusTracker` (on `AgentTokens`) reads the status record's revision at both ends, marks a turn owing
+  a revision when it calls a state-changing agent tool, and a watcher checks each owing turn against the
+  Manager-stamped revisions its own chat published inside its window. A missing one earns one reminder, whose
+  message id is reserved before it is queued; the turn whose dispatch source is that id is the ask. The
+  reservation holds until that message settles, is cancelled, or is withdrawn because another turn
+  published. A first start or hand-off successor is placed in its project from its provisional marker or
+  reserved hand-off (one registry snapshot), and its turns that end before it holds the role merge into one
+  obligation. Per-chat state goes with the chat. Published inline by `artifact_publish` (`content`), read
+  through `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
 - **Harness** (research pending — `docs/internal/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or

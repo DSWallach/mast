@@ -1117,6 +1117,13 @@ impl SessionsEngine {
         });
         if let Some((run_id, steerable, same_runtime, steer_tx, ledger)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
+            // A prompt routed into a settled, parked run starts a turn: number
+            // it before the mailbox can show it to the agent.
+            let turns = self.inner.agent_tokens.manager_status();
+            let reserved = steerable && same_runtime && !self.turn_in_flight(chat_id);
+            if reserved {
+                turns.reserve_turn(chat_id, Some(&user_id));
+            }
             let accepted = if steerable && same_runtime {
                 // Warm dispatch uses the same mailbox as explicit steering.
                 // Register acceptance before a fast boundary can retire it.
@@ -1137,6 +1144,9 @@ impl SessionsEngine {
             } else {
                 false
             };
+            if reserved && !accepted {
+                turns.release_turn(chat_id, &user_id);
+            }
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -1160,9 +1170,11 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
+                    turns.release_turn(chat_id, &user_id);
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
+                turns.release_turn(chat_id, &user_id);
                 // The run died around the send. If its exit drain already
                 // claimed the entry, that re-dispatch owns the message —
                 // otherwise reclaim it and fall through to a fresh run.
@@ -1387,7 +1399,12 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             },
         );
+        // The turn this prompt starts is numbered, and the queued message it
+        // carries noted, in the step that publishes Working.
+        let turns = self.inner.agent_tokens.manager_status();
+        turns.reserve_turn(chat_id, Some(&user_id));
         self.set_status(chat_id, SessionStatus::Working, true);
+        turns.release_turn(chat_id, &user_id);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
         self.inner.note_message(chat_id, &shown_prompt);
@@ -1450,11 +1467,22 @@ impl SessionsEngine {
             prompt: delivered_prompt.clone(),
             message_id: Some(user_id.clone()),
         };
+        // A prompt steered into a settled, parked run starts a turn. Its number
+        // is reserved before the mailbox can show the prompt to the agent, so
+        // the agent's first tool call already finds its turn.
+        let turns = self.inner.agent_tokens.manager_status();
+        let reserved = !self.turn_in_flight(chat_id);
+        if reserved {
+            turns.reserve_turn(chat_id, Some(&user_id));
+        }
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
             let mut pending = lock(&ledger);
             if steer_tx.try_send(message).is_err() {
+                if reserved {
+                    turns.release_turn(chat_id, &user_id);
+                }
                 return Ok(SteerOutcome::NotSteerable);
             }
             pending.push_back(RoutedSteer {
@@ -1472,9 +1500,13 @@ impl SessionsEngine {
         if self.is_live(chat_id, &run_id) {
             acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
             self.set_status(chat_id, SessionStatus::Working, false);
+            // Consumed by the turn that started; a prompt that joined a turn
+            // already running reserved nothing that lasts.
+            turns.release_turn(chat_id, &user_id);
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
+        turns.release_turn(chat_id, &user_id);
         // The run died around the send. Exit drain claimed the entry → its
         // re-dispatch owns the message; still ours → reclaim and report
         // NotSteerable so the executor falls back to a fresh dispatch
@@ -2142,7 +2174,7 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
-        let turn_boundary: Option<(bool, u64)>;
+        let turn_boundary: Option<(bool, u64, Option<String>)>;
         let session = {
             let mut statuses = lock(&self.statuses);
             // A chat's first row is created already in the new status, so
@@ -2181,10 +2213,11 @@ impl Inner {
             let turns = self.agent_tokens.manager_status();
             turn_boundary = match (existed && was_active, status) {
                 (false, SessionStatus::Working | SessionStatus::AwaitingInput) => {
-                    Some((true, turns.next_turn(chat_id)))
+                    let (seq, source) = turns.next_turn(chat_id);
+                    Some((true, seq, source))
                 }
                 (true, SessionStatus::Idle | SessionStatus::Errored) => {
-                    Some((false, turns.current_turn(chat_id)))
+                    Some((false, turns.current_turn(chat_id), None))
                 }
                 _ => None,
             };
@@ -2234,8 +2267,10 @@ impl Inner {
         // The Manager status check follows the session's own turn boundaries.
         // No lock is held here.
         match turn_boundary {
-            Some((true, seq)) => self.agent_tokens.manager_status().begin(chat_id, seq),
-            Some((false, seq)) => self.agent_tokens.manager_status().end(chat_id, seq),
+            Some((true, seq, source)) => {
+                self.agent_tokens.manager_status().begin(chat_id, seq, source.as_deref())
+            }
+            Some((false, seq, _)) => self.agent_tokens.manager_status().end(chat_id, seq),
             None => {}
         }
     }
@@ -2620,6 +2655,9 @@ impl Inner {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+            // No more prompts are coming to this run: numbers reserved for
+            // prompts that never started a turn are dropped.
+            self.agent_tokens.manager_status().clear_pending(chat_id);
         }
     }
 }
