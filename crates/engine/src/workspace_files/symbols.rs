@@ -43,6 +43,7 @@ pub struct QuerySymbolsRequest {
     pub limit: usize,
     #[serde(default)] pub exact_name: bool,
     #[serde(default)] pub kinds: Option<Vec<mast_syntax::symbols::SymbolKind>>,
+    #[serde(default)] pub source_path: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -146,14 +147,15 @@ impl WorkspaceFiles {
         let query = if request.exact_name { request.query } else { request.query.to_lowercase() };
         let exact_name = request.exact_name;
         let kinds = request.kinds;
+        let source_path = request.source_path;
         let limit = request.limit.min(200);
-        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected, exact_name, kinds.as_deref())).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected, exact_name, kinds.as_deref(), source_path.as_deref())).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         drop(receiver);
         results.ok_or_else(|| WorkspaceFilesError::Io("symbol query superseded".into()))
     }
 }
 
-fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &std::sync::atomic::AtomicU64, expected: u64, exact_name: bool, kinds: Option<&[mast_syntax::symbols::SymbolKind]>) -> Option<SymbolQueryResult> {
+fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &std::sync::atomic::AtomicU64, expected: u64, exact_name: bool, kinds: Option<&[mast_syntax::symbols::SymbolKind]>, source_path: Option<&str>) -> Option<SymbolQueryResult> {
     let mut best = Vec::with_capacity(limit + 1);
     let mut count = 0usize;
     let mut visited = 0usize;
@@ -164,7 +166,7 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
             if kinds.is_some_and(|kinds| !kinds.contains(&symbol.kind)) { continue; }
             let score = if exact_name {
                 if symbol.name != query { continue; }
-                0
+                source_path.map_or(0, |source| definition_score(source, path))
             } else {
                 let Some(score) = symbol_score(lower_name, &file.lower_path, query) else { continue; };
                 score
@@ -179,6 +181,18 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
     }
     if generation.load(Ordering::Acquire) != expected { return None; }
     Some(SymbolQueryResult { matches: best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect(), truncated: count > limit })
+}
+
+fn definition_score(source: &str, target: &str) -> i64 {
+    if source == target { return 2_000_000; }
+    let source_dir = source.rsplit_once('/').map_or("", |(directory, _)| directory);
+    let target_dir = target.rsplit_once('/').map_or("", |(directory, _)| directory);
+    if source_dir == target_dir { return 1_000_000; }
+    let source_parts = source_dir.split('/').filter(|part| !part.is_empty());
+    let target_parts = target_dir.split('/').filter(|part| !part.is_empty());
+    let common = source_parts.clone().zip(target_parts.clone()).take_while(|(a, b)| a == b).count();
+    let distance = source_parts.count() + target_parts.count() - 2 * common;
+    -(distance.min(999_999) as i64)
 }
 
 fn symbol_score(name: &str, path: &str, query: &str) -> Option<i64> {
@@ -497,14 +511,27 @@ mod tests {
         let mut index = SymbolIndex::new(4, 500, 500);
         index.apply(1, &[FileChange::Changed { path: "items.rs", source: &source }]);
         let generation = std::sync::atomic::AtomicU64::new(1);
-        let all = search_snapshot(&index, "item", 200, &generation, 1, false, None).unwrap();
+        let all = search_snapshot(&index, "item", 200, &generation, 1, false, None, None).unwrap();
         assert_eq!(all.matches.len(), 200);
         assert!(all.truncated);
         let source = (0..200).map(|i| format!("fn item_{i}() {{}}\n")).collect::<String>();
         index.apply(2, &[FileChange::Changed { path: "items.rs", source: &source }]);
-        let exact = search_snapshot(&index, "item", 200, &generation, 1, false, None).unwrap();
+        let exact = search_snapshot(&index, "item", 200, &generation, 1, false, None, None).unwrap();
         assert_eq!(exact.matches.len(), 200);
         assert!(!exact.truncated);
+    }
+
+    #[test]
+    fn exact_query_ranks_before_applying_limit() {
+        let mut index = SymbolIndex::new(10, 10, 10);
+        index.apply(1, &[
+            FileChange::Changed { path: "a/distant.rs", source: "fn target() {}" },
+            FileChange::Changed { path: "z/same.rs", source: "fn target() {}" },
+        ]);
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let found = search_snapshot(&index, "target", 1, &generation, 1, true, None, Some("z/same.rs")).unwrap();
+        assert_eq!(found.matches[0].path, "z/same.rs");
+        assert!(found.truncated);
     }
 
     #[test]
@@ -513,7 +540,7 @@ mod tests {
         let mut index = SymbolIndex::new(4, 20, 20);
         index.apply(1, &[FileChange::Changed { path: "items.rs", source: "fn item() {}\nfn Item() {}\nstruct item;\nfn item_extra() {}\n" }]);
         let generation = std::sync::atomic::AtomicU64::new(1);
-        let result = search_snapshot(&index, "item", 200, &generation, 1, true, Some(&[SymbolKind::Function])).unwrap();
+        let result = search_snapshot(&index, "item", 200, &generation, 1, true, Some(&[SymbolKind::Function]), None).unwrap();
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].symbol.name, "item");
         assert_eq!(result.matches[0].symbol.kind, SymbolKind::Function);
@@ -569,13 +596,13 @@ mod tests {
         let query_started = Instant::now();
         let snapshot = lock(&shared).clone();
         let generation = std::sync::atomic::AtomicU64::new(1);
-        let found = search_snapshot(&snapshot, "not_present", 200, &generation, 1, false, None).unwrap();
+        let found = search_snapshot(&snapshot, "not_present", 200, &generation, 1, false, None, None).unwrap();
         let query_elapsed = query_started.elapsed();
         eprintln!("20k-symbol query during reparse: {query_elapsed:?}");
         assert!(found.matches.is_empty());
         assert!(query_elapsed < Duration::from_millis(25));
         generation.store(2, Ordering::Release);
-        assert!(search_snapshot(&snapshot, "function", 200, &generation, 1, false, None).is_none());
+        assert!(search_snapshot(&snapshot, "function", 200, &generation, 1, false, None, None).is_none());
         release_tx.send(()).unwrap();
         worker.join().unwrap();
         let first_batch: Vec<_> = file_revisions.keys().take(FRESHNESS_BATCH_SIZE).cloned().collect();
