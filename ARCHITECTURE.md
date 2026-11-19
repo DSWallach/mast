@@ -227,19 +227,18 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Manager status** (`engine/src/manager_status.rs`): a turn is what the session calls one. The session
-  numbers each turn under its status lock, and numbers a prompt headed for a parked warm run before the
-  mailbox can show it to the agent, so starts, ends and tool calls are matched to turns by number: a late
-  report about one turn cannot close the next, and a call is attributed to the turn it was admitted in.
-  `StatusTracker` (on `AgentTokens`) reads the status record's revision at both ends, marks a turn owing
-  a revision when it calls a state-changing agent tool, and a watcher checks each owing turn against the
-  Manager-stamped revisions its own chat published inside its window. A missing one earns one reminder, whose
-  message id is reserved before it is queued; the turn whose dispatch source is that id is the ask. The
-  reservation holds until that message settles, is cancelled, or is withdrawn because another turn
-  published. A first start or hand-off successor is placed in its project from its provisional marker or
-  reserved hand-off (one registry snapshot), and its turns that end before it holds the role merge into one
-  obligation. Per-chat state goes with the chat. Published inline by `artifact_publish` (`content`), read
-  through `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
+- **Manager status** (`engine/src/manager_status.rs`): per manager chat, `StatusTracker` (on `AgentTokens`) keeps a
+  generation that every successful state-changing agent tool call advances, a watermark set by the latest
+  Manager-stamped revision the chat inserted (the generation captured when its publish was admitted, taken
+  from an internal receipt of the serialized `record` branch, so replays and unchanged documents never advance
+  it and a stale publish can lower it), and the generation a reminder was last given up on. The status is owed
+  while the generation is beyond both, so one update can cover several turns and a checkpoint never covers a
+  later change. A watcher queues one reminder, whose message id is reserved first, when the chat is idle and
+  owes; the turn that receives it (its Steered boundary or fresh run) settles it when it closes, covered or
+  given up for that generation. The reservation also survives dispatch failure and restore, is withdrawn when a
+  publication covers it while queued, and is released on cancel or a lost row. A chat about to hold the role
+  keeps what it owes until it does. Published inline by `artifact_publish` (`content`), read through
+  `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
 - **Harness** (research pending — `docs/internal/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or

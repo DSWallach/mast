@@ -3087,3 +3087,146 @@ async fn a_nested_project_reads_its_own_status_and_never_the_enclosing_one() {
     assert_eq!(entries[0]["artifactId"], "status-inner");
     assert_eq!(entries[0]["workItemId"], inner.as_str());
 }
+
+fn manager_caller(rig: &Rig) -> mast_engine::artifacts::AgentCaller {
+    mast_engine::artifacts::AgentCaller {
+        chat_id: CHAT.into(),
+        run_id: "run-1".into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(rig.item.clone()),
+    }
+}
+
+fn status_publish_args(content: &str, key: &str) -> Value {
+    status_args(content, key)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_call_that_inserted_a_revision_gets_a_receipt() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let caller = manager_caller(&rig);
+    let service = rig.core.artifacts.clone();
+    let publish = |content: &str, key: &str| service.agent_publish_with_receipt(&caller, &status_publish_args(content, key)).unwrap();
+    let a = status_document("09:00");
+    let (reply, receipt) = publish(&a, "k1");
+    assert_eq!(receipt, Some(1));
+    assert_eq!(reply["revision"], 1);
+    // The same key again is a replay of what was recorded: no new revision.
+    let (replayed, receipt) = publish(&a, "k1");
+    assert_eq!(receipt, None);
+    assert_eq!(replayed["changed"], true, "the public reply is unchanged: a replay still reports changed");
+    // A new key with the same bytes is an unchanged document: no new revision.
+    let (_, receipt) = publish(&a, "k2");
+    assert_eq!(receipt, None);
+    // A new key with different bytes inserts the next revision.
+    let (_, receipt) = publish(&status_document("09:05"), "k3");
+    assert_eq!(receipt, Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_publishes_give_a_receipt_only_to_the_invocation_that_inserted() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let caller = manager_caller(&rig);
+    let service = rig.core.artifacts.clone();
+    for round in 0..40 {
+        let content = status_document(&format!("same-key-{round}"));
+        let key = format!("same-{round}");
+        let barrier = std::sync::Barrier::new(2);
+        let receipts: Vec<Option<u32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        service
+                            .agent_publish_with_receipt(&caller, &status_publish_args(&content, &key))
+                            .unwrap()
+                            .1
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // The same key, raced: exactly one invocation inserted the revision, the
+        // other replayed it, and a replay never carries a receipt.
+        assert_eq!(receipts.iter().filter(|r| r.is_some()).count(), 1, "round {round}: {receipts:?}");
+    }
+    // Different keys and different bytes, raced: both insert, each its own revision.
+    let barrier = std::sync::Barrier::new(2);
+    let mut receipts: Vec<Option<u32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["x", "y"]
+            .iter()
+            .map(|tag| {
+                let (service, caller, barrier) = (&service, &caller, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .agent_publish_with_receipt(
+                            caller,
+                            &status_publish_args(&status_document(&format!("different-{tag}")), &format!("diff-{tag}")),
+                        )
+                        .unwrap()
+                        .1
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    receipts.sort();
+    assert!(receipts[0].is_some() && receipts[1].is_some() && receipts[0] != receipts[1], "{receipts:?}");
+}
+
+/// The status is owed by the order things complete in, through the real tool
+/// path: a publish covers what completed before it, and neither a replay nor an
+/// unchanged document covers a later change.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owed_status_follows_completion_order_through_the_real_tool_path() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let tracker = rig.core.sessions.agent_tokens();
+    let owes = || tracker.manager_status().owes(CHAT);
+    let change = |key: &str| {
+        let rig = &rig;
+        let key = key.to_owned();
+        async move {
+            tool(rig, &rig.token, "work_outline_create_child", json!({ "title": key, "idempotencyKey": key })).await.unwrap();
+        }
+    };
+    // Change then publish: covered.
+    change("c1").await;
+    assert!(owes());
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
+    assert_eq!(first["revision"], 1);
+    assert!(!owes(), "a publish after the change covers it");
+    // Publish then change: the checkpoint does not cover the later change.
+    change("c2").await;
+    assert!(owes());
+    // A replay of the earlier publish returns its old revision: not a new checkpoint.
+    let replay = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
+    assert_eq!(replay["revision"], 1);
+    assert!(owes(), "a replay does not cover a later change");
+    // An unchanged document under a new key records nothing: still owed.
+    publish(&rig, &rig.token, status_args(&status_document("09:00"), "p2")).await;
+    assert!(owes(), "an unchanged document does not cover a later change");
+    // A genuinely new revision does.
+    let third = publish(&rig, &rig.token, status_args(&status_document("09:10"), "p3")).await;
+    assert_eq!(third["revision"], 2);
+    assert!(!owes());
+    // One update covers several changes.
+    change("c3").await;
+    change("c4").await;
+    change("c5").await;
+    publish(&rig, &rig.token, status_args(&status_document("09:20"), "p4")).await;
+    assert!(!owes(), "one update covered three changes");
+}

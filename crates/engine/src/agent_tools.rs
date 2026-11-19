@@ -280,8 +280,6 @@ impl AgentTokens {
             .ok_or_else(AgentToolError::unauthenticated)?;
         if grant.expires_at.is_some_and(|at| Instant::now() >= at) {
             grants.remove(&key);
-            drop(grants);
-            self.manager_status.end_run(&grant.chat_id, &grant.run_id);
             return Err(AgentToolError::unauthenticated());
         }
         Ok(grant)
@@ -293,10 +291,7 @@ impl AgentTokens {
     }
 
     fn revoke(&self, key: &TokenKey) {
-        let grant = lock(&self.grants).remove(key);
-        if let Some(grant) = grant {
-            self.manager_status.end_run(&grant.chat_id, &grant.run_id);
-        }
+        lock(&self.grants).remove(key);
     }
 
     fn renew(&self, key: &TokenKey) {
@@ -746,6 +741,8 @@ struct CallContext<'a> {
     manager_scope: Option<String>,
     /// The chat's title, for attribution.
     chat_title: String,
+    /// The Manager status revision the call being run inserted, if it did.
+    publish_receipt: std::cell::Cell<Option<u32>>,
 }
 
 impl CallContext<'_> {
@@ -1129,6 +1126,7 @@ impl AgentToolsService {
             personal_assistant,
             manager_scope,
             chat_title: chat.title.clone().unwrap_or_default(),
+            publish_receipt: std::cell::Cell::new(None),
         })
     }
 
@@ -1164,20 +1162,19 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
-        // The turn a state-changing call belongs to is the one it is admitted
-        // in, and that turn's record is kept until the call settles: a
-        // successful completion is attributed to it, whatever the session has
-        // done in the meantime.
-        let admitted = crate::manager_status::is_state_changing(&params.tool)
-            .then(|| self.tokens.manager_status().admit_call(&context.grant.chat_id));
+        // The Manager status is kept current by the order things complete in:
+        // a successful state-changing call advances the chat's generation, and a
+        // publish that really inserted a new revision covers what had completed
+        // before it was admitted, nothing after.
+        let chat_id = &context.grant.chat_id;
+        let admitted_generation = (params.tool == tools::ARTIFACT_PUBLISH)
+            .then(|| self.tokens.manager_status().generation(chat_id));
         let result = self.dispatch(&context, &params.tool, &arguments);
-        if let Some(turn) = admitted {
-            self.tokens.manager_status().complete_call(
-                &context.grant.chat_id,
-                &context.grant.run_id,
-                turn,
-                result.is_ok(),
-            );
+        if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
+            self.tokens.manager_status().changed(chat_id);
+        }
+        if let (Some(admitted), Some(revision)) = (admitted_generation, context.publish_receipt.take()) {
+            self.tokens.manager_status().published(chat_id, revision, admitted);
         }
         result
             .map_err(|error| match error {
@@ -1262,7 +1259,9 @@ impl AgentToolsService {
             }
             tools::ARTIFACT_PUBLISH => {
                 let (service, caller) = self.artifact_call(context)?;
-                Ok(service.agent_publish(&caller, arguments)?)
+                let (reply, inserted) = service.agent_publish_with_receipt(&caller, arguments)?;
+                context.publish_receipt.set(inserted);
+                Ok(reply)
             }
             tools::ARTIFACT_GET_PLAN => {
                 let (service, caller) = self.artifact_call(context)?;

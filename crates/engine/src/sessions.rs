@@ -1128,11 +1128,6 @@ impl SessionsEngine {
         });
         if let Some((run_id, steerable, same_runtime, steer_tx, ledger)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
-            // A prompt routed into a settled, parked run starts a turn: number
-            // it before the mailbox can show it to the agent.
-            let turns = self.inner.agent_tokens.manager_status();
-            let reserved = steerable && same_runtime && !self.turn_in_flight(chat_id);
-            let _reservation = reserved.then(|| TurnReservation::new(turns, chat_id, &user_id));
             let accepted = if steerable && same_runtime {
                 // Warm dispatch uses the same mailbox as explicit steering.
                 // Register acceptance before a fast boundary can retire it.
@@ -1177,10 +1172,6 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    if !reserved {
-                        // Accepted into a turn already running: it delivered the prompt.
-                        turns.joined_active(chat_id, &user_id);
-                    }
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
@@ -1408,12 +1399,13 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             },
         );
-        // The turn this prompt starts is numbered, and the queued message it
-        // carries noted, in the step that publishes Working.
-        let turns = self.inner.agent_tokens.manager_status();
-        turns.reserve_turn(chat_id, Some(&user_id));
         self.set_status(chat_id, SessionStatus::Working, true);
-        turns.release_turn(chat_id, &user_id);
+        // A fresh run delivered the prompt: if it is the Manager status
+        // reminder, the turn that starts now is the one that received it.
+        self.inner
+            .agent_tokens
+            .manager_status()
+            .reminder_confirmed(chat_id, &user_id);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
         self.inner.note_message(chat_id, &shown_prompt);
@@ -1476,12 +1468,6 @@ impl SessionsEngine {
             prompt: delivered_prompt.clone(),
             message_id: Some(user_id.clone()),
         };
-        // A prompt steered into a settled, parked run starts a turn. Its number
-        // is reserved before the mailbox can show the prompt to the agent, so
-        // the agent's first tool call already finds its turn.
-        let turns = self.inner.agent_tokens.manager_status();
-        let reserved = !self.turn_in_flight(chat_id);
-        let _reservation = reserved.then(|| TurnReservation::new(turns, chat_id, &user_id));
         {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
@@ -1505,10 +1491,6 @@ impl SessionsEngine {
         if self.is_live(chat_id, &run_id) {
             acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
             self.set_status(chat_id, SessionStatus::Working, false);
-            if !reserved {
-                // The prompt joined a turn already running: that turn delivered it.
-                turns.joined_active(chat_id, &user_id);
-            }
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
@@ -2179,15 +2161,7 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
-        // A turn that is about to settle has its closing state read here, before
-        // the settled status is published: once Idle is visible the next turn can
-        // start and publish, and the revision at the end of this one must not
-        // include what that turn does. (No lock is held: the read is the
-        // tracker's probe, which reads the workspace.)
-        if matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
-            self.agent_tokens.manager_status().capture_boundary(chat_id);
-        }
-        let turn_boundary: Option<(bool, u64, Option<String>)>;
+        let turn_closed: bool;
         let session = {
             let mut statuses = lock(&self.statuses);
             // A chat's first row is created already in the new status, so
@@ -2215,25 +2189,12 @@ impl Inner {
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
             );
-            // A turn begins when a settled session turns active and ends when
-            // an active one settles: the same boundaries `started_at` and the
-            // tool-failure ledger use, so a warm session's next prompt, steered
-            // into a parked run on the same token, is a new turn.
-            // The turn's number is taken here, under the status lock, in the
-            // step that publishes the status: the next turn can only start
-            // after this, so numbers follow the order the session ran turns in,
-            // whatever order the reports below are made in.
-            let turns = self.agent_tokens.manager_status();
-            turn_boundary = match (existed && was_active, status) {
-                (false, SessionStatus::Working | SessionStatus::AwaitingInput) => {
-                    let (seq, source) = turns.next_turn(chat_id);
-                    Some((true, seq, source))
-                }
-                (true, SessionStatus::Idle | SessionStatus::Errored) => {
-                    Some((false, turns.current_turn(chat_id), None))
-                }
-                _ => None,
-            };
+            // A turn ends when an active session settles: the same boundary
+            // `started_at` and the tool-failure ledger use. Only an in-memory
+            // report is made, after the lock is released.
+            turn_closed = existed
+                && was_active
+                && matches!(status, SessionStatus::Idle | SessionStatus::Errored);
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
@@ -2277,14 +2238,10 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
-        // The Manager status check follows the session's own turn boundaries.
-        // No lock is held here.
-        match turn_boundary {
-            Some((true, seq, source)) => {
-                self.agent_tokens.manager_status().begin(chat_id, seq, source.as_deref())
-            }
-            Some((false, seq, _)) => self.agent_tokens.manager_status().end(chat_id, seq),
-            None => {}
+        // The Manager status reminder is judged when a turn closes. No lock is
+        // held here.
+        if turn_closed {
+            self.agent_tokens.manager_status().turn_closed(chat_id);
         }
     }
 
@@ -2677,33 +2634,7 @@ impl Inner {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
-            // No more prompts are coming to this run: numbers reserved for
-            // prompts that never started a turn are dropped.
-            self.agent_tokens.manager_status().clear_pending(chat_id);
         }
-    }
-}
-
-/// A turn number reserved for a prompt about to be delivered. Dropping it
-/// releases the reservation, whichever way the delivery ends (an error after the
-/// mailbox accepted the prompt included); a number the session has already taken
-/// is not affected.
-struct TurnReservation<'a> {
-    turns: &'a crate::manager_status::StatusTracker,
-    chat_id: &'a str,
-    source: String,
-}
-
-impl<'a> TurnReservation<'a> {
-    fn new(turns: &'a crate::manager_status::StatusTracker, chat_id: &'a str, source: &str) -> Self {
-        turns.reserve_turn(chat_id, Some(source));
-        Self { turns, chat_id, source: source.to_owned() }
-    }
-}
-
-impl Drop for TurnReservation<'_> {
-    fn drop(&mut self) {
-        self.turns.release_turn(self.chat_id, &self.source);
     }
 }
 
@@ -4182,11 +4113,14 @@ async fn drive_run(
             inner.set_status(&chat_id, SessionStatus::Working, true);
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
-            if let Some(h) = lock(&inner.runs)
+            let confirmed = lock(&inner.runs)
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
-            {
-                lock(&h.routed_steers).pop_front();
+                .and_then(|h| lock(&h.routed_steers).pop_front());
+            // The reminder, if this steer carried it, was received by the turn
+            // this boundary belongs to.
+            if let Some(steer) = confirmed {
+                inner.agent_tokens.manager_status().reminder_confirmed(&chat_id, &steer.message_id);
             }
             continue;
         }
@@ -4450,30 +4384,6 @@ fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool 
 
 #[cfg(test)]
 mod tests {
-    /// A reservation is released however the delivery ends, an error after the
-    /// mailbox accepted the prompt included, and a number the session already
-    /// took is left for its start report.
-    #[test]
-    fn a_turn_reservation_is_released_when_delivery_ends_by_any_path() {
-        let turns = crate::manager_status::StatusTracker::default();
-        let delivered_then_failed = |turns: &crate::manager_status::StatusTracker| -> Result<(), &'static str> {
-            let _reservation = TurnReservation::new(turns, "c", "m1");
-            // The mailbox accepted the prompt; writing the transcript then failed.
-            Err("write_user_message failed")
-        };
-        assert!(delivered_then_failed(&turns).is_err());
-        let (next, source) = turns.next_turn("c");
-        assert_eq!(source, None, "no stale reservation is left to be consumed");
-        assert!(next > 1, "the released number is spent, never reissued");
-        {
-            let _reservation = TurnReservation::new(&turns, "c", "m2");
-            let (taken, source) = turns.next_turn("c");
-            assert_eq!(source.as_deref(), Some("m2"));
-            assert_eq!(turns.admit("c"), taken);
-        }
-        assert!(turns.admit("c") > 0, "a number the session took is not given back");
-    }
-
     use super::*;
 
     #[test]

@@ -939,6 +939,17 @@ impl ArtifactsService {
     /// a revision when the content changed, write the row, and pin it when
     /// asked. Idempotent per `operation_id`.
     pub fn record(&self, request: PublishRequest) -> Outcome<ArtifactPublishReply> {
+        self.record_with_receipt(request).map(|(reply, _)| reply)
+    }
+
+    /// [`Self::record`], and the id of the revision this very invocation
+    /// inserted, if it did: `None` for a replay of an operation already
+    /// recorded and for an unchanged document, `Some` only from the serialized
+    /// branch that pushes a new revision. The reply is the same either way.
+    pub(crate) fn record_with_receipt(
+        &self,
+        request: PublishRequest,
+    ) -> Outcome<(ArtifactPublishReply, Option<u32>)> {
         let space = self.local_space(&request.space_id)?;
         let title = clean_title(&request.title);
         if title.is_empty() {
@@ -1044,13 +1055,16 @@ impl ArtifactsService {
                 .iter()
                 .find(|r| r.op.as_deref() == Some(op.as_str()))
         {
-            return Ok(ArtifactPublishReply {
-                artifact_id: id.clone(),
-                revision: revision.id,
-                url: existing.url(),
-                stored_path: existing.stored_path.clone(),
-                changed: true,
-            });
+            return Ok((
+                ArtifactPublishReply {
+                    artifact_id: id.clone(),
+                    revision: revision.id,
+                    url: existing.url(),
+                    stored_path: existing.stored_path.clone(),
+                    changed: true,
+                },
+                None,
+            ));
         }
         if let Some(existing) = &existing
             && existing.device_id != self.device_id()
@@ -1176,6 +1190,7 @@ impl ArtifactsService {
             }
             self.write_companion_index(&id, current.id, &companion_hashes)?;
         }
+        let mut inserted = None;
         if changed {
             self.store_snapshot(&id, &hash, &bytes)?;
             let next = view
@@ -1207,6 +1222,7 @@ impl ArtifactsService {
                 self.write_companion_index(&id, next, &companion_hashes)?;
             }
             view.current_revision = next;
+            inserted = Some(next);
         }
         view.kind = kind;
         view.title = title;
@@ -1234,13 +1250,16 @@ impl ArtifactsService {
                 hash,
             ),
         );
-        Ok(ArtifactPublishReply {
-            url: view.url(),
-            artifact_id: id,
-            revision: view.current_revision,
-            stored_path: view.stored_path,
-            changed,
-        })
+        Ok((
+            ArtifactPublishReply {
+                url: view.url(),
+                artifact_id: id,
+                revision: view.current_revision,
+                stored_path: view.stored_path,
+                changed,
+            },
+            inserted,
+        ))
     }
 
     // ── watcher ─────────────────────────────────────────────────────────────
@@ -2887,6 +2906,17 @@ impl ArtifactsService {
 
     /// `artifact_publish`.
     pub fn agent_publish(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        self.agent_publish_with_receipt(caller, arguments).map(|(reply, _)| reply)
+    }
+
+    /// `artifact_publish`, and for a Manager status publish the id of the
+    /// revision this very call inserted, if it did (see
+    /// [`Self::record_with_receipt`]). The reply is the public one, unchanged.
+    pub fn agent_publish_with_receipt(
+        &self,
+        caller: &AgentCaller,
+        arguments: &Value,
+    ) -> Outcome<(Value, Option<u32>)> {
         let args: PublishArgs = parse_args(arguments)?;
         let key =
             mast_proto::agent_tools::validate_idempotency_key(args.idempotency_key.as_deref())
@@ -2957,7 +2987,7 @@ impl ArtifactsService {
                 if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
             }
         }
-        Ok(json!({
+        Ok((json!({
             "warnings": warnings,
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
@@ -2967,7 +2997,7 @@ impl ArtifactsService {
             "orphanedRowIds": orphaned_row_ids,
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
-        }))
+        }), None))
     }
 
     /// The Manager status record, published from the chat as inline text: a
@@ -2979,7 +3009,7 @@ impl ArtifactsService {
         caller: &AgentCaller,
         args: &PublishArgs,
         operation_id: String,
-    ) -> Outcome<Value> {
+    ) -> Outcome<(Value, Option<u32>)> {
         let invalid = |message: &str| ArtifactError::invalid(message.to_owned());
         let Some(content) = args.content.as_deref() else {
             return Err(invalid(
@@ -3014,7 +3044,7 @@ impl ArtifactsService {
         let source = dir.path().join("manager-status.md");
         std::fs::write(&source, content)
             .map_err(|e| ArtifactError::invalid(format!("could not stage the status document: {e}")))?;
-        let recorded = self.record(PublishRequest {
+        let recorded = self.record_with_receipt(PublishRequest {
             space_id: caller.space_id.clone(),
             work_item_id: Some(project_item),
             chat_id: Some(caller.chat_id.clone()),
@@ -3028,15 +3058,15 @@ impl ArtifactsService {
             by: caller.actor(),
         });
         drop(dir);
-        let reply = recorded?;
-        Ok(json!({
+        let (reply, inserted) = recorded?;
+        Ok((json!({
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
             "changed": reply.changed,
             "url": reply.url,
             "storedPath": reply.stored_path,
             "note": "Manager status recorded. An unchanged document records no new revision.",
-        }))
+        }), inserted))
     }
 
     /// A Background scheduled run owns one revision of its task's results

@@ -5451,7 +5451,7 @@ fn nudges(rig: &Rig) -> usize {
 async fn a_manager_turn_that_dispatches_without_a_status_is_nudged_once_and_publishing_clears_it() {
     let (rig, _item) = role_rig("status-nudge").await;
     let status = rig.core.sessions.agent_tokens();
-    let open = || status.manager_status().turn_open(CHAT);
+    let open = || rig.core.sessions.turn_in_flight(CHAT);
 
     // Turn 1 dispatches (creates a work item) and publishes nothing.
     rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
@@ -5661,7 +5661,7 @@ async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
         .unwrap();
     // The call had no turn behind it: it is its own turn, placed in the project
     // from the provisional marker, and owed outright because the chat holds nothing.
-    assert_eq!(tokens.manager_status().pending(first), 1, "the change is held for adoption");
+    assert!(tokens.manager_status().owes(first), "the change is held for adoption");
     // The turn ends before the chat is adopted.
     drop(lease);
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -5699,7 +5699,7 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_la
         .unwrap();
     // The call had no turn behind it: the reserved hand-off places it in the
     // project, and it is held for the successor because the chat holds nothing yet.
-    assert_eq!(tokens.manager_status().pending(successor), 1, "the change is held for adoption");
+    assert!(tokens.manager_status().owes(successor), "the change is held for adoption");
     drop(lease);
     // Nothing expires the reservation, so a rotation long after the turn ended
     // (here, dozens of re-checks later) is still honored.
@@ -5791,7 +5791,7 @@ async fn a_failed_handoff_never_nudges_a_non_holder() {
 
     // The successor is deleted: that is a confirmed failure, the obligation ends.
     assert!(rig.core.workspace.delete_chat(successor).unwrap());
-    wait_for(|| tokens.manager_status().pending(successor) == 0, "the obligation to end").await;
+    wait_for(|| !tokens.manager_status().owes(successor), "the obligation to end").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
@@ -5820,7 +5820,7 @@ async fn a_replaced_handoff_reservation_drops_the_first_successors_turn() {
     // The first reservation is replaced before its turn ends.
     rig.core.workspace.reserve_standing_role_hand_off(CHAT, "second-successor", "op-r2", None).unwrap();
     drop(lease);
-    wait_for(|| tokens.manager_status().pending("first-successor") == 0, "the turn to be dropped").await;
+    wait_for(|| !tokens.manager_status().owes("first-successor"), "the obligation to be dropped").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
@@ -5932,32 +5932,28 @@ async fn a_prompt_steered_into_a_parked_run_is_numbered_before_the_agent_can_act
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
     feed_done();
     wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
-    let before = tokens.manager_status().current_turn(CHAT);
-
-    // The agent's first state-changing call lands as the prompt arrives.
-    let seen: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    // The agent's first state-changing call completes the instant the harness is
+    // handed the prompt, before the session has published Working for it.
+    let seen: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     {
         let tokens = tokens.clone();
         let seen = seen.clone();
         *warm.on_steer.lock().unwrap() = Some(Box::new(move || {
-            let turn = tokens.manager_status().admit(CHAT);
-            tokens.manager_status().note_state_change(CHAT, "warm-run", turn);
-            *seen.lock().unwrap() = Some(turn);
+            tokens.manager_status().changed(CHAT);
+            *seen.lock().unwrap() = true;
         }));
     }
+    assert!(!tokens.manager_status().owes(CHAT));
     rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
+    wait_for(|| *seen.lock().unwrap(), "the harness to receive the prompt").await;
     wait_for(|| status_is(mast_proto::SessionStatus::Working), "the steered turn").await;
-    wait_for(|| seen.lock().map(|s| s.is_some()).unwrap_or(false), "the harness to receive the prompt").await;
-    let admitted = seen.lock().unwrap().expect("the harness received the prompt");
-    assert!(admitted > before, "the arriving prompt's own turn, not the one that ended");
-    assert_eq!(admitted, tokens.manager_status().current_turn(CHAT), "the number the session then used");
-    assert!(tokens.manager_status().turn_open(CHAT));
+    assert!(tokens.manager_status().owes(CHAT));
 
-    // The call is owed on that turn: when it settles without a status, a
-    // reminder is steered in.
+    // However the call and the boundary interleaved, the change is owed: when the
+    // turn settles without a status, one reminder is steered in.
     *warm.on_steer.lock().unwrap() = None;
     feed_done();
-    wait_for(|| reminders() == 1, "the reminder for the steered turn").await;
+    wait_for(|| reminders() == 1, "the reminder for the change").await;
 }
 
 /// The reminder is steered into a turn that is already running. No new turn
@@ -5991,7 +5987,7 @@ async fn a_reminder_steered_into_an_active_turn_does_not_strand_later_reminders(
     rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
     // A reminder is owed, and its message is steered into the turn in flight.
-    let id = tokens.manager_status().reserve_reminder(CHAT, 0);
+    let id = tokens.manager_status().reserve_reminder(CHAT);
     let outcome = rig.core.sessions.steer(CHAT, "status, please", Some(id.clone())).await.unwrap();
     assert!(matches!(outcome, mast_engine::SteerOutcome::Accepted));
     assert!(status_is(mast_proto::SessionStatus::Working));
@@ -6033,7 +6029,13 @@ async fn a_failed_dispatch_restores_the_reminder_row_and_keeps_its_reservation()
         .workspace
         .create_chat(chat, Some(SPACE), Some(&rig.core.device_id), Some(config), Some(rig.space_path.clone()))
         .unwrap();
-    let id = tokens.manager_status().reserve_reminder(chat, 0);
+    // It is a manager's chat: only those are tracked.
+    let item = create_item(&rig, "restore-item", "Restore project", None).await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item, chat, &[])
+        .unwrap();
+    let id = tokens.manager_status().reserve_reminder(chat);
     rig.core.doc_host.queue_message_with_id(chat, &id, "remind", Vec::new(), true).await.unwrap();
     let handle = rig.core.doc_host.open(chat).unwrap();
     // The drain took the row, the dispatch failed, and the row was put back:
@@ -6086,7 +6088,7 @@ async fn a_queued_reminder_steered_into_an_active_turn_is_settled_by_it() {
     rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
     // The reminder is queued behind the running turn, then promoted into it.
-    let id = tokens.manager_status().reserve_reminder(CHAT, 0);
+    let id = tokens.manager_status().reserve_reminder(CHAT);
     rig.core.doc_host.queue_message_with_id(CHAT, &id, "status, please", Vec::new(), true).await.unwrap();
     assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap(), "the row was steered in");
     wait_for(|| warm.received.lock().unwrap().iter().any(|m| m.contains("status, please")), "the harness to receive it").await;
@@ -6122,25 +6124,20 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
     feed_done();
     wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
-    let before = tokens.manager_status().current_turn(CHAT);
-
     // The write fails once the prompt is in the mailbox.
     rig.core.sessions.fail_next_user_write(CHAT);
     assert!(rig.core.sessions.steer(CHAT, "lost", None).await.is_err());
     wait_for(|| warm.received.lock().unwrap().iter().any(|m| m == "lost"), "the harness to have been shown it").await;
-    assert!(tokens.manager_status().current_turn(CHAT) > before, "its number is spent");
     // The harness was shown the prompt, and confirms it with a steering
     // boundary, which is what turns the session active; then it settles. Both
     // steps wait on the harness's own events, not on time.
     wait_for(|| status_is(mast_proto::SessionStatus::Working), "the harness to confirm the prompt").await;
     feed_done();
     wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the run to settle").await;
-    let spent = tokens.manager_status().current_turn(CHAT);
 
-    // The next prompt is numbered after it, and its turn is tracked.
+    // The next prompt is delivered and its change is tracked as usual.
     rig.core.sessions.steer(CHAT, "next", None).await.unwrap();
     wait_for(|| status_is(mast_proto::SessionStatus::Working), "the next turn").await;
-    assert!(tokens.manager_status().current_turn(CHAT) > spent, "numbers are never reused");
     let token = run_token(&rig, 0);
     tool(&rig, &token, "work_outline_create_child", json!({ "title": "After", "idempotencyKey": "pm1" }))
         .await
@@ -6225,7 +6222,7 @@ async fn a_chat_that_is_not_a_manager_is_never_reminded() {
         .unwrap();
     rig.harness.release.notify_one();
     let tokens = rig.core.sessions.agent_tokens();
-    wait_for(|| !tokens.manager_status().turn_open(CHAT), "the turn to be dropped").await;
+    wait_for(|| !tokens.manager_status().owes(CHAT), "the change to be forgiven: this chat manages nothing").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
     assert_eq!(nudges(&rig), 0);
