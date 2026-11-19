@@ -195,7 +195,6 @@ impl OutlineView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(crate::typography::ui_rems(10.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(summary)),
             )
