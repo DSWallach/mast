@@ -63,7 +63,8 @@ impl Store {
               CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, input TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS run_followups(kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, due INTEGER NOT NULL, PRIMARY KEY(kind,id));
               CREATE INDEX IF NOT EXISTS run_followups_due ON run_followups(kind,due,id);
-              CREATE TABLE IF NOT EXISTS notion_writes(kind TEXT NOT NULL, id TEXT NOT NULL, allowed INTEGER NOT NULL, PRIMARY KEY(kind,id));").map_err(fail)?;
+              CREATE TABLE IF NOT EXISTS notion_writes(kind TEXT NOT NULL, id TEXT NOT NULL, allowed INTEGER NOT NULL, PRIMARY KEY(kind,id));
+              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);").map_err(fail)?;
             if version == 1 {
                 tx.execute_batch("ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'launching'; UPDATE runs SET state=json_extract(body,'$.state');").map_err(fail)?;
             }
@@ -83,6 +84,30 @@ impl Store {
     }
     pub fn scope(&self) -> &str {
         self.1.as_str()
+    }
+    /// Whether new interactive chats start with the briefing index (off until set).
+    pub fn briefing_index(&self) -> Result<bool, EngineError> {
+        blocking(|| {
+            let c = self.0.lock().map_err(fail)?;
+            let value: Option<String> = c
+                .query_row("SELECT value FROM settings WHERE key='briefingIndex'", [], |r| r.get(0))
+                .optional()
+                .map_err(fail)?;
+            Ok(value.as_deref() == Some("1"))
+        })
+    }
+    pub fn set_briefing_index(&self, enabled: bool) -> Result<(), EngineError> {
+        blocking(|| {
+            self.0
+                .lock()
+                .map_err(fail)?
+                .execute(
+                    "INSERT INTO settings VALUES('briefingIndex',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [if enabled { "1" } else { "0" }],
+                )
+                .map_err(fail)?;
+            Ok(())
+        })
     }
     pub fn replay(&self, op: &str, input: &str) -> Result<bool, EngineError> {
         blocking(|| replay(&*self.0.lock().map_err(fail)?, op, input))
@@ -617,6 +642,20 @@ mod tests {
         store.update_run(&done).unwrap();
         assert!(store.active().unwrap().is_empty());
         assert_eq!(store.runs(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_briefing_index_setting_defaults_off_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(!store.briefing_index().unwrap());
+        store.set_briefing_index(true).unwrap();
+        store.set_briefing_index(true).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.briefing_index().unwrap());
+        store.set_briefing_index(false).unwrap();
+        assert!(!store.briefing_index().unwrap());
     }
 }
 

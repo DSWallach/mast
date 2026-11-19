@@ -2860,14 +2860,27 @@ impl DocHost {
     /// (which queues through `queue_command_with_id`): until the role adopts it
     /// the chat is hidden, and a message sent to it would run where no one can
     /// see the answer.
-    /// For a provisional first-start chat, the id of its own launch's command
-    /// (empty when the marker names no operation); `None` for any other chat.
-    fn provisional_launch_command_id(&self, chat_id: &str) -> Option<String> {
+    /// The resolution of a message refused on a provisional Manager chat. It is
+    /// final: a user's Retry Delivery never re-issues it, so a message that was
+    /// not authorized cannot reach the chat after the role adopts it.
+    const UNAUTHORIZED_FIRST_MESSAGE: &str = "this Manager has not started yet";
+
+    /// For a provisional first-start chat, the command id and the user message
+    /// id of its own launch (empty when the marker names no operation); `None`
+    /// for any other chat. A retry of a rejected or expired launch re-issues
+    /// the same message under a new command id, so the message id is what
+    /// identifies it.
+    fn provisional_launch_ids(&self, chat_id: &str) -> Option<(String, String)> {
         let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
         chat.standing_role_provisional()?;
         Some(
             chat.standing_role_provisional_operation()
-                .map(|operation| mast_proto::derive_id(operation, mast_proto::roles::COMMAND))
+                .map(|operation| {
+                    (
+                        mast_proto::derive_id(operation, mast_proto::roles::COMMAND),
+                        mast_proto::derive_id(operation, mast_proto::roles::MESSAGE),
+                    )
+                })
                 .unwrap_or_default(),
         )
     }
@@ -4441,6 +4454,10 @@ impl DocHost {
             if message_landed(mid) {
                 continue;
             }
+            // Refused as unauthorized on a provisional Manager chat: final.
+            if c.resolution.as_deref() == Some(Self::UNAUTHORIZED_FIRST_MESSAGE) {
+                continue;
+            }
             let dead = match c.status {
                 // Rejected: execute failed or the sweep terminalized a crash
                 // window. Expired: the entry outlived its TTL undelivered —
@@ -4543,7 +4560,7 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         // A provisional Manager chat takes no message from another device; its
         // own launch queues locally and is never relayed.
-        if self.provisional_launch_command_id(chat_id).is_some()
+        if self.provisional_launch_ids(chat_id).is_some()
             && matches!(
                 entry.payload,
                 SessionCommandPayload::Run { .. }
@@ -5002,24 +5019,29 @@ impl DocHost {
             // A provisional Manager chat runs only its own launch's command. A
             // message that reached its doc another way (sync from a peer) is
             // rejected here, so it cannot run once the chat is adopted.
-            if let Some(launch_command) = self.provisional_launch_command_id(&handle.chat_id) {
+            if let Some((launch_command, launch_message)) =
+                self.provisional_launch_ids(&handle.chat_id)
+            {
                 for c in &commands {
-                    let message = matches!(
-                        c.payload,
-                        SessionCommandPayload::Run { .. }
-                            | SessionCommandPayload::RunWithInstructions { .. }
-                            | SessionCommandPayload::Steer { .. }
-                    );
-                    if message
-                        && c.status == SessionCommandStatus::Pending
-                        && c.id != launch_command
+                    let message_id = match &c.payload {
+                        SessionCommandPayload::Run { message_id, .. }
+                        | SessionCommandPayload::RunWithInstructions { message_id, .. } => {
+                            Some(message_id.as_str())
+                        }
+                        SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+                        _ => continue,
+                    };
+                    // The launch's command, or a retry's re-issue of its message.
+                    let own = c.id == launch_command || message_id == Some(launch_message.as_str());
+                    if c.status == SessionCommandStatus::Pending
+                        && !own
                         && !skipped.contains(&c.id)
                     {
                         self.resolve_command(
                             handle,
                             &c.id,
                             SessionCommandStatus::Rejected,
-                            Some("this Manager has not started yet"),
+                            Some(Self::UNAUTHORIZED_FIRST_MESSAGE),
                         );
                         skipped.insert(c.id.clone());
                     }

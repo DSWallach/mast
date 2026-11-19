@@ -2178,6 +2178,13 @@ async fn a_start_that_queued_its_message_is_surfaced_by_the_next_attempt_which_s
     assert_eq!(chat_count(&rig), 1);
     assert_eq!(user_messages(&rig, &first), 1);
     assert!(turns_with(&rig, "a different message").is_empty());
+    // The recovery's activation is on disk when the refusal returns.
+    let disk = registry_on_disk(&rig);
+    assert_eq!(
+        disk.standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item).as_deref(),
+        Some(first.as_str())
+    );
+    assert!(disk.chat(&first).unwrap().unwrap().standing_role_provisional().is_none());
     rig.core.shutdown().await;
 }
 
@@ -2225,12 +2232,24 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
     core.shutdown().await;
 }
 
+/// The directory holding the engine's `docs.sqlite3`, wherever the profile
+/// layout put it under the rig's temp tree.
+fn find_docs_dir(root: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_docs_dir(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|name| name == "docs.sqlite3") {
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
 fn registry_on_disk(rig: &Rig) -> mast_doc::RegistryDoc {
-    let data = rig.root.join("data");
-    let dir = [data.join("profiles/local"), data.clone()]
-        .into_iter()
-        .find(|dir| dir.join("docs.sqlite3").exists())
-        .expect("the engine's docs database");
+    let dir = find_docs_dir(&rig.root).expect("the engine's docs database under the rig");
     let store = mast_sync::DocsStore::open(&dir).expect("a second reader opens the database");
     let bytes = store
         .load_snapshot(mast_doc::REGISTRY_DOC_ID)
@@ -2338,5 +2357,62 @@ async fn a_manager_start_reuses_the_clean_worktree_an_interrupted_attempt_create
     let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
     assert!(reply.execution_root.contains(".worktrees"), "{}", reply.execution_root);
     assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rejects_others() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let a = manager_params(&rig, "manager-reissue-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = provisional_chats(&rig).remove(0).id;
+    let handle = rig.core.doc_host.open(&chat).unwrap();
+    let entry = |id: &str, message: String, prompt: &str| SessionCommandEntry {
+        id: id.into(),
+        payload: SessionCommandPayload::Run {
+            request: run_request(prompt, &rig.repo.to_string_lossy()),
+            message_id: message,
+        },
+        issued_by: rig.core.workspace.device_id().to_owned(),
+        // Recent, or the drain expires it as stale.
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    // What a retry of a rejected or expired launch writes: the launch's
+    // message under a NEW command id. And a message nobody authorized.
+    let reissue = entry("reissued-command", derive_id("manager-reissue-a", roles::MESSAGE), "reissued launch");
+    let stray = entry("stray-command", "stray-message".into(), "stray message");
+    handle.doc().queue_command(&reissue).unwrap();
+    handle.doc().queue_command(&stray).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+
+    wait_for(|| turns_with(&rig, "reissued launch").len() == 1, "the reissued launch message").await;
+    assert!(turns_with(&rig, "stray message").is_empty());
+    let stray_entry = commands(&rig, &chat).into_iter().find(|c| c.id == "stray-command").unwrap();
+    assert_eq!(stray_entry.status, SessionCommandStatus::Rejected);
+    assert!(stray_entry.resolution.unwrap_or_default().contains("not started yet"));
+
+    // After the role adopts the chat, a user's Retry Delivery must not
+    // re-issue the refused message: the rejection is final.
+    rig.core
+        .workspace
+        .activate_standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item, &chat, &[])
+        .expect("the provisional chat activates");
+    rig.core.doc_host.retry_delivery(&chat).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(turns_with(&rig, "stray message").is_empty(), "the refused message never ran");
+    let stray_commands: Vec<_> = commands(&rig, &chat)
+        .into_iter()
+        .filter(|c| matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if message_id == "stray-message"))
+        .collect();
+    assert_eq!(stray_commands.len(), 1, "no re-issued attempt: {stray_commands:?}");
+    assert_eq!(stray_commands[0].status, SessionCommandStatus::Rejected);
     rig.core.shutdown().await;
 }

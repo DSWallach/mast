@@ -652,10 +652,7 @@ impl WorkItemLaunchService {
                         if launched {
                             // An earlier start queued its message and stopped
                             // before adopting: surface it, and send nothing more.
-                            self.doc_host.persist_chat_now(&candidate.id).map_err(engine_error)?;
-                            self.workspace
-                                .activate_standing_role_chat(kind, &p.work_item_id, &candidate.id, &[])
-                                .map_err(conflict)?;
+                            self.activate_role_chat(kind, &p.work_item_id, &candidate.id)?;
                             return Err(conflict(MANAGER_ALREADY_STARTED));
                         }
                     }
@@ -922,12 +919,7 @@ impl WorkItemLaunchService {
         // saved, then one registry batch makes it the Manager. Idempotent on
         // a retry (an adopted chat is returned as is).
         if let Some(kind) = p.standing_role {
-            self.doc_host.persist_chat_now(&chat_id).map_err(engine_error)?;
-            self.workspace
-                .activate_standing_role_chat(kind, &p.work_item_id, &chat_id, &[])
-                .map_err(conflict)?;
-            // The success the caller sees includes the adoption on disk.
-            self.workspace.persist_registry_now().map_err(engine_error)?;
+            self.activate_role_chat(kind, &p.work_item_id, &chat_id)?;
         }
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
@@ -955,6 +947,22 @@ impl WorkItemLaunchService {
             state,
             detail,
         })
+    }
+
+    /// Make a provisional first-start chat the role's chat: save its session
+    /// doc (the queued message), adopt it in one registry batch, then save the
+    /// registry, so a success is on disk. Every activation goes through here.
+    fn activate_role_chat(
+        &self,
+        kind: mast_proto::StandingRoleKind,
+        item_id: &str,
+        chat_id: &str,
+    ) -> Result<(), WorkOutlineError> {
+        self.doc_host.persist_chat_now(chat_id).map_err(engine_error)?;
+        self.workspace
+            .activate_standing_role_chat(kind, item_id, chat_id, &[])
+            .map_err(conflict)?;
+        self.workspace.persist_registry_now().map_err(engine_error)
     }
 
     /// Whether this launch delivers a Work Outline instruction revision (see

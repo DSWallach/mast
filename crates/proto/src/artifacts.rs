@@ -273,6 +273,12 @@ pub struct ArtifactRevision {
     /// this revision). Internal; ≤ 64 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
+    /// The task key (the hash in its `scheduled-results:` role) of the
+    /// Background scheduled run that published this revision, stamped when it
+    /// is recorded. Absent for every other writer and for revisions recorded
+    /// before the stamp existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
 }
 
 /// One artifact as the registry row holds it (metadata only). This is both
@@ -320,7 +326,8 @@ pub struct ArtifactView {
     /// Number of the newest revision (0 = none recorded).
     #[serde(default)]
     pub current_revision: u32,
-    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`].
+    /// Newest first, at most [`artifact_limits::MAX_REVISIONS`], plus the
+    /// newest Background-run revision when it is older than that.
     #[serde(default)]
     pub revisions: Vec<ArtifactRevision>,
     /// The work item's (or chat's) plan. At most one per scope.

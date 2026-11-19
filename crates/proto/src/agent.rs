@@ -1029,6 +1029,9 @@ pub mod agent_tools {
         /// The pinned plan of the Chat's work item (or of the Chat).
         pub const ARTIFACT_GET_PLAN: &str = "artifact_get_plan";
         pub const ARTIFACT_GET_DECISIONS: &str = "artifact_get_decisions";
+        /// Read-only: the latest results artifact of one scheduled task, or of
+        /// every task in the caller's Space, with run times.
+        pub const BRIEFING_READ: &str = "briefing_read";
         /// Render an artifact offscreen in the headed app and return a
         /// screenshot plus errors and warnings.
         pub const ARTIFACT_RENDER_CHECK: &str = "artifact_render_check";
@@ -1044,10 +1047,11 @@ pub mod agent_tools {
         pub const HAND_OFF_ORCHESTRATOR: &str = "hand_off_orchestrator";
 
         /// The planning artifact tools, in catalog order.
-        pub const ARTIFACTS: [&str; 6] = [
+        pub const ARTIFACTS: [&str; 7] = [
             ARTIFACT_PUBLISH,
             ARTIFACT_GET_PLAN,
             ARTIFACT_GET_DECISIONS,
+            BRIEFING_READ,
             ARTIFACT_RENDER_CHECK,
             REVIEW_PUBLISH,
             REVIEW_GET,
@@ -1471,6 +1475,15 @@ pub mod agent_tools {
             required: &[p("artifactId", "decision sheet artifact id")],
             optional: &[],
             example: r#"{"artifactId": "<artifact id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::BRIEFING_READ,
+            required: &[],
+            optional: &[
+                p("task", "task name, task id or results artifact id; omit for every task in the Space"),
+                p("index", "true for run times only, no content"),
+            ],
+            example: r#"{"task": "Slack"}"#,
         },
         ToolUsage {
             tool: tools::ARTIFACT_RENDER_CHECK,

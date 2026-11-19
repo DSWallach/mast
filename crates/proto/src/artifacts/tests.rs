@@ -32,6 +32,7 @@ fn view() -> ArtifactView {
             },
             size_bytes: 10,
             op: None,
+            scheduled_task: None,
         }],
         pinned_as_plan: true,
         answers: Vec::new(),
