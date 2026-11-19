@@ -1392,15 +1392,20 @@ impl RegistryDoc {
         // The same holds for queued descendants whose project changes with the
         // move (a project inside the moved subtree keeps its own queue).
         let new_root = dest.and_then(|dest| Self::tree_project_root(&tree, dest));
-        for descendant in tree.descendants(&p.work_item_id) {
-            let before = Self::tree_project_root(&tree, &descendant);
-            if tree.items[&descendant].queue_order_key.is_some()
-                && before.as_deref() != Some(p.work_item_id.as_str())
+        let subtree = tree.descendants(&p.work_item_id);
+        for descendant in &subtree {
+            let before = Self::tree_project_root(&tree, descendant);
+            // A project inside the moved subtree travels with its own queue.
+            let stays_in_subtree = before
+                .as_deref()
+                .is_some_and(|root| root == p.work_item_id || subtree.iter().any(|id| id == root));
+            if tree.items[descendant].queue_order_key.is_some()
+                && !stays_in_subtree
                 && before != new_root
             {
                 plan.push(Planned::update(
                     KIND_WORK_ITEMS,
-                    &descendant,
+                    descendant,
                     BTreeMap::from([("queueOrderKey".to_owned(), Value::Null)]),
                 ));
             }
