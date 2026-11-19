@@ -319,7 +319,7 @@ mod tests {
             surface.preview.documents.insert(path.clone(), document);
             surface.preview.active = Some(path.clone());
             surface.request_context = Some(context.clone());
-            surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context }, cx);
+            surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context, index_ready: false }, cx);
             assert!(surface.definition_notice.is_none());
         }).unwrap();
         cx.run_until_parked();
@@ -377,6 +377,7 @@ struct DefinitionLookup {
     cursor: usize,
     source: String,
     context: super::client::FilesRequestContext,
+    index_ready: bool,
 }
 
 impl super::FilesSurface {
@@ -407,15 +408,16 @@ impl super::FilesSurface {
         let Some(context) = self.request_context.clone() else { return; };
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let client = WorkspaceFilesClient::new(engine, context.clone());
-        self.start_definition_lookup(client, DefinitionLookup { path, name, cursor, source: original_source, context }, cx);
+        let index_ready = self.definition_providers.get(&path).is_some_and(|provider| !provider.is_indexing());
+        self.start_definition_lookup(client, DefinitionLookup { path, name, cursor, source: original_source, context, index_ready }, cx);
     }
 
     fn start_definition_lookup(&mut self, client: WorkspaceFilesClient, lookup: DefinitionLookup, cx: &mut gpui::Context<Self>) {
-        let DefinitionLookup { path, name, cursor, source: original_source, context } = lookup;
+        let DefinitionLookup { path, name, cursor, source: original_source, context, index_ready } = lookup;
         self.definition_notice_generation = self.definition_notice_generation.wrapping_add(1);
         let notice_generation = self.definition_notice_generation;
         self.definition_notice = None;
-        let snapshot_ready = Rc::new(std::cell::Cell::new(false));
+        let snapshot_ready = Rc::new(std::cell::Cell::new(index_ready));
         let notice_ready = snapshot_ready.clone();
         cx.spawn(async move |surface, cx| {
             cx.background_executor().timer(Duration::from_millis(150)).await;
