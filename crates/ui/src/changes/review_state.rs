@@ -76,9 +76,9 @@ pub(super) fn changed_since_files(
         .collect()
 }
 
-/// Make `head` the re-review baseline, with the hunks it showed. A diff too
-/// large for the snapshot cap records the head alone (no group, no carry-over
-/// claim); the range diff still works.
+/// Make `head` the re-review baseline, with the hunks it showed. A diff over the
+/// snapshot cap records the head with `reviewed_truncated` and no snapshot; with
+/// `None` the snapshot is not known yet and is filled in later.
 pub(super) fn stamp_reviewed(
     state: &mut mast_proto::DiffReviewState,
     head: &str,
@@ -86,15 +86,29 @@ pub(super) fn stamp_reviewed(
 ) {
     state.reviewed_head = Some(head.to_owned());
     state.reviewed_at = Some(chrono::Utc::now().timestamp_millis());
-    state.reviewed_hunks = identities
-        .map(|files| files.iter().flatten().cloned().collect::<std::collections::BTreeSet<_>>())
-        .filter(|set| set.len() <= mast_proto::REVIEWED_HUNKS_CAP)
-        .unwrap_or_default();
+    state.reviewed_hunks.clear();
+    state.reviewed_truncated = false;
+    if let Some(files) = identities {
+        fill_snapshot(state, files);
+    }
+}
+
+/// Record the reviewed-hunk snapshot (or that it is over the cap).
+pub(super) fn fill_snapshot(state: &mut mast_proto::DiffReviewState, identities: &[Vec<String>]) {
+    let set: std::collections::BTreeSet<String> = identities.iter().flatten().cloned().collect();
+    if set.len() > mast_proto::REVIEWED_HUNKS_CAP {
+        state.reviewed_hunks.clear();
+        state.reviewed_truncated = true;
+    } else {
+        state.reviewed_hunks = set;
+        state.reviewed_truncated = false;
+    }
 }
 
 /// Advance the baseline after a mark change, but only once the reviewer has
 /// caught up: while changed hunks remain unviewed the group must keep listing
-/// them, so marking one hunk must not erase the rest of the delta.
+/// them, so marking one hunk must not erase the rest of the delta. A baseline
+/// without a usable snapshot (not yet known, or over the cap) never advances.
 pub(super) fn stamp_on_mark(
     state: &mut mast_proto::DiffReviewState,
     identities: &[Vec<String>],
@@ -102,20 +116,19 @@ pub(super) fn stamp_on_mark(
     let Some(head) = state.head_sha.clone() else {
         return;
     };
-    if state
-        .reviewed_head
-        .as_deref()
-        .is_some_and(|reviewed| reviewed.eq_ignore_ascii_case(&head))
-        && !state.reviewed_hunks.is_empty()
-    {
-        return;
+    match state.reviewed_head.as_deref() {
+        None => stamp_reviewed(state, &head, Some(identities)),
+        Some(reviewed) => {
+            if reviewed.eq_ignore_ascii_case(&head)
+                || state.reviewed_truncated
+                || state.reviewed_hunks.is_empty()
+                || !changed_since_files(state, Some(&head), identities).is_empty()
+            {
+                return;
+            }
+            stamp_reviewed(state, &head, Some(identities));
+        }
     }
-    if state.reviewed_head.is_some()
-        && !changed_since_files(state, Some(&head), identities).is_empty()
-    {
-        return;
-    }
-    stamp_reviewed(state, &head, Some(identities));
 }
 
 #[cfg(test)]
@@ -213,10 +226,25 @@ mod tests {
     #[test]
     fn oversized_snapshots_record_only_the_head() {
         let huge: Vec<Vec<String>> = vec![(0..mast_proto::REVIEWED_HUNKS_CAP + 1).map(|i| i.to_string()).collect()];
-        let mut state = mast_proto::DiffReviewState::default();
+        let mut state = mast_proto::DiffReviewState { head_sha: Some("h2".into()), ..Default::default() };
         stamp_reviewed(&mut state, "h", Some(&huge));
         assert_eq!(state.reviewed_head.as_deref(), Some("h"));
-        assert!(state.reviewed_hunks.is_empty());
+        assert!(state.reviewed_hunks.is_empty() && state.reviewed_truncated);
+        // A truncated baseline never advances on a mark.
+        stamp_on_mark(&mut state, &[vec!["x".into()]]);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn a_baseline_without_a_snapshot_never_advances_on_a_mark() {
+        let ids = vec![vec!["a".to_owned()]];
+        let mut state = mast_proto::DiffReviewState { head_sha: Some("h2".into()), ..Default::default() };
+        stamp_reviewed(&mut state, "h1", None);
+        stamp_on_mark(&mut state, &ids);
+        assert_eq!(state.reviewed_head.as_deref(), Some("h1"));
+        assert!(state.reviewed_hunks.is_empty() && !state.reviewed_truncated);
+        fill_snapshot(&mut state, &ids);
+        assert_eq!(state.reviewed_hunks.len(), 1);
     }
 
     #[test]
@@ -789,7 +817,7 @@ impl Changes {
         }
     }
 
-    fn refresh_review_status(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_review_status(&mut self, cx: &mut Context<Self>) {
         if self.review_status_task.is_some()
             || self
                 .review_status_checked
@@ -869,7 +897,7 @@ impl Changes {
         cx.notify();
     }
 
-    fn save_review_state(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_review_state(&mut self, cx: &mut Context<Self>) {
         if self.review_save_task.is_some() || self.review_error.is_some() {
             return;
         }
@@ -916,23 +944,29 @@ impl Changes {
         }));
     }
 
-    /// Record `head` as the re-review baseline for `target`. The hunk snapshot is
-    /// taken only when the parsed diff is the one for that head.
+    /// Record `head` as the re-review baseline for `target` (a submit or Mark all
+    /// reviewed) and leave re-review mode. The snapshot is the CURRENT full diff's
+    /// identities for that head; when the full diff for it is not on hand the head
+    /// is recorded now and the snapshot is filled in when that diff parses.
     pub(super) fn stamp_reviewed_head(&mut self, target: &str, head: &str, cx: &mut Context<Self>) {
         if self.review_target.as_deref() != Some(target) {
             return;
         }
-        let Some(state) = self.review_state.as_mut() else {
-            return;
-        };
-        let identities = self
+        self.rereview = false;
+        self.rereview_unavailable = None;
+        let known = self
             .full_identities
             .as_ref()
             .filter(|(known, _)| known.eq_ignore_ascii_case(head))
-            .map(|(_, identities)| identities.as_slice());
-        stamp_reviewed(state, head, identities);
+            .map(|(_, identities)| identities.clone());
+        let Some(state) = self.review_state.as_mut() else {
+            return;
+        };
+        stamp_reviewed(state, head, known.as_ref().map(|ids| ids.as_slice()));
+        self.pending_snapshot = known.is_none().then(|| (target.to_owned(), head.to_owned()));
         self.review_pending.insert(state.target.clone(), state.clone());
         self.save_review_state(cx);
+        self.ensure_scoped(cx);
         cx.notify();
     }
 

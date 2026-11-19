@@ -57,18 +57,51 @@ impl Changes {
         cx.notify();
     }
 
-    /// Remember the identities of the full diff for the current head, so a
-    /// baseline stamped while the delta is on screen still carries a snapshot.
-    pub(super) fn note_full_identities(&mut self, cx: &App) {
+    /// Remember the identities and files of the full diff for the current head,
+    /// so a baseline stamped (and drafts anchored) while the delta is on screen
+    /// use the full diff. Fills in a baseline snapshot that was waiting for it.
+    pub(super) fn note_full_identities(&mut self, cx: &mut Context<Self>) {
         if self.rereview_active() {
             return;
         }
-        let (Some(parsed), Some((_, Some(head)))) = (self.parsed.as_ref(), self.review_identity(cx)) else {
+        let head = self.review_identity(cx).and_then(|(_, head)| head);
+        let (Some(head), Some(parsed)) = (head, self.parsed.as_ref()) else {
             return;
         };
-        if !parsed.truncated {
-            self.full_identities = Some((head, parsed.hunk_identities.clone()));
+        if parsed.truncated {
+            return;
         }
+        self.full_files = Some((head.clone(), parsed.files.clone()));
+        self.full_identities = Some((head.clone(), parsed.hunk_identities.clone()));
+        let Some((target, wanted)) = self.pending_snapshot.clone() else {
+            return;
+        };
+        if !wanted.eq_ignore_ascii_case(&head) || self.review_target.as_deref() != Some(target.as_str()) {
+            return;
+        }
+        self.pending_snapshot = None;
+        let identities = self.full_identities.as_ref().map(|(_, ids)| ids.clone());
+        if let (Some(state), Some(ids)) = (self.review_state.as_mut(), identities)
+            && state.reviewed_head.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(&wanted))
+        {
+            fill_snapshot(state, &ids);
+            self.review_pending.insert(state.target.clone(), state.clone());
+            self.save_review_state(cx);
+        }
+    }
+
+    /// The files and hunk identities reviews anchor to: the full PR diff, even
+    /// while the delta is shown. `None` while the full diff is still loading.
+    pub(super) fn review_files(&self) -> Option<(Arc<Vec<FileDiff>>, Arc<Vec<Vec<String>>>)> {
+        if !self.rereview_active() {
+            let parsed = self.parsed.as_ref()?;
+            return Some((parsed.files.clone(), parsed.hunk_identities.clone()));
+        }
+        let head = self.review_state.as_ref()?.head_sha.as_deref()?;
+        let (files_head, files) = self.full_files.as_ref()?;
+        let (ids_head, ids) = self.full_identities.as_ref()?;
+        (files_head.eq_ignore_ascii_case(head) && ids_head.eq_ignore_ascii_case(head))
+            .then(|| (files.clone(), ids.clone()))
     }
 
     /// Full-diff identities for `head`, if known.
@@ -87,10 +120,7 @@ impl Changes {
         let Some(target) = self.review_target.clone() else {
             return;
         };
-        self.rereview = false;
-        self.rereview_unavailable = None;
         self.stamp_reviewed_head(&target, &head, cx);
-        self.ensure_scoped(cx);
     }
 
     pub(super) fn render_rereview_controls(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -252,16 +282,52 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_the_pr_clears_the_review_state_and_the_mode(cx: &mut gpui::TestAppContext) {
-        let (changes, vcx) = changes_with_review(cx, "bbbbbbb1", Some("aaaaaaa1"));
+    fn a_merged_pr_clears_the_baseline_through_the_real_status_refresh(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        let log = calls.clone();
+        let rpc: crate::diff_targets::FakeRpc = std::sync::Arc::new(move |method, params| {
+            log.lock().unwrap().push((method.to_owned(), params.clone()));
+            if method == mast_rpc::methods::PR_STATUS {
+                let status = mast_proto::PullRequestStatusSummary {
+                    pr_ref: mast_proto::PullRequestRef::new("o", "r", 1),
+                    state: mast_proto::PullRequestState::Merged,
+                    ..Default::default()
+                };
+                return Ok(serde_json::to_value(status).unwrap());
+            }
+            Ok(serde_json::json!({"state": null}))
+        });
+        let (changes, vcx) = cx.add_window_view(move |_, cx| {
+            let mut state = AppState::new();
+            state.chat_diff_rpc_override = Some(rpc);
+            let state = cx.new(|_| state);
+            Changes::new(state, cx)
+        });
         changes.update(vcx, |c, cx| {
+            c.scope = DiffScope::Branch;
+            c.review_target = Some("pr:o/r#1".into());
+            c.review_state = Some(mast_proto::DiffReviewState {
+                target: "pr:o/r#1".into(),
+                head_sha: Some("bbbbbbb1".into()),
+                reviewed_head: Some("aaaaaaa1".into()),
+                reviewed_hunks: ["h".to_owned()].into(),
+                ..Default::default()
+            });
             c.rereview = true;
-            // The status refresh's closed path (see refresh_review_status).
-            c.review_closed = true;
-            c.review_state = None;
-            c.review_pending.remove("pr:o/r#1");
+            assert!(c.rereview_active());
+            c.review_pending.insert("pr:o/r#1".into(), c.review_state.clone().unwrap());
+            c.review_status_checked = None;
+            c.refresh_review_status(cx);
+        });
+        vcx.run_until_parked();
+        changes.read_with(&*vcx, |c, _| {
+            assert!(c.review_closed && c.review_state.is_none(), "the row is dropped locally");
             assert!(!c.rereview_active());
-            assert!(c.render_rereview_controls(&Theme::dark(), cx).is_empty());
+            assert!(!c.review_pending.contains_key("pr:o/r#1"));
         });
     }
 }

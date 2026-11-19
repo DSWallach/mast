@@ -393,13 +393,13 @@ impl Changes {
             ),
             None => context,
         };
-        // Refs only: the checkout's own working tree is irrelevant.
-        let watch_sum = if range.is_some() {
+        let since = self.rereview_range();
+        // Refs only, or a range between two commits: the working tree is irrelevant.
+        let watch_sum = if range.is_some() || since.is_some() {
             String::new()
         } else {
             self.resolved(cx).map(|d| d.checksum.clone()).unwrap_or_default()
         };
-        let since = self.rereview_range();
         let context = match &since {
             Some((old, new)) => format!("{context}|since|{old}|{new}"),
             None => context,

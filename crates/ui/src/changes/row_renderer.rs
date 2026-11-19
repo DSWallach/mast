@@ -215,7 +215,7 @@ impl Changes {
                     .when(hovered, |el| {
                         el.child(positioned_adder(
                             comment_adder_left(side, gutter_px),
-                            render_comment_adder(&path, side, line_no, &theme, cx),
+                            render_comment_adder(&path, side, line_no, &theme, self.rereview_active(), cx),
                         ))
                     })
                     .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -330,7 +330,7 @@ impl Changes {
                             .when(self.hovering(&path, anchor), |el| {
                                 el.relative().child(positioned_adder(
                                     split_adder_left(gutter_px),
-                                    render_comment_adder(&path, side, line_no, &theme, cx),
+                                    render_comment_adder(&path, side, line_no, &theme, self.rereview_active(), cx),
                                 ))
                             })
                             .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {

@@ -194,6 +194,11 @@ impl Changes {
         if self.pinned_cwd.is_some() {
             return;
         }
+        if side == CommentSide::Old && self.rereview_active() {
+            self.local_draft_error = Some("Left-side comments aren't available in the Since view: its old side is the previous head, not the base. Switch to the full diff to comment on removed lines.".into());
+            cx.notify();
+            return;
+        }
         if self.draft.is_some() { self.commit_draft(cx); }
         let local = if local_allowed && matches!(self.scope, DiffScope::Branch | DiffScope::Range) {
             if let Some(target) = self.review_target.as_deref() {

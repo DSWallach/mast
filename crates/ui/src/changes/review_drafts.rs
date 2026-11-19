@@ -519,11 +519,6 @@ impl Changes {
         theme: &Theme,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        // The delta shows only some of the PR: drafts and threads outside it are
-        // not outdated, they live in the full diff.
-        if self.rereview_active() {
-            return Vec::new();
-        }
         let Some(target) = self.review_target.as_ref() else {
             return Vec::new();
         };
@@ -677,7 +672,11 @@ impl Changes {
                             div()
                                 .when(true, crate::components::hunk_header)
                                 .text_color(theme.text_faint)
-                                .child(format!("Thread outside the current diff · {location}")),
+                                .child(if self.rereview_active() {
+                                    format!("Thread outside these changes · {location}")
+                                } else {
+                                    format!("Thread outside the current diff · {location}")
+                                }),
                         )
                         .child(self.render_review_thread(index, *height, theme, cx))
                         .into_any_element(),
@@ -706,6 +705,17 @@ impl Changes {
                         "Show more outdated items ({})",
                         total - self.outdated_limit
                     ))
+                    .into_any_element(),
+            );
+        }
+        if self.rereview_active() && !cards.is_empty() {
+            cards.insert(
+                0,
+                div()
+                    .id("changes-drafts-outside-heading")
+                    .when(true, crate::components::hunk_header)
+                    .text_color(theme.text_faint)
+                    .child("Drafts outside these changes")
                     .into_any_element(),
             );
         }
@@ -763,12 +773,10 @@ impl Changes {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let suggestions: Vec<_> = self.review_suggestions.values().cloned().collect();
+        // Drafts always anchor against the full PR diff, also while the delta is shown.
         self.draft_anchor_index = self
-            .parsed
-            .as_ref()
-            .map(|parsed| {
-                DraftAnchorIndex::new(&parsed.files, &parsed.hunk_identities, drafts, &suggestions)
-            })
+            .review_files()
+            .map(|(files, identities)| DraftAnchorIndex::new(&files, &identities, drafts, &suggestions))
             .unwrap_or_default();
         self.rebuild_draft_comments(cx);
         self.rebuild_suggestion_comments(cx);
@@ -786,7 +794,24 @@ impl Changes {
         let (placed, unplaced) = self.draft_anchor_index.partition_drafts(drafts);
         self.local_outdated_drafts.extend(unplaced.into_iter().cloned());
         self.local_draft_ids.extend(drafts.iter().map(|draft| draft.id.clone()));
+        // In the Since view only right-side lines the delta shows can carry a draft inline;
+        // the rest are listed under "Drafts outside these changes" (never hidden or held back).
+        let visible: std::collections::HashSet<(&str, u32)> = if self.rereview_active() {
+            self.parsed
+                .iter()
+                .flat_map(|parsed| parsed.files.iter())
+                .flat_map(|file| file.hunks.iter().flat_map(move |hunk| hunk.lines.iter().filter_map(move |line| line.new_no.map(|n| (file.path.as_str(), n)))))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let rereview = self.rereview_active();
+        let mut outside = Vec::new();
         for (draft, (_, line)) in placed {
+            if rereview && (draft.anchor.side == ReviewSide::Left || !visible.contains(&(draft.anchor.file.as_str(), line))) {
+                outside.push(draft.clone());
+                continue;
+            }
             let side = match draft.anchor.side {
                 ReviewSide::Left => CommentSide::Old,
                 ReviewSide::Right => CommentSide::New,
@@ -799,6 +824,7 @@ impl Changes {
             }
             comments.push(comment);
         }
+        self.local_outdated_drafts.extend(outside);
         self.local_draft_comments.insert(target, comments);
         self.refresh_thread_rows(cx);
     }
@@ -813,9 +839,9 @@ impl Changes {
         if !self.local_review_drafts.contains_key(target) {
             return None;
         }
-        let parsed = self.parsed.as_ref()?;
-        let (file_ix, file) = parsed
-            .files
+        // In the Since view the anchor (hunk hash, right-side line) comes from the full PR diff.
+        let (files, identities) = self.review_files()?;
+        let (file_ix, file) = files
             .iter()
             .enumerate()
             .find(|(_, file)| file.path == path)?;
@@ -838,8 +864,7 @@ impl Changes {
                         },
                         start_line: line,
                         end_line: line,
-                        hunk_hash: parsed
-                            .hunk_identities
+                        hunk_hash: identities
                             .get(file_ix)
                             .and_then(|ids| ids.get(hunk_ix))
                             .cloned(),

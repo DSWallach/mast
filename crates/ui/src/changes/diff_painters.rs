@@ -454,15 +454,27 @@ pub(super) fn render_comment_adder(
     side: CommentSide,
     line: u32,
     theme: &Theme,
+    left_disabled: bool,
     cx: &Context<Changes>,
 ) -> AnyElement {
     let target = path.to_string();
-    crate::comment_ui::render_comment_adder(
+    let adder = crate::comment_ui::render_comment_adder(
         format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
         theme,
         cx,
         move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
-    )
+    );
+    if !(left_disabled && side == CommentSide::Old) {
+        return adder;
+    }
+    div()
+        .id(SharedString::from(format!("cmt-add-disabled-{path}-{line}")))
+        .opacity(0.4)
+        .tooltip(|_, cx| {
+            cx.new(|_| DiffHeaderTooltip("Left-side comments aren't available in the Since view; its old side is the previous head. Switch to the full diff.".into())).into()
+        })
+        .child(adder)
+        .into_any_element()
 }
 
 /// Mirrors [`ReviewComment::cite_path`] for the not-yet-staged note.

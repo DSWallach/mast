@@ -1325,6 +1325,10 @@ pub struct Changes {
     rereview_unavailable: Option<String>,
     /// Hunk identities of the latest full (non re-review) diff and the head they belong to.
     full_identities: Option<(String, Arc<Vec<Vec<String>>>)>,
+    /// Files of that same full diff: drafts always anchor against it, never against the delta.
+    full_files: Option<(String, Arc<Vec<FileDiff>>)>,
+    /// A baseline stamped before the full diff for its head was known: (target, head) awaiting its snapshot.
+    pending_snapshot: Option<(String, String)>,
     review_walkthrough: bool,
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
@@ -1637,6 +1641,8 @@ impl Changes {
             rereview: false,
             rereview_unavailable: None,
             full_identities: None,
+            full_files: None,
+            pending_snapshot: None,
             review_walkthrough: false,
             walkthrough_target: None,
             review_tour: false,
