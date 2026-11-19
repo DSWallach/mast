@@ -171,8 +171,9 @@ impl OutlineView {
             (None, true) => String::new(),
             (None, false) => "Starts on your first message".to_owned(),
         };
+        let label = theme.identity_foreground(theme.manager_accent());
         if self.sidebar {
-            return self.quiet_group_body(key, "Manager", summary, theme.text, theme);
+            return self.quiet_group_body(key, "Manager", summary, label, theme);
         }
         div()
             .debug_selector({
@@ -189,7 +190,7 @@ impl OutlineView {
                     .min_w_0()
                     .truncate()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(label)
                     .child(SharedString::from("Manager")),
             )
             .child(

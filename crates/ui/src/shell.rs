@@ -16686,10 +16686,15 @@ impl Shell {
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
         }
         if let Ok(manager) = std::env::var("MAST_PREVIEW_MANAGER")
-            && matches!(manager.as_str(), "placeholder" | "chat")
+            && matches!(manager.as_str(), "placeholder" | "chat" | "pinned")
         {
+            let pinned = manager == "pinned";
+            if pinned && let Some(key) = self.active_sidebar_pin_profile_key(cx) {
+                *self.settings.sidebar_pins_mut(key) =
+                    vec!["fixture-design".into(), "fixture-tests".into()];
+            }
             self.ensure_overview_page(cx).update(cx, |page, cx| {
-                page.show_snapshot_manager(manager == "chat", cx)
+                page.show_snapshot_manager(manager != "placeholder", pinned, cx)
             });
         }
     }
