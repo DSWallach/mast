@@ -92,6 +92,13 @@ pub(crate) fn launch_scheduled_chat(
         )),
         None => None,
     };
+    let parent = match (draft.space_id.as_deref(), draft.work_item_id.as_deref()) {
+        (Some(space), Some(item)) => {
+            let snapshot = mast_doc::materialize_work_outline(space, &workspace.work_outline_inputs(space));
+            snapshot.project_root(item).and_then(|project| workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project.id))
+        }
+        _ => None,
+    };
     workspace.create_scheduled_chat(
         chat_id,
         draft.space_id.as_deref(),
@@ -106,6 +113,7 @@ pub(crate) fn launch_scheduled_chat(
             write_to_notion: draft.write_to_notion,
             ..Default::default()
         },
+        parent,
     )?;
     if workspace.chat(chat_id)?.is_some_and(|c| c.title.is_none()) {
         workspace.rename_chat(chat_id, &draft.name)?;
@@ -413,6 +421,10 @@ pub struct WorkItemLaunchService {
 }
 
 impl WorkItemLaunchService {
+    #[cfg(test)]
+    pub(crate) async fn test_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
     pub fn new(
         workspace: WorkspaceHost,
         doc_host: DocHost,

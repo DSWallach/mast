@@ -67,6 +67,7 @@ async fn scheduled_launch_is_durable_idempotent_and_tagged() {
     let chat_id = snapshot.runs[0].chat_id.as_ref().unwrap();
     let chat = core.workspace.chat(chat_id).unwrap().unwrap();
     assert_eq!(chat.scheduled_task_info.as_ref().unwrap().task_id, "task");
+    assert!(chat.parent_chat_id.is_none(), "a standalone task has no Manager parent");
     assert_eq!(chat.config.unwrap().reasoning, Some(ReasoningLevel::Medium));
     let doc = core.doc_host.open(chat_id).unwrap();
     assert_eq!(doc.doc().read_commands().unwrap().len(), 1);

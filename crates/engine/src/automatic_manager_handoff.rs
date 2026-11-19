@@ -1,0 +1,202 @@
+//! Automatic context-window handoff for locally hosted project Managers.
+//!
+//! A normal completed turn at 80% requests a status checkpoint; a subsequent
+//! completed checkpoint turn hands off only after a newer status is visible.
+//! At 92% the last available status is used immediately.
+
+use std::collections::HashMap;
+
+use mast_proto::{Session, SessionStatus, StandingRoleKind, StandingRoleState};
+use tokio_util::sync::CancellationToken;
+
+use crate::artifacts::ArtifactsService;
+use crate::briefing::{self, BriefingKind, BriefingQuery, ProjectSubtreeScope};
+use crate::orchestrator_wakes::OrchestratorWakes;
+use crate::sessions::SessionsEngine;
+use crate::work_outline_launch::{HandOffOrigin, WorkItemLaunchService};
+use crate::{DocHost, WorkspaceHost};
+
+struct Checkpoint {
+    turn: String,
+    revision: u32,
+}
+
+pub(crate) fn start(
+    workspace: WorkspaceHost,
+    host: DocHost,
+    sessions: SessionsEngine,
+    artifacts: ArtifactsService,
+    wakes: OrchestratorWakes,
+    launch: WorkItemLaunchService,
+) -> CancellationToken {
+    let cancel = CancellationToken::new();
+    let stopped = cancel.clone();
+    tokio::spawn(async move {
+        let mut rx = sessions.watch_sessions();
+        let mut previous: HashMap<String, Option<String>> = HashMap::new();
+        let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
+        loop {
+            let rows: Vec<Session> = rx.borrow_and_update().clone();
+            for session in rows {
+                let old =
+                    previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
+                let Some(turn) = session.last_completed_turn.as_deref() else {
+                    continue;
+                };
+                if session.status != SessionStatus::Idle
+                    || old.is_none()
+                    || old.flatten().as_deref() == Some(turn)
+                {
+                    continue;
+                }
+                let Some(role) = workspace.standing_role_of_chat(&session.chat_id) else {
+                    continue;
+                };
+                if role.role != StandingRoleKind::Manager
+                    || role.state != StandingRoleState::Idle
+                    || role.current_chat_id.as_deref() != Some(session.chat_id.as_str())
+                {
+                    continue;
+                }
+                let Some(chat) = workspace.chat(&session.chat_id).ok().flatten() else {
+                    continue;
+                };
+                if chat.device_id != workspace.device_id() || chat.archived {
+                    continue;
+                }
+                let Some(space) = chat.space_id.as_deref() else {
+                    continue;
+                };
+                let status = || {
+                    briefing::read(
+                        &artifacts,
+                        &ProjectSubtreeScope::new(space, &role.scope_item_id),
+                        &BriefingQuery::new(BriefingKind::ManagerStatus),
+                        space,
+                    )
+                    .ok()
+                    .and_then(|entries| entries.into_iter().next())
+                };
+                let usage = host
+                    .open(&session.chat_id)
+                    .ok()
+                    .and_then(|handle| handle.doc().context_usage())
+                    .and_then(|value| value.fraction().or_else(|| value.tokens.map(|tokens| crate::context_usage::pct_from_tokens(tokens) as f64)));
+                let checkpoint = checkpoints.get(&session.chat_id);
+                let critical = usage.is_some_and(|fraction| fraction >= 0.92);
+                let ready = if critical {
+                    true
+                } else if let Some(checkpoint) = checkpoint {
+                    turn != checkpoint.turn
+                        && status().is_some_and(|entry| {
+                            entry.revision > checkpoint.revision && entry.content.is_some()
+                        })
+                } else {
+                    false
+                };
+                if !ready {
+                    if checkpoint.is_none()
+                        && usage.is_some_and(|fraction| fraction >= 0.80 && fraction < 0.92)
+                    {
+                        let baseline = status().map_or(0, |entry| entry.revision);
+                        let id = mast_proto::derive_id(
+                            &format!("{}:{turn}", session.chat_id),
+                            "manager-handoff-checkpoint",
+                        );
+                        match host.queue_context_message(
+                            &session.chat_id,
+                            &id,
+                            &mast_proto::manager_status_nudge_text(baseline),
+                        ) {
+                            Ok(_) => {
+                                checkpoints.insert(
+                                    session.chat_id.clone(),
+                                    Checkpoint {
+                                        turn: turn.into(),
+                                        revision: baseline,
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(chat = %session.chat_id, %error, "Manager handoff checkpoint could not be queued")
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let status = status().and_then(|entry| entry.content).unwrap_or_else(|| {
+                    let recent = host.open(&session.chat_id).ok()
+                        .and_then(|handle| handle.doc().read_entries().ok())
+                        .unwrap_or_default().into_iter().rev()
+                        .filter(|entry| matches!(entry.role, mast_doc::MessageRole::User | mast_doc::MessageRole::Assistant))
+                        .take(10)
+                        .flat_map(|entry| {
+                            let role = format!("{:?}", entry.role);
+                            entry.parts.into_iter().filter_map(move |part| match part {
+                                mast_doc::MessagePart::Text { text, .. } => Some(format!("{role}: {}", text.chars().take(2000).collect::<String>())),
+                                _ => None,
+                            })
+                        }).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+                    // A completed turn may precede transcript folding. Its
+                    // durable command still carries the submitted prompt.
+                    let commands = host.open(&session.chat_id).ok()
+                        .and_then(|handle| handle.doc().read_commands().ok()).unwrap_or_default()
+                        .into_iter().rev().filter_map(|command| match command.payload {
+                            mast_doc::SessionCommandPayload::Run { request, .. }
+                            | mast_doc::SessionCommandPayload::RunWithInstructions { request, .. } => Some(request.prompt),
+                            mast_doc::SessionCommandPayload::Steer { prompt, .. } => Some(prompt),
+                            _ => None,
+                        }).take(5).map(|text| text.chars().take(2000).collect::<String>())
+                        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+                    format!("No readable Manager status is available. Review the prior chat for its decisions. Recent conversation:\n{recent}\n\nRecent submitted prompts:\n{commands}")
+                });
+                let observations = crate::handoff_roles::RoleObservations::capture(
+                    &workspace,
+                    &sessions.agent_tokens(),
+                    &chat,
+                );
+                let request = mast_proto::CreateChatForWorkItemParams {
+                    work_item_id: role.scope_item_id.clone(),
+                    initial_prompt: mast_proto::WorkItemPrompt {
+                        text: format!(
+                            "Continue this project using the latest Manager status:\n\n{status}"
+                        ),
+                        attachments: vec![],
+                    },
+                    config: chat.config.clone(),
+                    execution_override: None,
+                    worktree_choice: None,
+                    operation_id: mast_proto::derive_id(
+                        &format!("{}:{turn}", session.chat_id),
+                        "automatic-manager-handoff",
+                    ),
+                    parent_chat_id: None,
+                    target_device_id: None,
+                    account_id: None,
+                    standing_role: None,
+                };
+                match launch
+                    .create_orchestrator_successor(
+                        &request,
+                        &wakes,
+                        &session.chat_id,
+                        HandOffOrigin::User {
+                            archive: Some(true),
+                            observed_roles: &observations,
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        checkpoints.remove(&session.chat_id);
+                    }
+                    Err(error) => {
+                        tracing::warn!(chat = %session.chat_id, %error, "automatic Manager handoff failed")
+                    }
+                }
+            }
+            tokio::select! { _ = stopped.cancelled() => break, result = rx.changed() => if result.is_err() { break; } }
+        }
+    });
+    cancel
+}

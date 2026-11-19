@@ -1965,6 +1965,95 @@ fn manager_chat(rig: &Rig) -> Option<String> {
         .standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_context_threshold_starts_successor_with_project_status() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "auto-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: "Existing scheduled task".into(), prompt: "Continue scheduled work".into(),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(&rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
+        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "existing-task".into(), expected_revision: 0, draft, operation_id: "save-existing-task".into() }).await.unwrap();
+    let lease = rig.core.sessions.agent_tokens().mint(&source, "status-run", SPACE, &rig.core.device_id);
+    let sections = mast_proto::MANAGER_STATUS_SECTIONS.iter().map(|section| format!("## {section}\nproject continuity evidence\n\n")).collect::<String>();
+    let content = format!("Updated: 2026-01-01 12:00\n\n{sections}");
+    rig.client.call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({ "token": lease.token(), "tool": "artifact_publish", "arguments": {
+        "title": "Manager status", "role": "manager-status", "content": content,
+        "note": "checkpoint", "idempotencyKey": "auto-status"
+    }})).await.unwrap();
+    let result = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Trigger the handoff [hold]" }, "operationId": "auto-threshold-turn" })).await.unwrap();
+    assert!(result["chatId"].is_string());
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn start").await;
+    rig.core.workspace.create_chat_with_parent("pending-worker", Some(SPACE), None, None, None, Some(source.clone())).unwrap();
+    rig.core.orchestrator_wakes.report_to_parent("pending-worker", "pending handoff wake").await.unwrap();
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.release();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "automatic successor").await;
+    let successor = manager_chat(&rig).unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("project continuity evidence")), "successor first turn with status").await;
+    assert!(rig.core.workspace.chat(&source).unwrap().unwrap().archived);
+    assert_eq!(rig.core.workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(rig.item.as_str()));
+    let wake_deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    while !rig.mock.turns().iter().any(|turn| turn.prompt.contains("pending handoff wake")) {
+        assert!(tokio::time::Instant::now() < wake_deadline, "timed out waiting for transferred wake: {:?}", rig.core.orchestrator_wakes.status(&successor));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("pending handoff wake")).count(), 1);
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "existing-task".into(), operation_id: "run-existing-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let scheduled_chat = snapshot.runs.iter().find(|run| run.task_id == "existing-task").unwrap().chat_id.as_deref().unwrap();
+    let scheduled = rig.core.workspace.chat(scheduled_chat).unwrap().unwrap();
+    assert_eq!(scheduled.parent_chat_id.as_deref(), Some(successor.as_str()));
+    assert_eq!(scheduled.config.as_ref().unwrap().harness, HarnessId::Mock);
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Continue scheduled work")), "scheduled task start").await;
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "existing-task".into(), operation_id: "run-existing-task".into() }).await.unwrap();
+    let replay = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    assert_eq!(replay.runs.iter().filter(|run| run.task_id == "existing-task").count(), 1);
+    assert_eq!(rig.core.workspace.chat(scheduled_chat).unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+        let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+        if snapshot.runs.iter().any(|run| run.task_id == "existing-task" && run.state == mast_proto::ScheduledRunState::Completed) { break; }
+        assert!(tokio::time::Instant::now() < deadline, "scheduled task did not complete");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let report = rig.core.orchestrator_wakes.report_to_parent(scheduled_chat, "scheduled task complete").await.unwrap();
+    assert_eq!(report.parent_chat_id, successor);
+    assert_eq!(report.delivery, "queuedForParent");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_critical_context_without_status_keeps_predecessor_context() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "no-status-manager", "Initial project priority")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Recent decision context [hold]" }, "operationId": "no-status-turn" })).await.unwrap();
+    wait_for(|| rig.core.sessions.turn_in_flight(&source), "threshold turn start").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.release();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "automatic successor without status").await;
+    let successor = manager_chat(&rig).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !rig.mock.turns().iter().any(|turn| turn.prompt.contains("Recent decision context") && turn.prompt.contains(&source)) {
+        assert!(tokio::time::Instant::now() < deadline, "missing successor fallback context: {:?}", rig.mock.turns());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(rig.core.workspace.chat(&source).unwrap().unwrap().standing_role_successor.as_deref(), Some(successor.as_str()));
+    rig.core.shutdown().await;
+}
+
 fn chat_count(rig: &Rig) -> usize {
     rig.core.workspace.work_outline_inputs(SPACE).chats.len()
 }

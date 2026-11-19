@@ -1040,6 +1040,11 @@ impl EngineRpc {
         self
     }
 
+    pub(crate) fn with_work_item_launch(mut self, launch: crate::work_outline_launch::WorkItemLaunchService) -> Self {
+        self.launch = launch;
+        self
+    }
+
     /// Run a blocking artifact operation, mapping its error to the
     /// `artifact/<code>` string.
     async fn artifact_reply<T, F>(&self, f: F) -> Result<RpcReply, RpcError>
@@ -6002,6 +6007,19 @@ impl RpcService for EngineRpc {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn engine_rpc_surfaces_share_handoff_launch_gate() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let first = core.rpc_service();
+        let second = core.rpc_service();
+        let held = first.launch.test_gate().await;
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), second.launch.test_gate()).await.is_err());
+        drop(held);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), second.launch.test_gate()).await.is_ok());
+        core.shutdown().await;
+    }
     #[tokio::test]
     async fn hand_off_config_preserves_and_validates_selection() {
         use super::*;
