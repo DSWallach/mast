@@ -411,7 +411,7 @@ fn is_indexed_constant_scope(mut node: tree_sitter::Node<'_>) -> bool {
         let kind = parent.kind();
         let namespace_block = matches!(kind, "statement_block" | "block")
             && parent.parent().is_some_and(|owner| matches!(owner.kind(), "internal_module" | "module" | "namespace_definition"));
-        if !namespace_block && (matches!(kind, "block" | "statement_block" | "compound_statement" | "do_block" | "if" | "unless" | "for" | "while" | "case" | "if_expression" | "match_expression" | "loop_expression" | "for_expression" | "while_expression" | "if_statement" | "switch_statement" | "for_statement" | "while_statement" | "do_statement" | "try_statement" | "catch_clause" | "closure_expression" | "lambda_expression" | "arrow_function" | "method" | "singleton_method" | "function" | "function_item" | "function_definition" | "function_declaration" | "method_definition" | "method_declaration" | "constructor_declaration" | "constructor_definition" | "init_declaration" | "initializer" | "deinit_declaration") || kind.ends_with("_function")) {
+        if !namespace_block && (matches!(kind, "block" | "statement_block" | "compound_statement" | "do_block" | "function_body" | "class_static_block" | "colon_block" | "const_block" | "unsafe_block" | "async_block" | "gen_block" | "try_block" | "begin" | "begin_block" | "rescue" | "catch_block" | "lambda" | "lambda_literal" | "if" | "unless" | "for" | "while" | "case" | "if_expression" | "match_expression" | "loop_expression" | "for_expression" | "while_expression" | "if_statement" | "switch_statement" | "for_statement" | "while_statement" | "do_statement" | "try_statement" | "catch_clause" | "closure_expression" | "lambda_expression" | "arrow_function" | "method" | "singleton_method" | "function" | "function_item" | "function_definition" | "function_declaration" | "function_expression" | "generator_function_declaration" | "method_definition" | "method_declaration" | "constructor_declaration" | "constructor_definition" | "init_declaration" | "initializer" | "deinit_declaration") || kind.ends_with("_function")) {
             return false;
         }
         node = parent;
@@ -532,6 +532,19 @@ mod tests {
         for (path, source) in cases {
             let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
             assert_eq!(constants, ["GLOBAL"], "{path}");
+        }
+    }
+
+    #[test]
+    fn constants_inside_function_expressions_and_closures_are_excluded() {
+        for (path, source) in [
+            ("a.js", "const OUTER = () => { const LOCAL = 2; };"),
+            ("a.ts", "const OUTER = function() { const LOCAL = 2; };"),
+            ("a.swift", "let OUTER = { let LOCAL = 2 }"),
+            ("a.rb", "OUTER = -> { LOCAL = 2 }"),
+        ] {
+            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["OUTER"], "{path}");
         }
     }
 
