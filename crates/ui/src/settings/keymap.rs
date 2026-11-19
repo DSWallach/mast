@@ -262,7 +262,7 @@ impl ShortcutId {
             ShortcutId::GoToLine => "mod-g",
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
-            ShortcutId::QuickOpenSymbols => "mod-shift-o",
+            ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
             ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
