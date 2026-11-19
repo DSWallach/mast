@@ -129,6 +129,13 @@ async fn rig() -> Rig {
     .await;
     let item = derive_id("op-item", roles::ITEM);
     let other_item = derive_id("op-other", roles::ITEM);
+    // New chats get a default work item; detach the lone chat so it has none.
+    outline(
+        &client,
+        json!({ "op": "removeChatFromWorkItem", "chatId": LONE_CHAT,
+                "operationId": "op-detach-lone" }),
+    )
+    .await;
     for (chat, target, op) in [
         (CHAT, &item, "op-assign-1"),
         (OTHER_CHAT, &other_item, "op-assign-2"),
