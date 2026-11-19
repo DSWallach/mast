@@ -706,7 +706,12 @@ fn closing_the_main_window_does_not_wait_on_a_dirty_popout(cx: &mut TestAppConte
             assert!(shell.prepare_window_close(cx), "only quit, relaunch and updates answer to pop-outs");
             assert!(shell.pending_exit.is_none());
             assert!(!shell.all_file_edits_flushed(cx), "the pop-out is still dirty for those paths");
-            assert!(shell.pending_exit_ready(cx));
+            assert!(!shell.pending_exit_ready(cx) || shell.pending_exit.is_none());
+            shell.pending_exit = Some(PendingExit::CloseWindow);
+            assert!(shell.pending_exit_ready(cx), "a pending window close does not wait on the pop-out");
+            shell.pending_exit = Some(PendingExit::Quit);
+            assert!(!shell.pending_exit_ready(cx), "a pending quit does");
+            shell.pending_exit = None;
         })
         .unwrap();
     popout.read_with(cx, |popout, cx| assert!(popout.has_unsaved_changes(cx))).unwrap();
@@ -715,15 +720,8 @@ fn closing_the_main_window_does_not_wait_on_a_dirty_popout(cx: &mut TestAppConte
 #[gpui::test]
 fn quit_continues_after_the_popout_save(cx: &mut TestAppContext) {
     init(cx);
-    let quit = std::rc::Rc::new(std::cell::Cell::new(false));
-    cx.update(|cx| {
-        let quit = quit.clone();
-        cx.on_app_quit(move |_| {
-            quit.set(true);
-            async {}
-        })
-        .detach();
-    });
+    let before = crate::app_menus::quit_requests();
+    let quit = || crate::app_menus::quit_requests() > before;
     let dir = tempfile::tempdir().unwrap();
     let window = shell_window(cx, dir.path());
     let state = window.read_with(cx, |shell, _| shell.state.clone()).unwrap();
@@ -731,34 +729,27 @@ fn quit_continues_after_the_popout_save(cx: &mut TestAppContext) {
     window.update(cx, |_, window, _| window.activate_window()).unwrap();
     cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));
     cx.run_until_parked();
-    assert!(!quit.get(), "the dirty pop-out holds the quit");
+    assert!(!quit(), "the dirty pop-out holds the quit");
     window.update(cx, |shell, _, _| assert!(matches!(shell.pending_exit, Some(PendingExit::Quit)))).unwrap();
     clean(popout, cx);
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
     cx.run_until_parked();
-    assert!(quit.get(), "the quit resumed once the pop-out was saved");
+    assert!(quit(), "the quit resumed once the pop-out was saved");
 }
 
 #[gpui::test]
 fn quit_continues_after_the_popout_save_with_no_main_window(cx: &mut TestAppContext) {
     init(cx);
-    let quit = std::rc::Rc::new(std::cell::Cell::new(false));
-    cx.update(|cx| {
-        let quit = quit.clone();
-        cx.on_app_quit(move |_| {
-            quit.set(true);
-            async {}
-        })
-        .detach();
-    });
+    let before = crate::app_menus::quit_requests();
+    let quit = || crate::app_menus::quit_requests() > before;
     let state = cx.update(|cx| cx.new(|_| AppState::new()));
     let popout = dirty_popout(state, cx);
     cx.update(|cx| crate::app_menus::request_quit(cx));
     cx.run_until_parked();
-    assert!(!quit.get());
+    assert!(!quit());
     popout.read_with(cx, |popout, _| assert!(popout.quit_pending())).unwrap();
     clean(popout, cx);
     cx.run_until_parked();
-    assert!(quit.get(), "the pop-out resumed the quit");
+    assert!(quit(), "the pop-out resumed the quit");
 }

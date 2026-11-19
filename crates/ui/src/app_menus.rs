@@ -103,7 +103,20 @@ fn prepare_quit(cx: &mut App) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static QUIT_REQUESTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: how many times the app actually reached the quit call.
+#[cfg(test)]
+pub(crate) fn quit_requests() -> u32 {
+    QUIT_REQUESTS.with(|count| count.get())
+}
+
 pub(crate) fn quit_after_save(cx: &mut App) {
+    #[cfg(test)]
+    QUIT_REQUESTS.with(|count| count.set(count.get() + 1));
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();
