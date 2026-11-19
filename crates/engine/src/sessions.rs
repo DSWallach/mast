@@ -2145,6 +2145,9 @@ impl Inner {
         let mut turn_boundary: Option<bool> = None;
         let session = {
             let mut statuses = lock(&self.statuses);
+            // A chat's first row is created already in the new status, so
+            // whether it was active before is read from whether it existed.
+            let existed = statuses.contains_key(chat_id);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
@@ -2171,7 +2174,7 @@ impl Inner {
             // an active one settles: the same boundaries `started_at` and the
             // tool-failure ledger use, so a warm session's next prompt, steered
             // into a parked run on the same token, is a new turn.
-            turn_boundary = match (was_active, status) {
+            turn_boundary = match (existed && was_active, status) {
                 (false, SessionStatus::Working | SessionStatus::AwaitingInput) => Some(true),
                 (true, SessionStatus::Idle | SessionStatus::Errored) => Some(false),
                 _ => None,
