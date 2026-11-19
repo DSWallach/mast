@@ -14,7 +14,7 @@
 //! typed API mirrors the old `WorkspaceDoc` surface so `WorkspaceHost` is a
 //! drop-in swap.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use mast_proto::{
-    Chat, ChatConfig, ChatPrLink, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space,
+    Chat, ChatConfig, ChatPrLink, Device, MAX_SIDEBAR_PINS, Session, SessionStatus,
+    SidebarPreferences, Space,
 };
 
 use crate::schema::DocError;
@@ -1283,6 +1284,71 @@ impl RegistryDoc {
         Ok(DeletedSpace { existed, chat_ids })
     }
 
+    /// Whether [`Self::fold_space`] may empty and delete `space_id`: it
+    /// exists, every chat in it is hosted here (writer discipline) and idle (a
+    /// live run's agent grant is pinned to the Space it started in), and it
+    /// owns no Work Outline rows beyond its settings row — deleting it would
+    /// cascade those away.
+    pub fn space_foldable(&self, space_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_SPACES, space_id) {
+            return Ok(false);
+        }
+        let chats: Vec<Chat> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .collect();
+        if chats.iter().any(|c| c.device_id != self.device_id()) {
+            return Ok(false);
+        }
+        let live: HashSet<String> = self
+            .read_sessions()?
+            .into_iter()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Working | SessionStatus::AwaitingInput
+                )
+            })
+            .map(|s| s.chat_id)
+            .collect();
+        if chats.iter().any(|c| live.contains(&c.id)) {
+            return Ok(false);
+        }
+        Ok(self
+            .work_outline_rows_of_space(space_id)
+            .iter()
+            .all(|(kind, _)| *kind == work_outline::KIND_WORK_OUTLINE_SPACE_SETTINGS))
+    }
+
+    /// Move every chat of `space_id` into `into`, then delete the emptied
+    /// Space. Returns the moved chat ids, or `None` without writing anything
+    /// when `into` is missing or `space_id` is not [foldable](Self::space_foldable).
+    pub fn fold_space(
+        &mut self,
+        space_id: &str,
+        into: &str,
+    ) -> Result<Option<Vec<String>>, DocError> {
+        if space_id == into
+            || !self.row_exists(KIND_SPACES, into)
+            || !self.space_foldable(space_id)?
+        {
+            return Ok(None);
+        }
+        let moved: Vec<String> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .map(|c| c.id)
+            .collect();
+        for chat_id in &moved {
+            self.set_chat_space(chat_id, into)?;
+        }
+        let deleted = self.delete_space(space_id)?;
+        debug_assert!(deleted.chat_ids.is_empty());
+        Ok(Some(moved))
+    }
+
     // ── chats ───────────────────────────────────────────────────────────────
 
     pub fn upsert_chat(&mut self, chat: &Chat) -> Result<(), DocError> {
@@ -1571,6 +1637,21 @@ impl RegistryDoc {
                 ("branch", json!(context.branch)),
                 ("checkoutId", json!(context.checkout_id)),
             ]),
+        );
+        Ok(true)
+    }
+
+    /// Re-home the chat into another Space. Only the Space-repair paths use
+    /// this: a run's agent grant is pinned to the Space it started in.
+    pub fn set_chat_space(&mut self, chat_id: &str, space_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("spaceId", json!(space_id))]),
         );
         Ok(true)
     }

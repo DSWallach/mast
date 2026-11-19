@@ -671,6 +671,10 @@ impl EngineCore {
         ));
         let pr_ticket_sweep = pr_ticket_cache.spawn_sweep_loop();
         scheduled_tasks.start();
+        {
+            let scheduled_tasks = scheduled_tasks.clone();
+            spaces_sync.set_space_holds(Arc::new(move || scheduled_tasks.task_space_ids()));
+        }
         Ok(Self {
             scheduled_tasks,
             sessions,
