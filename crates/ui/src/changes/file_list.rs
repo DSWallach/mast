@@ -456,6 +456,10 @@ enum FileTreeRow {
         index: usize,
         depth: usize,
     },
+    /// "Changed since you reviewed" group header (re-review).
+    Heading {
+        count: usize,
+    },
 }
 
 fn file_tree_rows(
@@ -666,7 +670,28 @@ impl Changes {
             .get(&tree_key)
             .cloned()
             .unwrap_or_default();
-        let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        let changed: std::collections::HashSet<usize> = self
+            .review_state
+            .as_ref()
+            .map(|state| {
+                review_state::changed_since_files(
+                    state,
+                    state.head_sha.as_deref(),
+                    &parsed.hunk_identities,
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let (changed_indices, indices): (Vec<usize>, Vec<usize>) =
+            indices.into_iter().partition(|index| changed.contains(index));
+        let (mut tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        if !changed_indices.is_empty() {
+            let mut group = vec![FileTreeRow::Heading { count: changed_indices.len() }];
+            group.extend(changed_indices.into_iter().map(|index| FileTreeRow::File { index, depth: 0 }));
+            group.append(&mut tree_rows);
+            tree_rows = group;
+        }
         let rows_key = tree_key.clone();
         let collapse_key = tree_key.clone();
         let expand_key = tree_key.clone();
@@ -687,6 +712,21 @@ impl Changes {
                         .map(|row| {
                             let (index, depth) = match row {
                                 FileTreeRow::File { index, depth } => (index, depth),
+                                FileTreeRow::Heading { count } => {
+                                    return div()
+                                        .id("changes-file-list-changed-heading")
+                                        .debug_selector(|| "changes-file-list-changed-heading".to_owned())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .px(px(6.0))
+                                        .h(px(28.0))
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(div().flex_1().min_w_0().truncate().child("Changed since you reviewed"))
+                                        .child(div().text_size(px(10.0)).child(SharedString::from(count.to_string())))
+                                        .into_any_element();
+                                }
                                 FileTreeRow::Folder {
                                     path,
                                     label,
@@ -1175,6 +1215,40 @@ mod navigation_tests {
         );
         vcx.simulate_mouse_up(start + gpui::point(px(450.0), px(0.0)), left, modifiers);
         changes.read_with(vcx, |changes, _| assert_eq!(changes.file_list_width, 600.0));
+    }
+
+    #[gpui::test]
+    fn changed_since_group_lists_changed_files_first(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/z.rs b/z.rs\n--- a/z.rs\n+++ b/z.rs\n@@ -1 +1 @@\n-x\n+y\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            let identities = hunk_identities(&files);
+            let mut state = mast_proto::DiffReviewState { target: "pr:o/r#1".into(), head_sha: Some("h2".into()), ..Default::default() };
+            // The reviewer saw only a.rs's hunk at h1: z.rs is new since.
+            state.reviewed_head = Some("h1".into());
+            state.reviewed_hunks.insert(identities[0][0].clone());
+            changes.review_state = Some(state);
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(identities), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let heading = vcx.debug_bounds("changes-file-list-changed-heading").expect("group heading");
+        let changed = vcx.debug_bounds("changes-file-list-entry-1").expect("z.rs listed");
+        let other = vcx.debug_bounds("changes-file-list-entry-0").expect("a.rs listed");
+        assert!(heading.origin.y < changed.origin.y && changed.origin.y < other.origin.y);
+        changes.update(vcx, |changes, _| changes.review_state.as_mut().unwrap().reviewed_head = Some("h2".into()));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-changed-heading").is_none());
     }
 
     #[gpui::test]

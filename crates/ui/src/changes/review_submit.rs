@@ -455,9 +455,12 @@ impl Changes {
             }
         }
         self.submit_inflight = None;
-        self.submit_params = None;
+        let submitted_head = self.submit_params.take().map(|params| params.commit_id);
         let posted = matches!(phase, SubmitPhase::Posted { .. });
         if posted {
+            if let Some(head) = submitted_head {
+                self.stamp_reviewed_head(target, &head, cx);
+            }
             // The engine removed the drafts it sent; reload the rest and the threads.
             self.local_review_drafts.remove(target);
             self.local_draft_acknowledged.remove(target);
