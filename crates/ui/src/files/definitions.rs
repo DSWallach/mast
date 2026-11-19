@@ -256,7 +256,7 @@ mod tests {
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
         let provider_for_editor = provider.clone();
         let host = cx.add_window(|window, cx| {
-            let editor = cx.new(|cx| gpui_base::input::EditorState::new(window, cx).language("src/a.rs".to_string()).default_value("fn call() {}"));
+            let editor = cx.new(|cx| gpui_base::input::EditorState::new(window, cx).language("src/a.rs".to_string()).line_number(true).default_value("fn call() {}"));
             editor.update(cx, |editor, _| editor.lsp_mut().definition_provider = Some(provider_for_editor));
             Fixture { editor }
         });
