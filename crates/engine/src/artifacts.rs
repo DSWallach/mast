@@ -688,6 +688,8 @@ struct Inner {
     /// record, so two concurrent publishes cannot both pass the check.
     agent_publish_serial: Mutex<()>,
     render: Arc<RenderBroker>,
+    /// Test seam: make provenance stamp writes fail.
+    fail_stamp_writes: std::sync::atomic::AtomicBool,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
 }
@@ -709,9 +711,18 @@ impl ArtifactsService {
                 gate: Mutex::new(HashMap::new()),
                 agent_publish_serial: Mutex::new(()),
                 render: Arc::new(RenderBroker::default()),
+                fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
         }
+    }
+
+    /// Test seam: while set, provenance stamp writes fail.
+    #[doc(hidden)]
+    pub fn fail_stamp_writes_for_test(&self, fail: bool) {
+        self.inner
+            .fail_stamp_writes
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Override the home directory the source deny-list is anchored to.
@@ -1458,8 +1469,9 @@ impl ArtifactsService {
     /// provenance outlives that chat. Only artifacts this device owns are
     /// rewritten. `chat` limits it to that chat's revisions. Never called from
     /// a read: reads leave the registry untouched. Returns how many artifacts
-    /// were rewritten.
-    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> usize {
+    /// were rewritten, or the first write that failed (later ones are not
+    /// attempted, and a retry resumes where it stopped).
+    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> Outcome<usize> {
         let artifacts = self.workspace().all_artifacts();
         let pending: Vec<String> = artifacts
             .into_iter()
@@ -1504,17 +1516,25 @@ impl ArtifactsService {
                     changed = true;
                 }
             }
-            if changed && self.workspace().put_artifact(&view).is_ok() {
+            if changed {
+                if self.inner.fail_stamp_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(ArtifactError::io("provenance stamp write failed (injected)"));
+                }
+                self.workspace()
+                    .put_artifact(&view)
+                    .map_err(|e| ArtifactError::io(e.to_string()))?;
                 written += 1;
             }
         }
-        written
+        Ok(written)
     }
 
     /// Stamp what `chat` published before the chat is deleted, since the stamp
     /// is what keeps a pre-stamp result readable afterwards.
-    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) {
-        self.backfill_run_stamps(Some(chat_id));
+    /// An error means a stamp could not be written, and the caller must not
+    /// delete the chat.
+    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) -> Outcome<()> {
+        self.backfill_run_stamps(Some(chat_id)).map(drop)
     }
 
     /// Run [`Self::backfill_run_stamps`] for every chat once the registry has
@@ -1527,10 +1547,16 @@ impl ArtifactsService {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                if service.workspace().registry_synced() {
-                    let service = service.clone();
-                    let _ = tokio::task::spawn_blocking(move || service.backfill_run_stamps(None)).await;
-                    break;
+                if !service.workspace().registry_synced() {
+                    continue;
+                }
+                let attempt = service.clone();
+                match tokio::task::spawn_blocking(move || attempt.backfill_run_stamps(None)).await {
+                    Ok(Ok(_)) => break,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "run stamp backfill failed; will retry");
+                    }
+                    Err(_) => break,
                 }
             }
         });
