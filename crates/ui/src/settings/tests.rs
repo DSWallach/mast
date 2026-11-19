@@ -1518,8 +1518,10 @@ fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
     );
     assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
     assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
-    assert_eq!(keymap.get(ShortcutId::FileNavigationBack), "ctrl--");
-    assert_eq!(keymap.get(ShortcutId::FileNavigationForward), "ctrl-shift--");
+    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationBack)), "ctrl--");
+    assert_eq!(platform_combo(keymap.get(ShortcutId::FileNavigationForward)), "ctrl-shift--");
+    assert_eq!(display_combo_on(true, "ctrl--"), "Ctrl+-");
+    assert_eq!(badge_combo_on(true, "ctrl-shift--"), "⌃⇧-");
     keymap.set(ShortcutId::FileNavigationBack, "mod-alt-k".into());
     keymap.set(ShortcutId::FileNavigationForward, "mod-alt-k".into());
     assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::FileNavigationBack));
@@ -1639,7 +1641,7 @@ fn every_default_is_spelled_the_way_the_recorder_spells_it() {
             // unambiguous, so the decode can't inherit the bug it checks.
             let bound = platform_combo_on(mac, combo);
             let mut parts: Vec<&str> = bound.split('-').collect();
-            let key = parts.pop().expect("a combo always ends in a key");
+            let key = if bound.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().expect("a combo always ends in a key") };
             let recorded = combo_from_keystroke_on(
                 mac,
                 parts.contains(&"ctrl"),

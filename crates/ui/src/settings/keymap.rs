@@ -269,8 +269,8 @@ impl ShortcutId {
             ShortcutId::SearchWorkspaceContent => "mod-shift-f",
             ShortcutId::QuickOpen => "mod-o",
             ShortcutId::QuickOpenSymbols => "mod-alt-shift-o",
-            ShortcutId::FileNavigationBack => "ctrl--",
-            ShortcutId::FileNavigationForward => "ctrl-shift--",
+            ShortcutId::FileNavigationBack => if mac { "ctrl--" } else { "mod--" },
+            ShortcutId::FileNavigationForward => if mac { "ctrl-shift--" } else { "mod-shift--" },
             ShortcutId::AddCodeToChat => "mod-shift-l",
             ShortcutId::ReviewNextStep => "n",
             ShortcutId::ReviewPreviousStep => "p",
@@ -914,7 +914,9 @@ pub fn display_combo(combo: &str) -> String {
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
+    let minus = combo.ends_with("--");
+    let combo = if minus { &combo[..combo.len() - 1] } else { combo };
+    let result = combo
         .split('-')
         .map(|part| match part {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
@@ -929,7 +931,8 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("+")
+        .join("+");
+    if minus { format!("{result}-") } else { result }
 }
 
 /// Compact combo for badge surfaces (the sidebar jump hints): macOS spells
@@ -946,7 +949,7 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
         return display_combo_on(false, combo);
     }
     let mut parts: Vec<&str> = combo.split('-').collect();
-    let key = parts.pop().unwrap_or("");
+    let key = if combo.ends_with("--") { parts.pop(); parts.pop(); "-" } else { parts.pop().unwrap_or("") };
     let mut out = String::new();
     for glyph in ["ctrl", "alt", "shift", "mod"]
         .iter()
