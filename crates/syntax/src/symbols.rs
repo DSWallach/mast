@@ -411,6 +411,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn skips_minified_source() {
+        let source = format!("fn visible() {{}}{}", " ".repeat(20_001));
+        assert!(extract(&source, "minified.rs", 100).is_empty());
+        assert_eq!(extract("fn visible() {}\n", "normal.rs", 100).len(), 1);
+    }
+
+    #[test]
     fn linked_tags_queries_compile() {
         for language in [
             LanguageId::Rust,
