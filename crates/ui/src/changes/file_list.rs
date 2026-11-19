@@ -896,12 +896,6 @@ impl Changes {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(!crate::components::is_horizon(theme), |element| {
-                element.border_r_1().border_color(theme.border)
-            })
-            .when(true, |element| {
-                crate::components::changes_file_list(element, theme)
-            })
             .child(
                 div()
                     .flex()

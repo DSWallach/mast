@@ -224,7 +224,10 @@ impl Changes {
                 } else {
                     theme.text_muted
                 })
-                .when(true, |el| crate::components::review_text_action(el, theme))
+                .when(selected == map, |el| el.bg(theme.element_hover))
+                .when(true, |el| {
+                    crate::components::segmented_key(el, theme, selected == map)
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.scope_map_selected = map;
                     crate::settings::update(
@@ -242,6 +245,12 @@ impl Changes {
             .flex()
             .flex_col()
             .min_h_0()
+            .when(!crate::components::is_horizon(theme), |element| {
+                element.border_r_1().border_color(theme.border)
+            })
+            .when(true, |element| {
+                crate::components::changes_file_list(element, theme)
+            })
             .child(
                 div()
                     .flex()
