@@ -8,6 +8,9 @@ use tree_sitter::StreamingIterator;
 
 use crate::{DEFAULT_MAX_SOURCE_BYTES, LanguageId, language_for_path};
 
+/// Upper bound for the index's owned entries, including an allowance per tree node.
+pub const MAX_INDEX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SymbolKind {
@@ -33,6 +36,8 @@ pub struct SymbolIndex {
     revision: Option<u64>,
     files: BTreeMap<String, Vec<Symbol>>,
     symbol_count: usize,
+    retained_bytes: usize,
+    truncated: bool,
     max_files: usize,
     max_symbols: usize,
     max_symbols_per_file: usize,
@@ -49,6 +54,8 @@ impl SymbolIndex {
             revision: None,
             files: BTreeMap::new(),
             symbol_count: 0,
+            retained_bytes: 0,
+            truncated: false,
             max_files,
             max_symbols,
             max_symbols_per_file,
@@ -70,18 +77,35 @@ impl SymbolIndex {
             }
             if let Some(previous) = self.files.remove(path) {
                 self.symbol_count -= previous.len();
+                self.retained_bytes -= estimated_file_bytes(path, &previous);
             }
             if let FileChange::Changed { source, .. } = change {
                 if self.files.len() >= self.max_files || self.symbol_count >= self.max_symbols {
+                    self.truncated = true;
                     continue;
                 }
                 let limit = self
                     .max_symbols_per_file
                     .min(self.max_symbols - self.symbol_count);
-                let symbols = extract(source, path, limit);
+                let mut symbols = extract(source, path, limit.saturating_add(1));
+                if symbols.len() > limit {
+                    self.truncated = true;
+                    symbols.truncate(limit);
+                }
                 parsed += 1;
+                let mut needed = estimated_file_bytes(path, &symbols);
+                while !symbols.is_empty()
+                    && self.retained_bytes.saturating_add(needed) > MAX_INDEX_PAYLOAD_BYTES
+                {
+                    self.truncated = true;
+                    let removed = symbols.pop().expect("symbol list is not empty");
+                    needed = needed
+                        .saturating_sub(std::mem::size_of::<Symbol>() + removed.name.capacity());
+                }
+                symbols.shrink_to_fit();
                 if !symbols.is_empty() {
                     self.symbol_count += symbols.len();
+                    self.retained_bytes += estimated_file_bytes(path, &symbols);
                     self.files.insert(path.to_owned(), symbols);
                 }
             }
@@ -98,19 +122,25 @@ impl SymbolIndex {
         self.symbol_count
     }
 
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Approximation of owned payload, including vector capacity and names.
     pub fn estimated_bytes(&self) -> usize {
-        self.files
-            .iter()
-            .map(|(path, symbols)| {
-                path.capacity()
-                    + std::mem::size_of::<String>()
-                    + std::mem::size_of::<Vec<Symbol>>()
-                    + symbols.capacity() * std::mem::size_of::<Symbol>()
-                    + symbols.iter().map(|s| s.name.capacity()).sum::<usize>()
-            })
-            .sum()
+        self.retained_bytes
     }
+}
+
+fn estimated_file_bytes(path: &str, symbols: &[Symbol]) -> usize {
+    // BTreeMap's node allocation is shared by several entries. Allow 128
+    // bytes per entry in addition to the path and symbol payload.
+    128 + path.len()
+        + symbols.len() * std::mem::size_of::<Symbol>()
+        + symbols
+            .iter()
+            .map(|symbol| symbol.name.capacity())
+            .sum::<usize>()
 }
 
 /// Returns the linked grammar and its tags query, if the grammar exposes one.
@@ -285,6 +315,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
             }
         }
         if let (Some(name), Some((node, mut kind))) = (name, definition) {
+            let node = definition_extent(node);
             let Ok(value) = name.utf8_text(source.as_bytes()) else {
                 continue;
             };
@@ -313,6 +344,27 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
         }
     }
     symbols.into_values().collect()
+}
+
+fn definition_extent(mut node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
+    if node.kind() == "function_declarator" {
+        let original = node;
+        while let Some(parent) = node.parent() {
+            if parent.kind() == "function_definition" {
+                return parent;
+            }
+            if matches!(
+                parent.kind(),
+                "translation_unit" | "declaration" | "field_declaration"
+            ) {
+                break;
+            }
+            node = parent;
+        }
+        original
+    } else {
+        node
+    }
 }
 
 fn is_test(language: LanguageId, node: tree_sitter::Node<'_>, name: &str, source: &str) -> bool {
@@ -398,6 +450,13 @@ mod tests {
             ]
         );
         assert_eq!(extract("fn f() {}", "a.rs", 0), vec![]);
+        let c = extract("int add(int a) {\n  return a + 1;\n}\n", "a.c", 10);
+        assert_eq!((c[0].start_line, c[0].end_line), (1, 3));
+        let ts = extract("interface Item {}\nfunction run() {}\n", "a.ts", 10);
+        assert_eq!(
+            ts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["Item", "run"]
+        );
         let tests = extract(
             "#[test]\nfn checks() {}\n#[tokio::test]\nasync fn async_check() {}\n",
             "a.rs",

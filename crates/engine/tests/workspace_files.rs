@@ -13,7 +13,7 @@ use mast_proto::{
 use mast_rpc::methods;
 
 async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = mast_harness::git_command_async()
         .args(args)
         .current_dir(cwd)
         .env("GIT_AUTHOR_NAME", "test")
@@ -28,6 +28,30 @@ async fn git(cwd: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_history_follows_renames_and_opens_the_historical_diff() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    git(&repo, &["mv", "src/lib.rs", "src/renamed.rs"]).await;
+    git(&repo, &["commit", "-m", "rename file"]).await;
+    let core = assemble(&temp.path().join("data"), "device-file-history");
+    core.workspace.create_space("space-file-history", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-file-history", Some("space-file-history"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId":"chat-file-history", "path":"src/renamed.rs"});
+    let history = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, params.clone()).await.unwrap();
+    assert_eq!(history["commits"].as_array().unwrap().len(), 2);
+    assert_eq!(history["commits"][0]["path"], "src/renamed.rs");
+    assert_eq!(history["commits"][0]["previousPath"], "src/lib.rs");
+    assert_eq!(history["commits"][1]["path"], "src/lib.rs");
+    let cached = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, params).await.unwrap();
+    assert_eq!(history, cached);
+    let old = &history["commits"][1];
+    let diff = client.call(methods::GET_WORKSPACE_FILE_HISTORY_DIFF, serde_json::json!({"chatId":"chat-file-history", "path":old["path"], "commit":old["commit"]["sha"]})).await.unwrap();
+    assert!(diff.as_str().unwrap().contains("+pub fn answer"));
 }
 
 async fn init_repo(path: &Path) {
@@ -64,6 +88,17 @@ async fn symbol_index_tracks_workspace_changes() {
     let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
     let initial = tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
     assert_eq!(initial["files"]["src/lib.rs"][0]["name"], "answer");
+    let target: mast_proto::WorkspaceTarget = serde_json::from_value(serde_json::json!({"chatId":"chat-symbols"})).unwrap();
+    let cached = core.workspace_files.subscribe_symbols(target.clone()).await.unwrap();
+    let snapshot = cached.borrow().clone().unwrap().unwrap();
+    drop(cached);
+    drop(stream);
+    let reopened = core.workspace_files.subscribe_symbols(target).await.unwrap();
+    let reused = reopened.borrow().clone().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&snapshot, &reused), "reopening an unchanged checkout reuses its snapshot");
+    drop(reopened);
+    let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
     std::fs::write(repo.join("src/lib.rs"), "pub fn revised() {}\n").unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -82,7 +117,7 @@ async fn symbol_index_tracks_workspace_changes() {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let frame = stream.recv().await.unwrap();
-            if frame["files"].get("created.rs").is_none() { break; }
+            if frame["files"].as_object().is_some_and(|files| !files.contains_key("created.rs")) { break; }
         }
     }).await.unwrap();
 }
