@@ -1,6 +1,9 @@
 //! Definition captures from the tags queries shipped with linked grammars.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::OnceLock,
+};
 use tree_sitter::StreamingIterator;
 
 use crate::{DEFAULT_MAX_SOURCE_BYTES, LanguageId, language_for_path};
@@ -10,6 +13,7 @@ pub enum SymbolKind {
     Function,
     Method,
     Type,
+    Test,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +23,92 @@ pub struct Symbol {
     /// One-based, inclusive source lines.
     pub start_line: u32,
     pub end_line: u32,
+}
+
+/// A bounded snapshot. The owner supplies only files changed by a watch event
+/// and performs file reads and calls to `apply` on a background worker.
+pub struct SymbolIndex {
+    revision: Option<u64>,
+    files: BTreeMap<String, Vec<Symbol>>,
+    symbol_count: usize,
+    max_files: usize,
+    max_symbols: usize,
+    max_symbols_per_file: usize,
+}
+
+pub enum FileChange<'a> {
+    Changed { path: &'a str, source: &'a str },
+    Removed { path: &'a str },
+}
+
+impl SymbolIndex {
+    pub fn new(max_files: usize, max_symbols: usize, max_symbols_per_file: usize) -> Self {
+        Self {
+            revision: None,
+            files: BTreeMap::new(),
+            symbol_count: 0,
+            max_files,
+            max_symbols,
+            max_symbols_per_file,
+        }
+    }
+
+    /// Replaying an already applied revision does no parsing or allocation.
+    pub fn apply(&mut self, revision: u64, changes: &[FileChange<'_>]) -> usize {
+        if self.revision.is_some_and(|previous| revision <= previous) {
+            return 0;
+        }
+        let mut parsed = 0;
+        for change in changes {
+            let path = match change {
+                FileChange::Changed { path, .. } | FileChange::Removed { path } => *path,
+            };
+            if path.len() > 4096 {
+                continue;
+            }
+            if let Some(previous) = self.files.remove(path) {
+                self.symbol_count -= previous.len();
+            }
+            if let FileChange::Changed { source, .. } = change {
+                if self.files.len() >= self.max_files || self.symbol_count >= self.max_symbols {
+                    continue;
+                }
+                let limit = self
+                    .max_symbols_per_file
+                    .min(self.max_symbols - self.symbol_count);
+                let symbols = extract(source, path, limit);
+                parsed += 1;
+                if !symbols.is_empty() {
+                    self.symbol_count += symbols.len();
+                    self.files.insert(path.to_owned(), symbols);
+                }
+            }
+        }
+        self.revision = Some(revision);
+        parsed
+    }
+
+    pub fn files(&self) -> &BTreeMap<String, Vec<Symbol>> {
+        &self.files
+    }
+
+    pub fn symbol_count(&self) -> usize {
+        self.symbol_count
+    }
+
+    /// Approximation of owned payload, including vector capacity and names.
+    pub fn estimated_bytes(&self) -> usize {
+        self.files
+            .iter()
+            .map(|(path, symbols)| {
+                path.capacity()
+                    + std::mem::size_of::<String>()
+                    + std::mem::size_of::<Vec<Symbol>>()
+                    + symbols.capacity() * std::mem::size_of::<Symbol>()
+                    + symbols.iter().map(|s| s.name.capacity()).sum::<usize>()
+            })
+            .sum()
+    }
 }
 
 /// Returns the linked grammar and its tags query, if the grammar exposes one.
@@ -90,19 +180,54 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
     Some((grammar, query))
 }
 
+fn compiled_tags(
+    language: LanguageId,
+) -> Option<&'static (tree_sitter::Language, tree_sitter::Query)> {
+    static QUERIES: OnceLock<HashMap<LanguageId, (tree_sitter::Language, tree_sitter::Query)>> =
+        OnceLock::new();
+    QUERIES
+        .get_or_init(|| {
+            [
+                LanguageId::Rust,
+                LanguageId::JavaScript,
+                LanguageId::Jsx,
+                LanguageId::TypeScript,
+                LanguageId::Tsx,
+                LanguageId::Python,
+                LanguageId::Go,
+                LanguageId::C,
+                LanguageId::Cpp,
+                LanguageId::CSharp,
+                LanguageId::Java,
+                LanguageId::Swift,
+                LanguageId::Ruby,
+                LanguageId::Php,
+                LanguageId::Lua,
+            ]
+            .into_iter()
+            .filter_map(|id| {
+                let (grammar, source) = tags(id)?;
+                let query = tree_sitter::Query::new(&grammar, &source).ok()?;
+                Some((id, (grammar, query)))
+            })
+            .collect()
+        })
+        .get(&language)
+}
+
 /// Extract definitions from one file. The caller owns scheduling and caching.
 pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
     if source.len() > DEFAULT_MAX_SOURCE_BYTES || max_symbols == 0 {
         return Vec::new();
     }
-    let Some((language, text)) = language_for_path(path).and_then(tags) else {
+    let Some(language_id) = language_for_path(path) else {
         return Vec::new();
     };
-    let Ok(query) = tree_sitter::Query::new(&language, &text) else {
+    let Some((language, query)) = compiled_tags(language_id) else {
         return Vec::new();
     };
     let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
+    if parser.set_language(language).is_err() {
         return Vec::new();
     }
     let Some(tree) = parser.parse(source, None) else {
@@ -110,7 +235,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
     };
     let names = query.capture_names();
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     let mut symbols = BTreeMap::new();
     while let Some(found) = matches.next() {
         let mut name = None;
@@ -134,10 +259,18 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
                 definition = Some((capture.node, kind));
             }
         }
-        if let (Some(name), Some((node, kind))) = (name, definition) {
+        if let (Some(name), Some((node, mut kind))) = (name, definition) {
             let Ok(value) = name.utf8_text(source.as_bytes()) else {
                 continue;
             };
+            if value.len() > 512 {
+                continue;
+            }
+            if matches!(kind, SymbolKind::Function | SymbolKind::Method)
+                && is_test(language_id, node, value, source)
+            {
+                kind = SymbolKind::Test;
+            }
             let symbol = Symbol {
                 name: value.to_owned(),
                 kind,
@@ -145,20 +278,51 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
                 end_line: node.end_position().row as u32 + 1,
             };
             let key = (name.start_byte(), name.end_byte());
-            symbols
-                .entry(key)
-                .and_modify(|old: &mut Symbol| {
-                    if kind == SymbolKind::Method {
-                        *old = symbol.clone();
-                    }
-                })
-                .or_insert(symbol);
-            if symbols.len() >= max_symbols {
-                break;
+            if let Some(old) = symbols.get_mut(&key) {
+                if matches!(kind, SymbolKind::Method | SymbolKind::Test) {
+                    *old = symbol;
+                }
+            } else if symbols.len() < max_symbols {
+                symbols.insert(key, symbol);
             }
         }
     }
     symbols.into_values().collect()
+}
+
+fn is_test(language: LanguageId, node: tree_sitter::Node<'_>, name: &str, source: &str) -> bool {
+    match language {
+        LanguageId::Python => name.starts_with("test_"),
+        LanguageId::Go => name
+            .strip_prefix("Test")
+            .is_some_and(|tail| tail.starts_with(|c: char| c.is_uppercase())),
+        LanguageId::Rust => {
+            let mut previous = node.prev_named_sibling();
+            while let Some(attribute) = previous {
+                if attribute.kind() != "attribute_item" {
+                    break;
+                }
+                if attribute
+                    .utf8_text(source.as_bytes())
+                    .ok()
+                    .is_some_and(|text| {
+                        let head = text
+                            .trim_start_matches("#[")
+                            .trim_start()
+                            .split(['(', ']', ' '])
+                            .next()
+                            .unwrap_or("");
+                        head == "test" || head.ends_with("::test")
+                    })
+                {
+                    return true;
+                }
+                previous = attribute.prev_named_sibling();
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +373,92 @@ mod tests {
             ]
         );
         assert_eq!(extract("fn f() {}", "a.rs", 0), vec![]);
+        let tests = extract(
+            "#[test]\nfn checks() {}\n#[tokio::test]\nasync fn async_check() {}\n",
+            "a.rs",
+            10,
+        );
+        assert_eq!(
+            tests.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            vec![SymbolKind::Test, SymbolKind::Test]
+        );
+    }
+
+    #[test]
+    fn index_updates_only_changed_files_and_bounds_results() {
+        let mut index = SymbolIndex::new(2, 3, 2);
+        assert_eq!(
+            index.apply(
+                1,
+                &[
+                    FileChange::Changed {
+                        path: "a.rs",
+                        source: "fn a() {} fn b() {}"
+                    },
+                    FileChange::Changed {
+                        path: "b.rs",
+                        source: "fn c() {}"
+                    }
+                ]
+            ),
+            2
+        );
+        assert_eq!(index.symbol_count(), 3);
+        assert_eq!(
+            index.apply(
+                1,
+                &[FileChange::Changed {
+                    path: "a.rs",
+                    source: "fn changed() {}"
+                }]
+            ),
+            0
+        );
+        assert_eq!(index.files()["a.rs"][0].name, "a");
+        assert_eq!(
+            index.apply(
+                2,
+                &[
+                    FileChange::Removed { path: "b.rs" },
+                    FileChange::Changed {
+                        path: "a.rs",
+                        source: "fn changed() {}"
+                    }
+                ]
+            ),
+            1
+        );
+        assert_eq!(index.symbol_count(), 1);
+        assert_eq!(index.files()["a.rs"][0].name, "changed");
+    }
+
+    #[test]
+    fn index_large_fixture_budget_and_idle_revision() {
+        let source = (0..20)
+            .map(|i| format!("fn function_{i}() {{}}\n"))
+            .collect::<String>();
+        let paths = (0..1000)
+            .map(|i| format!("src/file_{i}.rs"))
+            .collect::<Vec<_>>();
+        let changes = paths
+            .iter()
+            .map(|path| FileChange::Changed {
+                path,
+                source: &source,
+            })
+            .collect::<Vec<_>>();
+        let mut index = SymbolIndex::new(1000, 20_000, 20);
+        let started = std::time::Instant::now();
+        assert_eq!(index.apply(1, &changes), 1000);
+        let elapsed = started.elapsed();
+        let bytes = index.estimated_bytes();
+        eprintln!(
+            "symbol index: {} symbols, {bytes} estimated payload bytes, {elapsed:?}",
+            index.symbol_count()
+        );
+        assert_eq!(index.symbol_count(), 20_000);
+        assert!(bytes < 4 * 1024 * 1024);
+        assert!(elapsed < std::time::Duration::from_secs(20));
+        assert_eq!(index.apply(1, &changes), 0);
     }
 }
