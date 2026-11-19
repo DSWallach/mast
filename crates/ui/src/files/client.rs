@@ -153,6 +153,8 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
 }
 
 impl WorkspaceFilesClient {
+    pub(super) fn request_context(&self) -> &FilesRequestContext { &self.context }
+
     pub fn new(engine: EngineHandle, context: FilesRequestContext) -> Self {
         Self {
             transport: Arc::new(EngineFilesTransport(engine)),

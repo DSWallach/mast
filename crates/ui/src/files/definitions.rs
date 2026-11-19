@@ -6,7 +6,26 @@ use gpui::{App, Task, Window};
 use gpui_base::input::{DefinitionProvider, Rope, RopeExt};
 use mast_syntax::symbols::Symbol;
 
-use super::client::WorkspaceFilesClient;
+use super::client::{FilesRequestContext, WorkspaceFilesClient};
+
+thread_local! {
+    static FAILED_WATCHES: RefCell<Vec<(FilesRequestContext, Instant)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn watch_failed_recently(context: &FilesRequestContext) -> bool {
+    FAILED_WATCHES.with(|failures| failures.borrow().iter().any(|(failed_context, at)| failed_context == context && at.elapsed() < Duration::from_secs(60)))
+}
+fn clear_watch_failure(context: &FilesRequestContext) {
+    FAILED_WATCHES.with(|failures| failures.borrow_mut().retain(|(failed_context, _)| failed_context != context));
+}
+fn record_watch_failure(context: FilesRequestContext) {
+    FAILED_WATCHES.with(|failures| {
+        let mut failures = failures.borrow_mut();
+        failures.retain(|(failed_context, at)| failed_context != &context && at.elapsed() < Duration::from_secs(60));
+        if failures.len() >= 64 { failures.remove(0); }
+        failures.push((context, Instant::now()));
+    });
+}
 
 #[derive(Clone)]
 pub(super) struct Definition {
@@ -21,7 +40,6 @@ struct DefinitionState {
     cache: HashMap<String, Vec<Definition>>,
     parsed: Option<(String, Rc<Vec<Range<usize>>>)>,
     watch: Option<Task<()>>,
-    watch_failed_at: Option<Instant>,
     editor: Option<gpui::WeakEntity<gpui_base::input::EditorState>>,
     selected: Vec<Definition>,
     selected_origin_line: Option<u32>,
@@ -67,9 +85,10 @@ impl SymbolDefinitionProvider {
     pub(super) fn start_watch(&self, cx: &mut App) {
         {
             let state = self.state.borrow();
-            if state.watch.is_some() || state.watch_failed_at.is_some_and(|failed| failed.elapsed() < Duration::from_secs(60)) { return; }
+            if state.watch.is_some() || watch_failed_recently(self.client.request_context()) { return; }
         }
         let client = self.client.clone();
+        let context = client.request_context().clone();
         let state = Rc::downgrade(&self.state);
         let task = cx.spawn(async move |cx| {
             if let Ok(mut stream) = client.watch_symbols().await {
@@ -81,7 +100,7 @@ impl SymbolDefinitionProvider {
                         let mut state = state.borrow_mut();
                         if state.revision == revision { None } else {
                             state.revision = revision;
-                            state.watch_failed_at = None;
+                            clear_watch_failure(&context);
                             state.cache.clear();
                             state.selected.clear();
                             state.editor.clone()
@@ -94,7 +113,7 @@ impl SymbolDefinitionProvider {
                 let editor = {
                     let mut state = state.borrow_mut();
                     state.revision = None;
-                    state.watch_failed_at = Some(Instant::now());
+                    record_watch_failure(context);
                     state.cache.clear();
                     state.selected.clear();
                     state.watch = None;
@@ -349,17 +368,19 @@ mod tests {
     fn failed_watch_is_not_retried_on_each_hover(cx: &mut gpui::TestAppContext) {
         use std::sync::{Arc, atomic::Ordering};
         let transport = Arc::new(FailingWatchTransport::default());
-        let context = super::super::client::FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/fixture".into(), checkout_id: Some("checkout".into()) };
-        let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context), "src/a.rs".into());
+        let context = super::super::client::FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/failed-watch-test".into(), checkout_id: Some("checkout".into()) };
+        let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context.clone()), "src/a.rs".into());
+        let other = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context.clone()), "src/b.rs".into());
         cx.update(|cx| provider.start_watch(cx));
         cx.run_until_parked();
-        for _ in 0..20 { cx.update(|cx| provider.start_watch(cx)); }
+        for _ in 0..20 { cx.update(|cx| { provider.start_watch(cx); other.start_watch(cx); }); }
         cx.run_until_parked();
         assert_eq!(transport.0.load(Ordering::SeqCst), 1);
-        provider.state.borrow_mut().watch_failed_at = Some(Instant::now() - Duration::from_secs(61));
+        FAILED_WATCHES.with(|failures| failures.borrow_mut().iter_mut().find(|(key, _)| key == &context).unwrap().1 = Instant::now() - Duration::from_secs(61));
         cx.update(|cx| provider.start_watch(cx));
         cx.run_until_parked();
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+        clear_watch_failure(&context);
     }
 
     #[test]
