@@ -22,8 +22,7 @@ impl Changes {
         let key = parsed.key.clone();
         let files = parsed.files.clone();
         let layout = parsed.layout.clone();
-        let risks = self.scope_map_risks.clone();
         self.scope_map_data
-            .get_or_build(&key, || data::Data::new(&files, &layout, &risks));
+            .get_or_build(&key, || data::Data::new(&files, &layout));
     }
 }

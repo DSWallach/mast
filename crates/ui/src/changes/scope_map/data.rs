@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use super::super::{DiffTreeNode, FileDiff, FileStatus};
+use super::super::{DiffTreeNode, FileDiff};
 use super::layout::{Entry, Folder};
 
 #[derive(Clone, Debug)]
@@ -12,8 +12,6 @@ pub(super) struct File {
     pub path: String,
     pub additions: u32,
     pub deletions: u32,
-    pub status: FileStatus,
-    pub risk: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,8 +29,7 @@ pub(super) struct Data {
     pub totals: Totals,
 }
 
-/// The parsed diff key owns the expensive tree and rollups. Callers invalidate
-/// this when walkthrough notes change for the same diff.
+/// The parsed diff key owns the expensive tree and rollups.
 #[derive(Default)]
 pub(in crate::changes) struct Cache {
     entry: Option<(String, Data)>,
@@ -101,11 +98,7 @@ impl Totals {
 }
 
 impl Data {
-    pub(super) fn new(
-        files: &[FileDiff],
-        layout: &[DiffTreeNode],
-        risks: &HashMap<String, String>,
-    ) -> Self {
+    pub(super) fn new(files: &[FileDiff], layout: &[DiffTreeNode]) -> Self {
         fn indices(nodes: &[DiffTreeNode], output: &mut Vec<usize>) {
             for node in nodes {
                 match node {
@@ -132,11 +125,6 @@ impl Data {
                 path: source.path.clone(),
                 additions: source.additions,
                 deletions: source.deletions,
-                status: source.status,
-                risk: risks
-                    .get(&source.path)
-                    .filter(|s| !s.trim().is_empty())
-                    .cloned(),
             };
             builder.insert(
                 &file.path,
@@ -164,20 +152,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_nested_rollups_and_ignores_empty_risks() {
+    fn builds_nested_rollups() {
         let mut a = FileDiff::new("src/a.rs".into(), None);
         a.additions = 3;
         let mut b = FileDiff::new("src/nested/b.rs".into(), None);
         b.deletions = 2;
-        let risks = HashMap::from([
-            ("src/a.rs".into(), "check this".into()),
-            ("src/nested/b.rs".into(), " ".into()),
-        ]);
-        let data = Data::new(
-            &[a, b],
-            &[DiffTreeNode::File(0), DiffTreeNode::File(1)],
-            &risks,
-        );
+        let data = Data::new(&[a, b], &[DiffTreeNode::File(0), DiffTreeNode::File(1)]);
         assert_eq!(
             data.totals,
             Totals {
@@ -188,8 +168,6 @@ mod tests {
         );
         assert_eq!(data.folders["src/"], data.totals);
         assert_eq!(data.folders["src/nested/"].deletions, 2);
-        assert_eq!(data.files[0].risk.as_deref(), Some("check this"));
-        assert_eq!(data.files[1].risk, None);
     }
 
     #[test]
@@ -199,14 +177,14 @@ mod tests {
         for key in ["a", "a", "b"] {
             cache.get_or_build(key, || {
                 builds += 1;
-                Data::new(&[], &[], &HashMap::new())
+                Data::new(&[], &[])
             });
         }
         assert_eq!(builds, 2);
         cache.invalidate();
         cache.get_or_build("b", || {
             builds += 1;
-            Data::new(&[], &[], &HashMap::new())
+            Data::new(&[], &[])
         });
         assert_eq!(builds, 3);
     }

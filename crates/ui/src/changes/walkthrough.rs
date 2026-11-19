@@ -348,6 +348,7 @@ impl TourCoverage {
 /// viewed identities used by Changes; no state is persisted in the sidecar.
 pub(crate) struct Walkthrough {
     review: TourReview,
+    scope_map_risks: Arc<std::collections::HashMap<String, String>>,
     files: Arc<Vec<FileDiff>>,
     coverage: Option<TourCoverage>,
     viewed: BTreeSet<String>,
@@ -550,12 +551,12 @@ impl Walkthrough {
     }
 
     fn new(review: TourReview, changes: Entity<Changes>, cx: &mut Context<Self>) -> Self {
+        let scope_map_risks = Arc::new(review.risk_notes());
+        let walkthrough = cx.weak_entity();
         changes.update(cx, |changes, _| {
             changes.review_walkthrough = true;
             changes.review_tour = true;
-            changes.scope_map_risks = review.risk_notes();
-            changes.scope_map_data.invalidate();
-            changes.refresh_scope_map_data();
+            changes.scope_map_walkthrough = Some(walkthrough);
         });
         let observer = cx.observe(&changes, |_, _, cx| cx.notify());
         let step_input = cx.new(|cx| {
@@ -572,6 +573,7 @@ impl Walkthrough {
         });
         Self {
             review,
+            scope_map_risks,
             files: Arc::new(Vec::new()),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -592,6 +594,10 @@ impl Walkthrough {
             step_task: None,
             step_cancelled: None,
         }
+    }
+
+    pub(super) fn scope_map_risks(&self, target: &str, head: Option<&str>) -> Option<Arc<std::collections::HashMap<String, String>>> {
+        (target == self.review.target_key && head.is_some_and(|head| head.eq_ignore_ascii_case(&self.review.head))).then(|| self.scope_map_risks.clone())
     }
 
     fn coverage(&mut self) -> &TourCoverage {
@@ -1284,7 +1290,7 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
         });
     }
     cx.new(|cx| Walkthrough {
-        review, files: Arc::new(Vec::new()), coverage: None,
+        scope_map_risks: Arc::new(review.risk_notes()), review, files: Arc::new(Vec::new()), coverage: None,
         viewed: BTreeSet::new(), file_progress: None, seen: HashSet::new(), target_selected: true,
         selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
         focus: cx.focus_handle(), changes, _changes_observer: None,
@@ -1468,6 +1474,7 @@ mod tests {
         review.steps[0].risk_note.clear();
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
+            scope_map_risks: Arc::default(),
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -1528,6 +1535,7 @@ mod tests {
         review.steps[0].what = "Long note ".repeat(30);
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
+            scope_map_risks: Arc::default(),
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -1651,6 +1659,7 @@ mod tests {
         review.steps.push(second);
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
+            scope_map_risks: Arc::default(),
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),

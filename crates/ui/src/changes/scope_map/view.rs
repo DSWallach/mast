@@ -49,7 +49,6 @@ mod tests {
             let mut state = mast_proto::DiffReviewState { target: "test".into(), ..Default::default() };
             state.viewed_hunks.insert(changes.parsed.as_ref().unwrap().hunk_identities[0][0].clone());
             changes.review_state = Some(state);
-            changes.scope_map_risks.insert("b".into(), "Check this".into());
             changes.scope_map_selected = true;
             changes.refresh_scope_map_data();
             changes.scope_map_resize(224.0, 320.0, cx);
@@ -67,7 +66,9 @@ mod tests {
             vcx.debug_bounds("scope-map-file-0-viewed-no-risk")
                 .is_some()
         );
-        let tile_bounds = vcx.debug_bounds("scope-map-file-1-unviewed-risk").unwrap();
+        let tile_bounds = vcx
+            .debug_bounds("scope-map-file-1-unviewed-no-risk")
+            .unwrap();
         let tile = tile_bounds.center();
         vcx.simulate_click(tile, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
@@ -257,10 +258,6 @@ impl Changes {
             }
         }
         self.scope_map_selected = true;
-        self.scope_map_risks.insert(
-            "src/model/cache.rs".into(),
-            "Check cache invalidation".into(),
-        );
         self.refresh_scope_map_data();
         self.scope_map_resize(224.0, 416.0, cx);
         self.reflatten(cx);
@@ -408,6 +405,13 @@ impl Changes {
         let Some(data) = self.scope_map_data.get() else {
             return div().into_any_element();
         };
+        let risks = self.review_identity(cx).and_then(|(target, head)| {
+            self.scope_map_walkthrough
+                .as_ref()?
+                .upgrade()?
+                .read(cx)
+                .scope_map_risks(&target, head.as_deref())
+        });
         let marks = self.review_state.as_ref();
         let key = (
             parsed.key.clone(),
@@ -526,9 +530,9 @@ impl Changes {
                         continue;
                     };
                     let viewed = file_is_viewed(file, &parsed.hunk_identities[*index], marks);
-                    let risk = self
-                        .scope_map_risks
-                        .get(&file.path)
+                    let risk = risks
+                        .as_ref()
+                        .and_then(|notes| notes.get(&file.path))
                         .filter(|note| !note.trim().is_empty());
                     let color = match file.status {
                         FileStatus::Added => theme.diff_add,
