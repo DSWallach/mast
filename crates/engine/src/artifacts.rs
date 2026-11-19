@@ -691,6 +691,7 @@ struct Inner {
     /// Held from an agent publish's results-contract check through its
     /// record, so two concurrent publishes cannot both pass the check.
     agent_publish_serial: Mutex<()>,
+    manager_publish_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     render: Arc<RenderBroker>,
     /// Test seam: make provenance stamp writes fail.
     fail_stamp_writes: std::sync::atomic::AtomicBool,
@@ -714,11 +715,18 @@ impl ArtifactsService {
                 questions: Mutex::new(HashMap::new()),
                 gate: Mutex::new(HashMap::new()),
                 agent_publish_serial: Mutex::new(()),
+                manager_publish_hook: Mutex::new(None),
                 render: Arc::new(RenderBroker::default()),
                 fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
         }
+    }
+
+    /// Test seam invoked after Manager ownership is checked, before recording.
+    #[doc(hidden)]
+    pub fn set_manager_publish_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *lock(&self.inner.manager_publish_hook) = hook;
     }
 
     /// Test seam: while set, provenance stamp writes fail.
@@ -945,7 +953,8 @@ impl ArtifactsService {
     /// [`Self::record`], and the id of the revision this very invocation
     /// inserted, if it did: `None` for a replay of an operation already
     /// recorded and for an unchanged document, `Some` only from the serialized
-    /// branch that pushes a new revision. The reply is the same either way.
+    /// branch that pushes a Manager-stamped revision for its writer. The reply
+    /// is the same either way.
     pub(crate) fn record_with_receipt(
         &self,
         request: PublishRequest,
@@ -1201,6 +1210,9 @@ impl ArtifactsService {
                 .unwrap_or(0)
                 .max(view.current_revision)
                 + 1;
+            let manager_stamp = self.manager_stamp(&request, role.as_deref());
+            let stamped_for_writer = manager_stamp.as_ref().is_some_and(|stamp|
+                Some(stamp.chat_id.as_str()) == request.by.chat_id.as_deref());
             view.revisions.insert(
                 0,
                 ArtifactRevision {
@@ -1212,7 +1224,7 @@ impl ArtifactsService {
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
                     scheduled_task: self.run_stamp(&request.by),
-                    manager_status: self.manager_stamp(&request, role.as_deref()),
+                    manager_status: manager_stamp,
                 },
             );
             if manifest.is_some() {
@@ -1222,7 +1234,7 @@ impl ArtifactsService {
                 self.write_companion_index(&id, next, &companion_hashes)?;
             }
             view.current_revision = next;
-            inserted = Some(next);
+            inserted = stamped_for_writer.then_some(next);
         }
         view.kind = kind;
         view.title = title;
@@ -3039,6 +3051,10 @@ impl ArtifactsService {
             return Err(invalid("the project is in another Space"));
         }
         mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
+        let hook = lock(&self.inner.manager_publish_hook).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         // A private folder per call, removed on every path out.
         let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
         let source = dir.path().join("manager-status.md");

@@ -3129,6 +3129,30 @@ async fn only_the_call_that_inserted_a_revision_gets_a_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn handoff_after_status_ownership_check_never_receipts_an_unstamped_revision() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, OTHER_CHAT, "handoff-status-race", None).unwrap();
+    let workspace = rig.core.workspace.clone();
+    let did_handoff = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let happened = did_handoff.clone();
+    rig.core.artifacts.set_manager_publish_hook(Some(Arc::new(move || {
+        workspace.rotate_standing_role_for_chat(CHAT, OTHER_CHAT).unwrap();
+        happened.store(true, std::sync::atomic::Ordering::SeqCst);
+    })));
+    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &manager_caller(&rig), &status_publish_args(&status_document("handoff"), "handoff-status"),
+    ).unwrap();
+    rig.core.artifacts.set_manager_publish_hook(None);
+    assert!(did_handoff.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(receipt, None, "an unstamped insertion cannot cover the old manager's changes");
+    let artifact = rig.core.workspace.artifact(reply["artifactId"].as_str().unwrap()).unwrap();
+    assert_eq!(artifact.current_revision, 1);
+    assert!(artifact.current().unwrap().manager_status.is_none());
+    assert!(mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_publishes_give_a_receipt_only_to_the_invocation_that_inserted() {
     let rig = rig().await;
     rig.core
