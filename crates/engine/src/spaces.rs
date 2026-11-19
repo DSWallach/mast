@@ -326,13 +326,6 @@ fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
                 "tombstoned orphaned work outline rows (space gone)"
             );
         }
-        // A hand-off of a manager or assistant chat on a host that predates
-        // roles starts the successor but leaves the role behind. Any updated
-        // device finishes it.
-        let repaired = inner.workspace.repair_stranded_standing_roles();
-        if repaired > 0 {
-            tracing::info!(roles = repaired, "moved standing roles stranded by an older host");
-        }
     }
 }
 

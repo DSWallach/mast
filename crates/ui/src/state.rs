@@ -6308,6 +6308,49 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn open_pane_resubscribes_its_transcript_to_the_role_successor(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)));
+            state.apply_chats_frame(vec![chat("first", 0, None), chat("second", 1, None)], cx);
+            state.select_chat(Some("first".into()), cx);
+        });
+        cx.run_until_parked();
+        let watched = |requests: &mut tokio::sync::mpsc::Receiver<String>| {
+            let mut chats = Vec::new();
+            while let Ok(frame) = requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if request["method"] == methods::WATCH_DOC_MESSAGES {
+                    chats.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+                }
+            }
+            chats
+        };
+        assert_eq!(watched(&mut requests), ["first"]);
+
+        // The rotation frame arrives over the chats watch.
+        state.update(cx, |state, cx| {
+            let mut first = chat("first", 0, None);
+            first.archived = true;
+            first.standing_role_successor = Some("second".into());
+            state.apply_chats_frame(vec![first, chat("second", 1, None)], cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(watched(&mut requests), ["second"], "the pane subscribes to the successor, not the predecessor");
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert!(state.transcript_task.is_some(), "a live transcript watch is attached");
+        });
+    }
+
     #[test]
     fn optimistic_chat_title_updates_every_shared_consumer_and_can_roll_back() {
         let mut state = AppState::new();

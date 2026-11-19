@@ -647,46 +647,6 @@ fn a_rotation_beats_newer_synced_clocks_on_both_rows() {
 }
 
 #[test]
-fn a_hand_off_a_roleless_binary_completed_is_repaired_by_an_updated_device() {
-    use mast_proto::StandingRoleKind;
-    let (mut doc, item) = role_doc(&["first", "second", "third", "plain", "plain-next"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
-    // Nothing to repair while no hand-off happened, and ordinary chats are not roles.
-    assert_eq!(doc.repair_stranded_standing_roles(), 0);
-    doc.hand_off_chat_children("plain", "plain-next", "plain", 1).unwrap();
-    assert!(doc.stranded_standing_role_hand_offs().is_empty());
-    // An older host hands off the role chat: workers move and provenance is recorded,
-    // but the role stays on the predecessor.
-    doc.hand_off_chat_children("first", "second", "first", 2).unwrap();
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
-    assert_eq!(doc.stranded_standing_role_hand_offs(), [("first".to_owned(), "second".to_owned())]);
-    assert_eq!(doc.repair_stranded_standing_roles(), 1);
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("second"));
-    let first = doc.chat("first").unwrap().unwrap();
-    assert!(first.archived && first.is_standing_role_predecessor());
-    assert_eq!(doc.repair_stranded_standing_roles(), 0, "idempotent");
-}
-
-#[test]
-fn stranded_repair_leaves_ambiguous_and_in_flight_hand_offs_alone() {
-    use mast_proto::StandingRoleKind;
-    // Two successors recorded from the role chat: ambiguous, so nothing moves.
-    let (mut doc, item) = role_doc(&["first", "second", "third"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
-    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
-    doc.hand_off_chat_children("first", "third", "first", 2).unwrap();
-    assert_eq!(doc.repair_stranded_standing_roles(), 0);
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
-    // A live host mid-launch (the reservation names the successor) finishes its own hand-off.
-    let (mut doc, item) = role_doc(&["first", "second"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
-    doc.reserve_standing_role_hand_off("first", "second", "op", Some("space")).unwrap();
-    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
-    assert_eq!(doc.repair_stranded_standing_roles(), 0);
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
-}
-
-#[test]
 fn rotation_enforces_the_holder_invariants_adoption_does() {
     use mast_proto::StandingRoleKind;
     let (mut doc, item) = role_doc(&["first", "holder", "foreign", "ok"]);

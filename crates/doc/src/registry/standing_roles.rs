@@ -366,57 +366,6 @@ impl RegistryDoc {
         .then_some(pending)
     }
 
-    /// Hand-offs a binary without role support completed: the successor
-    /// recorded a hand-off from the chat that still holds a role, and nothing
-    /// moved the role. Each is `(role chat, its sole active successor)`;
-    /// ambiguous cases (several successors), hand-offs a live host is
-    /// finishing (a reservation names that successor), and successors that
-    /// cannot hold the role are left alone.
-    pub fn stranded_standing_role_hand_offs(&self) -> Vec<(String, String)> {
-        let chats = self.read_chats().unwrap_or_default();
-        let mut stranded = Vec::new();
-        for role in self.standing_roles() {
-            let Some(current) = role.current_chat_id.as_deref() else {
-                continue;
-            };
-            let pending_to = self.pending_hand_off_of(&role.id).map(|p| p.to_chat_id);
-            let successors: Vec<&Chat> = chats
-                .iter()
-                .filter(|c| !c.archived && !c.is_standing_role_predecessor() && c.id != current)
-                .filter(|c| self.hand_off_recorded(current, &c.id))
-                .collect();
-            let [successor] = successors.as_slice() else {
-                continue;
-            };
-            if pending_to.as_deref() == Some(successor.id.as_str()) {
-                continue;
-            }
-            if self
-                .check_standing_role_hand_off(current, &successor.id, None)
-                .is_ok()
-            {
-                stranded.push((current.to_owned(), successor.id.clone()));
-            }
-        }
-        stranded
-    }
-
-    /// Finish the stranded hand-offs found by
-    /// [`Self::stranded_standing_role_hand_offs`]. Returns how many moved.
-    pub fn repair_stranded_standing_roles(&mut self) -> usize {
-        let mut repaired = 0;
-        for (from, to) in self.stranded_standing_role_hand_offs() {
-            match self.rotate_standing_role_for_chat(&from, &to) {
-                Ok(Some(_)) => repaired += 1,
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(from = %from, to = %to, %error, "standing role repair failed");
-                }
-            }
-        }
-        repaired
-    }
-
     /// Read-only precheck for a hand-off launch, run before anything is
     /// written. The launch holds the engine's launch gate and the hand-off
     /// runs on the source chat's host, so the plan stays true until
