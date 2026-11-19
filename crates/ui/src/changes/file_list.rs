@@ -458,6 +458,16 @@ enum FileTreeRow {
     },
 }
 
+pub(super) fn file_is_viewed(file: &FileDiff, identities: &[String], state: Option<&mast_proto::DiffReviewState>) -> bool {
+    state.is_some_and(|state| {
+        if file.hunks.is_empty() {
+            state.viewed_files.contains(&file.path)
+        } else {
+            identities.iter().all(|identity| state.viewed_hunks.contains(identity))
+        }
+    })
+}
+
 fn file_tree_rows(
     files: &[FileDiff],
     indices: &[usize],
@@ -554,7 +564,23 @@ fn file_tree_rows(
 }
 
 impl Changes {
-    fn file_tree_key(&self) -> String {
+    pub(super) fn reveal_scope_folder(&mut self, folder: String, file: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.file_tree_key();
+        let folder = if folder.is_empty() {
+            self.parsed.as_ref().and_then(|parsed| parsed.files.get(file)).and_then(|file| file.path.rsplit_once('/')).map(|(folder, _)| folder.to_owned()).unwrap_or_default()
+        } else { folder };
+        let target = format!("{}/", folder.trim_end_matches('/'));
+        if let Some(collapsed) = self.file_tree_collapsed.get_mut(&key) {
+            collapsed.retain(|path| !target.starts_with(path) && !path.starts_with(&target));
+        }
+        self.file_filter.update(cx, |input, cx| input.set_text("", cx));
+        self.scope_map_selected = false;
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.changes_scope_map = false);
+        self.scope_map_reveal = Some((folder, file));
+        window.focus(&self.file_tree_focus, cx);
+        cx.notify();
+    }
+    pub(super) fn file_tree_key(&self) -> String {
         let owner = self.owner.as_ref().map(|owner| {
             (
                 &owner.chat_id,
@@ -652,6 +678,7 @@ impl Changes {
         let files = parsed.files.clone();
         let identities = parsed.hunk_identities.clone();
         let review_state = self.review_state.clone();
+        let folder_totals = self.scope_map_folder_totals();
         let indices = indices
             .into_iter()
             .filter(|index| {
@@ -667,6 +694,14 @@ impl Changes {
             .cloned()
             .unwrap_or_default();
         let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        if let Some((path, file)) = self.scope_map_reveal.take() {
+            let target = format!("{}/", path.trim_end_matches('/'));
+            let position = tree_rows.iter().enumerate().filter_map(|(index, row)| match row {
+                FileTreeRow::Folder { path, .. } if !target.starts_with('/') && (path == &target || path.starts_with(&target) || target.starts_with(path)) => Some((index, path.len())),
+                _ => None,
+            }).min_by_key(|(_, length)| length.abs_diff(target.len())).map(|(index, _)| index).or_else(|| tree_rows.iter().position(|row| matches!(row, FileTreeRow::File { index, .. } if *index == file)));
+            if let Some(position) = position { self.file_tree_scroll.scroll_to_item(position, gpui::ScrollStrategy::Nearest); }
+        }
         let rows_key = tree_key.clone();
         let collapse_key = tree_key.clone();
         let expand_key = tree_key.clone();
@@ -694,6 +729,9 @@ impl Changes {
                                     count,
                                     collapsed,
                                 } => {
+                                    let totals = folder_totals.get(&path).copied().unwrap_or_default();
+                                    let lines = totals.additions + totals.deletions;
+                                    let add_width = if lines == 0 { 0.0 } else { 28.0 * totals.additions as f32 / lines as f32 };
                                     let focused = focused_path.as_ref() == Some(&path);
                                     let selector = format!("changes-folder-{path}");
                                     let toggle_path = path.clone();
@@ -747,19 +785,14 @@ impl Changes {
                                                 .text_color(theme.text_muted)
                                                 .child(SharedString::from(count.to_string()))
                                         }))
+                                        .child(div().debug_selector(move || format!("changes-folder-totals-{}-{}", totals.additions, totals.deletions)).flex().w(px(28.0)).h(px(2.0)).bg(del_color(theme)).child(div().w(px(add_width)).h_full().bg(add_color(theme))))
+                                        .child(div().text_size(px(10.0)).text_color(add_color(theme)).child(format!("+{}", totals.additions)))
+                                        .child(div().text_size(px(10.0)).text_color(del_color(theme)).child(format!("−{}", totals.deletions)))
                                         .into_any_element();
                                 }
                             };
                             let file = &files[index];
-                            let viewed = review_state.as_ref().is_some_and(|state| {
-                                if file.hunks.is_empty() {
-                                    state.viewed_files.contains(&file.path)
-                                } else {
-                                    identities[index]
-                                        .iter()
-                                        .all(|identity| state.viewed_hunks.contains(identity))
-                                }
-                            });
+                            let viewed = file_is_viewed(file, &identities[index], review_state.as_ref());
                             let label = match &file.old_path {
                                 Some(old) if old != &file.path => format!("{old} → {}", file.path),
                                 _ => file
@@ -828,6 +861,7 @@ impl Changes {
                         .collect::<Vec<_>>()
                 })
             })
+            .track_scroll(&self.file_tree_scroll)
             .flex_1()
             .min_h_0();
         div()
@@ -861,16 +895,10 @@ impl Changes {
                     }
                 }),
             )
-            .flex_none()
+            .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .when(!crate::components::is_horizon(theme), |element| {
-                element.border_r_1().border_color(theme.border)
-            })
-            .when(true, |element| {
-                crate::components::changes_file_list(element, theme)
-            })
             .child(
                 div()
                     .flex()
@@ -1134,6 +1162,7 @@ mod navigation_tests {
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
             changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
             changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.refresh_scope_map_data();
             changes.reflatten(cx);
         }));
         vcx.update(|window, cx| window.draw(cx).clear());
@@ -1142,6 +1171,7 @@ mod navigation_tests {
             .unwrap()
             .center();
         assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        assert!(vcx.debug_bounds("changes-folder-totals-2-2").is_some());
         vcx.simulate_click(folder, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("changes-file-list-entry-0").is_none());

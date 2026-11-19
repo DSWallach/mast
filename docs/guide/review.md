@@ -15,6 +15,8 @@ Keys can be rebound and do not apply while typing. If the head changes, heed the
 
 ## Changes and code references
 
+Use **Map** in the Changes sidebar to see files grouped by folder and sized by added and deleted lines. Select a tile to jump to its diff; hover for its path, counts, viewed state, and any walkthrough risk note. Viewed files fade, and an outline marks a file with a risk note. The header shows review progress in files and lines. **List** shows folder totals and addition/deletion bars. Mast remembers your choice; List is the default. For very small diffs the map uses a row, and for large diffs it groups small files within folders.
+
 Changes shows the enclosing function in hunk headers when available. Click the one-line gap control to reveal more context; Option-click expands the whole gap. Review threads appear as cards in the diff.
 
 Use **Add to chat** on a code selection or hunk to attach a code reference. Its chip can show **Moved** or **Changed** and has a hover card. Open the reference to see the pinned snippet. If the code changed, **Show diff vs current** compares it with the current file; a moved reference offers a reanchor action.

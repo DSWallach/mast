@@ -724,6 +724,7 @@ fn round_trip() {
         profile_at_migration: None,
         window_geometry: None,
         changes_file_list_width: 240.0,
+        changes_scope_map: true,
         sidebar_width: 300.0,
         sidebar_collapsed: true,
         sidebar_grouped: true,

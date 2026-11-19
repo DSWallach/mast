@@ -350,6 +350,7 @@ impl Changes {
                 self.review_link_chat = Some(chat_id.clone());
                 self.review_target = None;
                 self.review_state = None;
+                self.review_state_generation = self.review_state_generation.wrapping_add(1);
                 self.review_pr = None;
                 self.review_link_status = None;
                 let task = self.state.update(cx, |state, cx| {
@@ -436,6 +437,7 @@ impl Changes {
                 self.review_checkout_matches = None;
                 self.review_target = None;
                 self.review_state = None;
+                self.review_state_generation = self.review_state_generation.wrapping_add(1);
                 let base = self.base_ref.clone();
                 let expected_slug = format!("{}/{}", pr.owner, pr.repo).to_lowercase();
                 let expected_pr = pr.external_id().to_lowercase();
@@ -520,6 +522,7 @@ impl Changes {
             if self.review_branch_lookup.as_ref() == Some(&key) && self.review_branch_lookup_task.is_some() { return; }
             self.review_target = None;
             self.review_state = None;
+            self.review_state_generation = self.review_state_generation.wrapping_add(1);
             self.review_task = None;
             self.review_branch_lookup = Some(key.clone());
             let task = self.state.update(cx, |state, cx| state.list_chat_diff_checkouts(&chat_id, cx));
@@ -571,11 +574,13 @@ impl Changes {
         self.review_error = None;
         if let Some(state) = self.review_pending.get(&target).cloned() {
             self.review_state = Some(state);
+            self.review_state_generation = self.review_state_generation.wrapping_add(1);
             self.reconcile_current_review_head(head_sha, cx);
             self.save_review_state(cx);
             return;
         }
         self.review_state = None;
+        self.review_state_generation = self.review_state_generation.wrapping_add(1);
         let branch_target = self.branch_target_for_pr(&target);
         let mut params = serde_json::json!({"target": target});
         if let Some(branch_target) = branch_target {
@@ -604,6 +609,7 @@ impl Changes {
                         this.review_acknowledged
                             .insert(target.clone(), state.clone());
                         this.review_state = Some(state);
+                        this.review_state_generation = this.review_state_generation.wrapping_add(1);
                         // Re-read the current head: it may have moved while the row loaded.
                         let head = this.review_identity(cx).and_then(|(_, head)| head);
                         this.reconcile_current_review_head(head, cx);
@@ -662,6 +668,7 @@ impl Changes {
         if reconcile_review_head(state, head, &parsed.hunk_identities) {
             self.review_pending
                 .insert(state.target.clone(), state.clone());
+            self.review_state_generation = self.review_state_generation.wrapping_add(1);
             self.save_review_state(cx);
         }
     }
@@ -706,6 +713,7 @@ impl Changes {
                     if closed {
                         this.review_closed = true;
                         this.review_state = None;
+                        this.review_state_generation = this.review_state_generation.wrapping_add(1);
                         this.review_task = None;
                         this.review_pending.remove(&target);
                         this.review_acknowledged.remove(&target);
@@ -736,6 +744,7 @@ impl Changes {
                 self.review_acknowledged.remove(target);
             }
             self.review_state = None;
+            self.review_state_generation = self.review_state_generation.wrapping_add(1);
         }
         if self.review_state.is_none() {
             self.review_target = None;
@@ -817,6 +826,7 @@ impl Changes {
         state.viewed_files.remove(&file_diff.path);
         self.review_pending
             .insert(state.target.clone(), state.clone());
+        self.review_state_generation = self.review_state_generation.wrapping_add(1);
         self.save_review_state(cx);
         cx.notify();
     }
@@ -854,6 +864,7 @@ impl Changes {
         }
         self.review_pending
             .insert(state.target.clone(), state.clone());
+        self.review_state_generation = self.review_state_generation.wrapping_add(1);
         self.save_review_state(cx);
         cx.notify();
     }

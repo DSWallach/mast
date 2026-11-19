@@ -77,6 +77,7 @@ mod review_state;
 mod review_drafts;
 mod review_submit;
 mod row_renderer;
+mod scope_map;
 mod syntax_excerpts;
 mod split_pairing;
 mod watch_lifecycle;
@@ -1297,7 +1298,12 @@ pub struct Changes {
     file_tree_collapsed: HashMap<String, std::collections::HashSet<String>>,
     file_tree_focus: FocusHandle,
     file_tree_focused_path: Option<String>,
+    file_tree_scroll: gpui::UniformListScrollHandle,
+    scope_map_reveal: Option<(String, usize)>,
     file_list_width: f32,
+    scope_map_selected: bool,
+    scope_map_focus: FocusHandle,
+    scope_toggle_focus: FocusHandle,
     file_list_resize_anchor: Option<(f32, f32)>,
     file_list_resize_hover: bool,
     diff_focus: FocusHandle,
@@ -1318,7 +1324,11 @@ pub struct Changes {
     review_status_base: Option<String>,
     review_closed: bool,
     review_state: Option<mast_proto::DiffReviewState>,
+    review_state_generation: u64,
     review_walkthrough: bool,
+    scope_map_walkthrough: Option<gpui::WeakEntity<walkthrough::Walkthrough>>,
+    scope_map_data: scope_map::data::Cache,
+    scope_map_view: scope_map::view::State,
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
     review_task: Option<Task<()>>,
@@ -1606,7 +1616,12 @@ impl Changes {
             file_tree_collapsed: HashMap::new(),
             file_tree_focus: cx.focus_handle(),
             file_tree_focused_path: None,
+            file_tree_scroll: gpui::UniformListScrollHandle::new(),
+            scope_map_reveal: None,
             file_list_width: settings.changes_file_list_width,
+            scope_map_selected: settings.changes_scope_map,
+            scope_map_focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            scope_toggle_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             file_list_resize_anchor: None,
             file_list_resize_hover: false,
             diff_focus: cx.focus_handle(),
@@ -1627,7 +1642,11 @@ impl Changes {
             review_status_base: None,
             review_closed: false,
             review_state: None,
+            review_state_generation: 0,
             review_walkthrough: false,
+            scope_map_walkthrough: None,
+            scope_map_data: scope_map::data::Cache::default(),
+            scope_map_view: scope_map::view::State::default(),
             walkthrough_target: None,
             review_tour: false,
             review_task: None,
@@ -1976,6 +1995,8 @@ impl Changes {
                     submodules: Arc::new(submodules),
                     layout: Arc::new(layout),
                 });
+                changes.refresh_scope_map_data();
+                changes.reset_scope_map_layout();
                 changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
                 changes.refresh_thread_rows(cx);
@@ -2189,7 +2210,7 @@ impl Render for Changes {
                                             cx.notify();
                                         }
                                     }))
-                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, window, cx)))
+                                    .children((!self.review_tour).then(|| self.render_scope_sidebar(&theme, window, cx)))
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
