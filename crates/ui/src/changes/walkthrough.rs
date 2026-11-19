@@ -349,6 +349,7 @@ impl TourCoverage {
 pub(crate) struct Walkthrough {
     review: TourReview,
     scope_map_risks: Arc<std::collections::HashMap<String, String>>,
+    scope_map_revision: Option<String>,
     files: Arc<Vec<FileDiff>>,
     coverage: Option<TourCoverage>,
     viewed: BTreeSet<String>,
@@ -552,6 +553,7 @@ impl Walkthrough {
 
     fn new(review: TourReview, changes: Entity<Changes>, cx: &mut Context<Self>) -> Self {
         let scope_map_risks = Arc::new(review.risk_notes());
+        let scope_map_revision = Self::matching_diff_revision(&review, changes.read(cx), cx);
         let walkthrough = cx.weak_entity();
         changes.update(cx, |changes, _| {
             changes.review_walkthrough = true;
@@ -574,6 +576,7 @@ impl Walkthrough {
         Self {
             review,
             scope_map_risks,
+            scope_map_revision,
             files: Arc::new(Vec::new()),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -596,8 +599,15 @@ impl Walkthrough {
         }
     }
 
-    pub(super) fn scope_map_risks(&self, target: &str, head: Option<&str>) -> Option<Arc<std::collections::HashMap<String, String>>> {
-        (target == self.review.target_key && head.is_some_and(|head| head.eq_ignore_ascii_case(&self.review.head))).then(|| self.scope_map_risks.clone())
+    fn matching_diff_revision(review: &TourReview, changes: &Changes, cx: &App) -> Option<String> {
+        let (target, head) = changes.review_identity(cx)?;
+        if target != review.target_key || !head.as_deref().is_some_and(|head| head.eq_ignore_ascii_case(&review.head)) { return None; }
+        let parsed = changes.parsed.as_ref()?;
+        (changes.active_diff(cx).is_some_and(|diff| changes.parse_key(diff) == parsed.key)).then(|| parsed.key.clone())
+    }
+
+    pub(super) fn scope_map_risks(&self, target: &str, head: Option<&str>, revision: &str) -> Option<Arc<std::collections::HashMap<String, String>>> {
+        (target == self.review.target_key && self.scope_map_revision.as_deref() == Some(revision) && head.is_some_and(|head| head.eq_ignore_ascii_case(&self.review.head))).then(|| self.scope_map_risks.clone())
     }
 
     fn coverage(&mut self) -> &TourCoverage {
@@ -723,6 +733,9 @@ impl Render for Walkthrough {
         if let Some(changes) = &self.changes {
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
             let changes = changes.read(cx);
+            if self.scope_map_revision.is_none() {
+                self.scope_map_revision = Self::matching_diff_revision(&self.review, changes, cx);
+            }
             if let Some(parsed) = &changes.parsed {
                 if !Arc::ptr_eq(&self.files, &parsed.files) {
                     self.files = parsed.files.clone();
@@ -1290,7 +1303,7 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
         });
     }
     cx.new(|cx| Walkthrough {
-        scope_map_risks: Arc::new(review.risk_notes()), review, files: Arc::new(Vec::new()), coverage: None,
+        scope_map_risks: Arc::new(review.risk_notes()), scope_map_revision: None, review, files: Arc::new(Vec::new()), coverage: None,
         viewed: BTreeSet::new(), file_progress: None, seen: HashSet::new(), target_selected: true,
         selected: 0, note_expanded: false, note_height: Rc::new(Cell::new(0.0)), tour: true, stale_head: None,
         focus: cx.focus_handle(), changes, _changes_observer: None,
@@ -1512,6 +1525,7 @@ mod tests {
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
             scope_map_risks: Arc::default(),
+            scope_map_revision: None,
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -1575,6 +1589,7 @@ mod tests {
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review,
             scope_map_risks,
+            scope_map_revision: Some("revision".into()),
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -1597,9 +1612,10 @@ mod tests {
         });
         vcx.update(|window, cx| window.draw(cx).clear());
         view.read_with(vcx, |view, _| {
-            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head)).is_some());
-            assert!(view.scope_map_risks(&view.review.target_key, Some("different-head")).is_none());
-            assert!(view.scope_map_risks("different-target", Some(&view.review.head)).is_none());
+            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head), "revision").is_some());
+            assert!(view.scope_map_risks(&view.review.target_key, Some("different-head"), "revision").is_none());
+            assert!(view.scope_map_risks("different-target", Some(&view.review.head), "revision").is_none());
+            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head), "other-revision").is_none());
         });
         assert!(vcx.debug_bounds("review-progress").is_some());
         assert!(vcx.debug_bounds("review-note").is_some());
@@ -1704,6 +1720,7 @@ mod tests {
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
             review: review.into(),
             scope_map_risks: Arc::default(),
+            scope_map_revision: None,
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),

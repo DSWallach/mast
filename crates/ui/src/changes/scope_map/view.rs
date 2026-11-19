@@ -517,7 +517,7 @@ impl Changes {
                     .as_ref()?
                     .upgrade()?
                     .read(cx)
-                    .scope_map_risks(&target, head.as_deref())
+                    .scope_map_risks(&target, head.as_deref(), &parsed.key)
             });
         let marks = self.review_state.as_ref();
         let key = (parsed.key.clone(), self.review_state_generation);
