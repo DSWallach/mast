@@ -7136,6 +7136,24 @@ impl Overview {
         }
     }
 
+    pub(crate) fn dismiss_required_actions(
+        &mut self,
+        request_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_required_actions(cx);
+        let spaces = self.required_action_spaces(cx);
+        let chats = self.outline_chats.clone();
+        if let Some(panel) = &self.required_actions_panel {
+            panel.update(cx, |panel, cx| {
+                panel.set_data(spaces, chats);
+                for request_id in request_ids {
+                    panel.external_dismiss(request_id, "menu", cx);
+                }
+            });
+        }
+    }
+
     pub(crate) fn close_required_actions(&mut self, cx: &mut Context<Self>) {
         if self.required_actions_panel.take().is_some() {
             self._required_actions_events = None;

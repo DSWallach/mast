@@ -33,7 +33,7 @@ async fn managed_install_reaches_session_started() {
         steering,
         interrupt: interrupt.clone(),
     };
-    let request = RunRequest { scheduled_task: None, approval_rules: false,
+    let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: "say the word ok and stop".into(),
         harness: None,
         model: None,

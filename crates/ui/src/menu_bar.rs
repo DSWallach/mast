@@ -399,6 +399,7 @@ pub enum MenuAction {
     OpenChat(String),
     OpenRequest { space_id: String, request_id: String },
     DecideRequest { space_id: String, request_id: String, decision: RequestDecision },
+    DismissAllRequests(Vec<String>),
     OpenMast,
     RestartWhenIdle,
     ResumeAll(Vec<String>),
@@ -620,6 +621,7 @@ pub(crate) fn insert_requests(view: &mut MenuView, mut requests: Vec<RequestPrev
     use mast_proto::work_outline_user_actions::UserActionKind;
     if requests.is_empty() { return; }
     requests.sort_by(|a, b| (a.group, a.created_at, &a.request_id).cmp(&(b.group, b.created_at, &b.request_id)));
+    let request_ids = requests.iter().map(|request| request.request_id.clone()).collect();
     let mut items = vec![Item::Section(format!("Requests · {}", requests.len()))];
     for request in requests {
         let label = match request.kind {
@@ -640,6 +642,10 @@ pub(crate) fn insert_requests(view: &mut MenuView, mut requests: Vec<RequestPrev
             });
         }
     }
+    items.push(Item::Action {
+        action: MenuAction::DismissAllRequests(request_ids),
+        label: "Dismiss all".into(),
+    });
     view.items.splice(1..1, items);
 }
 

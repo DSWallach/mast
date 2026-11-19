@@ -1701,6 +1701,17 @@ pub(crate) fn snapshot_fixture(window: &mut Window, cx: &mut App) -> Entity<impl
         revisions: vec![mast_proto::ArtifactRevision { id: 2, by: mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::Agent, ..Default::default() }, ..Default::default() }, mast_proto::ArtifactRevision { id: 1, ..Default::default() }],
         ..Default::default()
     };
+    // `MAST_PREVIEW_ARTIFACT_RESULTS=1` opens a scheduled task's results
+    // artifact, to check how its header shows the reserved role.
+    let artifact = if std::env::var_os("MAST_PREVIEW_ARTIFACT_RESULTS").is_some() {
+        ArtifactView {
+            title: "Results: Slack digest".into(),
+            role: Some(mast_proto::ScheduledRunResults::role_for("slack")),
+            ..artifact
+        }
+    } else {
+        artifact
+    };
     let state = cx.new(|_| {
         let mut state = AppState::new();
         state.local_device_id = Some("fixture-device".into());

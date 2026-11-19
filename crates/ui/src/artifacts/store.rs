@@ -219,12 +219,12 @@ impl ArtifactStore {
     }
 }
 
-/// Pinned plan first, then `updatedAt` descending, then title for a stable
-/// order. Pure.
+/// Pinned plan first, then scheduled results, then the rest; each group by
+/// `updatedAt` descending, then title for a stable order. Pure.
 pub(crate) fn details_order(mut artifacts: Vec<&ArtifactView>) -> Vec<&ArtifactView> {
     artifacts.sort_by(|a, b| {
-        b.pinned_as_plan
-            .cmp(&a.pinned_as_plan)
+        a.pin_rank()
+            .cmp(&b.pin_rank())
             .then(b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.title.cmp(&b.title))
             .then_with(|| a.id.cmp(&b.id))

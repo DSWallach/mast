@@ -2433,7 +2433,7 @@ fn run_request(chat: &Chat, space: Option<&Space>, harness: HarnessId, text: Str
         .clone()
         .or_else(|| space.map(|s| s.path.clone()))
         .unwrap_or_else(|| "~".into());
-    RunRequest { scheduled_task: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.as_ref().is_some_and(|c| c.approval_rules),
         prompt: text,
         harness: Some(harness),
         model: config.as_ref().and_then(|c| c.model.clone()),

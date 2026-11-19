@@ -24,6 +24,9 @@ pub struct ScheduledChat {
     /// Captured from the task's run snapshot when the chat is created.
     #[serde(default, skip_serializing_if = "ScheduledTaskOutput::is_interactive")]
     pub output: ScheduledTaskOutput,
+    /// The run snapshot's Write to Notion setting, for the agent environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_to_notion: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,6 +102,11 @@ pub struct ScheduledTaskDraft {
     /// Applies only to Background runs and is captured in each run snapshot.
     #[serde(default, skip_serializing_if = "ScheduledTaskAfterSuccess::is_archive")]
     pub after_success: ScheduledTaskAfterSuccess,
+    /// Whether the task's procedure may write to Notion. `None` is a task
+    /// saved before the setting existed: runs carry no Notion instruction and
+    /// keep their prior behavior. New and imported tasks start `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_to_notion: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,6 +168,76 @@ pub struct ScheduledRun {
     pub awaiting_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_since: Option<i64>,
+    /// The results artifact this Background run promised to publish. Absent
+    /// for Interactive runs and for runs launched before the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<ScheduledRunResults>,
+}
+
+/// Role prefix of a task's results artifact. The suffix is a hash of the
+/// task id, so the role stays within the artifact role limit.
+pub const RESULTS_ROLE_PREFIX: &str = "scheduled-results:";
+
+/// Identity of a Background task's results artifact on its work item.
+/// There is one per task and item; every run adds one revision to it.
+/// Consumers find it by `role` (stable across task renames), never by title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRunResults {
+    pub artifact_id: String,
+    pub title: String,
+    pub role: String,
+    /// The revision this run published, set once the run is verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
+}
+
+impl ScheduledRunResults {
+    /// Roles compare trimmed and lowercased, exactly as `artifact_id` does.
+    pub fn normalize_role(role: &str) -> String {
+        role.trim().to_lowercase()
+    }
+
+    /// Whether `role` is in the reserved results namespace, in any case.
+    pub fn is_results_role(role: &str) -> bool {
+        Self::normalize_role(role).starts_with(RESULTS_ROLE_PREFIX)
+    }
+
+    pub fn role_for(task_id: &str) -> String {
+        format!(
+            "{RESULTS_ROLE_PREFIX}{}",
+            crate::work_outline::derive_id(task_id, "results")
+        )
+    }
+
+    pub fn title_for(task_name: &str) -> String {
+        crate::artifacts::clean_title(&format!("Results: {}", task_name.trim()))
+    }
+
+    pub fn new(space_id: &str, work_item_id: &str, task_id: &str, task_name: &str) -> Self {
+        let title = Self::title_for(task_name);
+        let role = Self::role_for(task_id);
+        Self {
+            artifact_id: crate::artifacts::artifact_id(
+                space_id,
+                Some(work_item_id),
+                None,
+                &title,
+                Some(&role),
+            ),
+            title,
+            role,
+            revision: None,
+        }
+    }
+
+    /// Prefix of the Required Action dedupe keys this task's runs raise.
+    pub fn dedupe_prefix(task_id: &str) -> String {
+        format!(
+            "scheduled-need:{}:",
+            crate::work_outline::derive_id(task_id, "results")
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -489,5 +567,116 @@ mod tests {
         let decoded: crate::Chat = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.id, "old");
         assert!(decoded.scheduled_task_info.is_none());
+    }
+
+    #[test]
+    fn a_run_row_without_results_reads_and_writes_unchanged() {
+        let results = ScheduledRunResults::new("space", "item", "task", "Slack");
+        assert!(results.role.len() <= crate::artifacts::artifact_limits::MAX_ROLE_CHARS);
+        let long = "x".repeat(128);
+        assert!(
+            ScheduledRunResults::role_for(&long).len()
+                <= crate::artifacts::artifact_limits::MAX_ROLE_CHARS
+        );
+        let mut value = serde_json::to_value(ScheduledRunResults::new("s", "i", "t", "n")).unwrap();
+        assert!(value.get("revision").is_none());
+        value["revision"] = 3.into();
+        let decoded: ScheduledRunResults = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.revision, Some(3));
+    }
+
+    fn sample_run(results: Option<ScheduledRunResults>) -> ScheduledRun {
+        ScheduledRun {
+            id: "run".into(),
+            task_id: "task".into(),
+            scheduled_for: 1,
+            created_at: 2,
+            finished_at: None,
+            manual: false,
+            state: ScheduledRunState::Queued,
+            detail: None,
+            chat_id: Some("chat".into()),
+            task_revision: 1,
+            snapshot: ScheduledTaskDraft {
+                name: "Slack".into(),
+                prompt: "Go".into(),
+                cwd: "/".into(),
+                space_id: Some("space".into()),
+                config: ChatConfig {
+                    approval_rules: false,
+                    harness: crate::HarnessId::Mock,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    sandbox: crate::SandboxLevel::WorkspaceWrite,
+                    auto_approve: false,
+                },
+                schedule: TaskSchedule::Once { at: 3 },
+                enabled: false,
+                grace_minutes: 0,
+                cutover_confirmed: false,
+                work_item_id: Some("item".into()),
+                output: ScheduledTaskOutput::Background,
+                after_success: Default::default(),
+                write_to_notion: None,
+            },
+            awaiting_request_id: None,
+            awaiting_since: None,
+            results,
+        }
+    }
+
+    /// The reader before the results contract: the same run without `results`.
+    #[derive(Debug, PartialEq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyScheduledRun {
+        id: String,
+        task_id: String,
+        scheduled_for: i64,
+        created_at: i64,
+        finished_at: Option<i64>,
+        manual: bool,
+        state: ScheduledRunState,
+        detail: Option<String>,
+        chat_id: Option<String>,
+        task_revision: u64,
+        snapshot: ScheduledTaskDraft,
+        #[serde(default)]
+        awaiting_request_id: Option<String>,
+        #[serde(default)]
+        awaiting_since: Option<i64>,
+    }
+
+    #[test]
+    fn an_old_run_payload_reads_in_the_new_reader_without_results() {
+        let with = sample_run(Some(ScheduledRunResults::new("space", "item", "task", "Slack")));
+        let mut old = serde_json::to_value(&with).unwrap();
+        old.as_object_mut().unwrap().remove("results");
+        let decoded: ScheduledRun = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded, sample_run(None));
+    }
+
+    #[test]
+    fn a_new_run_payload_reads_in_the_legacy_reader_and_omits_empty_results() {
+        let with = sample_run(Some(ScheduledRunResults::new("space", "item", "task", "Slack")));
+        let json = serde_json::to_value(&with).unwrap();
+        assert!(json.get("results").is_some());
+        let legacy: LegacyScheduledRun = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.id, "run");
+        assert_eq!(legacy.snapshot, with.snapshot);
+        // A run with no promise serializes exactly as before the contract.
+        let without = serde_json::to_value(sample_run(None)).unwrap();
+        assert!(without.get("results").is_none());
+        let again: LegacyScheduledRun = serde_json::from_value(without).unwrap();
+        assert_eq!(again.chat_id.as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn reserved_roles_compare_trimmed_and_lowercased() {
+        let role = ScheduledRunResults::role_for("task");
+        let shouted = format!("  {}  ", role.to_uppercase());
+        assert!(ScheduledRunResults::is_results_role(&shouted));
+        assert_eq!(ScheduledRunResults::normalize_role(&shouted), role);
+        assert!(!ScheduledRunResults::is_results_role("doc"));
     }
 }

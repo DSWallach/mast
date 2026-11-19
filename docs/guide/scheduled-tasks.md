@@ -55,6 +55,15 @@ editions of the task.
 Every scheduled run gets `MAST_SCHEDULED_TASK=<task name>` in its environment,
 so your own hooks can tell an unattended run from an interactive one.
 
+**Write to Notion** says whether the task's procedure may write to Notion. New
+and imported tasks start with it off. When it is off, the run's prompt ends with
+an instruction to skip every step that creates, updates or deletes Notion
+content, and the run's environment has `MAST_SCHEDULED_WRITE_TO_NOTION=0`. When
+it is on, the value is `1`. Mast does not block Notion tools itself, so a
+procedure must follow the instruction. Tasks saved before the setting existed
+show it on and send neither the instruction nor the variable until you save them
+with the setting chosen. The control needs an updated execution device.
+
 Enable scheduled runs and choose **Save changes**. **Run now** creates a separate
 edition without changing the recurring next-run time. **Pause** stops future
 dispatches; it does not stop an agent already running. Stop that agent from its
@@ -70,6 +79,14 @@ A Background run that fails, stops early or waits for input leaves its chat
 unarchived. Look for the task's Required Action on its work item. It links to
 the run chat when one exists and updates as new runs need attention. A successful
 run resolves the action.
+
+Each Background run must also leave its results on the work item. Mast appends
+a short contract to the task's prompt that asks the run to publish one markdown
+artifact titled `Results: <task name>`, raise a Required Action for anything that
+needs you, and set the item's status. When the run ends, Mast checks that this
+run published a new revision. A run that did not is marked **Failed** with the
+reason, stays unarchived and raises the same task Required Action as any other
+failure. Interactive runs get no contract and are not checked.
 
 ## Read editions
 

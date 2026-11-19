@@ -210,6 +210,7 @@ pub fn render(
                 "token-usage-rules" => mast_ui::snapshot::token_usage_fixture(2,cx).into(),
                 "token-usage-trends" => mast_ui::snapshot::token_usage_fixture(3,cx).into(),
                 "token-usage-efficiency" => mast_ui::snapshot::token_usage_fixture(4,cx).into(),
+                "scheduled-task-editor" => mast_ui::snapshot::scheduled_task_editor_fixture(cx).into(),
                 "workflow-pack" => mast_ui::snapshot::workflow_pack_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
                 "side-chat" => mast_ui::snapshot::side_chat_fixture(data_dir, cx).into(),
@@ -224,6 +225,7 @@ pub fn render(
                     mast_ui::snapshot::changes_fixture(false, true, window, cx).into()
                 }
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
+                "artifact" => mast_ui::snapshot::artifact_fixture(window, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx
                     .new(mast_ui::settings::appearance::AppearancePage::new)

@@ -367,9 +367,28 @@ fn canonical_executable(candidate: std::path::PathBuf) -> Option<std::path::Path
 
 /// Name the scheduled task in the agent's environment so the user's own hooks
 /// can tell an unattended run apart (see `RunRequest::scheduled_task`).
-pub(crate) fn export_scheduled_task(cmd: &mut process::Command, task: Option<&str>) {
-    if let Some(task) = task {
-        cmd.env("MAST_SCHEDULED_TASK", task);
+pub(crate) fn export_scheduled_task(cmd: &mut process::Command, run: Option<ScheduledEnv<'_>>) {
+    if let Some(run) = run {
+        cmd.env("MAST_SCHEDULED_TASK", run.task);
+        if let Some(allowed) = run.notion_writes {
+            cmd.env("MAST_SCHEDULED_WRITE_TO_NOTION", if allowed { "1" } else { "0" });
+        }
+    }
+}
+
+/// The scheduled-run facts a harness exports to the agent process.
+#[derive(Clone, Copy)]
+pub(crate) struct ScheduledEnv<'a> {
+    task: &'a str,
+    notion_writes: Option<bool>,
+}
+
+impl<'a> ScheduledEnv<'a> {
+    pub(crate) fn of(request: &'a mast_proto::RunRequest) -> Option<Self> {
+        Some(Self {
+            task: request.scheduled_task.as_deref()?,
+            notion_writes: request.scheduled_notion_writes,
+        })
     }
 }
 
@@ -779,6 +798,29 @@ mod sandbox_support_tests {
         for ok in ["workspace-write", "danger-full-access"] {
             require_read_only_support(HarnessId::Opencode, &request(ok)).unwrap();
         }
+    }
+
+    #[test]
+    fn scheduled_runs_export_the_notion_writes_setting_only_when_set() {
+        let envs = |writes: Option<bool>| {
+            let mut req = request("workspace-write");
+            req.scheduled_task = Some("Daily".into());
+            req.scheduled_notion_writes = writes;
+            let mut cmd = process::Command::new("true");
+            export_scheduled_task(&mut cmd, ScheduledEnv::of(&req));
+            cmd.as_std_mut()
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned())))
+                .collect::<Vec<_>>()
+        };
+        let task = ("MAST_SCHEDULED_TASK".to_owned(), "Daily".to_owned());
+        let flag = |v: &str| ("MAST_SCHEDULED_WRITE_TO_NOTION".to_owned(), v.to_owned());
+        assert_eq!(envs(None), [task.clone()]);
+        assert_eq!(envs(Some(false)), [task.clone(), flag("0")]);
+        assert_eq!(envs(Some(true)), [task, flag("1")]);
+        let mut unscheduled = request("workspace-write");
+        unscheduled.scheduled_notion_writes = Some(false);
+        assert!(ScheduledEnv::of(&unscheduled).is_none());
     }
 }
 
