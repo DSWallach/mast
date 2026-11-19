@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -17,6 +17,8 @@ pub(in crate::changes) struct State {
     bucket: Option<Bucket>,
     layouts: HashMap<Bucket, Arc<Vec<Tile>>>,
     labels: HashMap<Bucket, Arc<Vec<SharedString>>>,
+    layout_lru: VecDeque<Bucket>,
+    actual_size: (f32, f32),
     progress_key: Option<(String, u64)>,
     progress: (usize, u64),
     selected_tile: Option<usize>,
@@ -359,6 +361,7 @@ impl Changes {
         self.scope_map_view.bucket = None;
         self.scope_map_view.layouts.clear();
         self.scope_map_view.labels.clear();
+        self.scope_map_view.layout_lru.clear();
         self.scope_map_view.progress_key = None;
     }
 
@@ -377,9 +380,14 @@ impl Changes {
             self.scope_map_view.revision = parsed.key.clone();
             self.scope_map_view.layouts.clear();
             self.scope_map_view.labels.clear();
+            self.scope_map_view.layout_lru.clear();
             self.scope_map_view.bucket = None;
         }
         if self.scope_map_view.bucket == Some(bucket) {
+            if self.scope_map_view.actual_size != (width, height) {
+                self.scope_map_view.actual_size = (width, height);
+                cx.notify();
+            }
             return;
         }
         if !self.scope_map_view.layouts.contains_key(&bucket) {
@@ -415,7 +423,16 @@ impl Changes {
             self.scope_map_view.labels.insert(bucket, Arc::new(labels));
             self.scope_map_view.layouts.insert(bucket, Arc::new(tiles));
         }
+        self.scope_map_view.layout_lru.retain(|entry| *entry != bucket);
+        self.scope_map_view.layout_lru.push_back(bucket);
+        while self.scope_map_view.layout_lru.len() > 4 {
+            if let Some(old) = self.scope_map_view.layout_lru.pop_front() {
+                self.scope_map_view.layouts.remove(&old);
+                self.scope_map_view.labels.remove(&old);
+            }
+        }
         self.scope_map_view.bucket = Some(bucket);
+        self.scope_map_view.actual_size = (width, height);
         self.scope_map_view.selected_tile =
             self.scope_map_view.layouts.get(&bucket).and_then(|tiles| {
                 tiles
@@ -471,6 +488,7 @@ impl Changes {
             .cloned()
             .unwrap_or_default();
         let current_bucket = self.scope_map_view.bucket;
+        let current_size = self.scope_map_view.actual_size;
         let labels = current_bucket
             .and_then(|bucket| self.scope_map_view.labels.get(&bucket))
             .cloned()
@@ -485,7 +503,7 @@ impl Changes {
                     (width.max(0.0) / 32.0).floor() as u16,
                     (height.max(0.0) / 32.0).floor() as u16,
                 );
-                if Some(bucket) != current_bucket && bucket.0 > 0 && bucket.1 > 0 {
+                if (Some(bucket) != current_bucket || (width, height) != current_size) && bucket.0 > 0 && bucket.1 > 0 {
                     let weak = weak.clone();
                     cx.defer(move |cx| {
                         let _ =
@@ -496,6 +514,7 @@ impl Changes {
         )
         .absolute()
         .inset_0();
+        let (scale_x, scale_y) = current_bucket.map(|bucket| (current_size.0 / (f32::from(bucket.0) * 32.0), current_size.1 / (f32::from(bucket.1) * 32.0))).unwrap_or((1.0, 1.0));
         let focused = self.scope_map_focus.is_focused(window);
         let mut canvas = div()
             .relative()
@@ -512,10 +531,10 @@ impl Changes {
             let r = tile.bounds;
             let base = div()
                 .absolute()
-                .left(px(r.x))
-                .top(px(r.y))
-                .w(px(r.width))
-                .h(px(r.height))
+                .left(px(r.x * scale_x))
+                .top(px(r.y * scale_y))
+                .w(px(r.width * scale_x))
+                .h(px(r.height * scale_y))
                 .overflow_hidden();
             match &tile.kind {
                 TileKind::Folder(path) => {
