@@ -823,7 +823,9 @@ async fn space_scoped_linear_operations_need_linear_on() {
         "idempotent"
     );
     let snapshot = rig.snapshot(SPACE);
-    assert_eq!(snapshot.items.len(), 2);
+    // "Plain", the Linear-created item, and the default item of the chat the
+    // rig creates in this Space.
+    assert_eq!(snapshot.items.len(), 3);
     assert_eq!(snapshot.item(&id).unwrap().title, "ENG-1 · One");
     assert_eq!(
         snapshot.linear_issue_reference(&id).unwrap().external_id,

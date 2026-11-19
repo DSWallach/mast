@@ -161,8 +161,12 @@ fn onboarding_documents_use_the_current_name() {
     for path in files {
         let text = fs::read_to_string(&path).expect("read onboarding document");
         for (index, line) in text.lines().enumerate() {
-            // Preserve the project's explicit historical attribution.
-            if path.ends_with("README.md") && line.contains("fork of [zeronsh/zeron]") {
+            // Preserve the project's explicit historical attribution: the
+            // fork credit and the upstream licence notice.
+            if path.ends_with("README.md")
+                && (line.contains("fork of [Zeron](https://github.com/zeronsh/zeron)")
+                    || line.contains("Zeron is MIT licensed, copyright 2026 Wing"))
+            {
                 continue;
             }
             assert!(
