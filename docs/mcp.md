@@ -178,7 +178,7 @@ record on the nearest project around the caller (a manager's own project; for
 any other chat, the nearest project at or above its item), and nothing else. A
 nested project's chat never receives the enclosing project's record, and a chat
 never receives another project's. A chat outside any project, or with no work
-item, is refused. The reply has the same shape, with one entry and `needYou: 0`. An unknown
+item, gets an empty list. The reply has the same shape, with one entry and `needYou: 0`. An unknown
 `kind` is an error.
 
 The Manager status is published with `artifact_publish` and inline `content`

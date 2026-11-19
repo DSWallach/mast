@@ -933,25 +933,20 @@ impl AgentToolsService {
                 (entries, need_you)
             }
             crate::briefing::BriefingKind::ManagerStatus => {
-                let item = caller.work_item_id.as_deref().ok_or_else(|| {
-                    AgentToolError::refused(
-                        AgentToolErrorCode::Unsupported,
-                        "the Manager status is read from a chat that works under a project item",
-                    )
-                })?;
                 // The nearest project only: a manager reads its own project's
                 // record, and a chat in a nested project never the enclosing one.
+                // A chat outside any project has no record to read, which is an
+                // empty answer, not an error, as before.
                 let project = match crate::manager_status::managed_project(&self.workspace, &caller.chat_id) {
-                    Some((_, project)) => project,
-                    None => snapshot
-                        .project_root(item)
-                        .map(|project| project.id.clone())
-                        .ok_or_else(|| {
-                            AgentToolError::refused(
-                                AgentToolErrorCode::Unsupported,
-                                "the Manager status is read from a chat inside a project",
-                            )
-                        })?,
+                    Some((_, project)) => Some(project),
+                    None => caller
+                        .work_item_id
+                        .as_deref()
+                        .and_then(|item| snapshot.project_root(item))
+                        .map(|project| project.id.clone()),
+                };
+                let Some(project) = project else {
+                    return Ok(json!({ "briefings": [], "needYou": 0 }));
                 };
                 let scope = crate::briefing::ProjectSubtreeScope::new(&caller.space_id, &project);
                 let query = crate::briefing::BriefingQuery::new(kind).index_only(index_only);

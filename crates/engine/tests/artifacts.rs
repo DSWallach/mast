@@ -2884,13 +2884,13 @@ async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_pr
     assert_eq!(entries[0]["revision"], 2);
     assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:05"));
 
-    // A chat outside any project reads nothing, whether refused or empty.
+    // A chat outside any project gets an empty answer, not an error.
     for token in [&rig.other_token, &rig.lone_token] {
-        let outside = tool(&rig, token, "briefing_read", json!({ "kind": "manager-status" })).await;
-        assert!(
-            outside.as_ref().map_or(true, |read| read["briefings"].as_array().is_some_and(Vec::is_empty)),
-            "{outside:?}"
-        );
+        let outside = tool(&rig, token, "briefing_read", json!({ "kind": "manager-status" }))
+            .await
+            .expect("an out-of-project read is empty, not refused");
+        assert!(outside["briefings"].as_array().unwrap().is_empty(), "{outside}");
+        assert_eq!(outside["needYou"], 0);
     }
     // The default kind never returns the status record.
     let scheduled = tool(&rig, &rig.token, "briefing_read", json!({})).await.unwrap();
