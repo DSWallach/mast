@@ -775,6 +775,11 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
+        // A pop-out already holds this file: focus it rather than opening a
+        // second editor over the same buffer.
+        if crate::popout::focus_file(&self.active_chat, &path, line.map(|line| (line, column)), cx) {
+            return;
+        }
         let from = self.active_file_location(cx);
         let target_line = line.unwrap_or_else(|| {
             let lookup = (self.panel_key(cx), path.clone());
@@ -1102,7 +1107,11 @@ impl Shell {
             transcript.set_workspace_link_handler(links)
         });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        let fetch = if frozen {
+        let shared = self.state.update(cx, |s, _| s.acquire_subagent_doc(&doc_id));
+        let fetch = if shared {
+            // A pop-out (or another tab) already feeds this doc.
+            None
+        } else if frozen {
             self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
         } else {
             self.state
@@ -1318,23 +1327,28 @@ impl Shell {
     }
 
     pub(super) fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
+        // Pop-outs hold files too: every exit path (quit, close window, update
+        // install, relaunch, runtime change) answers to them as well.
+        let popouts_ready = crate::popout::prepare_exit(false, cx);
         let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
             .all(|surface| !surface.read(cx).has_unsaved_changes())
         {
-            self.pending_exit = None;
-            return true;
+            self.pending_exit = if popouts_ready { None } else { Some(action) };
+            cx.notify();
+            return popouts_ready;
         }
         self.pending_exit = Some(action);
-        let mut all_ready = true;
+        let mut shell_ready = true;
         for surface in surfaces {
             let disposition = surface.update(cx, |surface, cx| surface.prepare_close(cx));
-            all_ready &= disposition == FilesCloseDisposition::Allow;
+            shell_ready &= disposition == FilesCloseDisposition::Allow;
         }
+        let all_ready = shell_ready && popouts_ready;
         if all_ready {
             self.pending_exit = None;
-        } else {
+        } else if !shell_ready {
             self.reveal_unsaved_file(cx);
         }
         cx.notify();
@@ -1364,6 +1378,7 @@ impl Shell {
         self.file_surfaces
             .values()
             .all(|surface| !surface.read(cx).has_unsaved_changes())
+            && crate::popout::all_flushed(cx)
     }
 
     pub(super) fn complete_file_close(

@@ -92,7 +92,12 @@ fn prepare_quit(cx: &mut App) {
                 .unwrap_or(false);
         }
     }
-    ready &= crate::popout::prepare_quit(cx);
+    // Without a main window nothing else holds the quit while a pop-out's
+    // save prompt is open, so the pop-out does.
+    let has_main = cx.windows().iter().any(|window| window.downcast::<shell::Shell>().is_some());
+    if !has_main {
+        ready &= crate::popout::prepare_exit(true, cx);
+    }
     if ready {
         quit_after_save(cx);
     }

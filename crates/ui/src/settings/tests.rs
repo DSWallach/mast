@@ -2220,3 +2220,18 @@ fn terminal_height_clamps_on_load() {
         TERMINAL_ABS_MAX_HEIGHT
     );
 }
+
+#[test]
+fn the_pop_out_shortcut_yields_to_an_existing_option_command_n_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s","newSession":"mod-alt-n"}}"#).unwrap();
+    let keymap = UiSettings::load(dir.path()).keymap;
+    assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
+    assert_eq!(keymap.get(ShortcutId::PopOutSurface), "", "arrives unbound, not double-bound");
+    assert!(conflicted_shortcuts(&keymap).is_empty());
+
+    // With the chord free the new row takes its default.
+    std::fs::write(UiSettings::path(dir.path()), r#"{"keymap":{"saveFile":"mod-s"}}"#).unwrap();
+    let keymap = UiSettings::load(dir.path()).keymap;
+    assert_eq!(keymap.get(ShortcutId::PopOutSurface), "mod-alt-n");
+}

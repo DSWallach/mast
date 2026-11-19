@@ -179,6 +179,22 @@ struct ReopenState {
 
 impl gpui::Global for ReopenState {}
 
+/// Whether the main `Shell` window exists. Pop-outs do not count: with only
+/// pop-outs left the Dock, banners and menu bar rebuild the main window.
+pub(crate) fn has_main_window(cx: &App) -> bool {
+    cx.windows().iter().any(|window| window.downcast::<shell::Shell>().is_some())
+}
+
+/// The main window, rebuilt around the running engine when ⌘W closed it.
+pub(crate) fn main_shell_or_reopen(cx: &mut App) -> Option<gpui::WindowHandle<shell::Shell>> {
+    if let Some(handle) = cx.windows().into_iter().find_map(|window| window.downcast::<shell::Shell>()) {
+        return Some(handle);
+    }
+    let reopen = cx.try_global::<ReopenState>()?;
+    let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
+    Some(open_main_window(state, boot, cx))
+}
+
 /// Main-thread freeze watchdog: the main-thread executor answers the watchdog
 /// thread's pings (no timer on the main thread); a stall of 2 s or more leaves
 /// a `warn` and a `freeze-<timestamp>.txt` stack sample in the logs dir.
@@ -231,7 +247,7 @@ pub fn run_app(config: UiConfig) {
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).
     app.on_reopen(|cx| {
-        if cx.windows().is_empty()
+        if !has_main_window(cx)
             && let Some(reopen) = cx.try_global::<ReopenState>()
         {
             let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
@@ -381,7 +397,7 @@ fn open_notified_chat(
     cx: &mut App,
 ) {
     cx.activate(true);
-    if cx.windows().is_empty()
+    if !has_main_window(cx)
         && let Some(reopen) = cx.try_global::<ReopenState>()
     {
         let (state, boot) = (reopen.state.clone(), reopen.boot.clone());

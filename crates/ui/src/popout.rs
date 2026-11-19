@@ -25,6 +25,14 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::transcript::{Transcript, TranscriptEvent};
 
+/// Files held by pop-outs, for the exit gate. Kept as weak entity handles
+/// because the gate can run while a pop-out window itself is mid-update
+/// (reading the window root then would panic).
+#[derive(Default)]
+struct PopoutFiles(Vec<gpui::WeakEntity<FilesSurface>>);
+
+impl Global for PopoutFiles {}
+
 /// Frames of popped-out windows, remembered for the session only (no
 /// persistence across restarts yet), keyed by [`PopoutSurface::frame_key`].
 #[derive(Default)]
@@ -62,7 +70,7 @@ impl PopoutSurface {
 
 pub struct PopoutWindow {
     state: Entity<AppState>,
-    surface: PopoutSurface,
+    pub(crate) surface: PopoutSurface,
     /// The chat whose workspace the surface belongs to; navigation forwarded
     /// to the main window opens that chat first.
     owner_chat: String,
@@ -72,6 +80,11 @@ pub struct PopoutWindow {
     /// A dirty file's close is waiting on the save / discard prompt.
     closing: bool,
     titlebar_should_move: bool,
+    /// Quit is waiting on this window's save / discard prompt and no main
+    /// window exists to hold the pending exit.
+    quit_pending: bool,
+    #[cfg(test)]
+    save_requests: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +150,7 @@ impl PopoutWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let key = surface.frame_key();
+        let focus = cx.focus_handle();
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.observe_window_bounds(window, move |_, window, cx| {
             if window.is_fullscreen() {
@@ -148,6 +162,9 @@ impl PopoutWindow {
         }));
         match &surface {
             PopoutSurface::File { surface, .. } => {
+                let files = cx.default_global::<PopoutFiles>();
+                files.0.retain(|file| file.upgrade().is_some());
+                files.0.push(surface.downgrade());
                 subscriptions.push(cx.subscribe_in(surface, window, Self::on_files_event));
                 surface.update(cx, |file, cx| file.ensure_loaded(cx));
             }
@@ -159,6 +176,10 @@ impl PopoutWindow {
                 subscriptions.push(cx.subscribe(&sub.transcript, Self::on_transcript_event));
             }
         }
+        // Shortcuts (⌘S, ⌘W) dispatch through the focus chain. Focus the root,
+        // which is always mounted; an unmounted editor handle would leave the
+        // window with dead shortcuts. A click moves focus into the editor.
+        window.focus(&focus, cx);
         // Closing the window drops the surface. A subagent feed is pinned in
         // `AppState`, so release it explicitly.
         cx.on_release(|this, cx| {
@@ -174,9 +195,12 @@ impl PopoutWindow {
             owner_chat,
             fallback_title: title,
             shown_title: None,
-            focus: cx.focus_handle(),
+            focus,
             closing: false,
             titlebar_should_move: false,
+            quit_pending: false,
+            #[cfg(test)]
+            save_requests: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -195,7 +219,9 @@ impl PopoutWindow {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>),
     ) {
-        if let Some(main) = main_shell(cx) {
+        // The main window may have been closed with ⌘W; rebuild it rather than
+        // dropping the navigation.
+        if let Some(main) = crate::main_shell_or_reopen(cx) {
             main.update(cx, |shell, window, cx| {
                 window.activate_window();
                 f(shell, window, cx)
@@ -213,6 +239,8 @@ impl PopoutWindow {
     ) {
         let owner = self.owner_chat.clone();
         match event {
+            // A link to the file this window already shows has nowhere to go.
+            FilesEvent::OpenFile(path) if matches!(&self.surface, PopoutSurface::File { path: own, .. } if own == path) => {}
             FilesEvent::OpenFile(path) => {
                 let path = path.clone();
                 self.with_main(cx, move |shell, window, cx| {
@@ -225,9 +253,11 @@ impl PopoutWindow {
             }
             FilesEvent::OpenWebLink(activation) => {
                 let activation = activation.clone();
-                if let Some(main) = main_shell(cx) {
+                if let Some(main) = crate::main_shell_or_reopen(cx) {
                     let outcome = main
-                        .update(cx, |shell, window, cx| shell.popout_activate_link(&activation, window, cx))
+                        .update(cx, |shell, window, cx| {
+                            shell.popout_activate_link(owner, &activation, window, cx)
+                        })
                         .ok();
                     if let Some(crate::markdown::render::LinkOutcome::External(url)) = outcome {
                         cx.open_url(&url);
@@ -252,11 +282,27 @@ impl PopoutWindow {
             FilesEvent::CloseReady => {
                 if self.closing {
                     window.remove_window();
+                } else if self.quit_pending {
+                    self.quit_pending = false;
+                    crate::app_menus::request_quit(cx);
                 }
+                self.nudge_main(false, cx);
             }
-            FilesEvent::CloseCancelled => self.closing = false,
+            FilesEvent::CloseCancelled => {
+                self.closing = false;
+                self.quit_pending = false;
+                self.nudge_main(true, cx);
+            }
             // Navigation history and the explorer live in the main window.
             FilesEvent::Jumped { .. } | FilesEvent::RevealFile(_) => {}
+        }
+    }
+
+    /// A save / discard prompt in this window resolved: let the main window
+    /// re-check a pending exit (update install, relaunch, runtime change).
+    fn nudge_main(&self, cancelled: bool, cx: &mut Context<Self>) {
+        if let Some(main) = main_shell(cx) {
+            main.update(cx, |shell, _, cx| shell.popout_exit_progress(cancelled, cx)).ok();
         }
     }
 
@@ -267,8 +313,8 @@ impl PopoutWindow {
     }
 
     fn on_transcript_event(&mut self, transcript: Entity<Transcript>, event: &TranscriptEvent, cx: &mut Context<Self>) {
-        let event = event.clone();
-        self.with_main(cx, move |shell, _, cx| shell.popout_transcript_event(transcript, &event, cx));
+        let (event, owner) = (event.clone(), self.owner_chat.clone());
+        self.with_main(cx, move |shell, _, cx| shell.popout_transcript_event(owner, transcript, &event, cx));
     }
 
     /// Whether the window may close now. A file with unsaved edits raises its
@@ -287,8 +333,11 @@ impl PopoutWindow {
         }
     }
 
-    /// App quit: a dirty file blocks it and brings its window forward.
-    pub fn prepare_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Any app exit (quit, update install, relaunch, runtime change): a dirty
+    /// file blocks it and brings its window forward. `standalone` means no
+    /// main window exists to remember the exit, so this window does and
+    /// resumes the quit once the prompt resolves.
+    pub fn prepare_exit(&mut self, standalone: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let PopoutSurface::File { surface, .. } = &self.surface else {
             return true;
         };
@@ -297,6 +346,7 @@ impl PopoutWindow {
         }
         let allowed = surface.update(cx, |file, cx| file.prepare_close(cx)) == FilesCloseDisposition::Allow;
         if !allowed {
+            self.quit_pending = standalone;
             window.activate_window();
         }
         allowed
@@ -405,6 +455,10 @@ impl Render for PopoutWindow {
             .font_family(theme.font_sans.clone())
             .text_size(crate::typography::ui_rems(14.0))
             .on_action(cx.listener(|this, _: &crate::shell::SaveFile, _, cx| {
+                #[cfg(test)]
+                {
+                    this.save_requests += 1;
+                }
                 if let PopoutSurface::File { surface, .. } = &this.surface {
                     surface.update(cx, |file, cx| file.save_active_document(cx));
                 }
@@ -424,22 +478,83 @@ pub(crate) fn close_active(window: gpui::AnyWindowHandle, cx: &mut App) -> bool 
     true
 }
 
-/// App quit: every pop-out must agree. Returns `false` when one holds
-/// unsaved edits (that window is brought forward).
-pub(crate) fn prepare_quit(cx: &mut App) -> bool {
+/// Every exit path: every pop-out must agree. Returns `false` when one holds
+/// unsaved edits (that window is brought forward). The main window's own
+/// exit gate (`Shell::prepare_exit`) calls this with `standalone = false`;
+/// with no main window the quit calls it with `true`.
+pub(crate) fn prepare_exit(standalone: bool, cx: &mut App) -> bool {
     let mut ready = true;
     for window in cx.windows() {
         if let Some(window) = window.downcast::<PopoutWindow>() {
             ready &= window
-                .update(cx, |popout, window, cx| popout.prepare_quit(window, cx))
+                .update(cx, |popout, window, cx| popout.prepare_exit(standalone, window, cx))
                 .unwrap_or(true);
         }
     }
     ready
 }
 
+/// Whether no pop-out holds unsaved edits.
+pub(crate) fn all_flushed(cx: &App) -> bool {
+    cx.try_global::<PopoutFiles>().is_none_or(|files| {
+        files.0.iter().filter_map(|file| file.upgrade()).all(|file| !file.read(cx).has_unsaved_changes())
+    })
+}
+
+/// A file already open in a pop-out for this chat: bring that window forward
+/// (and reveal `line`) instead of opening a second editor. Returns whether a
+/// pop-out had it.
+pub(crate) fn focus_file(owner_chat: &str, path: &str, line: Option<(u32, Option<u32>)>, cx: &mut App) -> bool {
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<PopoutWindow>() else { continue };
+        let found = window
+            .update(cx, |popout, window, cx| {
+                let PopoutSurface::File { surface, path: open_path } = &popout.surface else {
+                    return false;
+                };
+                if popout.owner_chat != owner_chat || open_path != path {
+                    return false;
+                }
+                if let Some((line, column)) = line {
+                    surface.update(cx, |file, cx| file.reveal_editor_location(line, column, cx));
+                }
+                surface.update(cx, |file, cx| file.focus_editor(window, cx));
+                window.activate_window();
+                true
+            })
+            .unwrap_or(false);
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pop-outs currently open.
 #[cfg(test)]
 pub(crate) fn open_count(cx: &App) -> usize {
     cx.windows().into_iter().filter(|window| window.downcast::<PopoutWindow>().is_some()).count()
+}
+
+#[cfg(test)]
+impl PopoutWindow {
+    pub(crate) fn surface_entity_id(&self) -> gpui::EntityId {
+        match &self.surface {
+            PopoutSurface::File { surface, .. } => surface.entity_id(),
+            PopoutSurface::Diff(changes) => changes.entity_id(),
+            PopoutSurface::Subagent(sub) => sub.transcript.entity_id(),
+        }
+    }
+
+    pub(crate) fn save_requests(&self) -> usize {
+        self.save_requests
+    }
+
+    pub(crate) fn quit_pending(&self) -> bool {
+        self.quit_pending
+    }
+
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing
+    }
 }

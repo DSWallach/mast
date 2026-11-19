@@ -18,4 +18,4 @@ The tab leaves the main window and moves to the new one. It is the same editor o
 
 ## Not yet
 
-Browser, Artifact, Review, Tracker, Item and Terminal tabs, and chats, cannot pop out yet. Pop-out positions last for the session only and are not restored after a restart.
+Browser, Artifact, Review, Tracker, Item and Terminal tabs, and chats, cannot pop out yet. Opening a file that a pop-out already holds focuses that window. Pop-out positions last for the session only and are not restored after a restart.

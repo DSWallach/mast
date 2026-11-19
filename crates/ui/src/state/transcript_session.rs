@@ -185,8 +185,29 @@ impl AppState {
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
+        match self.sub_refs.get_mut(doc_id) {
+            // Another tab or pop-out still shows this doc.
+            Some(holders) if *holders > 1 => {
+                *holders -= 1;
+                return;
+            }
+            Some(_) => {
+                self.sub_refs.remove(doc_id);
+            }
+            None => {}
+        }
         self.tab_watch_docs.remove(doc_id);
         self.remove_subagent_doc_watch(doc_id);
+    }
+
+    /// Register one holder of a subagent doc (a right-pane tab or a pop-out).
+    /// Returns whether another holder already had it, in which case its feed
+    /// (watch or frozen snapshot) is already running and must not be started
+    /// again. Pair with [`Self::unwatch_subagent_doc`].
+    pub fn acquire_subagent_doc(&mut self, doc_id: &str) -> bool {
+        let holders = self.sub_refs.entry(doc_id.to_string()).or_insert(0);
+        *holders += 1;
+        *holders > 1
     }
 
     fn remove_subagent_doc_watch(&mut self, doc_id: &str) {

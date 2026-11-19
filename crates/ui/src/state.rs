@@ -351,6 +351,9 @@ pub struct AppState {
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
     tab_watch_docs: std::collections::HashSet<String>,
+    /// How many windows/tabs hold each subagent doc. The watch and the rows
+    /// go when the last holder releases ([`Self::unwatch_subagent_doc`]).
+    sub_refs: HashMap<String, usize>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -446,6 +449,7 @@ impl AppState {
             linear: Default::default(),
             github: Default::default(),
             sub_transcripts: HashMap::new(),
+            sub_refs: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             tab_watch_docs: Default::default(),
             auto_selected: false,

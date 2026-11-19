@@ -112,21 +112,35 @@ impl Shell {
         self.add_commit_diff_surface(commit, Some(owner_chat), cx);
     }
 
+    /// A pop-out's save / discard prompt resolved: re-check a pending exit.
+    pub(crate) fn popout_exit_progress(&mut self, cancelled: bool, cx: &mut Context<Self>) {
+        if cancelled {
+            self.pending_exit = None;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn popout_activate_link(
         &mut self,
+        owner_chat: String,
         activation: &crate::markdown::render::LinkActivation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> crate::markdown::render::LinkOutcome {
+        self.popout_focus_chat(&owner_chat, cx);
         self.activate_session_link(activation, window, cx)
     }
 
     pub(crate) fn popout_transcript_event(
         &mut self,
+        owner_chat: String,
         transcript: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
+        if matches!(event, TranscriptEvent::OpenSubagent { .. }) {
+            self.popout_focus_chat(&owner_chat, cx);
+        }
         self.on_transcript_event(transcript, event, cx)
     }
 

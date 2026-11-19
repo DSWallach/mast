@@ -1193,6 +1193,7 @@ impl UiSettings {
                             (ShortcutId::OpenFullChat, "openFullChat"),
                             (ShortcutId::CreateWorkItem, "createWorkItem"),
                             (ShortcutId::OpenLinear, "openLinear"),
+                            (ShortcutId::PopOutSurface, "popOutSurface"),
                         ] {
                             let default = platform_combo(id.default_combo());
                             let taken = !keymap.contains_key(field)
