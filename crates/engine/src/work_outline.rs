@@ -282,14 +282,26 @@ pub fn step_plan_digest(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str)
                         .filter(|i| i.work_item_id.as_deref() == Some(id.as_str()))
                         .map(|i| format!("{}={}", i.id, i.text))
                         .collect();
+                    // The planner reads live structure: where the row sits (parent,
+                    // sibling order), whether it is archived, and what it says.
                     text.push_str(&format!(
-                        "|row:{id}:{}:{}:{}:{}:{}",
+                        "|row:{id}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                        row.parent_work_item_id.as_deref().unwrap_or(""),
+                        row.order_key,
+                        row.archived_at.is_some(),
                         row.title,
                         row.template_node_id.as_deref().unwrap_or(""),
                         row.is_project,
                         row.worker_destination_id.as_deref().unwrap_or(""),
+                        row.child_ids.join(","),
                         instructions.join(";"),
                     ));
+                }
+            } else if let Some(parent) = item {
+                // A create lands last among the parent's children: their order
+                // and status are inputs too.
+                for child in parent.child_ids.iter().filter_map(|id| snapshot.item(id)) {
+                    text.push_str(&format!("|kid:{}:{}:{}", child.id, child.order_key, child.archived_at.is_some()));
                 }
             }
         }

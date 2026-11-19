@@ -55,6 +55,10 @@ struct BatchRecord {
     spent: usize,
     plan: Vec<String>,
     done: bool,
+    /// Bumped each time an approval replaces the plan and allowance. An
+    /// execution admitted under an older generation can no longer reserve.
+    #[serde(default)]
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -111,6 +115,8 @@ impl BudgetBook {
 pub struct BatchBudget {
     key: String,
     book: Arc<Mutex<BudgetBook>>,
+    /// The plan generation this execution was admitted (or last approved) under.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for BudgetBook {
@@ -125,7 +131,7 @@ impl BatchBudget {
     pub fn new(total: usize) -> Arc<Self> {
         let book = Arc::new(Mutex::new(BudgetBook::default()));
         lock(&book).entries.insert(String::new(), BatchRecord { total, ..Default::default() });
-        Arc::new(Self { key: String::new(), book })
+        Arc::new(Self { key: String::new(), book, generation: Default::default() })
     }
 
     pub fn remaining(&self) -> usize {
@@ -147,6 +153,11 @@ impl BatchBudget {
             return false;
         }
         let Some(record) = book.entries.get_mut(&self.key) else { return false };
+        // Checked in the same critical section as the spend: an execution
+        // whose plan was replaced by a newer approval spends nothing of it.
+        if record.generation != self.generation.load(Ordering::Acquire) {
+            return false;
+        }
         if n > record.total.saturating_sub(record.spent) {
             return false;
         }
@@ -185,12 +196,15 @@ impl BatchBudget {
         let before = record.clone();
         record.total = record.spent + allowance;
         record.plan = plan.to_vec();
+        record.generation += 1;
+        let generation = record.generation;
         if book.persist().is_err() {
             if let Some(record) = book.entries.get_mut(&self.key) {
                 *record = before;
             }
             return Err("the batch budget could not be saved".into());
         }
+        self.generation.store(generation, Ordering::Release);
         Ok(())
     }
 
@@ -469,8 +483,13 @@ impl AdminGrants {
                 return Err("the batch budget could not be saved".into());
             }
         }
+        let generation = book.entries.get(key).map_or(0, |r| r.generation);
         drop(book);
-        Ok(Arc::new(BatchBudget { key: key.to_owned(), book: self.budgets.clone() }))
+        Ok(Arc::new(BatchBudget {
+            key: key.to_owned(),
+            book: self.budgets.clone(),
+            generation: std::sync::atomic::AtomicU64::new(generation),
+        }))
     }
 
     /// [`Self::admit_batch`] with no plan and nothing committed (tests).

@@ -5898,3 +5898,62 @@ fn batch_admission_fails_closed_on_an_unreadable_store_a_full_store_and_a_failed
         "the token is still unclaimed"
     );
 }
+
+#[test]
+fn a_stale_execution_cannot_spend_a_newer_approvals_allowance() {
+    use mast_engine::admin::AdminGrants;
+    let grants = AdminGrants::default();
+    let stale = grants.admit_batch("exec", 10, &["old".into()], false).unwrap();
+    let newer = grants.admit_batch("exec", 10, &[], false).unwrap();
+    // A concurrent execution's fresh approval replaces the plan and allowance.
+    newer.approve(20, &["new".into()]).unwrap();
+    assert!(!stale.reserve(1), "its plan was replaced: it spends nothing, even though allowance exists");
+    assert_eq!(newer.remaining(), 20);
+    assert!(newer.reserve(5));
+    assert_eq!(stale.remaining(), 15, "and none of the new allowance was taken");
+    assert_eq!(newer.plan(), vec!["new".to_string()]);
+    // An execution admitted after the approval is current.
+    let current = grants.admit_batch("exec", 10, &[], false).unwrap();
+    assert!(current.reserve(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_digest_binds_live_structure_sibling_order_and_archive_status() {
+    use mast_engine::work_outline::step_plan_digest;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-template", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    let a = create_item(&rig, "ds-a", "Row A", Some(&p.tickets)).await;
+    let b = create_item(&rig, "ds-b", "Row B", Some(&p.tickets)).await;
+    let digests = |rig: &Rig| {
+        let snap = snapshot(rig);
+        (step_plan_digest(&snap, "template_apply", &p.tickets), step_plan_digest(&snap, "create", &p.tickets))
+    };
+    let (apply0, create0) = digests(&rig);
+
+    // Reparent: the same rows and count, one of them now under another.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-reparent", "steps": [
+        { "op": "move", "itemId": a, "parentId": b }
+    ]})).await.unwrap();
+    let (apply1, create1) = digests(&rig);
+    assert_ne!(apply1, apply0, "reparenting changes what an apply walks");
+    assert_ne!(create1, create0, "and the parent's live children");
+
+    // Sibling order: the same rows, one moved to the front.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-order", "steps": [
+        { "op": "move", "itemId": b, "parentId": p.tickets, "position": "first" }
+    ]})).await.unwrap();
+    let (apply2, create2) = digests(&rig);
+    assert_ne!(apply2, apply1, "sibling order is an input of an apply");
+    assert_ne!(create2, create1, "and of where a create lands");
+
+    // Archive status: the planner only matches live rows.
+    admin(&rig, &token, json!({ "idempotencyKey": "ds-archive", "steps": [
+        { "op": "archive", "itemId": a }
+    ]})).await.unwrap();
+    let (apply3, _) = digests(&rig);
+    assert_ne!(apply3, apply2, "an archived row is not the same plan");
+}
