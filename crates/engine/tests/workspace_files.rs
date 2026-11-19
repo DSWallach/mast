@@ -74,7 +74,7 @@ async fn file_history_handles_merge_commits() {
     let client = mast_rpc::memory_client(core.rpc_service());
     let history = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, serde_json::json!({"chatId":"chat-merge", "path":"src/lib.rs"})).await.unwrap();
     let commits = history["commits"].as_array().unwrap();
-    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "merge topic"));
+    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "topic edit"));
     assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "initial"));
     assert!(commits.iter().all(|entry| entry["path"] == "src/lib.rs"));
 }

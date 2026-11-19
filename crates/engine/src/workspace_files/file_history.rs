@@ -91,8 +91,6 @@ impl WorkspaceFiles {
             &[
                 "log",
                 "--follow",
-                "-m",
-                "--first-parent",
                 "--max-count=101",
                 "--no-color",
                 "--no-decorate",
