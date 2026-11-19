@@ -6066,7 +6066,7 @@ impl Shell {
         }
         match self.state.read(cx).workspace_scope {
             Some(WorkspaceScope::Local) => {
-                let cancelled = self.cancel_local_pin_handoffs(change.session_id());
+                let cancelled = self.note_local_pin_handoff_edit(change.session_id());
                 if pinned_session_ids.is_empty() {
                     self.settings
                         .sidebar_pinned_session_ids_by_profile

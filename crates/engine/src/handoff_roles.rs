@@ -56,6 +56,13 @@ struct PendingRoleTransfer {
 }
 
 impl PendingHandoff {
+    fn with_successor(&self, successor: &str) -> Self {
+        Self {
+            requested_successor: successor.to_owned(),
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn new(
         source: &Chat,
         requested_successor: &str,
@@ -127,9 +134,18 @@ impl PendingHandoffs {
         successor: &str,
     ) -> Result<(), EngineError> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = state.pending.iter().find(|entry| &entry.intent == intent) else {
+        let Some(requested) = state.pending.iter().find(|entry| &entry.intent == intent) else {
             return Ok(());
         };
+        // A standing-role retry may use a fresh operation ID. The host's
+        // reply identifies the original successor ahead of registry sync.
+        // Use that original intent's observed roles when we sent it.
+        let canonical = intent.with_successor(successor);
+        let entry = state
+            .pending
+            .iter()
+            .find(|entry| entry.intent == canonical)
+            .unwrap_or(requested);
         let Some(source) = workspace.chat(&intent.source)?.filter(|chat| {
             chat.device_id == intent.device
                 && chat.space_id.as_deref() == Some(intent.space.as_str())
@@ -163,7 +179,7 @@ impl PendingHandoffs {
                 ))
             })?;
         let mut pending = state.pending.clone();
-        pending.retain(|entry| &entry.intent != intent);
+        pending.retain(|entry| &entry.intent != intent && entry.intent != canonical);
         state.replace(pending)?;
         Ok(())
     }

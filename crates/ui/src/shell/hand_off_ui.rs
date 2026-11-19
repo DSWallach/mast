@@ -130,11 +130,19 @@ impl Shell {
         dialog.default_summary = summary;
     }
 
-    pub(super) fn cancel_local_pin_handoffs(&mut self, source: &str) -> bool {
+    pub(super) fn note_local_pin_handoff_edit(&mut self, chat_id: &str) -> bool {
         let mut changed = false;
         for intent in &mut self.settings.local_pin_handoffs {
-            if intent.source == source && !intent.cancelled {
+            if intent.cancelled {
+                continue;
+            }
+            if intent.source == chat_id || intent.requested_successor == chat_id {
                 intent.cancelled = true;
+                changed = true;
+            } else if !intent.edited_chats.iter().any(|id| id == chat_id) {
+                // A resumed hand-off can return a different successor. Save
+                // edits until the completion identifies which chat it used.
+                intent.edited_chats.push(chat_id.to_owned());
                 changed = true;
             }
         }
@@ -152,6 +160,7 @@ impl Shell {
             source: source.to_owned(),
             requested_successor: requested.to_owned(),
             cancelled: false,
+            edited_chats: Vec::new(),
         };
         if self.settings.local_pin_handoffs.iter().any(|item| item.requested_successor == requested) {
             return settings::flush_checked(cx);
@@ -195,7 +204,10 @@ impl Shell {
         let Some(first) = matching.next() else {
             return;
         };
-        let transfer = !first.cancelled && matching.all(|intent| !intent.cancelled);
+        let unchanged = |intent: &settings::LocalPinHandoff| {
+            !intent.cancelled && !intent.edited_chats.contains(&completion.successor)
+        };
+        let transfer = unchanged(first) && matching.all(unchanged);
         self.settings
             .local_pin_handoffs
             .retain(|intent| !intent.matches(completion));
@@ -623,6 +635,71 @@ mod tests {
                 assert_eq!(saved_again.sidebar_pins("local"), [CHAT_API, CHAT_UI]);
                 assert!(saved_again.local_pin_handoffs.is_empty());
             });
+        });
+    }
+
+    #[gpui::test]
+    fn local_handoff_pin_preserves_successor_unpin_across_settings_reload(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use mast_proto::SidebarPinChange;
+
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local)
+            });
+            for requested in [CHAT_UI, "fresh-request"] {
+                shell.state.update(cx, |state, _| {
+                    state.sidebar_preferences.local_handoffs.clear()
+                });
+                *shell.settings.sidebar_pins_mut("local".into()) = vec![CHAT_API.into()];
+                shell
+                    .record_local_pin_handoff("local", CHAT_API, requested, cx)
+                    .unwrap();
+                assert!(shell.apply_sidebar_pin_change(
+                    "local".into(),
+                    SidebarPinChange::Pin {
+                        session_id: CHAT_UI.into(),
+                        after: None,
+                        before: None,
+                    },
+                    cx
+                ));
+                assert!(shell.apply_sidebar_pin_change(
+                    "local".into(),
+                    SidebarPinChange::Unpin {
+                        session_id: CHAT_UI.into(),
+                    },
+                    cx
+                ));
+
+                let data_dir = shell.boot.data_dir.clone();
+                shell.settings = settings::UiSettings::load(&data_dir);
+                assert_eq!(shell.settings.local_pin_handoffs.len(), 1);
+                assert_eq!(shell.settings.sidebar_pins("local"), [CHAT_API]);
+                shell.state.update(cx, |state, _| {
+                    state.sidebar_preferences.local_handoffs =
+                        vec![mast_proto::CompletedSidebarHandoff {
+                            source: CHAT_API.into(),
+                            successor: CHAT_UI.into(),
+                            retry_chat_ids: if requested == CHAT_UI {
+                                Vec::new()
+                            } else {
+                                vec![requested.into()]
+                            },
+                        }];
+                });
+                shell.reconcile_sidebar_pins(cx);
+                shell.reconcile_sidebar_pins(cx);
+                let saved = settings::UiSettings::load(&data_dir);
+                assert_eq!(
+                    saved.sidebar_pins("local"),
+                    [CHAT_API],
+                    "pin edit survived completion of {requested}"
+                );
+                assert!(saved.local_pin_handoffs.is_empty());
+            }
         });
     }
 

@@ -1981,6 +1981,8 @@ pub(crate) struct LocalPinHandoff {
     pub source: String,
     pub requested_successor: String,
     pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited_chats: Vec<String>,
 }
 
 impl LocalPinHandoff {

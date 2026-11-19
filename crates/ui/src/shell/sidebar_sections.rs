@@ -122,7 +122,7 @@ impl Shell {
                     return false;
                 }
                 if section_id.is_some() {
-                    cancelled = self.cancel_local_pin_handoffs(session_id);
+                    cancelled = self.note_local_pin_handoff_edit(session_id);
                 }
                 if let Some(pins) = self
                     .settings

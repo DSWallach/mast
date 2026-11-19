@@ -726,6 +726,100 @@ async fn verify_lost_forwarded_handoff(edited: bool, initially_absent: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forwarded_handoff_resume_uses_the_original_role_observations_before_sync() {
+    use mast_engine::work_outline_launch::LaunchStep;
+    use mast_proto::{StandingRoleKind, derive_id, roles};
+
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let owner = assemble(&dirs.path().join("owner"), "owner");
+    let origin = assemble(&dirs.path().join("origin"), "origin");
+    owner
+        .workspace
+        .create_space("space", "owner", cwd.to_str().unwrap(), None, false)
+        .unwrap();
+    owner
+        .workspace
+        .create_chat("source", Some("space"), None, None, None)
+        .unwrap();
+    let item = owner.workspace.ensure_chat_work_item("source").unwrap();
+    owner
+        .workspace
+        .adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[])
+        .unwrap();
+    let source = owner.workspace.chat("source").unwrap().unwrap();
+    origin.workspace.import_chat_row(&source).unwrap();
+    let device = owner
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.id == "owner")
+        .unwrap();
+    origin.workspace.upsert_device_row(&device);
+    let tokens = origin.sessions.agent_tokens();
+    tokens.admin().grant("source", "space", None, false);
+    tokens.personal_assistant().set(&source);
+
+    let host = owner.rpc_service();
+    host.inject_launch_fault(Some(LaunchStep::TurnQueued));
+    let _host = HostRelay::spawn(
+        HostRelayConfig::new(
+            &relay_url,
+            "owner",
+            Arc::new(StaticToken("test-user".into())),
+        ),
+        host,
+        Arc::new(|_| {}),
+    );
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    origin.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let mut params = serde_json::json!({
+        "chatId": "source", "summary": "Continue remotely", "archive": false,
+        "operationId": "original-forwarded-handoff",
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let result = client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .await;
+        let error = result.unwrap_err().to_string();
+        if error.contains("injected fault after TurnQueued") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{error}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let renewed = tokens.admin().grant("source", "space", None, true);
+    let reassigned = tokens.personal_assistant().set(&source);
+
+    params["operationId"] = "fresh-forwarded-handoff".into();
+    let reply = client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params)
+        .await
+        .unwrap();
+    let successor = derive_id("original-forwarded-handoff", roles::CHAT);
+    assert_eq!(reply["chatId"], successor);
+    assert!(
+        origin.workspace.chat(&successor).unwrap().is_none(),
+        "registry has not synced"
+    );
+    assert_eq!(tokens.admin().live("source"), Some(renewed));
+    assert!(tokens.admin().live(&successor).is_none());
+    assert_eq!(tokens.personal_assistant().get(), Some(reassigned));
+    assert_eq!(
+        std::fs::read_to_string(dirs.path().join("origin/pending-role-handoffs.json")).unwrap(),
+        "[]"
+    );
+    origin.shutdown().await;
+    owner.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn role_handoff_needs_a_host_that_moves_roles_but_plain_handoff_does_not() {
     use mast_proto::StandingRoleKind;
     let (relay_url, _relay) = fake_device_room().await;
