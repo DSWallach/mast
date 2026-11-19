@@ -59,16 +59,15 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         let mut files = Vec::new();
         collect(root, &mut files);
         if !files.is_empty() {
-            let width = bounds.width / files.len() as f32;
-            for (index, file) in files.iter().enumerate() {
+            let total: u64 = files.iter().map(|file| file.weight.max(1)).sum();
+            let mut x = bounds.x;
+            for file in &files {
+                let width = bounds.width * file.weight.max(1) as f32 / total as f32;
                 result.push(Tile {
                     kind: TileKind::File(file.id),
-                    bounds: Rect {
-                        x: bounds.x + width * index as f32,
-                        width,
-                        ..bounds
-                    },
+                    bounds: Rect { x, width, ..bounds },
                 });
+                x += width;
             }
         }
         return result;
@@ -271,8 +270,8 @@ mod tests {
             },
         );
         assert_eq!(tiles.len(), 2);
-        assert_eq!(tiles[0].bounds.width, 100.0);
-        assert_eq!(tiles[1].bounds.x, 100.0);
+        assert!((tiles[0].bounds.width - 200.0 / 101.0).abs() < 0.001);
+        assert_eq!(tiles[1].bounds.x, tiles[0].bounds.width);
     }
 
     #[test]
