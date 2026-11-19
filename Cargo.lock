@@ -5345,6 +5345,7 @@ name = "mast-syntax"
 version = "0.2.82"
 dependencies = [
  "ctor",
+ "im",
  "serde",
  "thiserror 2.0.20",
  "tree-sitter",

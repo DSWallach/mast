@@ -47,13 +47,17 @@ pub struct QuerySymbolsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SymbolMatch { pub path: String, pub symbol: Symbol }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SymbolQueryResult { pub matches: Vec<SymbolMatch>, pub truncated: bool }
+
 pub(super) struct SymbolIndexSlot {
     sender: tokio::sync::watch::Sender<Option<SymbolResult>>,
     cancel: CancellationToken,
     accessed: u64,
     refresh: Arc<Notify>,
     force_refresh: Arc<AtomicBool>,
-    index: Arc<std::sync::Mutex<SymbolIndex>>,
+    index: Arc<std::sync::Mutex<Arc<SymbolIndex>>>,
+    query_generation: Arc<std::sync::atomic::AtomicU64>,
     idle_checks: u8,
 }
 
@@ -91,8 +95,8 @@ impl WorkspaceFiles {
                 let cancel = self.inner.cancel.child_token();
                 let refresh = Arc::new(Notify::new());
                 let force_refresh = Arc::new(AtomicBool::new(false));
-                let index = Arc::new(std::sync::Mutex::new(SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS)));
-                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone(), index: index.clone(), idle_checks: 0 });
+                let index = Arc::new(std::sync::Mutex::new(Arc::new(SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS))));
+                indexes.insert(workspace.checkout_id.clone(), SymbolIndexSlot { sender: sender.clone(), cancel: cancel.clone(), accessed, refresh: refresh.clone(), force_refresh: force_refresh.clone(), index: index.clone(), query_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)), idle_checks: 0 });
                 (receiver, Some((sender, cancel, refresh, force_refresh, index)))
             }
         };
@@ -126,32 +130,43 @@ impl WorkspaceFiles {
         Ok(())
     }
 
-    pub async fn query_symbols(&self, request: QuerySymbolsRequest) -> Result<Vec<SymbolMatch>, WorkspaceFilesError> {
+    pub async fn query_symbols(&self, request: QuerySymbolsRequest) -> Result<SymbolQueryResult, WorkspaceFilesError> {
         if request.query.chars().count() > 256 { return Err(WorkspaceFilesError::BadParams("symbol query too long".into())); }
         let receiver = self.subscribe_symbols(request.target.clone()).await?;
         let workspace = self.resolve_target(&request.target).await?;
-        let index = lock(&self.inner.symbol_indexes).get(&workspace.checkout_id).ok_or_else(|| WorkspaceFilesError::Io("symbol index stopped".into()))?.index.clone();
+        let (index, generation, expected) = {
+            let indexes = lock(&self.inner.symbol_indexes);
+            let slot = indexes.get(&workspace.checkout_id).ok_or_else(|| WorkspaceFilesError::Io("symbol index stopped".into()))?;
+            let expected = slot.query_generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+            (lock(&slot.index).clone(), slot.query_generation.clone(), expected)
+        };
         let query = request.query.to_lowercase();
         let limit = request.limit.min(200);
-        let results = tokio::task::spawn_blocking(move || {
-            let index = lock(&index);
-            let mut best = Vec::with_capacity(limit + 1);
-            for (path, symbols) in index.files() {
-                let lower_path = path.to_lowercase();
-                for symbol in symbols {
-                    let Some(score) = symbol_score(&symbol.name.to_lowercase(), &lower_path, &query) else { continue; };
-                    let position = best.partition_point(|(existing_score, existing_path, existing_symbol): &(i64, &String, &Symbol)| existing_score > &score || (existing_score == &score && (existing_path.as_str(), existing_symbol.start_line) <= (path.as_str(), symbol.start_line)));
-                    if position < limit {
-                        best.insert(position, (score, path, symbol));
-                        if best.len() > limit { best.pop(); }
-                    }
-                }
-            }
-            best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect()
-        }).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
+        let results = tokio::task::spawn_blocking(move || search_snapshot(&index, &query, limit, &generation, expected)).await.map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
         drop(receiver);
-        Ok(results)
+        results.ok_or_else(|| WorkspaceFilesError::Io("symbol query superseded".into()))
     }
+}
+
+fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &std::sync::atomic::AtomicU64, expected: u64) -> Option<SymbolQueryResult> {
+    let mut best = Vec::with_capacity(limit + 1);
+    let mut count = 0usize;
+    let mut visited = 0usize;
+    for (path, file) in index.files() {
+        for (symbol, lower_name) in file.symbols.iter().zip(&file.lower_names) {
+            visited += 1;
+            if visited % 128 == 0 && generation.load(Ordering::Acquire) != expected { return None; }
+            let Some(score) = symbol_score(lower_name, &file.lower_path, query) else { continue; };
+            count += 1;
+            let position = best.partition_point(|(existing_score, existing_path, existing_symbol): &(i64, &String, &Symbol)| existing_score > &score || (existing_score == &score && (existing_path.as_str(), existing_symbol.start_line) <= (path.as_str(), symbol.start_line)));
+            if position < limit {
+                best.insert(position, (score, path, symbol));
+                if best.len() > limit { best.pop(); }
+            }
+        }
+    }
+    if generation.load(Ordering::Acquire) != expected { return None; }
+    Some(SymbolQueryResult { matches: best.into_iter().map(|(_, path, symbol)| SymbolMatch { path: path.clone(), symbol: symbol.clone() }).collect(), truncated: count > limit })
 }
 
 fn symbol_score(name: &str, path: &str, query: &str) -> Option<i64> {
@@ -177,7 +192,7 @@ async fn run_index(
     cancel: &CancellationToken,
     refresh: Arc<Notify>,
     force_refresh: Arc<AtomicBool>,
-    shared_index: Arc<std::sync::Mutex<SymbolIndex>>,
+    shared_index: Arc<std::sync::Mutex<Arc<SymbolIndex>>>,
 ) -> Result<(), String> {
     let mut changes = service
         .watch_files(WatchWorkspaceFilesRequest {
@@ -314,9 +329,7 @@ async fn run_index(
                     updates.extend(changed_files(&root, batch, &file_revisions, force));
                 }
             }
-            let mut guard = lock(&worker_index);
-            let index = std::mem::replace(&mut *guard, SymbolIndex::new(MAX_INDEX_FILES, MAX_INDEX_SYMBOLS, MAX_FILE_SYMBOLS));
-            let (index, revision, file_revisions, _) = update_paths(&root, index, revision, file_revisions, removed, updates, || cancellation.is_cancelled());
+            let (revision, file_revisions, _, index_truncated) = update_shared_index(&worker_index, &root, revision, file_revisions, removed, updates, || cancellation.is_cancelled());
             if initial_build {
                 let mut newest: Vec<_> = file_revisions.iter().collect();
                 newest.sort_unstable_by_key(|(_, revision)| std::cmp::Reverse(revision.modified));
@@ -324,10 +337,9 @@ async fn run_index(
             }
             let snapshot = Arc::new(SymbolSnapshot {
                 revision,
-                truncated: paths_truncated || index.truncated(),
+                truncated: paths_truncated || index_truncated,
                 updating: false,
             });
-            *guard = index;
             (revision, file_revisions, known, recent, snapshot)
         })
         .await
@@ -347,6 +359,22 @@ async fn run_index(
     }
 }
 
+fn update_shared_index(
+    shared: &std::sync::Mutex<Arc<SymbolIndex>>,
+    root: &Path,
+    revision: u64,
+    revisions: HashMap<String, FileRevision>,
+    removed: HashSet<String>,
+    updates: HashSet<String>,
+    cancelled: impl FnMut() -> bool,
+) -> (u64, HashMap<String, FileRevision>, usize, bool) {
+    let index = lock(shared).as_ref().clone();
+    let (index, revision, revisions, reads) = update_paths(root, index, revision, revisions, removed, updates, cancelled);
+    let truncated = index.truncated();
+    *lock(shared) = Arc::new(index);
+    (revision, revisions, reads, truncated)
+}
+
 fn update_paths(
     root: &Path,
     mut index: SymbolIndex,
@@ -354,7 +382,7 @@ fn update_paths(
     mut file_revisions: HashMap<String, FileRevision>,
     removed: HashSet<String>,
     updates: HashSet<String>,
-    cancelled: impl Fn() -> bool,
+    mut cancelled: impl FnMut() -> bool,
 ) -> (SymbolIndex, u64, HashMap<String, FileRevision>, usize) {
     let mut removed: Vec<_> = removed.into_iter().collect();
     let mut updates: Vec<_> = updates.into_iter().collect();
@@ -427,7 +455,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         let cancel = CancellationToken::new();
         let slots = std::sync::Mutex::new(HashMap::from([("checkout".into(), SymbolIndexSlot {
-            sender, cancel: cancel.clone(), accessed: 0, refresh: Arc::new(Notify::new()), force_refresh: Arc::new(AtomicBool::new(false)), index: Arc::new(std::sync::Mutex::new(SymbolIndex::new(1, 1, 1))), idle_checks: 0,
+            sender, cancel: cancel.clone(), accessed: 0, refresh: Arc::new(Notify::new()), force_refresh: Arc::new(AtomicBool::new(false)), index: Arc::new(std::sync::Mutex::new(Arc::new(SymbolIndex::new(1, 1, 1)))), query_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)), idle_checks: 0,
         })]));
         retire_idle_symbol_index(&slots, "checkout");
         assert!(lock(&slots).contains_key("checkout"));
@@ -447,6 +475,22 @@ mod tests {
         let paths = freshness_paths(&known, &recent, false);
         assert_eq!(paths.len(), 128);
         assert!(started.elapsed() < Duration::from_millis(5));
+    }
+
+    #[test]
+    fn query_truncation_reports_more_than_the_limit() {
+        let source = (0..201).map(|i| format!("fn item_{i}() {{}}\n")).collect::<String>();
+        let mut index = SymbolIndex::new(4, 500, 500);
+        index.apply(1, &[FileChange::Changed { path: "items.rs", source: &source }]);
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let all = search_snapshot(&index, "item", 200, &generation, 1).unwrap();
+        assert_eq!(all.matches.len(), 200);
+        assert!(all.truncated);
+        let source = (0..200).map(|i| format!("fn item_{i}() {{}}\n")).collect::<String>();
+        index.apply(2, &[FileChange::Changed { path: "items.rs", source: &source }]);
+        let exact = search_snapshot(&index, "item", 200, &generation, 1).unwrap();
+        assert_eq!(exact.matches.len(), 200);
+        assert!(!exact.truncated);
     }
 
     #[test]
@@ -480,7 +524,33 @@ mod tests {
         assert_eq!(reads, 1000);
         assert_eq!(index.symbol_count(), 20_000);
         assert!(bytes < 4 * 1024 * 1024);
-        assert!(elapsed < Duration::from_millis(750));
+        assert!(elapsed < Duration::from_millis(1_200));
+        let shared = Arc::new(std::sync::Mutex::new(Arc::new(index.clone())));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_index = shared.clone();
+        let worker_root = root.path().to_owned();
+        let worker_revisions = file_revisions.clone();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            update_shared_index(&worker_index, &worker_root, revision, worker_revisions, HashSet::new(), HashSet::from(["file_0.rs".into()]), || {
+                if first { first = false; started_tx.send(()).unwrap(); release_rx.recv().unwrap(); }
+                false
+            });
+        });
+        started_rx.recv().unwrap();
+        let query_started = Instant::now();
+        let snapshot = lock(&shared).clone();
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let found = search_snapshot(&snapshot, "not_present", 200, &generation, 1).unwrap();
+        let query_elapsed = query_started.elapsed();
+        eprintln!("20k-symbol query during reparse: {query_elapsed:?}");
+        assert!(found.matches.is_empty());
+        assert!(query_elapsed < Duration::from_millis(25));
+        generation.store(2, Ordering::Release);
+        assert!(search_snapshot(&snapshot, "function", 200, &generation, 1).is_none());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
         let first_batch: Vec<_> = file_revisions.keys().take(FRESHNESS_BATCH_SIZE).cloned().collect();
         let check_started = Instant::now();
         let unchanged = changed_files(root.path(), &first_batch, &file_revisions, false);

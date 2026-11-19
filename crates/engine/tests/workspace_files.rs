@@ -117,9 +117,11 @@ async fn symbol_index_tracks_workspace_changes() {
     assert!(serde_json::to_vec(&initial).unwrap().len() < 256);
     let params = |query: &str| serde_json::json!({"chatId":"chat-symbols", "query":query, "limit":200});
     let initial_matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("answer")).await.unwrap();
-    assert_eq!(initial_matches[0]["symbol"]["name"], "answer");
+    assert_eq!(initial_matches["matches"][0]["symbol"]["name"], "answer");
+    assert_eq!(initial_matches["truncated"], false);
     let bounded = client.call(methods::QUERY_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "query":"", "limit":10000})).await.unwrap();
-    assert_eq!(bounded.as_array().unwrap().len(), 200);
+    assert_eq!(bounded["matches"].as_array().unwrap().len(), 200);
+    assert_eq!(bounded["truncated"], true);
     client.call(methods::REFRESH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "force":false})).await.unwrap();
     let checked = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -135,7 +137,7 @@ async fn symbol_index_tracks_workspace_changes() {
             assert!(frame.get("files").is_none());
             if frame["updating"] == false {
                 let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("revised")).await.unwrap();
-                if !matches.as_array().unwrap().is_empty() { break; }
+                if !matches["matches"].as_array().unwrap().is_empty() { break; }
             }
         }
     }).await.unwrap();
@@ -145,7 +147,7 @@ async fn symbol_index_tracks_workspace_changes() {
             let frame = stream.recv().await.unwrap();
             if frame["updating"] == false {
                 let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
-                if !matches.as_array().unwrap().is_empty() { break; }
+                if !matches["matches"].as_array().unwrap().is_empty() { break; }
             }
         }
     }).await.unwrap();
@@ -155,7 +157,7 @@ async fn symbol_index_tracks_workspace_changes() {
             let frame = stream.recv().await.unwrap();
             if frame["updating"] == false {
                 let matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("created")).await.unwrap();
-                if matches.as_array().unwrap().is_empty() { break; }
+                if matches["matches"].as_array().unwrap().is_empty() { break; }
             }
         }
     }).await.unwrap();

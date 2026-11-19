@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 use tree_sitter::StreamingIterator;
 
@@ -32,15 +32,27 @@ pub struct Symbol {
 
 /// A bounded snapshot. The owner supplies only files changed by a watch event
 /// and performs file reads and calls to `apply` on a background worker.
+#[derive(Clone)]
 pub struct SymbolIndex {
     revision: Option<u64>,
-    files: BTreeMap<String, Vec<Symbol>>,
+    files: im::OrdMap<String, Arc<SymbolFile>>,
     symbol_count: usize,
     retained_bytes: usize,
     truncated: bool,
     max_files: usize,
     max_symbols: usize,
     max_symbols_per_file: usize,
+}
+
+pub struct SymbolFile {
+    pub lower_path: String,
+    pub lower_names: Vec<String>,
+    pub symbols: Vec<Symbol>,
+}
+
+impl std::ops::Deref for SymbolFile {
+    type Target = [Symbol];
+    fn deref(&self) -> &Self::Target { &self.symbols }
 }
 
 pub enum FileChange<'a> {
@@ -52,7 +64,7 @@ impl SymbolIndex {
     pub fn new(max_files: usize, max_symbols: usize, max_symbols_per_file: usize) -> Self {
         Self {
             revision: None,
-            files: BTreeMap::new(),
+            files: im::OrdMap::new(),
             symbol_count: 0,
             retained_bytes: 0,
             truncated: false,
@@ -93,20 +105,27 @@ impl SymbolIndex {
                     symbols.truncate(limit);
                 }
                 parsed += 1;
-                let mut needed = estimated_file_bytes(path, &symbols);
-                while !symbols.is_empty()
+                let mut file = SymbolFile { lower_path: path.to_lowercase(), lower_names: symbols.iter().map(|symbol| symbol.name.to_lowercase()).collect(), symbols };
+                file.symbols.shrink_to_fit();
+                file.lower_names.shrink_to_fit();
+                let mut needed = estimated_file_bytes(path, &file);
+                while !file.symbols.is_empty()
                     && self.retained_bytes.saturating_add(needed) > MAX_INDEX_PAYLOAD_BYTES
                 {
                     self.truncated = true;
-                    let removed = symbols.pop().expect("symbol list is not empty");
-                    needed = needed
-                        .saturating_sub(std::mem::size_of::<Symbol>() + removed.name.capacity());
+                    file.symbols.pop();
+                    file.lower_names.pop();
+                    file.symbols.shrink_to_fit();
+                    file.lower_names.shrink_to_fit();
+                    needed = estimated_file_bytes(path, &file);
                 }
-                symbols.shrink_to_fit();
-                if !symbols.is_empty() {
-                    self.symbol_count += symbols.len();
-                    self.retained_bytes += estimated_file_bytes(path, &symbols);
-                    self.files.insert(path.to_owned(), symbols);
+                file.symbols.shrink_to_fit();
+                file.lower_names.shrink_to_fit();
+                needed = estimated_file_bytes(path, &file);
+                if !file.symbols.is_empty() {
+                    self.symbol_count += file.symbols.len();
+                    self.retained_bytes += needed;
+                    self.files.insert(path.to_owned(), Arc::new(file));
                 }
             }
         }
@@ -114,7 +133,7 @@ impl SymbolIndex {
         parsed
     }
 
-    pub fn files(&self) -> &BTreeMap<String, Vec<Symbol>> {
+    pub fn files(&self) -> &im::OrdMap<String, Arc<SymbolFile>> {
         &self.files
     }
 
@@ -132,12 +151,14 @@ impl SymbolIndex {
     }
 }
 
-fn estimated_file_bytes(path: &str, symbols: &[Symbol]) -> usize {
+fn estimated_file_bytes(path: &str, file: &SymbolFile) -> usize {
     // BTreeMap's node allocation is shared by several entries. Allow 128
     // bytes per entry in addition to the path and symbol payload.
-    128 + path.len()
-        + symbols.len() * std::mem::size_of::<Symbol>()
-        + symbols
+    128 + path.len() + file.lower_path.capacity()
+        + file.symbols.capacity() * std::mem::size_of::<Symbol>()
+        + file.lower_names.capacity() * std::mem::size_of::<String>()
+        + file.lower_names.iter().map(String::capacity).sum::<usize>()
+        + file.symbols
             .iter()
             .map(|symbol| symbol.name.capacity())
             .sum::<usize>()

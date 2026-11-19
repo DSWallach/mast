@@ -524,11 +524,11 @@ impl Shell {
                     let truncated = this.workspace_symbol_truncated;
                     let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.generation == generation) else { return; };
                     match result {
-                        Ok(matches) => {
-                            search.rows = matches.into_iter().map(|entry| ResultRow { path: entry.path, line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol) }).collect();
+                        Ok(result) => {
+                            search.rows = result.matches.into_iter().map(|entry| ResultRow { path: entry.path, line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol) }).collect();
                             search.displayed_query = Some(displayed_query);
                             search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
-                            search.status = if updating { "Updating…".into() } else if truncated { "Symbol index reached its limit; results are incomplete.".into() } else if search.rows.len() == 200 { "Showing the first 200 matches".into() } else if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
+                            search.status = if updating { "Updating…".into() } else if truncated { "Symbol index reached its limit; results are incomplete.".into() } else if result.truncated { "Showing the first 200 matches".into() } else if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
                         }
                         Err(error) => search.status = error.to_string(),
                     }
