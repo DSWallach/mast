@@ -33,6 +33,8 @@ A pop-out handles `⌘S` (save) and `⌘W` (close the window; a file with unsave
 
 | Key | Does |
 | --- | --- |
+| `F12` | Go to the definition at the cursor |
+| `⌘`-click | Go to an underlined definition |
 | `⌘F` | Find in the file |
 | `⌘G` / `⇧⌘G` | Next / previous match while find is open |
 | `⌘G` | Go to a line when find is closed |
