@@ -199,6 +199,8 @@ pub fn render(
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
                 "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),
+                "changes-rereview" => mast_ui::snapshot::changes_rereview_fixture(false, cx).into(),
+                "changes-since" => mast_ui::snapshot::changes_rereview_fixture(true, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

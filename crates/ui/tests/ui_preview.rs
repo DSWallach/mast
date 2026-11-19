@@ -115,6 +115,8 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "changes-expanded",
         "changes-collapsed",
         "changes-focus-resize",
+        "changes-rereview",
+        "changes-since",
         "details",
         "walkthrough",
         "handoff",

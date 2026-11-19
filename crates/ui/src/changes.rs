@@ -2358,6 +2358,29 @@ pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
     })
 }
 
+/// A PR review the reviewer has already seen once: the baseline differs from
+/// the head, one file is new since, and `rereview` selects the "Since" view.
+#[cfg(feature = "snapshot")]
+pub(crate) fn snapshot_rereview_changes(rereview: bool, cx: &mut App) -> Entity<Changes> {
+    let changes = snapshot_populated_changes(cx);
+    changes.update(cx, |changes, _| {
+        changes.scope = DiffScope::Branch;
+        let identities = changes.parsed.as_ref().map(|p| p.hunk_identities.clone()).unwrap_or_default();
+        let mut state = mast_proto::DiffReviewState {
+            target: "pr:example/project#42".into(),
+            head_sha: Some("b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6".into()),
+            ..Default::default()
+        };
+        stamp_reviewed(&mut state, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", Some(&identities[1..]));
+        state.reviewed_at = Some(chrono::Utc::now().timestamp_millis() - 2 * 86_400_000);
+        state.viewed_hunks.extend(identities[1..].iter().flatten().cloned());
+        changes.review_target = Some(state.target.clone());
+        changes.review_state = Some(state);
+        changes.rereview = rereview;
+    });
+    changes
+}
+
 #[cfg(test)]
 mod tests;
 

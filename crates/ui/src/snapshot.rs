@@ -105,6 +105,12 @@ pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: 
     changes
 }
 
+/// The Changes pane of a re-reviewed PR: the file list's "Changed since you
+/// reviewed" group and header count, and (`since`) the "Since abc1234" view.
+pub fn changes_rereview_fixture(since: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+    crate::changes::snapshot_rereview_changes(since, cx)
+}
+
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");
