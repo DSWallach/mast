@@ -45,7 +45,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -216,7 +216,7 @@ struct CheckoutEntry {
     last_head: Mutex<Option<(String, i64)>>,
     /// Branch and remote-tracking ref tips as of the last capture of this
     /// (bound) checkout; the "before" picture for the next HEAD move.
-    last_tips: Mutex<Option<crate::provenance::TipsCache>>,
+    last_tips: Mutex<Option<Arc<Vec<String>>>>,
 }
 
 /// Kick channel into an entry's sync task that also counts sends, so
@@ -304,8 +304,22 @@ struct ResolvedChatTargets {
     ref_targets: Vec<ResolvedRefTarget>,
 }
 
+struct RepositoryTips {
+    cache: Option<crate::provenance::TipsCache>,
+}
+
+struct PackedRefs {
+    modified: Option<SystemTime>,
+    length: u64,
+    refs: HashMap<String, String>,
+    #[cfg(test)]
+    parses: u64,
+}
+
 struct DiffSyncInner {
     repos: Repos,
+    repository_tips: Mutex<HashMap<PathBuf, RepositoryTips>>,
+    packed_refs: Mutex<HashMap<PathBuf, PackedRefs>>,
     workspace: WorkspaceHost,
     device_id: String,
     edge: Option<EdgeConfig>,
@@ -389,6 +403,8 @@ impl CheckoutDiffSync {
         let sync = Self {
             inner: Arc::new(DiffSyncInner {
                 repos,
+                repository_tips: Mutex::new(HashMap::new()),
+                packed_refs: Mutex::new(HashMap::new()),
                 workspace: workspace.clone(),
                 device_id: device_id.to_string(),
                 edge,
@@ -895,7 +911,7 @@ async fn resolve_chat_targets(inner: &Arc<DiffSyncInner>, chat_id: &str) -> Vec<
 
 /// Branch (`None` when detached or unreadable) and HEAD sha of a checkout,
 /// read from the git dir's files (HEAD, loose ref, `packed-refs`) — no spawn.
-fn read_head(identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
+fn read_head(inner: &DiffSyncInner, identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
     let Ok(head) = std::fs::read_to_string(identity.git_dir.join("HEAD")) else {
         return (None, None);
     };
@@ -913,11 +929,31 @@ fn read_head(identity: &CheckoutIdentity) -> (Option<String>, Option<String>) {
             valid_object_id(sha).then(|| sha.to_owned())
         });
     let sha = loose.or_else(|| {
-        let packed = std::fs::read_to_string(common_dir.join("packed-refs")).ok()?;
-        packed.lines().find_map(|line| {
-            let (sha, name) = line.split_once(' ')?;
-            (name.trim() == reference && valid_object_id(sha)).then(|| sha.to_owned())
-        })
+        let path = common_dir.join("packed-refs");
+        let metadata = std::fs::metadata(&path).ok()?;
+        let modified = metadata.modified().ok();
+        let length = metadata.len();
+        let mut caches = lock(&inner.packed_refs);
+        if !caches.contains_key(&common_dir) && caches.len() >= 256 {
+            caches.clear();
+        }
+        let stale = caches.get(&common_dir)
+            .is_none_or(|cache| cache.modified != modified || cache.length != length);
+        if stale {
+            let packed = std::fs::read_to_string(path).ok()?;
+            let refs = packed.lines().take(100_000).filter_map(|line| {
+                let (sha, name) = line.split_once(' ')?;
+                valid_object_id(sha).then(|| (name.trim().to_owned(), sha.to_owned()))
+            }).collect();
+            #[cfg(test)]
+            let parses = caches.get(&common_dir).map_or(1, |cache| cache.parses + 1);
+            caches.insert(common_dir.clone(), PackedRefs {
+                modified, length, refs,
+                #[cfg(test)]
+                parses,
+            });
+        }
+        caches.get(&common_dir)?.refs.get(reference).cloned()
     });
     (branch, sha)
 }
@@ -964,7 +1000,7 @@ fn publish_targets(inner: &Arc<DiffSyncInner>) {
                 .targets
                 .iter()
                 .map(|target| {
-                    let (branch, head_sha) = read_head(&target.identity);
+                    let (branch, head_sha) = read_head(inner, &target.identity);
                     ChatDiffTargetView {
                         path: target.identity.root.to_string_lossy().into_owned(),
                         checkout_id: target.identity.id.clone(),
@@ -1795,7 +1831,7 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     // the file list from the probe's status (taken just before, see above).
     // Either falls back to its own git call when unavailable.
     let hints = CaptureHints {
-        head: read_head(&entry.identity).1,
+        head: read_head(inner, &entry.identity).1,
         status_v1: probe_status_v2
             .as_deref()
             .and_then(git_status::v2_to_v1),
@@ -1904,6 +1940,19 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
     }
 }
 
+fn repository_tips(inner: &DiffSyncInner, git_dir: &Path) -> Arc<Vec<String>> {
+    let common_dir = common_dir_of(git_dir);
+    let mut caches = lock(&inner.repository_tips);
+    if !caches.contains_key(&common_dir) && caches.len() >= 256 {
+        caches.clear();
+    }
+    let entry = caches.entry(common_dir.clone()).or_insert_with(|| RepositoryTips {
+        cache: None,
+    });
+    let tips = crate::provenance::TipsCache::refresh(&mut entry.cache, &common_dir);
+    tips
+}
+
 /// Compare the captured HEAD with the last one seen for this checkout. A change
 /// in a checkout that some chat has bound as a diff target is a HEAD move: hand
 /// it to the listener (commit provenance), together with the ref tips as of the
@@ -1920,19 +1969,19 @@ fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Optio
             drop(last);
             // Same HEAD: refresh the tips snapshot for the next move.
             if is_bound_target(inner, entry) && lock(&inner.head_move_listener).is_some() {
-                crate::provenance::TipsCache::refresh(&mut lock(&entry.last_tips), &entry.identity.git_dir);
+                *lock(&entry.last_tips) = Some(repository_tips(inner, &entry.identity.git_dir));
             }
             return;
         }
         *last = Some((head.to_owned(), now));
         previous
     };
-    let prior_tips = crate::provenance::TipsCache::current(&lock(&entry.last_tips))
+    let prior_tips = lock(&entry.last_tips).clone()
         .map(|tips| (*tips).clone())
         .unwrap_or_default();
     let bound = is_bound_target(inner, entry);
     if bound && lock(&inner.head_move_listener).is_some() {
-        crate::provenance::TipsCache::refresh(&mut lock(&entry.last_tips), &entry.identity.git_dir);
+        *lock(&entry.last_tips) = Some(repository_tips(inner, &entry.identity.git_dir));
     }
     let Some((old, since_ms)) = previous else { return };
     let Some(listener) = lock(&inner.head_move_listener).clone() else { return };
@@ -3748,7 +3797,7 @@ mod watch_budget_tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     #[tokio::test]
     async fn watch_setup_priority_changes_and_fifo_prevents_starvation() {
