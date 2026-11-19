@@ -533,7 +533,8 @@ mod tests {
         let worker_revisions = file_revisions.clone();
         let worker = std::thread::spawn(move || {
             let mut first = true;
-            update_shared_index(&worker_index, &worker_root, revision, worker_revisions, HashSet::new(), HashSet::from(["file_0.rs".into()]), || {
+            let updates = (0..1000).map(|number| format!("file_{number}.rs")).collect();
+            update_shared_index(&worker_index, &worker_root, revision, worker_revisions, HashSet::new(), updates, || {
                 if first { first = false; started_tx.send(()).unwrap(); release_rx.recv().unwrap(); }
                 false
             });
