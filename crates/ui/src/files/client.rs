@@ -243,6 +243,14 @@ impl WorkspaceFilesClient {
         self.call(methods::QUERY_WORKSPACE_SYMBOLS, &mast_engine::workspace_files::symbols::QuerySymbolsRequest { target: self.context.target.clone(), query, limit: 200, exact_name: false, kinds: None }).await
     }
 
+    pub async fn query_definitions(&self, name: String) -> Result<mast_engine::workspace_files::symbols::SymbolQueryResult, FilesClientError> {
+        use mast_syntax::symbols::SymbolKind;
+        self.call(methods::QUERY_WORKSPACE_SYMBOLS, &mast_engine::workspace_files::symbols::QuerySymbolsRequest {
+            target: self.context.target.clone(), query: name, limit: 200, exact_name: true,
+            kinds: Some(vec![SymbolKind::Function, SymbolKind::Method, SymbolKind::Type, SymbolKind::Constant, SymbolKind::Test]),
+        }).await
+    }
+
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,

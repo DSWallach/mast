@@ -40,6 +40,20 @@ pub(super) enum EditorContextAction {
     SelectAll,
 }
 
+/// Locate the identifier at a cursor offset for keyboard and context-menu navigation.
+/// The editor exposes the cursor but not its syntax tree; use its source text here.
+pub(super) fn identifier_at_cursor(source: &str, offset: usize) -> Option<std::ops::Range<usize>> {
+    if offset > source.len() || !source.is_char_boundary(offset) { return None; }
+    let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+    let start = source[..offset].char_indices().rev()
+        .find(|(_, character)| !is_identifier(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let end = source[offset..].char_indices()
+        .find(|(_, character)| !is_identifier(*character))
+        .map_or(source.len(), |(index, _)| offset + index);
+    (start < end).then_some(start..end)
+}
+
 /// Creates a stable editor entity for an open workspace document.
 pub(super) fn new_file_editor(
     text: impl Into<SharedString>,
@@ -169,6 +183,14 @@ pub(super) fn subscribe_to_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_at_cursor_respects_unicode_boundaries() {
+        let text = "call(élève_2);";
+        assert_eq!(&text[identifier_at_cursor(text, 8).unwrap()], "élève_2");
+        assert!(identifier_at_cursor(text, 6).is_none());
+        assert!(identifier_at_cursor(text, text.len()).is_none());
+    }
 
     #[test]
     fn menu_availability_tracks_selection_editability_and_clipboard() {
