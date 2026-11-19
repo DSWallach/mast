@@ -81,10 +81,13 @@ block, so it posts as a suggestion.
   survives a lost response and an engine restart. Just before the POST, Mast also
   saves the ids of the drafts being sent next to the nonce (durably). Every
   submit, the first included, lists the PR's reviews first; if one carries this
-  marker, Mast records the review as posted, treats exactly the saved ids as
+  marker, Mast records the review as posted, treats exactly the saved comments as
   sent (the review's comments are never used to decide that, so a comment GitHub
-  reports differently can't cause a repost), removes those drafts, sends
-  nothing, and says **Already posted** with the link. Only an older attempt with
+  reports differently can't cause a repost), sends nothing, and says
+  **Already posted** with the link. The attempt saves each comment's text as sent,
+  and the local record keeps that text. A saved draft is removed only if it still
+  reads as it did when sent; one edited since stays a draft (a new comment next
+  time) and the dialog says "N drafts were edited after posting and kept". Only an older attempt with
   no saved ids falls back to matching comment text (every page, outdated
   comments by their original line, a failed read is an error); a partial match
   there keeps the unmatched drafts. A check never renews the nonce. A submit

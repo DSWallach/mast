@@ -852,9 +852,9 @@ impl WorkspaceHost {
         Ok(nonce)
     }
 
-    /// Save which drafts are about to be posted under `nonce`, durably, before the POST.
-    pub fn save_review_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), EngineError> {
-        self.mutate(|doc| doc.save_review_attempt(target, nonce, ids))?;
+    /// Save the comments about to be posted under `nonce`, durably, before the POST.
+    pub fn save_review_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.save_review_attempt(target, nonce, comments))?;
         self.inner.persist_snapshot()?;
         Ok(())
     }
@@ -863,8 +863,8 @@ impl WorkspaceHost {
         self.read(|doc| doc.posted_reviews(target))
     }
 
-    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, sent_ids: &[String], consume_nonce: bool) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.record_posted_review(target, review, sent_ids, consume_nonce))?)
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, consume_nonce: bool) -> Result<mast_doc::registry::PostedRecord, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review, consume_nonce))?)
     }
 
     pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
@@ -3430,6 +3430,39 @@ mod tests {
         assert_eq!(*preferences.borrow(), collapsed);
     }
 
+    #[tokio::test]
+    async fn a_draft_edited_after_the_attempt_survives_recording_and_the_record_keeps_the_sent_text() {
+        use crate::pr_dash::SubmitLedger;
+        use mast_proto::{PostedReview, ReviewEvent, ReviewSide, SubmitReviewComment};
+        let (_dir, host) = linkable_test_host();
+        let target = "pr:o/r#7";
+        let draft = |id: &str, body: &str| mast_proto::ReviewDraft {
+            id: id.into(), target: target.into(), body: body.into(), source: mast_proto::ReviewDraftSource::User, created_at: 1,
+            anchor: mast_proto::ReviewAnchor { file: "a.rs".into(), side: ReviewSide::Right, start_line: 3, end_line: 3, hunk_hash: None },
+            line_hash: None, end_line_hash: None,
+        };
+        let sent = |id: &str, body: &str| SubmitReviewComment {
+            draft_id: id.into(), path: "a.rs".into(), line: 3, side: ReviewSide::Right, start_line: None, start_side: None,
+            body: body.into(), line_text: String::new(), start_text: String::new(), context: vec![],
+        };
+        let nonce = host.ensure_nonce(target).unwrap();
+        // The attempt saves the text as sent, before the POST.
+        host.save_attempt(target, &nonce, &[sent("a", "as sent"), sent("b", "as sent b")]).unwrap();
+        // The reviewer edits "a" and deletes "b" before the retry that finds the marker.
+        host.put_review_drafts(target, &[draft("a", "edited later")]).unwrap();
+        let saved = host.attempt(target, &nonce).expect("the attempt survives");
+        let review = PostedReview {
+            review_id: 9, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1,
+            comments: saved, nonce: Some(nonce.clone()),
+        };
+        let outcome = host.record_posted_review(target, &review, true).unwrap();
+        assert_eq!(outcome.edited_kept, 1);
+        assert_eq!(host.review_drafts(target).iter().map(|d| d.body.as_str()).collect::<Vec<_>>(), ["edited later"]);
+        assert_eq!(host.posted_reviews(target)[0].comments[0].body, "as sent");
+        assert!(host.attempt(target, &nonce).is_none(), "a confirmed record consumes the attempt");
+        assert!(host.nonce_recorded(target, &nonce));
+    }
+
     /// Shared setup for the `set_chat_link` precedence/set-clear tests below:
     /// a fresh workspace with one chat row, ready to link.
     fn linkable_test_host() -> (tempfile::TempDir, WorkspaceHost) {
@@ -3790,10 +3823,10 @@ impl crate::pr_dash::SubmitLedger for WorkspaceHost {
     fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String> {
         self.renew_review_nonce(target, expected).map_err(|e| e.to_string())
     }
-    fn save_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), String> {
-        self.save_review_attempt(target, nonce, ids).map_err(|e| e.to_string())
+    fn save_attempt(&self, target: &str, nonce: &str, comments: &[mast_proto::SubmitReviewComment]) -> Result<(), String> {
+        self.save_review_attempt(target, nonce, comments).map_err(|e| e.to_string())
     }
-    fn attempt_ids(&self, target: &str, nonce: &str) -> Option<Vec<String>> {
-        self.read(|doc| doc.review_attempt_ids(target, nonce))
+    fn attempt(&self, target: &str, nonce: &str) -> Option<Vec<mast_proto::SubmitReviewComment>> {
+        self.read(|doc| doc.review_attempt(target, nonce))
     }
 }

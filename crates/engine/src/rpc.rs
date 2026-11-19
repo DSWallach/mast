@@ -3300,8 +3300,8 @@ impl RpcService for EngineRpc {
                     mast_proto::SubmitReviewOutcome::Posted | mast_proto::SubmitReviewOutcome::AlreadyPosted
                 ) && let Some(review_id) = reply.review_id
                 {
-                    let sent: std::collections::HashSet<&String> = reply.sent_draft_ids.iter().collect();
-                    // A fresh post, or the ids saved before the POST, account for the whole attempt;
+                    let sent: std::collections::HashSet<&String> = reply.sent_comments.iter().map(|c| &c.draft_id).collect();
+                    // A fresh post, or the comments saved before the POST, account for the whole attempt;
                     // only the text-match fallback can be partial, and it then keeps the nonce.
                     let full = reply.sent_exact || p.comments.iter().all(|c| sent.contains(&c.draft_id));
                     let posted = mast_proto::PostedReview {
@@ -3310,14 +3310,18 @@ impl RpcService for EngineRpc {
                         event: p.event,
                         body: p.body.clone(),
                         posted_at: chrono::Utc::now().timestamp_millis(),
-                        comments: p.comments.iter().filter(|c| sent.contains(&c.draft_id)).cloned().collect(),
+                        // The text GitHub has, even when the draft was edited since.
+                        comments: reply.sent_comments.clone(),
                         nonce: Some(nonce),
                     };
                     // The review is on GitHub already. If the local record cannot be written the
                     // drafts and the nonce stay, so the next attempt finds the review and records it.
-                    if let Err(error) = self.workspace.record_posted_review(&p.target, &posted, &reply.sent_draft_ids, full) {
-                        tracing::warn!("could not record posted review locally: {error}");
-                        reply.local_record_error = Some(error.to_string());
+                    match self.workspace.record_posted_review(&p.target, &posted, full) {
+                        Ok(record) => reply.edited_kept = record.edited_kept,
+                        Err(error) => {
+                            tracing::warn!("could not record posted review locally: {error}");
+                            reply.local_record_error = Some(error.to_string());
+                        }
                     }
                 }
                 RpcReply::value(&reply)

@@ -23,7 +23,7 @@ pub(super) enum SubmitPhase {
     Sending,
     /// A post ended without a clear answer; asking GitHub whether it landed.
     Checking,
-    Posted { url: String, already: bool, warning: Option<String> },
+    Posted { url: String, already: bool, warning: Option<String>, edited_kept: usize },
     /// A pending review from the browser blocks a second one.
     Conflict { url: String },
     /// `reprepare`: the PR's head is unknown or moved, so the check must run again.
@@ -416,6 +416,7 @@ impl Changes {
                     url: reply.url.clone(),
                     already: reply.outcome == SubmitReviewOutcome::AlreadyPosted,
                     warning: reply.local_record_error.clone(),
+                    edited_kept: reply.edited_kept,
                 },
                 SubmitReviewOutcome::PendingConflict => SubmitPhase::Conflict { url: reply.url.clone() },
                 SubmitReviewOutcome::NotFound => SubmitPhase::Failed {
@@ -608,7 +609,7 @@ impl Changes {
                         .into_any_element(),
                 )
             }
-            SubmitPhase::Posted { url, already, warning } => {
+            SubmitPhase::Posted { url, already, warning, edited_kept } => {
                 let url = url.clone();
                 let text = if *already {
                     "Already posted: this review was on GitHub; nothing was sent again."
@@ -621,6 +622,17 @@ impl Changes {
                         .flex_col()
                         .gap(px(6.0))
                         .child(div().text_size(px(11.5)).text_color(theme.text).child(text))
+                        .when(*edited_kept > 0, |el| {
+                            el.child(note(
+                                &format!(
+                                    "{} draft{} edited after posting and kept. {} will be a new comment next time.",
+                                    edited_kept,
+                                    if *edited_kept == 1 { " was" } else { "s were" },
+                                    if *edited_kept == 1 { "It" } else { "They" },
+                                ),
+                                theme.warning,
+                            ))
+                        })
                         .when_some(warning.clone(), |el, warning| {
                             el.child(note(
                                 &format!("Mast couldn't save the local record ({warning}). Your drafts are still here; nothing will be posted twice."),
@@ -816,10 +828,10 @@ mod tests {
                     let mut reply = script.submits.lock().unwrap().pop_front().unwrap_or_else(posted)?;
                     let landed = matches!(reply["outcome"].as_str(), Some("posted" | "already-posted"));
                     if landed {
-                        if reply.get("sentDraftIds").is_none() {
-                            reply["sentDraftIds"] = serde_json::json!(ids(&params));
+                        if reply.get("sentComments").is_none() {
+                            reply["sentComments"] = params["comments"].clone();
                         }
-                        let sent: Vec<String> = reply["sentDraftIds"].as_array().unwrap().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                        let sent: Vec<String> = reply["sentComments"].as_array().unwrap().iter().filter_map(|v| v["draftId"].as_str().map(str::to_owned)).collect();
                         script.drafts.lock().unwrap().retain(|d| !sent.contains(&d.id));
                     }
                     Ok(reply)
@@ -1013,7 +1025,7 @@ mod tests {
     fn timeout_is_checked_and_a_landed_review_is_not_posted_again(cx: &mut gpui::TestAppContext) {
         let (changes, vcx, script) = setup(cx);
         script.queue(Err("gh timed out".into()));
-        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"https://github.com/o/r/pull/1#pullrequestreview-9","sentDraftIds":["placed"]})));
+        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"https://github.com/o/r/pull/1#pullrequestreview-9","sentComments":[{"draftId":"placed","path":"a","line":1,"side":"right","body":"body placed"}]})));
         open(&changes, vcx);
         click(&changes, vcx);
         vcx.run_until_parked();
@@ -1117,12 +1129,25 @@ mod tests {
     #[gpui::test]
     fn a_failed_local_record_is_reported_and_leaves_the_drafts(cx: &mut gpui::TestAppContext) {
         let (changes, vcx, script) = setup(cx);
-        script.queue(Ok(serde_json::json!({"outcome":"posted","reviewId":9,"url":"u","sentDraftIds":[],"localRecordError":"disk full"})));
+        script.queue(Ok(serde_json::json!({"outcome":"posted","reviewId":9,"url":"u","sentComments":[],"localRecordError":"disk full"})));
         open(&changes, vcx);
         click(&changes, vcx);
         vcx.run_until_parked();
         assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { warning: Some(ref w), .. }) if w == "disk full"));
         assert_eq!(script.remaining(), ["placed", "lost"]);
+        render(&changes, vcx);
+    }
+
+    #[gpui::test]
+    fn a_draft_edited_after_posting_is_kept_and_the_dialog_says_so(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        // The engine kept "placed" (edited since it was sent), so the fake sends nothing for removal.
+        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"u","sentComments":[],"editedKept":1})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { already: true, edited_kept: 1, .. })));
+        assert_eq!(script.remaining(), ["placed", "lost"], "the edited draft stays a draft");
         render(&changes, vcx);
     }
 
@@ -1149,7 +1174,7 @@ mod tests {
     fn reopening_during_a_post_still_checks_a_timed_out_result(cx: &mut gpui::TestAppContext) {
         let (changes, vcx, script) = setup(cx);
         script.queue(Err("gh timed out".into()));
-        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"u","sentDraftIds":["placed"]})));
+        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"u","sentComments":[{"draftId":"placed","path":"a","line":1,"side":"right","body":"body placed"}]})));
         open(&changes, vcx);
         click(&changes, vcx);
         // Away and back while the post runs: the dialog is dropped and reopened mid-flight.

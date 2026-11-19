@@ -16,9 +16,9 @@ pub trait SubmitLedger: Send + Sync {
     fn nonce_recorded(&self, target: &str, nonce: &str) -> bool;
     /// Compare-and-set: replace the nonce only if it still equals `expected`; returns the one now in effect.
     fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String>;
-    /// Durably save the draft ids about to be posted under `nonce`.
-    fn save_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), String>;
-    fn attempt_ids(&self, target: &str, nonce: &str) -> Option<Vec<String>>;
+    /// Durably save the comments (with their text) about to be posted under `nonce`.
+    fn save_attempt(&self, target: &str, nonce: &str, comments: &[SubmitReviewComment]) -> Result<(), String>;
+    fn attempt(&self, target: &str, nonce: &str) -> Option<Vec<SubmitReviewComment>>;
 }
 
 const PAGE: usize = 100;
@@ -243,7 +243,7 @@ pub(super) async fn prepare(gh: &dyn GhRunner, params: &PrepareReviewParams) -> 
 // Submit
 // ---------------------------------------------------------------------------
 
-fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent: Vec<String>, exact: bool) -> SubmitReviewReply {
+fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent: Vec<SubmitReviewComment>, exact: bool) -> SubmitReviewReply {
     SubmitReviewReply {
         outcome,
         review_id: review.get("id").and_then(Value::as_u64),
@@ -254,13 +254,14 @@ fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent:
             .unwrap_or(fallback_url)
             .to_owned(),
         local_record_error: None,
-        sent_draft_ids: sent,
+        edited_kept: 0,
+        sent_comments: sent,
         sent_exact: exact,
     }
 }
 
 fn plain(outcome: SubmitReviewOutcome, url: String) -> SubmitReviewReply {
-    SubmitReviewReply { outcome, review_id: None, url, local_record_error: None, sent_draft_ids: Vec::new(), sent_exact: false }
+    SubmitReviewReply { outcome, review_id: None, url, local_record_error: None, sent_comments: Vec::new(), sent_exact: false, edited_kept: 0 }
 }
 
 fn is_pending_conflict(error: &str) -> bool {
@@ -269,7 +270,7 @@ fn is_pending_conflict(error: &str) -> bool {
 
 /// Which of `params.comments` an existing review already carries. Pages through all of the
 /// review's comments; a failed or runaway read is an error, never "no match".
-async fn already_sent(gh: &dyn GhRunner, base: &str, review_id: u64, params: &SubmitReviewParams) -> Result<Vec<String>, String> {
+async fn already_sent(gh: &dyn GhRunner, base: &str, review_id: u64, params: &SubmitReviewParams) -> Result<Vec<SubmitReviewComment>, String> {
     let mut existing: Vec<Value> = Vec::new();
     for page in 1..=MAX_COMMENT_PAGES {
         let reply = gh
@@ -284,7 +285,7 @@ async fn already_sent(gh: &dyn GhRunner, base: &str, review_id: u64, params: &Su
     Err("GitHub returned too many comments on this review to check them".into())
 }
 
-fn match_sent(existing: &[Value], params: &SubmitReviewParams) -> Vec<String> {
+fn match_sent(existing: &[Value], params: &SubmitReviewParams) -> Vec<SubmitReviewComment> {
     params
         .comments
         .iter()
@@ -301,7 +302,7 @@ fn match_sent(existing: &[Value], params: &SubmitReviewParams) -> Vec<String> {
                     && found.get("body").and_then(Value::as_str).map(str::trim) == Some(comment.body.trim())
             })
         })
-        .map(|comment| comment.draft_id.clone())
+        .cloned()
         .collect()
 }
 
@@ -344,7 +345,7 @@ pub(super) async fn submit(
             {
                 // The ids saved before the POST say what that review carries. A text match is only
                 // the fallback when nothing was saved (an older attempt), never the authority.
-                let (sent, exact) = match ledger.attempt_ids(&params.target, nonce) {
+                let (sent, exact) = match ledger.attempt(&params.target, nonce) {
                     Some(saved) => (saved, true),
                     None => match review.get("id").and_then(Value::as_u64) {
                         Some(id) => (already_sent(gh, &base, id, params).await?, false),
@@ -373,17 +374,15 @@ pub(super) async fn submit(
     }
     // Durable before the POST: if the response is lost, the marker on GitHub plus these ids
     // are enough to finish the job, even after a restart.
-    let ids: Vec<String> = params.comments.iter().map(|c| c.draft_id.clone()).collect();
     ledger
-        .save_attempt(&params.target, nonce, &ids)
+        .save_attempt(&params.target, nonce, &params.comments)
         .map_err(|e| format!("could not save the review attempt: {e}"))?;
     match gh.rest("POST", &format!("{base}/reviews"), Some(&payload(params, nonce))).await {
         Ok(review) => {
             if review.get("id").and_then(Value::as_u64).is_none() {
                 return Err("GitHub accepted the review but returned no review id".into());
             }
-            let sent = params.comments.iter().map(|c| c.draft_id.clone()).collect();
-            Ok(reply(SubmitReviewOutcome::Posted, &review, &url, sent, true))
+            Ok(reply(SubmitReviewOutcome::Posted, &review, &url, params.comments.clone(), true))
         }
         Err(error) if is_pending_conflict(&error) => Ok(plain(SubmitReviewOutcome::PendingConflict, url)),
         Err(error) => Err(error),
@@ -446,7 +445,7 @@ mod tests {
     struct LedgerState {
         nonce: Option<String>,
         recorded: std::collections::HashSet<String>,
-        attempt: Option<(String, Vec<String>)>,
+        attempt: Option<(String, Vec<SubmitReviewComment>)>,
         renews: usize,
     }
 
@@ -484,12 +483,12 @@ mod tests {
             state.attempt = None;
             Ok(next)
         }
-        fn save_attempt(&self, _: &str, nonce: &str, ids: &[String]) -> Result<(), String> {
-            self.0.lock().unwrap().attempt = Some((nonce.into(), ids.to_vec()));
+        fn save_attempt(&self, _: &str, nonce: &str, comments: &[SubmitReviewComment]) -> Result<(), String> {
+            self.0.lock().unwrap().attempt = Some((nonce.into(), comments.to_vec()));
             Ok(())
         }
-        fn attempt_ids(&self, _: &str, nonce: &str) -> Option<Vec<String>> {
-            self.0.lock().unwrap().attempt.as_ref().filter(|(n, _)| n == nonce).map(|(_, ids)| ids.clone())
+        fn attempt(&self, _: &str, nonce: &str) -> Option<Vec<SubmitReviewComment>> {
+            self.0.lock().unwrap().attempt.as_ref().filter(|(n, _)| n == nonce).map(|(_, comments)| comments.clone())
         }
     }
 
@@ -595,6 +594,10 @@ mod tests {
         }
     }
 
+    fn sent_ids(reply: &SubmitReviewReply) -> Vec<&str> {
+        reply.sent_comments.iter().map(|c| c.draft_id.as_str()).collect()
+    }
+
     fn comment(id: &str, line: u32, text: &str, start: Option<(u32, &str)>) -> SubmitReviewComment {
         SubmitReviewComment {
             draft_id: id.into(),
@@ -677,7 +680,7 @@ mod tests {
         let reply = submit(gh.as_ref(), &params(two()), "nonce-1", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::Posted);
         assert_eq!(reply.review_id, Some(991));
-        assert_eq!(reply.sent_draft_ids, ["d1", "d2"]);
+        assert_eq!(sent_ids(&reply), ["d1", "d2"]);
         let posts = gh.posts();
         assert_eq!(posts.len(), 1);
         let body = &posts[0];
@@ -727,7 +730,7 @@ mod tests {
         let reply = submit(gh.as_ref(), &check, "n0", &ledger).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(reply.review_id, Some(991));
-        assert_eq!(reply.sent_draft_ids, ["d1", "d2"], "the ids saved before the POST decide what was sent");
+        assert_eq!(sent_ids(&reply), ["d1", "d2"], "the ids saved before the POST decide what was sent");
         assert!(reply.sent_exact);
         assert_eq!(gh.gets("/comments"), 0, "the text match is not consulted when ids were saved");
         // A plain retry sends nothing either.
@@ -737,6 +740,21 @@ mod tests {
         // A different nonce is a different review.
         *gh.mode.lock().unwrap() = PostMode::Ok;
         assert_eq!(submit(gh.as_ref(), &params(two()), "fresh", &MemLedger::default()).await.unwrap().outcome, SubmitReviewOutcome::Posted);
+    }
+
+    #[tokio::test]
+    async fn a_draft_edited_between_the_attempt_and_the_retry_is_reported_with_the_text_that_was_sent() {
+        let gh = FakeRest::new(PostMode::Lost("gh timed out"));
+        let ledger = MemLedger::default();
+        assert!(submit(gh.as_ref(), &params(two()), "n0", &ledger).await.is_err());
+        // The reviewer edits d1 before retrying; the retry hits the marker.
+        let mut edited = two();
+        edited[0].body = "```suggestion\nrewritten after the attempt\n```".into();
+        let reply = submit(gh.as_ref(), &params(edited), "n0", &ledger).await.unwrap();
+        assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
+        assert_eq!(gh.posts().len(), 1);
+        let d1 = reply.sent_comments.iter().find(|c| c.draft_id == "d1").unwrap();
+        assert_eq!(d1.body, "```suggestion\nbody d1\n```", "what GitHub has, not the edited draft");
     }
 
     #[tokio::test]
@@ -794,7 +812,7 @@ mod tests {
         landed_review(&gh, found);
         let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
-        assert_eq!(reply.sent_draft_ids, ["d1", "d2"]);
+        assert_eq!(sent_ids(&reply), ["d1", "d2"]);
         assert_eq!(gh.gets("/comments?per_page=100&page=2"), 1);
     }
 
@@ -812,7 +830,7 @@ mod tests {
         let gh = FakeRest::new(PostMode::Ok);
         landed_review(&gh, vec![serde_json::json!({"path": "src/a.rs", "line": 12, "body": "```suggestion\nbody d2\n```"})]);
         let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
-        assert_eq!(reply.sent_draft_ids, ["d2"], "d1 stays a local draft");
+        assert_eq!(sent_ids(&reply), ["d2"], "d1 stays a local draft");
     }
 
     #[tokio::test]

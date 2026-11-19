@@ -133,11 +133,14 @@ pub struct SubmitReviewReply {
     /// written. The drafts stay and the next attempt finds the review and records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_record_error: Option<String>,
-    /// Draft ids that are on GitHub because of this review (all of them after a
-    /// post; the ones matched in the existing review after "already posted").
+    /// The comments this review carries, as sent: all of them after a post, the ones saved before
+    /// the POST after "already posted" (never the current drafts, which may have been edited since).
     #[serde(default)]
-    pub sent_draft_ids: Vec<String>,
-    /// `sent_draft_ids` is exactly what the review carries (a fresh post, or the ids saved
+    pub sent_comments: Vec<SubmitReviewComment>,
+    /// Drafts that were edited after they were posted: kept as drafts (a new comment next time).
+    #[serde(default)]
+    pub edited_kept: usize,
+    /// `sent_comments` is exactly what the review carries (a fresh post, or the ids saved
     /// before the POST), so the attempt is fully accounted for.
     #[serde(default)]
     pub sent_exact: bool,
@@ -161,4 +164,9 @@ pub struct PostedReview {
 /// Marker appended (as an invisible HTML comment) to every review body Mast posts.
 pub fn review_marker(attempt_id: &str) -> String {
     format!("<!-- mast-review:{attempt_id} -->")
+}
+
+/// Hash of a draft's text, used to tell whether it changed after it was posted.
+pub fn review_body_hash(body: &str) -> String {
+    crate::derive_id(body, "review-draft-body")
 }
