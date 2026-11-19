@@ -111,6 +111,37 @@ mod tests {
             assert!(changes.scope_map_selected);
             assert!(crate::settings::current(cx).changes_scope_map);
         });
+        let first = changes.update(vcx, |changes, cx| {
+            let parsed = changes.parsed.as_mut().unwrap();
+            parsed.key = "grouped".into();
+            for index in 0..500 {
+                let file = FileDiff::new(format!("group/{index}.rs"), None);
+                let file_index = parsed.files.len();
+                parsed.horizontal.push(FileHorizontalState::new(&file));
+                Arc::make_mut(&mut parsed.files).push(file);
+                Arc::make_mut(&mut parsed.hunk_identities).push(Vec::new());
+                Arc::make_mut(&mut parsed.layout).push(DiffTreeNode::File(file_index as u32));
+            }
+            changes.refresh_scope_map_data();
+            changes.reset_scope_map_layout();
+            changes.scope_map_resize(224.0, 320.0, cx);
+            changes.scope_map_view.layouts[&(7, 10)]
+                .iter()
+                .find_map(|tile| match &tile.kind {
+                    TileKind::More { files, .. } => Some(files[0]),
+                    _ => None,
+                })
+                .unwrap()
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let more = vcx
+            .debug_bounds(&format!("scope-map-more-{first}"))
+            .unwrap()
+            .center();
+        vcx.simulate_click(more, gpui::Modifiers::default());
+        vcx.update(|window, cx| window.draw(cx).clear());
+        changes.read_with(vcx, |changes, _| assert!(!changes.scope_map_selected));
+        assert!(vcx.debug_bounds("changes-folder-group/").is_some());
     }
 
     #[gpui::test]
@@ -472,13 +503,17 @@ impl Changes {
         let Some(data) = self.scope_map_data.get() else {
             return div().into_any_element();
         };
-        let risks = self.review_identity(cx).and_then(|(target, head)| {
-            self.scope_map_walkthrough
-                .as_ref()?
-                .upgrade()?
-                .read(cx)
-                .scope_map_risks(&target, head.as_deref())
-        });
+        let risks = self
+            .active_diff(cx)
+            .filter(|diff| self.parse_key(diff) == parsed.key)
+            .and_then(|_| self.review_identity(cx))
+            .and_then(|(target, head)| {
+                self.scope_map_walkthrough
+                    .as_ref()?
+                    .upgrade()?
+                    .read(cx)
+                    .scope_map_risks(&target, head.as_deref())
+            });
         let marks = self.review_state.as_ref();
         let key = (parsed.key.clone(), self.review_state_generation);
         if self.scope_map_view.progress_key.as_ref() != Some(&key) {
@@ -586,6 +621,7 @@ impl Changes {
                     let lines = *lines;
                     canvas = canvas.child(
                         base.id(("scope-map-more", first))
+                            .debug_selector(move || format!("scope-map-more-{first}"))
                             .cursor_pointer()
                             .border_1()
                             .border_color(theme.border)

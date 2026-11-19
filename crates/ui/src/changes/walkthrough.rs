@@ -1533,9 +1533,11 @@ mod tests {
         });
         let (mut review, files) = fixture();
         review.steps[0].what = "Long note ".repeat(30);
+        let review: TourReview = review.into();
+        let scope_map_risks = Arc::new(review.risk_notes());
         let (view, vcx) = cx.add_window_view(|_, cx| Walkthrough {
-            review: review.into(),
-            scope_map_risks: Arc::default(),
+            review,
+            scope_map_risks,
             files: Arc::new(files),
             coverage: None,
             viewed: BTreeSet::new(),
@@ -1557,6 +1559,11 @@ mod tests {
             step_cancelled: None,
         });
         vcx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(vcx, |view, _| {
+            assert!(view.scope_map_risks(&view.review.target_key, Some(&view.review.head)).is_some());
+            assert!(view.scope_map_risks(&view.review.target_key, Some("different-head")).is_none());
+            assert!(view.scope_map_risks("different-target", Some(&view.review.head)).is_none());
+        });
         assert!(vcx.debug_bounds("review-progress").is_some());
         assert!(vcx.debug_bounds("review-note").is_some());
         let collapsed = vcx.debug_bounds("review-note-body").unwrap().size.height;
