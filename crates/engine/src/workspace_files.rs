@@ -26,6 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Repos, WorkspaceHost};
 
+mod symbols;
+
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
 pub const DIRECTORY_PAGE_SIZE: usize = 500;
@@ -59,6 +61,7 @@ struct WorkspaceFilesInner {
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
     search_indexes: Mutex<HashMap<String, SearchIndex>>,
+    symbol_indexes: Mutex<HashMap<String, tokio::sync::watch::Sender<Option<symbols::SymbolResult>>>>,
     cancel: CancellationToken,
 }
 
@@ -230,6 +233,7 @@ impl WorkspaceFiles {
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
                 search_indexes: Mutex::new(HashMap::new()),
+                symbol_indexes: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
             }),
         }

@@ -5147,6 +5147,7 @@ dependencies = [
  "mast-proto",
  "mast-rpc",
  "mast-sync",
+ "mast-syntax",
  "mast-update",
  "notify",
  "nucleo-matcher",
@@ -5344,6 +5345,7 @@ name = "mast-syntax"
 version = "0.2.82"
 dependencies = [
  "ctor",
+ "serde",
  "thiserror 2.0.20",
  "tree-sitter",
  "tree-sitter-bash",

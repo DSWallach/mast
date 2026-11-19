@@ -9,6 +9,7 @@ publish.workspace = true
 startup-bench = []
 
 [dependencies]
+mast-syntax.workspace = true
 mast-preview.workspace = true
 mast-proto.workspace = true
 mast-doc.workspace = true

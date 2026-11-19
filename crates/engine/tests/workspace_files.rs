@@ -53,6 +53,41 @@ fn assemble(data_dir: &Path, device_id: &str) -> EngineCore {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symbol_index_tracks_workspace_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-symbols");
+    core.workspace.create_space("space-symbols", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-symbols", Some("space-symbols"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let mut stream = client.subscribe(methods::WATCH_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols"})).await.unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(30), stream.recv()).await.unwrap().unwrap();
+    assert_eq!(initial["files"]["src/lib.rs"][0]["name"], "answer");
+    std::fs::write(repo.join("src/lib.rs"), "pub fn revised() {}\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["files"]["src/lib.rs"][0]["name"] == "revised" { break; }
+        }
+    }).await.unwrap();
+    std::fs::write(repo.join("created.rs"), "fn created() {}\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["files"]["created.rs"][0]["name"] == "created" { break; }
+        }
+    }).await.unwrap();
+    std::fs::remove_file(repo.join("created.rs")).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = stream.recv().await.unwrap();
+            if frame["files"].get("created.rs").is_none() { break; }
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_index_tracks_file_changes() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");

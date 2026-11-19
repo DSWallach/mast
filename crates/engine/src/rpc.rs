@@ -4335,6 +4335,25 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&page)
             }
+            methods::WATCH_WORKSPACE_SYMBOLS => {
+                let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
+                let index = self.workspace_files.subscribe_symbols(request.target).await.map_err(RpcError::from)?;
+                let stream = futures::stream::unfold((index, true), |(mut index, mut first)| async move {
+                    loop {
+                        if !first && index.changed().await.is_err() { return None; }
+                        first = false;
+                        let value = index.borrow_and_update().clone();
+                        if let Some(value) = value {
+                            let frame = match value {
+                                Ok(symbols) => serde_json::json!({"files": symbols.as_ref()}),
+                                Err(error) => serde_json::json!({"error": error}),
+                            };
+                            return Some((frame, (index, false)));
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
             methods::WATCH_WORKSPACE_SEARCH_FILES => {
                 let request: mast_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let index = self.workspace_files

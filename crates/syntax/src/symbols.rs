@@ -8,7 +8,8 @@ use tree_sitter::StreamingIterator;
 
 use crate::{DEFAULT_MAX_SOURCE_BYTES, LanguageId, language_for_path};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SymbolKind {
     Function,
     Method,
@@ -16,7 +17,8 @@ pub enum SymbolKind {
     Test,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -213,6 +215,29 @@ fn compiled_tags(
             .collect()
         })
         .get(&language)
+}
+
+pub fn supports_path(path: &str) -> bool {
+    matches!(
+        language_for_path(path),
+        Some(
+            LanguageId::Rust
+                | LanguageId::JavaScript
+                | LanguageId::Jsx
+                | LanguageId::TypeScript
+                | LanguageId::Tsx
+                | LanguageId::Python
+                | LanguageId::Go
+                | LanguageId::C
+                | LanguageId::Cpp
+                | LanguageId::CSharp
+                | LanguageId::Java
+                | LanguageId::Swift
+                | LanguageId::Ruby
+                | LanguageId::Php
+                | LanguageId::Lua
+        )
+    )
 }
 
 /// Extract definitions from one file. The caller owns scheduling and caching.
