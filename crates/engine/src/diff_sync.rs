@@ -4242,4 +4242,56 @@ mod repository_ref_budget_tests {
         assert_eq!(parses, 1);
         core.diff_sync.shutdown().await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prior_tips_remain_specific_to_each_checkout() {
+        let _pause = CheckoutDiffSync::pause_watch_setups_for_test().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("file"), "initial\n").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "initial"]);
+        let paths: Vec<_> = ["a", "b"].iter().map(|name| {
+            let path = root.join(name);
+            git(&repo, &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()]);
+            path
+        }).collect();
+        let data = root.join("engine");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("device-id"), "test-device").unwrap();
+        let core = EngineCore::assemble(&data, Arc::new(HarnessRegistry::new()), mast_proto::HarnessId::Mock, None).unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            let chat = format!("chat-{index}");
+            core.workspace.create_chat(&chat, None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
+            core.diff_targets.bind(&chat, &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
+        }
+        let moves = Arc::new(Mutex::new(Vec::new()));
+        let recorded = moves.clone();
+        core.diff_sync.set_head_move_listener(Arc::new(move |event| lock(&recorded).push(event)));
+        core.diff_sync.reconcile_now().await;
+        let inner = &core.diff_sync.inner;
+        let entries: Vec<_> = paths.iter().map(|path| {
+            lock(&inner.entries).values().find(|entry| entry.identity.root == *path).unwrap().clone()
+        }).collect();
+        for entry in &entries { sync_entry(inner, entry).await; }
+        std::fs::write(repo.join("file"), "commit\n").unwrap();
+        git(&repo, &["commit", "-qam", "new commit"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["branch", "additional", &tip]);
+        std::fs::write(paths[0].join("file"), "capture a\n").unwrap();
+        sync_entry(inner, &entries[0]).await;
+        assert!(lock(&entries[0].last_tips).as_ref().unwrap().contains(&tip));
+        assert!(!lock(&entries[1].last_tips).as_ref().unwrap().contains(&tip));
+        git(&paths[1], &["reset", "--hard", &tip]);
+        sync_entry(inner, &entries[1]).await;
+        let events = lock(&moves);
+        let event = events.iter().find(|event| event.root == paths[1] && event.new == tip).expect("B HEAD move");
+        assert!(!event.prior_tips.contains(&tip), "B must retain its previous capture's tips");
+        drop(events);
+        core.diff_sync.shutdown().await;
+    }
+
 }
