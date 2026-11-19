@@ -32,6 +32,7 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⌘G` / `⇧⌘G` | Next / previous match while find is open |
 | `⌘G` | Go to a line when find is closed |
 | `⌃-` / `⌃⇧-` | Back / forward through file locations |
+| `⌥⌘G` | Show or hide the blame gutter (also in View) |
 | `⌥↩` in symbol search | Add the selected symbol to the chat |
 
 ## Outline and chat
