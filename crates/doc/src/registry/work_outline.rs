@@ -411,6 +411,7 @@ impl RegistryDoc {
             execution_configurations,
             chat_execution_bindings,
             execution_space,
+            standing_roles: self.standing_roles(),
             space_live: self.row_state(KIND_SPACES, space_id) == RowState::Live,
             synced,
             items: self.overlay_rows(KIND_WORK_ITEMS),
@@ -449,7 +450,12 @@ impl RegistryDoc {
     /// two reads ⇒ every Space's inputs are unchanged too (`synced` aside).
     pub fn work_outline_inputs_generation(&self) -> u64 {
         let base = self.kinds_generation(WORK_OUTLINE_KINDS);
-        base.max(self.kinds_generation(&[KIND_SPACES, KIND_CHATS, KIND_SESSIONS]))
+        base.max(self.kinds_generation(&[
+            KIND_SPACES,
+            KIND_CHATS,
+            KIND_SESSIONS,
+            KIND_STANDING_ROLES,
+        ]))
     }
 
     /// Change marker of the outline kinds plus Spaces, without the Chat and
@@ -458,7 +464,7 @@ impl RegistryDoc {
     /// the outline cannot see).
     pub fn work_outline_structure_generation(&self) -> u64 {
         self.kinds_generation(WORK_OUTLINE_KINDS)
-            .max(self.kinds_generation(&[KIND_SPACES]))
+            .max(self.kinds_generation(&[KIND_SPACES, KIND_STANDING_ROLES]))
     }
 
     /// Hash of exactly the Chat and session fields [`Self::work_outline_inputs`]
@@ -500,6 +506,7 @@ impl RegistryDoc {
     /// planning artifacts; no chat or session churn).
     pub fn work_outline_kinds_generation(&self) -> u64 {
         self.kinds_generation(WORK_OUTLINE_KINDS)
+            .max(self.kinds_generation(&[KIND_STANDING_ROLES]))
     }
 
     /// Convenience: inputs + materialization in one call (tests, small reads).

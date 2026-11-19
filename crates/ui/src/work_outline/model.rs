@@ -30,7 +30,7 @@
 //! survive snapshot refreshes.
 use std::collections::{HashMap, HashSet};
 
-use mast_proto::ChatIndicator;
+use mast_proto::{ChatIndicator, StandingRoleKind};
 
 use super::store::{
     WorkItemEffectiveStatus, WorkItemStatus, WorkItemView, WorkOutlineLoad, WorkOutlineSnapshot,
@@ -58,6 +58,11 @@ pub(crate) mod row_key {
     }
     pub(crate) fn notice(space_id: &str) -> String {
         format!("notice:{space_id}")
+    }
+    /// A project's Manager row: stable across hand-offs, which change only
+    /// the Chat behind it.
+    pub(crate) fn manager(space_id: &str, item_id: &str) -> String {
+        format!("manager:{space_id}:{item_id}")
     }
 }
 
@@ -160,6 +165,20 @@ impl ItemRow {
     }
 }
 
+/// A project's pinned Manager row. A placeholder until the first message
+/// creates the Chat (`chat_id` is `None`); afterwards it stands for whichever
+/// Chat currently holds the role.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ManagerRow {
+    pub space_id: String,
+    pub item_id: String,
+    pub chat_id: Option<String>,
+    /// The holder's model label (the Overview's model badge); `None` until
+    /// the Chat exists.
+    pub model: Option<String>,
+    pub status: Option<ChatIndicator>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChatRow {
     pub chat: OutlineChat,
@@ -179,6 +198,7 @@ pub(crate) enum OutlineRowKind {
         hidden: bool,
     },
     Item(ItemRow),
+    Manager(ManagerRow),
     Chat(ChatRow),
     Unassociated {
         space_id: Option<String>,
@@ -219,6 +239,13 @@ impl OutlineRow {
         }
     }
 
+    pub(crate) fn manager(&self) -> Option<&ManagerRow> {
+        match &self.kind {
+            OutlineRowKind::Manager(manager) => Some(manager),
+            _ => None,
+        }
+    }
+
     /// The Chat a compact item row stands for.
     pub(crate) fn compact_chat(&self) -> Option<&ChatRow> {
         self.item().and_then(|item| item.compact_chat.as_ref())
@@ -238,6 +265,7 @@ impl OutlineRow {
                 Some(space_id)
             }
             OutlineRowKind::Item(item) => Some(&item.space_id),
+            OutlineRowKind::Manager(manager) => Some(&manager.space_id),
             OutlineRowKind::Chat(chat) => chat.chat.space_id.as_deref(),
             OutlineRowKind::Unassociated { space_id, .. } => space_id.as_deref(),
         }
@@ -666,17 +694,38 @@ fn item_node<'s>(
     }
     let completed = item.effective_status == WorkItemEffectiveStatus::Completed;
     let archived = item.archived_at.is_some();
+    // A project's Manager Chat is shown by its Manager row, not as a Chat row
+    // beside it (and never folded into the project's own row).
+    let manager_role = item
+        .is_project
+        .then(|| snapshot.standing_role(StandingRoleKind::Manager, &item.id))
+        .flatten();
+    let manager_chat_id = manager_role.and_then(|role| role.current_chat_id.clone());
+    let manager_chat_node = manager_chat_id.as_deref().and_then(|id| {
+        let at = chat_nodes.iter().position(|node| {
+            matches!(&node.kind, OutlineRowKind::Chat(row) if row.chat.id == id && !row.dangling)
+        })?;
+        Some(chat_nodes.remove(at))
+    });
+    // The placeholder is chrome, not content: it never keeps a hidden
+    // project in view, and it stays out of filtered and searched views.
+    let manager_placeholder = item.is_project
+        && !archived
+        && !options.attention_only
+        && options.query.is_empty()
+        && manager_chat_node.is_none();
     let self_visible =
         (!archived || options.show_archived) && (!completed || !options.hide_completed);
-    let has_visible_below = !children.is_empty() || !chat_nodes.is_empty();
+    let has_visible_below =
+        !children.is_empty() || !chat_nodes.is_empty() || manager_chat_node.is_some();
     if !(has_visible_below || (!options.attention_only && under_match && self_visible)) {
         if completed && !archived && options.hide_completed && options.query.is_empty() {
             ctx.hidden_completed += 1;
         }
         return None;
     }
-    let compact_chat = options
-        .compact_single_chat
+    let has_manager_row = manager_chat_node.is_some() || manager_placeholder;
+    let compact_chat = (options.compact_single_chat && !has_manager_row)
         .then(|| compactable_chat(&children, &chat_nodes))
         .flatten();
     if compact_chat.is_some() {
@@ -687,7 +736,15 @@ fn item_node<'s>(
     let (pinned, other): (Vec<_>, Vec<_>) = chat_nodes.into_iter().partition(|node| {
         matches!(&node.kind, OutlineRowKind::Chat(row) if options.pinned_chats.contains(&row.chat.id))
     });
-    let mut ordered = pinned;
+    let manager = manager_row(
+        space_id,
+        &item.id,
+        manager_chat_id.as_deref(),
+        manager_chat_node,
+        manager_placeholder,
+    );
+    let mut ordered: Vec<Node> = manager.into_iter().collect();
+    ordered.extend(pinned);
     ordered.extend(children);
     ordered.extend(other);
     let children = ordered;
@@ -721,6 +778,40 @@ fn item_node<'s>(
             archived,
             kept_for_descendants: !self_visible,
             compact_chat,
+        }),
+        children,
+    })
+}
+
+/// The Manager row of a project: first among its children. Built from the
+/// Manager Chat's own node when it is shown (its sub-chats nest under the
+/// row). Without that node, `placeholder` (the row may show without a visible
+/// Chat) builds it from the role alone: a Chat the filters hide, or no Chat
+/// yet.
+fn manager_row(
+    space_id: &str,
+    item_id: &str,
+    chat_id: Option<&str>,
+    chat_node: Option<Node>,
+    placeholder: bool,
+) -> Option<Node> {
+    let (model, status, children) = match chat_node {
+        Some(Node {
+            kind: OutlineRowKind::Chat(row),
+            children,
+            ..
+        }) => (row.chat.harness, Some(row.chat.status), children),
+        _ if placeholder => (None, None, Vec::new()),
+        _ => return None,
+    };
+    Some(Node {
+        key: row_key::manager(space_id, item_id),
+        kind: OutlineRowKind::Manager(ManagerRow {
+            space_id: space_id.to_owned(),
+            item_id: item_id.to_owned(),
+            chat_id: chat_id.map(str::to_owned),
+            model,
+            status,
         }),
         children,
     })
@@ -835,6 +926,15 @@ fn emit(
     }) = &node.kind
     {
         model.index.insert(row_key::chat(&chat.chat.id), ix);
+    }
+    // The Manager's Chat key resolves to its row too, so opening that Chat
+    // highlights the row.
+    if let OutlineRowKind::Manager(ManagerRow {
+        chat_id: Some(chat_id),
+        ..
+    }) = &node.kind
+    {
+        model.index.insert(row_key::chat(chat_id), ix);
     }
     model.rows.push(OutlineRow {
         key: node.key,
@@ -1157,6 +1257,165 @@ pub(crate) mod tests {
         assert!(
             model.position(&row_key::chat(CHAT_PR)).unwrap()
                 < model.position(&row_key::chat(CHAT_LOOSE_A)).unwrap()
+        );
+    }
+
+    fn manager_role(item: &str, chat: Option<&str>, chain: &[&str]) -> mast_proto::StandingRole {
+        mast_proto::StandingRole {
+            id: mast_proto::standing_role_id(StandingRoleKind::Manager, item),
+            role: StandingRoleKind::Manager,
+            scope_item_id: item.into(),
+            current_chat_id: chat.map(Into::into),
+            chain: chain.iter().map(|id| id.to_string()).collect(),
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+        }
+    }
+
+    /// The fixture with `API` marked a project (it already holds `CHAT_API`
+    /// and the child item `API_AUTH`) and an optional Manager role.
+    fn project_snapshot(role: Option<mast_proto::StandingRole>) -> WorkOutlineSnapshot {
+        let mut snapshot = fixture_snapshot("s1");
+        snapshot
+            .items
+            .iter_mut()
+            .find(|i| i.id == API)
+            .unwrap()
+            .is_project = true;
+        snapshot.standing_roles.extend(role);
+        snapshot
+    }
+
+    #[test]
+    fn project_shows_a_placeholder_manager_first_and_plain_items_show_none() {
+        let spaces = [ready("s1", "Repo", project_snapshot(None))];
+        let model = flatten(&spaces, &[], &HashSet::new(), &opts());
+        let project = model.position(&row_key::item("s1", API)).unwrap();
+        let manager = model.position(&row_key::manager("s1", API)).unwrap();
+        assert_eq!(manager, project + 1, "pinned before the project's other children");
+        assert_eq!(model.rows[manager].parent, Some(project));
+        let row = model.rows[manager].manager().unwrap();
+        assert_eq!((row.chat_id.as_deref(), row.model.as_deref()), (None, None));
+        let plain = model.row(&row_key::item("s1", LAUNCH)).unwrap();
+        assert!(model.row(&row_key::manager("s1", LAUNCH)).is_none() && plain.item().is_some());
+        assert_eq!(
+            model.rows.iter().filter(|row| row.manager().is_some()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manager_chat_is_shown_by_its_row_with_the_model_badge_and_not_twice() {
+        let role = manager_role(API, Some(CHAT_API), &[CHAT_API]);
+        let spaces = [ready("s1", "Repo", project_snapshot(Some(role)))];
+        let mut chats = fixture_chats("s1");
+        chats.iter_mut().find(|c| c.id == CHAT_API).unwrap().harness = Some("Opus 5.5".into());
+        let options = OutlineOptions {
+            compact_single_chat: true,
+            ..opts()
+        };
+        let model = flatten(&spaces, &chats, &HashSet::new(), &options);
+        let manager = model.position(&row_key::manager("s1", API)).unwrap();
+        let row = model.rows[manager].manager().unwrap();
+        assert_eq!(row.chat_id.as_deref(), Some(CHAT_API));
+        assert_eq!(row.model.as_deref(), Some("Opus 5.5"));
+        assert_eq!(
+            model.position(&row_key::chat(CHAT_API)),
+            Some(manager),
+            "the chat key resolves to the row, so an open chat highlights it"
+        );
+        assert!(model.rows.iter().all(|row| row.chat().is_none_or(|c| c.chat.id != CHAT_API)));
+        assert!(
+            model.row(&row_key::item("s1", API)).unwrap().compact_chat().is_none(),
+            "the Manager chat is never folded into the project row"
+        );
+    }
+
+    #[test]
+    fn manager_row_key_and_place_survive_a_hand_off() {
+        let before = [ready(
+            "s1",
+            "Repo",
+            project_snapshot(Some(manager_role(API, Some(CHAT_API), &[CHAT_API]))),
+        )];
+        // The role now points at a successor assigned to the same project;
+        // the superseded chat is archived and hidden, so it is not listed.
+        let mut after_snapshot = project_snapshot(Some(manager_role(
+            API,
+            Some("successor"),
+            &[CHAT_API, "successor"],
+        )));
+        after_snapshot
+            .items
+            .iter_mut()
+            .find(|i| i.id == API)
+            .unwrap()
+            .chat_ids = vec!["successor".into()];
+        let mut assignment = after_snapshot
+            .assignments
+            .iter()
+            .find(|a| a.chat_id == CHAT_API)
+            .unwrap()
+            .clone();
+        assignment.chat_id = "successor".into();
+        after_snapshot.assignments.retain(|a| a.chat_id != CHAT_API);
+        after_snapshot.assignments.push(assignment);
+        let after = [ready("s1", "Repo", after_snapshot)];
+        let mut chats = fixture_chats("s1");
+        let first = flatten(&before, &chats, &HashSet::new(), &opts());
+        chats.retain(|c| c.id != CHAT_API);
+        let mut successor = chat("successor", Some("s1"));
+        successor.harness = Some("Sonnet 5.5".into());
+        chats.push(successor);
+        let second = flatten(&after, &chats, &HashSet::new(), &opts());
+
+        let key = row_key::manager("s1", API);
+        let at = |model: &OutlineModel| model.position(&key).unwrap();
+        assert_eq!(at(&first), at(&second), "same place");
+        assert_eq!(second.rows[at(&second)].manager().unwrap().chat_id.as_deref(), Some("successor"));
+        assert_eq!(second.rows[at(&second)].manager().unwrap().model.as_deref(), Some("Sonnet 5.5"));
+    }
+
+    #[test]
+    fn manager_placeholder_stays_out_of_filtered_searched_and_archived_views() {
+        let spaces = [ready("s1", "Repo", project_snapshot(None))];
+        let attention = OutlineOptions {
+            attention_only: true,
+            ..opts()
+        };
+        assert!(
+            flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &attention)
+                .rows
+                .iter()
+                .all(|row| row.manager().is_none())
+        );
+        let search = OutlineOptions {
+            query: "api".into(),
+            ..opts()
+        };
+        assert!(
+            flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &search)
+                .rows
+                .iter()
+                .all(|row| row.manager().is_none())
+        );
+        let mut archived = project_snapshot(None);
+        archived
+            .items
+            .iter_mut()
+            .find(|i| i.id == API)
+            .unwrap()
+            .archived_at = Some(1);
+        let spaces = [ready("s1", "Repo", archived)];
+        let show = OutlineOptions {
+            show_archived: true,
+            ..opts()
+        };
+        assert!(
+            flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &show)
+                .rows
+                .iter()
+                .all(|row| row.manager().is_none())
         );
     }
 

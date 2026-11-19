@@ -2650,6 +2650,7 @@ impl AgentToolsService {
             parent_chat_id: Some(context.grant.chat_id.clone()),
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         })
     }
 
@@ -2690,6 +2691,7 @@ impl AgentToolsService {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         }, source, selection.harness, selection.model, selection.reasoning))
     }
 }

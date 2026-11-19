@@ -1718,6 +1718,8 @@ pub struct Overview {
     /// Tests run without a Shell: Start Chat requests land here.
     #[cfg(test)]
     pub(crate) captured_start_chat: Option<(String, String)>,
+    #[cfg(test)]
+    pub(crate) captured_start_manager: Option<(String, String)>,
     _details_events: Option<Subscription>,
     _outline_events: Subscription,
     _observe: Subscription,
@@ -1825,6 +1827,13 @@ impl Overview {
             }
             OutlineEvent::StartChat { space_id, item_id } => {
                 if let Err(notice) = this.start_chat_for_item(space_id.clone(), item_id.clone(), cx)
+                {
+                    this.outline
+                        .update(cx, |outline, cx| outline.show_error(notice, cx));
+                }
+            }
+            OutlineEvent::StartManager { space_id, item_id } => {
+                if let Err(notice) = this.start_manager_for_item(space_id.clone(), item_id.clone(), cx)
                 {
                     this.outline
                         .update(cx, |outline, cx| outline.show_error(notice, cx));
@@ -1954,6 +1963,8 @@ impl Overview {
             _project_issue_picker_events: None,
             #[cfg(test)]
             captured_start_chat: None,
+            #[cfg(test)]
+            captured_start_manager: None,
             _details_events: None,
             _outline_events: outline_events,
             _observe: observe,
@@ -6974,6 +6985,37 @@ impl Overview {
         Ok(())
     }
 
+    /// Open Start Chat for a project's Manager (its placeholder row).
+    pub(crate) fn start_manager_for_item(
+        &mut self,
+        space_id: String,
+        item_id: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let snapshot = self
+            .outline_snapshot(&space_id, cx)
+            .ok_or("This Space's outline is not loaded")?;
+        let item = snapshot.item(&item_id).ok_or("That work item is gone")?;
+        if !item.is_project {
+            return Err("Only a project has a Manager");
+        }
+        #[cfg(test)]
+        if self.shell.upgrade().is_none() {
+            self.captured_start_manager = Some((space_id, item_id));
+            return Ok(());
+        }
+        let shell = self
+            .shell
+            .upgrade()
+            .ok_or("Starting a Manager needs the app window")?;
+        cx.defer(move |cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_start_manager_or_notice(&space_id, &item_id, cx)
+            });
+        });
+        Ok(())
+    }
+
     /// Open Work Item Details for the item with Effective Instructions
     /// expanded (the explicit open path; Milestone 3's pre-launch check
     /// reuses it).
@@ -7167,6 +7209,48 @@ impl Overview {
         self.rows_dirty = true;
         self.outline_dirty = true;
         cx.notify();
+    }
+
+    /// Outline with `w-api` marked a project: `chat` gives its Manager the
+    /// fixture chat `fixture-design` (model badge), `placeholder` leaves the
+    /// Manager before its first message.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn show_snapshot_manager(&mut self, with_chat: bool, cx: &mut Context<Self>) {
+        use mast_proto::{StandingRole, StandingRoleKind, StandingRoleState, standing_role_id};
+        let mut snapshot = crate::work_outline::store::fixture_snapshot("fixture-space");
+        snapshot.external_references.clear();
+        let project = "w-api";
+        snapshot.items.iter_mut().find(|i| i.id == project).unwrap().is_project = true;
+        let chat = with_chat.then(|| "fixture-design".to_owned());
+        if let Some(chat) = &chat {
+            let mut assignment = snapshot.assignments.first().cloned().unwrap();
+            assignment.chat_id = chat.clone();
+            assignment.work_item_id = Some(project.into());
+            snapshot.assignments.push(assignment);
+        }
+        snapshot.standing_roles.push(StandingRole {
+            id: standing_role_id(StandingRoleKind::Manager, project),
+            role: StandingRoleKind::Manager,
+            scope_item_id: project.into(),
+            chain: chat.iter().cloned().collect(),
+            current_chat_id: chat,
+            fallback_chain: Vec::new(),
+            state: StandingRoleState::Idle,
+        });
+        self.set_outline_loads(
+            [(
+                "fixture-space".into(),
+                WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot)),
+            )]
+            .into_iter()
+            .collect(),
+            cx,
+        );
+        self.set_mode(OverviewMode::Outline, cx);
+        self.sync_outline(cx);
+        self.outline.update(cx, |outline, cx| {
+            outline.select(&row_key::manager("fixture-space", project), cx)
+        });
     }
 
     #[cfg(feature = "snapshot")]

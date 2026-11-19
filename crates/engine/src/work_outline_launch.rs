@@ -295,6 +295,8 @@ pub enum LaunchStep {
     Validated,
     ChatCreated,
     Assigned,
+    /// The new Chat holds the standing role (role launches only).
+    RoleAdopted,
     BindingCaptured,
     RevisionCreated,
     RevisionApplied,
@@ -361,6 +363,10 @@ struct LaunchInputs<'a> {
     /// Omitted when absent, so a user launch's hash never changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_chat_id: &'a Option<String>,
+    /// Likewise omitted when absent: an operation id used for a role launch
+    /// cannot be replayed as a plain one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    standing_role: &'a Option<mast_proto::StandingRoleKind>,
 }
 
 /// The launch workflow and Turn continuation. Cheap to clone.
@@ -549,6 +555,7 @@ impl WorkItemLaunchService {
             execution_override: &p.execution_override,
             worktree_choice: &p.worktree_choice,
             parent_chat_id: &p.parent_chat_id,
+            standing_role: &p.standing_role,
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
@@ -599,6 +606,27 @@ impl WorkItemLaunchService {
                 WorkOutlineErrorCode::Archived,
                 "The work item is archived",
             ));
+        }
+        // A role launch starts the role's first Chat: only a project can have
+        // a Manager, and a role that already has a different Chat is not
+        // adopted over (two clicks, two windows, or a stale placeholder).
+        // The holder being this operation's own Chat is a retry. The gate
+        // held above serializes launches, so the check stays true until the
+        // adoption below.
+        if let Some(kind) = p.standing_role {
+            if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
+                return Err(error(
+                    WorkOutlineErrorCode::Invalid,
+                    "Only a project can have a Manager",
+                ));
+            }
+            if let Some(current) = self.workspace.standing_role_chat(kind, &p.work_item_id)
+                && current != chat_id
+            {
+                return Err(conflict(
+                    "This project's Manager already has a chat; open it instead",
+                ));
+            }
         }
         // Reserve the successor on the source's role before anything is
         // created, moved or queued. A source a role already replaced, a Space
@@ -703,6 +731,15 @@ impl WorkItemLaunchService {
         // ── 4. assignment ──
         self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
         self.checkpoint(LaunchStep::Assigned)?;
+
+        // ── 4b. standing role ──
+        // Idempotent: a retry finds the role already on this Chat.
+        if let Some(kind) = p.standing_role {
+            self.workspace
+                .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
+                .map_err(conflict)?;
+        }
+        self.checkpoint(LaunchStep::RoleAdopted)?;
 
         // ── 5. execution binding ──
         if existing_binding.is_none() {
@@ -1536,6 +1573,7 @@ mod default_model_tests {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         }
     }
 

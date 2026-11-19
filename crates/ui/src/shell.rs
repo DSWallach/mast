@@ -16624,6 +16624,12 @@ impl Shell {
             self.ensure_overview_page(cx)
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
         }
+        if let Ok(manager) = std::env::var("MAST_PREVIEW_MANAGER")
+            && matches!(manager.as_str(), "placeholder" | "chat")
+        {
+            self.ensure_overview_page(cx)
+                .update(cx, |page, cx| page.show_snapshot_manager(manager == "chat", cx));
+        }
     }
 
     pub fn fixture_snapshot_item_panel(&mut self, cx: &mut Context<Self>) {

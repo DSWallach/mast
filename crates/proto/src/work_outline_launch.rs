@@ -102,6 +102,13 @@ pub struct CreateChatForWorkItemParams {
     /// resolved at the first run as usual.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Make the new Chat the holder of this standing role of `workItemId`
+    /// (a project's Manager). The launch refuses when the role already has a
+    /// different Chat, and a retry of the same operation adopts only once.
+    /// Hosts without `standing-role-launch-v1` would drop it, so callers gate on
+    /// that capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_role: Option<crate::StandingRoleKind>,
 }
 
 /// Request a successor for an existing coordinator chat.
@@ -210,6 +217,7 @@ mod tests {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(

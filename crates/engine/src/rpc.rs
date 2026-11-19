@@ -1739,6 +1739,15 @@ impl EngineRpc {
                     capability: mast_proto::capabilities::WORK_OUTLINE_LAUNCH_V1.into(),
                 }));
             }
+            // An older owner would drop `standingRole` and start a plain Chat.
+            if p.standing_role.is_some()
+                && !device.supports(mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1)
+            {
+                return Err(blocked(ExecutionValidationError::HostUnsupported {
+                    device_id: owner,
+                    capability: mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1.into(),
+                }));
+            }
             let mut forwarded = p.clone();
             forwarded.target_device_id = Some(owner.clone());
             let params = serde_json::to_value(&forwarded)
@@ -3860,6 +3869,7 @@ impl RpcService for EngineRpc {
                     parent_chat_id: None,
                     target_device_id: None,
                     account_id: None,
+                    standing_role: None,
                 };
                 let reply = self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &p.chat_id)
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;

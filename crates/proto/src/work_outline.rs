@@ -877,9 +877,24 @@ pub struct WorkOutlineSnapshot {
     /// then id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<crate::work_outline_templates::WorkItemTemplateView>,
+    /// Standing roles scoped to an item of this Space, sorted by role id.
+    /// The Manager row of a project reads its chat and fallback model here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standing_roles: Vec<crate::StandingRole>,
 }
 
 impl WorkOutlineSnapshot {
+    /// The standing role of `kind` scoped to `item_id`, if it has a record.
+    pub fn standing_role(
+        &self,
+        kind: crate::StandingRoleKind,
+        item_id: &str,
+    ) -> Option<&crate::StandingRole> {
+        self.standing_roles
+            .iter()
+            .find(|role| role.role == kind && role.scope_item_id == item_id)
+    }
+
     /// A snapshot with no content for a Space that is not (yet) available.
     pub fn unavailable(space_id: impl Into<String>, synced: bool, revision: u64) -> Self {
         Self {

@@ -86,6 +86,10 @@ In the sidebar, work items and chats have separate two-line rows. Work items use
 
 Press `⌘I` on an item row to open its Details.
 
+## Manager row
+
+Every project shows a **Manager** row first among its children, in the sidebar and the outline, with the model of its current chat as a badge. Before you use it, the row is a placeholder and nothing is running. Click it to open Start Manager, the Start Chat dialog for the project; sending the first message creates the Manager chat under the project on the Space's device. Afterwards the row opens that chat, and it stays in the same place if the chat is later replaced. A second start while the Manager already has a chat is refused, so repeated clicks or retries never create two. The row is hidden in search, in the attention filter, and for archived projects, and plain work items have none. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
+
 ## Undo
 
 `⌘Z` undoes your last outline change and `⇧⌘Z` redoes it. Undo is kept in memory for this session and only covers changes you made in the UI, not ones an agent made. If the item changed since, Mast refuses and says nothing was changed. **Recent Changes…** in the row menu lists them.

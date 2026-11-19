@@ -20,7 +20,7 @@
 //! the item and its non-archived descendants (archived items contribute
 //! nothing, like the status counts).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use mast_proto::work_outline::{
     WorkItemArchiveCause, WorkItemChatAssignmentState, WorkItemChatAssignmentView,
@@ -99,6 +99,9 @@ pub struct WorkOutlineInputs {
     pub approval_audit: Vec<mast_proto::FrictionReport>,
     /// Live `workItemTemplates` rows of this Space (project templates).
     pub templates: Vec<RegistryRow>,
+    /// Every live standing role (every Space; the reader keeps those scoped
+    /// to an item of this Space).
+    pub standing_roles: Vec<mast_proto::StandingRole>,
 }
 
 // ── lenient row decoding ────────────────────────────────────────────────────
@@ -1009,6 +1012,14 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
     );
 
     let templates = super::templates::decode_templates(space_id, &inputs.templates, &mut repairs);
+    let item_ids: HashSet<&str> = views.iter().map(|view| view.id.as_str()).collect();
+    let mut standing_roles: Vec<mast_proto::StandingRole> = inputs
+        .standing_roles
+        .iter()
+        .filter(|role| item_ids.contains(role.scope_item_id.as_str()))
+        .cloned()
+        .collect();
+    standing_roles.sort_by(|a, b| a.id.cmp(&b.id));
     WorkOutlineSnapshot {
         space_id: space_id.into(),
         available: true,
@@ -1046,6 +1057,7 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             settings
         },
         templates,
+        standing_roles,
     }
 }
 
