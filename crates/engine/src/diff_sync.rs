@@ -4171,3 +4171,71 @@ mod watch_budget_tests {
         assert!(peak.load(Ordering::SeqCst) >= 1);
     }
 }
+
+#[cfg(test)]
+mod repository_ref_budget_tests {
+    use super::*;
+    use crate::{EngineCore, HarnessRegistry};
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = mast_harness::git_command()
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args).current_dir(path).env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_repository_ref_read_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("file"), "content").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "initial"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let mut paths = Vec::new();
+        for index in 0..20 {
+            let path = root.join(format!("checkout-{index}"));
+            git(&repo, &["worktree", "add", "-q", "-b", &format!("branch-{index}"), path.to_str().unwrap()]);
+            paths.push(path);
+        }
+        git(&repo, &["pack-refs", "--all"]);
+        let refs = repo.join(".git/refs/heads");
+        std::fs::create_dir_all(&refs).unwrap();
+        for index in 0..300 {
+            std::fs::write(refs.join(format!("extra-{index}")), format!("{head}\n")).unwrap();
+        }
+        let data = root.join("engine");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("device-id"), "test-device").unwrap();
+        let core = EngineCore::assemble(&data, Arc::new(HarnessRegistry::new()), mast_proto::HarnessId::Mock, None).unwrap();
+        core.workspace.create_chat("chat", None, Some("test-device"), None, Some(repo.to_string_lossy().into_owned())).unwrap();
+        for path in &paths {
+            core.diff_targets.bind("chat", &path.to_string_lossy(), ChatDiffTargetSource::Agent, None).unwrap();
+        }
+        core.diff_sync.set_head_move_listener(Arc::new(|_| {}));
+        core.diff_sync.reconcile_now().await;
+        let inner = &core.diff_sync.inner;
+        let entries: Vec<_> = lock(&inner.entries).values().filter(|entry| paths.contains(&entry.identity.root)).cloned().collect();
+        assert_eq!(entries.len(), 20);
+        for _ in 0..5 {
+            for entry in &entries { sync_entry(inner, entry).await; }
+        }
+        git(&repo, &["branch", "additional", "HEAD"]);
+        for _ in 0..5 {
+            for entry in &entries { sync_entry(inner, entry).await; }
+        }
+        let common = common_dir_of(&repo.join(".git"));
+        let reads = lock(&inner.repository_tips).get(&common).unwrap().cache.as_ref().unwrap().reads;
+        let parses = lock(&inner.packed_refs).get(&common).unwrap().parses;
+        assert!(reads <= 2, "tip reads: {reads}");
+        assert!(parses <= 2, "packed-refs parses: {parses}");
+        assert_eq!(reads, 2);
+        assert_eq!(parses, 1);
+        core.diff_sync.shutdown().await;
+    }
+}
