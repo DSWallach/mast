@@ -45,6 +45,18 @@ pub struct SubmitReviewComment {
     /// The text of a range's first line.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub start_text: String,
+    /// Every line of the local hunk on the comment's side within the anchored lines and
+    /// up to two lines either side of them. GitHub's patch must agree with all of them,
+    /// or the file differs from the PR head there and the draft is held back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<ContextLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextLine {
+    pub line: u32,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +149,9 @@ pub struct PostedReview {
     pub body: String,
     pub posted_at: i64,
     pub comments: Vec<SubmitReviewComment>,
+    /// The marker nonce this review was posted (or found) under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
 }
 
 /// Marker appended (as an invisible HTML comment) to every review body Mast posts.

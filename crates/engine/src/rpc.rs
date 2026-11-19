@@ -3294,8 +3294,13 @@ impl RpcService for EngineRpc {
                 });
                 // The marker nonce is persisted per review target and lives until a post is
                 // confirmed and recorded, so a retry after a timeout or restart finds the review.
-                let nonce = self.workspace.ensure_review_nonce(&p.target)
-                    .map_err(|error| RpcError::Failed(format!("could not prepare the review: {error}")))?;
+                let prepare = |error: crate::EngineError| RpcError::Failed(format!("could not prepare the review: {error}"));
+                let mut nonce = self.workspace.ensure_review_nonce(&p.target).map_err(prepare)?;
+                // A nonce that already belongs to a recorded review (a partial match kept it) must
+                // not match that review again, or the remaining drafts could never be posted.
+                if self.workspace.posted_reviews(&p.target).iter().any(|r| r.nonce.as_deref() == Some(nonce.as_str())) {
+                    nonce = self.workspace.renew_review_nonce(&p.target).map_err(prepare)?;
+                }
                 let mut reply = dash.submit_review(&p, &nonce).await.map_err(RpcError::Failed)?;
                 if matches!(
                     reply.outcome,
@@ -3303,6 +3308,9 @@ impl RpcService for EngineRpc {
                 ) && let Some(review_id) = reply.review_id
                 {
                     let sent: std::collections::HashSet<&String> = reply.sent_draft_ids.iter().collect();
+                    // Only a full match (or a fresh post) consumes the nonce; a partial match records
+                    // what matched and keeps the nonce and the unmatched drafts.
+                    let full = p.comments.iter().all(|c| sent.contains(&c.draft_id));
                     let posted = mast_proto::PostedReview {
                         review_id,
                         url: reply.url.clone(),
@@ -3310,10 +3318,11 @@ impl RpcService for EngineRpc {
                         body: p.body.clone(),
                         posted_at: chrono::Utc::now().timestamp_millis(),
                         comments: p.comments.iter().filter(|c| sent.contains(&c.draft_id)).cloned().collect(),
+                        nonce: Some(nonce.clone()),
                     };
                     // The review is on GitHub already. If the local record cannot be written the
                     // drafts and the nonce stay, so the next attempt finds the review and records it.
-                    if let Err(error) = self.workspace.record_posted_review(&p.target, &posted) {
+                    if let Err(error) = self.workspace.record_posted_review(&p.target, &posted, full) {
                         tracing::warn!("could not record posted review locally: {error}");
                         reply.local_record_error = Some(error.to_string());
                     }

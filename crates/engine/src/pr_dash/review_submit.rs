@@ -10,6 +10,7 @@ use mast_proto::{
 const PAGE: usize = 100;
 const MAX_PAGES: usize = 10;
 const MAX_FILE_PAGES: usize = 30;
+const MAX_COMMENT_PAGES: usize = 30;
 
 fn side(side: ReviewSide) -> &'static str {
     match side {
@@ -74,10 +75,11 @@ fn pr_url(owner: &str, repo: &str, number: u64) -> String {
 // Placement against GitHub's committed diff
 // ---------------------------------------------------------------------------
 
+/// Line number -> (text, index of the hunk it sits in).
 #[derive(Default)]
 struct PatchLines {
-    right: HashMap<u32, String>,
-    left: HashMap<u32, String>,
+    right: HashMap<u32, (String, u32)>,
+    left: HashMap<u32, (String, u32)>,
 }
 
 fn hunk_start(header: &str) -> Option<(u32, u32)> {
@@ -93,10 +95,12 @@ fn parse_patch(patch: &str) -> PatchLines {
     let mut lines = PatchLines::default();
     let (mut old, mut new) = (0u32, 0u32);
     let mut in_hunk = false;
+    let mut hunk = 0u32;
     for line in patch.split('\n') {
         if line.starts_with("@@ ") {
             if let Some((o, n)) = hunk_start(line) {
                 (old, new, in_hunk) = (o, n, true);
+                hunk += 1;
             }
             continue;
         }
@@ -106,16 +110,16 @@ fn parse_patch(patch: &str) -> PatchLines {
         let text = |rest: &str| rest.trim_end_matches('\r').trim_end().to_owned();
         match line.chars().next() {
             Some('+') => {
-                lines.right.insert(new, text(&line[1..]));
+                lines.right.insert(new, (text(&line[1..]), hunk));
                 new += 1;
             }
             Some('-') => {
-                lines.left.insert(old, text(&line[1..]));
+                lines.left.insert(old, (text(&line[1..]), hunk));
                 old += 1;
             }
             Some(' ') => {
-                lines.right.insert(new, text(&line[1..]));
-                lines.left.insert(old, text(&line[1..]));
+                lines.right.insert(new, (text(&line[1..]), hunk));
+                lines.left.insert(old, (text(&line[1..]), hunk));
                 old += 1;
                 new += 1;
             }
@@ -165,31 +169,42 @@ fn norm(text: &str) -> &str {
     text.trim_end_matches('\r').trim_end()
 }
 
+/// Why GitHub's diff at the PR head cannot take this comment, as the engine knows it. The
+/// UI turns "changed locally" into "not pushed" when the checkout is ahead of the PR.
+pub const REASON_NO_DIFF: &str = "no diff on GitHub";
+pub const REASON_CHANGED: &str = "changed locally";
+pub const REASON_SPANS_HUNKS: &str = "spans hunks";
+
 fn unplaced_reason(comment: &SubmitReviewComment, files: &HashMap<String, Option<PatchLines>>) -> Option<&'static str> {
-    let Some(entry) = files.get(&comment.path) else {
-        return Some("this file is not in the pull request's diff");
+    let Some(Some(lines)) = files.get(&comment.path) else {
+        return Some(REASON_NO_DIFF);
     };
-    let Some(lines) = entry else {
-        return Some("GitHub has no diff for this file");
+    let map = |side: ReviewSide| match side {
+        ReviewSide::Left => &lines.left,
+        ReviewSide::Right => &lines.right,
     };
-    let check = |side: ReviewSide, line: u32, text: &str| -> Option<&'static str> {
-        let map = match side {
-            ReviewSide::Left => &lines.left,
-            ReviewSide::Right => &lines.right,
+    let agrees = |side: ReviewSide, line: u32, text: &str| map(side).get(&line).is_some_and(|(found, _)| found == norm(text));
+    if !agrees(comment.side, comment.line, &comment.line_text) {
+        return Some(REASON_CHANGED);
+    }
+    let start = comment.start_line.filter(|start| *start < comment.line);
+    if let Some(start) = start {
+        let start_side = comment.start_side.unwrap_or(comment.side);
+        let Some((_, start_hunk)) = map(start_side).get(&start) else {
+            return Some(REASON_CHANGED);
         };
-        match map.get(&line) {
-            None => Some("this line is not in the pull request's diff"),
-            Some(found) if found != norm(text) => Some("this line differs from the pull request's committed code"),
-            Some(_) => None,
+        if !agrees(start_side, start, &comment.start_text) {
+            return Some(REASON_CHANGED);
         }
-    };
-    if let Some(reason) = check(comment.side, comment.line, &comment.line_text) {
-        return Some(reason);
+        if map(comment.side).get(&comment.line).map(|(_, hunk)| hunk) != Some(start_hunk) {
+            return Some(REASON_SPANS_HUNKS);
+        }
     }
-    match comment.start_line.filter(|start| *start < comment.line) {
-        Some(start) => check(comment.start_side.unwrap_or(comment.side), start, &comment.start_text),
-        None => None,
+    // The drafted lines plus two either side must read the same on GitHub.
+    if comment.context.iter().any(|ctx| !agrees(comment.side, ctx.line, &ctx.text)) {
+        return Some(REASON_CHANGED);
     }
+    None
 }
 
 /// Validate every draft against the PR's diff at its current head on GitHub,
@@ -237,21 +252,35 @@ fn is_pending_conflict(error: &str) -> bool {
     error.to_ascii_lowercase().contains("pending review")
 }
 
-/// Which of `params.comments` an existing review already carries (best effort:
-/// a failure here only leaves the drafts in place).
-async fn already_sent(gh: &dyn GhRunner, base: &str, review_id: u64, params: &SubmitReviewParams) -> Vec<String> {
-    let Ok(Value::Array(existing)) = gh
-        .rest("GET", &format!("{base}/reviews/{review_id}/comments?per_page={PAGE}"), None)
-        .await
-    else {
-        return Vec::new();
-    };
+/// Which of `params.comments` an existing review already carries. Pages through all of the
+/// review's comments; a failed or runaway read is an error, never "no match".
+async fn already_sent(gh: &dyn GhRunner, base: &str, review_id: u64, params: &SubmitReviewParams) -> Result<Vec<String>, String> {
+    let mut existing: Vec<Value> = Vec::new();
+    for page in 1..=MAX_COMMENT_PAGES {
+        let reply = gh
+            .rest("GET", &format!("{base}/reviews/{review_id}/comments?per_page={PAGE}&page={page}"), None)
+            .await?;
+        let list = reply.as_array().ok_or("GitHub returned an unexpected review comment list")?;
+        existing.extend(list.iter().cloned());
+        if list.len() < PAGE {
+            return Ok(match_sent(&existing, params));
+        }
+    }
+    Err("GitHub returned too many comments on this review to check them".into())
+}
+
+fn match_sent(existing: &[Value], params: &SubmitReviewParams) -> Vec<String> {
     params
         .comments
         .iter()
         .filter(|comment| {
             existing.iter().any(|found| {
-                let line = found.get("line").or_else(|| found.get("original_line")).and_then(Value::as_u64);
+                // `line` is null when the comment is outdated; `original_line` still names it.
+                let line = found
+                    .get("line")
+                    .filter(|line| !line.is_null())
+                    .or_else(|| found.get("original_line"))
+                    .and_then(Value::as_u64);
                 found.get("path").and_then(Value::as_str) == Some(comment.path.as_str())
                     && line == Some(u64::from(comment.line))
                     && found.get("body").and_then(Value::as_str).map(str::trim) == Some(comment.body.trim())
@@ -298,7 +327,7 @@ pub(super) async fn submit(
                 .is_some_and(|body| body.contains(&marker))
             {
                 let sent = match review.get("id").and_then(Value::as_u64) {
-                    Some(id) => already_sent(gh, &base, id, params).await,
+                    Some(id) => already_sent(gh, &base, id, params).await?,
                     None => Vec::new(),
                 };
                 return Ok(reply(SubmitReviewOutcome::AlreadyPosted, review, &url, sent));
@@ -386,19 +415,21 @@ mod tests {
     struct FakeRest {
         reviews: StdMutex<Vec<Value>>,
         review_comments: StdMutex<Vec<Value>>,
+        comments_fail: StdMutex<Option<String>>,
         head: StdMutex<String>,
         mode: StdMutex<PostMode>,
         delay: Duration,
         calls: StdMutex<Vec<(String, String, Option<Value>)>>,
     }
 
-    const PATCH: &str = "@@ -10,3 +10,4 @@ fn a() {\n keep one\n-old line\n+new line\n+added line\n keep two\n";
+    const PATCH: &str = "@@ -10,3 +10,4 @@ fn a() {\n keep one\n-old line\n+new line\n+added line\n keep two\n@@ -38,2 +39,2 @@ fn b() {\n second\n-gone\n+here\n";
 
     impl FakeRest {
         fn new(mode: PostMode) -> Arc<Self> {
             Arc::new(Self {
                 reviews: StdMutex::new(Vec::new()),
                 review_comments: StdMutex::new(Vec::new()),
+                comments_fail: StdMutex::new(None),
                 head: StdMutex::new("abc123".into()),
                 mode: StdMutex::new(mode),
                 delay: Duration::ZERO,
@@ -444,7 +475,12 @@ mod tests {
                     ]));
                 }
                 if path.contains("/comments") {
-                    return Ok(Value::Array(self.review_comments.lock().unwrap().clone()));
+                    if self.comments_fail.lock().unwrap().is_some() {
+                        return Err(self.comments_fail.lock().unwrap().clone().unwrap());
+                    }
+                    let page: usize = path.rsplit("page=").next().and_then(|p| p.parse().ok()).unwrap_or(1);
+                    let all = self.review_comments.lock().unwrap().clone();
+                    return Ok(Value::Array(all.into_iter().skip((page - 1) * PAGE).take(PAGE).collect()));
                 }
                 if path.starts_with(&format!("{root}/reviews")) {
                     return Ok(Value::Array(self.reviews.lock().unwrap().clone()));
@@ -480,6 +516,7 @@ mod tests {
             body: format!("```suggestion\nbody {id}\n```"),
             line_text: text.into(),
             start_text: start.map(|s| s.1.to_owned()).unwrap_or_default(),
+            context: Vec::new(),
         }
     }
 
@@ -504,11 +541,11 @@ mod tests {
     #[test]
     fn patch_lines_are_numbered_per_side() {
         let lines = parse_patch(PATCH);
-        assert_eq!(lines.right[&10], "keep one");
-        assert_eq!(lines.right[&11], "new line");
-        assert_eq!(lines.right[&13], "keep two");
-        assert_eq!(lines.left[&11], "old line");
-        assert_eq!(lines.left[&12], "keep two");
+        assert_eq!(lines.right[&10], ("keep one".to_owned(), 1));
+        assert_eq!(lines.right[&11].0, "new line");
+        assert_eq!(lines.right[&13].0, "keep two");
+        assert_eq!(lines.left[&11].0, "old line");
+        assert_eq!(lines.left[&12].0, "keep two");
     }
 
     #[tokio::test]
@@ -538,10 +575,10 @@ mod tests {
         assert_eq!(prepared.head_sha, "abc123");
         assert_eq!(prepared.placed, ["ok", "range", "left"]);
         let reasons: HashMap<_, _> = prepared.unplaced.iter().map(|u| (u.draft_id.as_str(), u.reason.as_str())).collect();
-        assert!(reasons["changed"].contains("differs"));
-        assert!(reasons["past"].contains("not in the pull request's diff"));
-        assert!(reasons["nofile"].contains("not in the pull request's diff"));
-        assert!(reasons["binary"].contains("no diff"));
+        assert_eq!(reasons["changed"], REASON_CHANGED);
+        assert_eq!(reasons["past"], REASON_CHANGED);
+        assert_eq!(reasons["nofile"], REASON_NO_DIFF);
+        assert_eq!(reasons["binary"], REASON_NO_DIFF);
     }
 
     #[tokio::test]
@@ -603,6 +640,82 @@ mod tests {
         *gh.mode.lock().unwrap() = PostMode::Ok;
         let other = submit(gh.as_ref(), &params(two()), "fresh").await.unwrap();
         assert_eq!(other.outcome, SubmitReviewOutcome::Posted);
+    }
+
+    fn landed_review(gh: &FakeRest, comments: Vec<Value>) {
+        gh.reviews.lock().unwrap().push(serde_json::json!({"id": 55, "state": "COMMENTED", "body": "x <!-- mast-review:n -->",
+            "html_url": "https://github.com/o/r/pull/7#pullrequestreview-55"}));
+        *gh.review_comments.lock().unwrap() = comments;
+    }
+
+    #[tokio::test]
+    async fn marker_match_treats_null_line_as_absent_and_reads_every_page() {
+        let gh = FakeRest::new(PostMode::Ok);
+        let mut found: Vec<Value> = (0..150).map(|i| serde_json::json!({"path": "elsewhere.rs", "line": i + 1, "body": "filler"})).collect();
+        // Outdated comments carry `line: null`; `original_line` names them. The second
+        // draft's match sits on page two.
+        found.insert(3, serde_json::json!({"path": "src/a.rs", "line": null, "original_line": 11, "body": "```suggestion\nbody d1\n```"}));
+        found.push(serde_json::json!({"path": "src/a.rs", "line": 12, "original_line": 12, "body": "```suggestion\nbody d2\n```"}));
+        landed_review(&gh, found);
+        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
+        assert_eq!(reply.sent_draft_ids, ["d1", "d2"]);
+        assert_eq!(gh.gets("/comments?per_page=100&page=2"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_comment_read_is_an_error_not_a_no_match() {
+        let gh = FakeRest::new(PostMode::Ok);
+        landed_review(&gh, vec![]);
+        *gh.comments_fail.lock().unwrap() = Some("HTTP 502".into());
+        assert_eq!(submit(gh.as_ref(), &params(two()), "n").await.unwrap_err(), "HTTP 502");
+        assert!(gh.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_partial_match_reports_only_what_matched() {
+        let gh = FakeRest::new(PostMode::Ok);
+        landed_review(&gh, vec![serde_json::json!({"path": "src/a.rs", "line": 12, "body": "```suggestion\nbody d2\n```"})]);
+        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        assert_eq!(reply.sent_draft_ids, ["d2"], "d1 stays a local draft");
+    }
+
+    #[tokio::test]
+    async fn context_lines_must_agree_with_githubs_patch() {
+        let gh = FakeRest::new(PostMode::Ok);
+        let ctx = |line, text: &str| mast_proto::ContextLine { line, text: text.into() };
+        let mut same = comment("same", 11, "new line", None);
+        same.context = vec![ctx(10, "keep one"), ctx(11, "new line"), ctx(12, "added line"), ctx(13, "keep two")];
+        let mut drifted = comment("drifted", 11, "new line", None);
+        drifted.context = vec![ctx(10, "keep one edited locally"), ctx(11, "new line")];
+        let mut beyond = comment("beyond", 11, "new line", None);
+        beyond.context = vec![ctx(14, "a line GitHub's hunk does not have")];
+        let prepared = prepare(
+            gh.as_ref(),
+            &PrepareReviewParams { owner: "o".into(), repo: "r".into(), number: 7, comments: vec![same, drifted, beyond] },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.placed, ["same"]);
+        assert!(prepared.unplaced.iter().all(|u| u.reason == REASON_CHANGED));
+        assert_eq!(prepared.unplaced.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_range_across_hunks_is_unplaceable() {
+        let gh = FakeRest::new(PostMode::Ok);
+        let reply = prepare(
+            gh.as_ref(),
+            &PrepareReviewParams {
+                owner: "o".into(), repo: "r".into(), number: 7,
+                comments: vec![comment("two-hunks", 40, "here", Some((11, "new line"))), comment("one-hunk", 12, "added line", Some((11, "new line")))],
+            },
+        )
+        .await
+        .unwrap();
+        // Line 40 is in a second hunk of the same file.
+        assert_eq!(reply.placed, ["one-hunk"]);
+        assert_eq!(reply.unplaced[0].reason, REASON_SPANS_HUNKS);
     }
 
     #[tokio::test]

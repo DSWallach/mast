@@ -171,6 +171,27 @@ impl RegistryDoc {
         Ok(candidate.to_owned())
     }
 
+    /// Replace the target's nonce (the old one already belongs to a recorded review).
+    pub fn renew_review_nonce(&mut self, target: &str, candidate: &str) -> Result<String, DocError> {
+        if target.trim().is_empty() || candidate.trim().is_empty() {
+            return Err(DocError::Schema("review nonce needs a target".into()));
+        }
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let mut set = fields([("target", json!(target))]);
+        set.insert("nonce".into(), json!(candidate));
+        let hlc = self.mint_hlc();
+        self.write_ops(vec![RowOp {
+            kind: KIND_REVIEW_DRAFTS.into(),
+            id,
+            op: OpKind::Upsert,
+            set: Some(set),
+            hlc,
+            clocks: None,
+        }])?;
+        Ok(candidate.to_owned())
+    }
+
     /// Posted reviews recorded for a target, oldest first.
     pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
         let Some(row) = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target)) else {
@@ -196,6 +217,7 @@ impl RegistryDoc {
         &mut self,
         target: &str,
         review: &mast_proto::PostedReview,
+        consume_nonce: bool,
     ) -> Result<bool, DocError> {
         if target.trim().is_empty() {
             return Err(DocError::Schema("posted review needs a target".into()));
@@ -208,7 +230,7 @@ impl RegistryDoc {
         if !already {
             set.insert(key, json!(serde_json::to_string(review)?));
         }
-        let mut removed = self.review_nonce(target).is_some();
+        let mut removed = consume_nonce && self.review_nonce(target).is_some();
         if removed {
             // A confirmed post consumes the marker nonce; the next review gets a fresh one.
             set.insert("nonce".into(), Value::Null);
@@ -385,16 +407,17 @@ mod tests {
             event: ReviewEvent::Comment,
             body: "summary".into(),
             posted_at: 5,
+            nonce: None,
             comments: vec![SubmitReviewComment {
                 draft_id: "posted".into(), path: "a.rs".into(), line: 2, side: ReviewSide::Right,
-                start_line: None, start_side: None, body: "note".into(), line_text: String::new(), start_text: String::new(),
+                start_line: None, start_side: None, body: "note".into(), line_text: String::new(), start_text: String::new(), context: vec![],
             }],
         };
-        assert!(registry.record_posted_review(target, &review).unwrap());
+        assert!(registry.record_posted_review(target, &review, true).unwrap());
         assert_eq!(registry.review_drafts(target).iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["kept"]);
         assert_eq!(registry.posted_reviews(target), vec![review.clone()]);
         // Recording it again (a retried submit that found the review) changes nothing.
-        assert!(!registry.record_posted_review(target, &review).unwrap());
+        assert!(!registry.record_posted_review(target, &review, true).unwrap());
         assert_eq!(registry.posted_reviews(target).len(), 1);
     }
 
@@ -409,11 +432,17 @@ mod tests {
         assert_eq!(registry.ensure_review_nonce(target, "second").unwrap(), "first");
         assert_eq!(registry.review_nonce(target).as_deref(), Some("first"));
         let review = PostedReview {
-            review_id: 3, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1, comments: vec![],
+            review_id: 3, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1, comments: vec![], nonce: None,
         };
-        assert!(registry.record_posted_review(target, &review).unwrap());
+        assert!(registry.record_posted_review(target, &review, true).unwrap());
         assert_eq!(registry.review_nonce(target), None, "confirmed post consumes the nonce");
         assert_eq!(registry.ensure_review_nonce(target, "third").unwrap(), "third");
+        // A partial match records the review but keeps the nonce.
+        let partial = PostedReview { review_id: 4, ..review.clone() };
+        assert!(registry.record_posted_review(target, &partial, false).unwrap());
+        assert_eq!(registry.review_nonce(target).as_deref(), Some("third"));
+        assert_eq!(registry.renew_review_nonce(target, "fourth").unwrap(), "fourth");
+        assert_eq!(registry.review_nonce(target).as_deref(), Some("fourth"));
     }
 
     #[test]

@@ -832,17 +832,32 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.accept_review_suggestion(draft, suggestion))?)
     }
 
+    /// The target's marker nonce, created and made durable before anything is posted so a
+    /// crash right after the POST still finds the review on restart.
     pub fn ensure_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.review_nonce(target)) {
+            return Ok(existing);
+        }
         let candidate = uuid::Uuid::new_v4().to_string();
-        Ok(self.mutate(|doc| doc.ensure_review_nonce(target, &candidate))?)
+        let nonce = self.mutate(|doc| doc.ensure_review_nonce(target, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
+    }
+
+    /// Start a new marker once the old one belongs to a recorded review.
+    pub fn renew_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let nonce = self.mutate(|doc| doc.renew_review_nonce(target, &candidate))?;
+        self.inner.persist_snapshot()?;
+        Ok(nonce)
     }
 
     pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
         self.read(|doc| doc.posted_reviews(target))
     }
 
-    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.record_posted_review(target, review))?)
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, consume_nonce: bool) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review, consume_nonce))?)
     }
 
     pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
