@@ -79,7 +79,7 @@ block, so it posts as a suggestion.
   marker, `<!-- mast-review:<nonce> -->`. The nonce is per review target, saved
   in the registry, and kept until a post is confirmed and recorded, so it
   survives a lost response and an engine restart. Just before the POST, Mast also
-  saves the ids of the drafts being sent next to the nonce (durably). Every
+  saves the comments being sent, with their text, next to the nonce (durably). Every
   submit, the first included, lists the PR's reviews first; if one carries this
   marker, Mast records the review as posted, treats exactly the saved comments as
   sent (the review's comments are never used to decide that, so a comment GitHub
@@ -88,7 +88,7 @@ block, so it posts as a suggestion.
   and the local record keeps that text. A saved draft is removed only if it still
   reads as it did when sent; one edited since stays a draft (a new comment next
   time) and the dialog says "N drafts were edited after posting and kept". Only an older attempt with
-  no saved ids falls back to matching comment text (every page, outdated
+  nothing saved falls back to matching comment text (every page, outdated
   comments by their original line, a failed read is an error); a partial match
   there keeps the unmatched drafts. A check never renews the nonce. A submit
   retires a nonce that already belongs to a recorded review and starts a new one,
