@@ -314,6 +314,16 @@ pub fn published_between(artifact: Option<&ArtifactView>, chat_id: &str, baselin
     })
 }
 
+/// The project a chat manages, as `(space id, project item id)`.
+pub fn managed_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(String, String)> {
+    let role = workspace.standing_role_of_chat(chat_id)?;
+    if role.role != StandingRoleKind::Manager {
+        return None;
+    }
+    let space = workspace.work_item_space(&role.scope_item_id)?;
+    Some((space, role.scope_item_id))
+}
+
 /// The project of a chat the Manager role is about to adopt: a first start
 /// still carrying its provisional marker, or the successor a hand-off has
 /// reserved.
