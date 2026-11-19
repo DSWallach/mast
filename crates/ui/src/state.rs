@@ -1064,6 +1064,20 @@ impl AppState {
         }
     }
 
+    /// One chats watch frame, end to end: replace the list, move an open pane
+    /// off a chat a standing role rotated away from (re-subscribing its
+    /// transcript and queue watches), then reconcile the dependent watches.
+    pub(crate) fn apply_chats_frame(&mut self, chats: Vec<Chat>, cx: &mut Context<Self>) {
+        self.apply_chats(chats);
+        self.follow_standing_role_selection(cx);
+        self.apply_pending_deep_link(cx);
+        self.reconcile_change_request_watches(cx);
+        // A Chat's Space can arrive (or the selection vanish) with a chats
+        // frame.
+        self.reconcile_work_outline_watches(cx);
+        cx.notify();
+    }
+
     /// The chat now holding the role of the selected chat, when the selected
     /// chat was rotated away from. `None` when nothing needs to change.
     pub(crate) fn standing_role_selection_target(&self) -> Option<String> {
@@ -3587,14 +3601,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 let alive = this.update(cx, |state, cx| {
                     #[cfg(feature = "startup-bench")]
                     startup_trace("chats_apply");
-                    state.apply_chats(parsed);
-                    state.follow_standing_role_selection(cx);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    // A Chat's Space can arrive (or the selection vanish)
-                    // with a chats frame.
-                    state.reconcile_work_outline_watches(cx);
-                    cx.notify();
+                    state.apply_chats_frame(parsed, cx);
                 });
                 #[cfg(feature = "startup-bench")]
                 drop(update_span);
@@ -6275,6 +6282,30 @@ mod tests {
                 .iter()
                 .all(|(_, c)| !c.is_standing_role_predecessor())
         );
+    }
+
+    #[gpui::test]
+    fn chats_frame_moves_an_open_pane_to_the_role_successor(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(vec![chat("first", 0, None), chat("second", 1, None)], cx);
+            state.select_chat(Some("first".into()), cx);
+            let revision = state.transcript_revision;
+            // The same frame a rotation produces: the predecessor is archived
+            // and points at its successor.
+            let mut first = chat("first", 0, None);
+            first.archived = true;
+            first.standing_role_successor = Some("second".into());
+            state.apply_chats_frame(vec![first, chat("second", 1, None)], cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert_ne!(state.transcript_revision, revision, "transcript was swapped, not kept");
+            assert!(!state.transcript_replayed);
+            // A frame that changes nothing about the role keeps the pane put.
+            let revision = state.transcript_revision;
+            state.apply_chats_frame(vec![chat("second", 1, None)], cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert_eq!(state.transcript_revision, revision);
+        });
     }
 
     #[test]

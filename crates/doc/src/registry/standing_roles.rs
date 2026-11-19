@@ -1,6 +1,7 @@
 use super::*;
 use mast_proto::{
-    StandingRole, StandingRoleKind, StandingRoleModel, StandingRoleState, standing_role_id,
+    PendingStandingHandOff, StandingRole, StandingRoleKind, StandingRoleModel, StandingRoleState,
+    standing_role_id,
 };
 
 pub const KIND_STANDING_ROLES: &str = "standingRoles";
@@ -24,6 +25,8 @@ struct RawStandingRole {
     fallback_chain: Vec<StandingRoleModel>,
     #[serde(default)]
     state: StandingRoleState,
+    #[serde(default)]
+    pending_hand_off: Option<PendingStandingHandOff>,
 }
 
 impl From<RawStandingRole> for StandingRole {
@@ -83,9 +86,58 @@ impl RegistryDoc {
             .find(|role| role.current_chat_id.as_deref() == Some(chat_id))
     }
 
+    /// Write rows as one checked registry batch: every op is size-gated first
+    /// and nothing is enqueued unless all pass, and the ops go out together,
+    /// so a second device never sees half of a role change.
+    fn commit_rows(
+        &mut self,
+        rows: Vec<(&str, String, OpKind, BTreeMap<String, Value>)>,
+    ) -> Result<(), String> {
+        let hlc = self.mint_hlc();
+        let mut ops = Vec::with_capacity(rows.len());
+        for (kind, id, op, set) in rows {
+            self.observe_row(kind, &id);
+            ops.push(RowOp {
+                kind: kind.to_owned(),
+                id,
+                op,
+                set: Some(set),
+                hlc: hlc.clone(),
+                clocks: None,
+            });
+        }
+        self.write_ops(ops).map_err(|e| e.to_string())
+    }
+
+    fn pending_hand_off_of(&self, role_id: &str) -> Option<PendingStandingHandOff> {
+        self.overlay_row(KIND_STANDING_ROLES, role_id)
+            .and_then(|row| row_to::<RawStandingRole>(&row))
+            .and_then(|raw| raw.pending_hand_off)
+    }
+
+    /// The hand-off reserved on this role and not yet committed, if any.
+    pub fn pending_standing_hand_off(
+        &self,
+        role: StandingRoleKind,
+        scope_item_id: &str,
+    ) -> Option<PendingStandingHandOff> {
+        self.pending_hand_off_of(&standing_role_id(role, scope_item_id))
+    }
+
+    /// Whether the hand-off `from -> to` already moved workers: the point
+    /// after which it must be finished by retrying it, not replaced.
+    fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
+        self.overlay_row(KIND_CHATS, to)
+            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+            .is_some_and(|p| p.get("fromChatId").and_then(Value::as_str) == Some(from))
+    }
+
     /// Make `chat_id` the role's chat, creating the record on first use.
-    /// Replays of the same adoption succeed; adopting over a different live
-    /// holder is refused (rotation is the only way to change holders).
+    /// Replays of the same adoption succeed. Refused: a different live
+    /// holder (rotation is the only way to change holders), a chat that
+    /// already holds another role, a scope item that is missing or in another
+    /// Space, a chat whose host does not own its Space, and an oversized
+    /// fallback chain.
     pub fn adopt_standing_role(
         &mut self,
         role: StandingRoleKind,
@@ -98,42 +150,61 @@ impl RegistryDoc {
             .map_err(|e| e.to_string())?
             .ok_or("chat does not exist")?;
         let id = standing_role_id(role, scope_item_id);
-        if let Some(existing) = self.standing_role_by_id(&id) {
-            return match existing.current_chat_id.as_deref() {
-                Some(current) if current == chat_id => Ok(existing),
-                Some(_) => Err("role already has a different chat; rotate it instead".into()),
-                None => self.write_role_chat(existing, chat_id, &chat),
-            };
+        let existing = self.standing_role_by_id(&id);
+        if let Some(existing) = &existing
+            && existing.current_chat_id.as_deref() == Some(chat_id)
+        {
+            return Ok(existing.clone());
         }
-        let record = StandingRole {
-            id,
-            role,
-            scope_item_id: scope_item_id.to_owned(),
-            current_chat_id: None,
-            chain: Vec::new(),
-            fallback_chain: fallback_chain.to_vec(),
-            state: StandingRoleState::Idle,
-        };
-        self.write_role_chat(record, chat_id, &chat)
-    }
-
-    fn write_role_chat(
-        &mut self,
-        mut record: StandingRole,
-        chat_id: &str,
-        chat: &Chat,
-    ) -> Result<StandingRole, String> {
+        StandingRoleModel::validate_chain(fallback_chain)?;
+        let space_id = chat
+            .space_id
+            .clone()
+            .ok_or("a role chat belongs to a Space")?;
+        match self.work_item_space(scope_item_id) {
+            Some(scope_space) if scope_space == space_id => {}
+            Some(_) => return Err("the scope item belongs to another Space".into()),
+            None => return Err("the scope item does not exist".into()),
+        }
+        let owner = self
+            .space(&space_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the chat's Space does not exist")?;
+        if owner.device_id != chat.device_id {
+            return Err("the chat's host does not own its Space".into());
+        }
+        if self.standing_role_of_chat(chat_id).is_some() {
+            return Err("this chat already holds another role".into());
+        }
         if chat.archived || chat.is_standing_role_predecessor() {
             return Err("an archived or superseded chat cannot hold a role".into());
         }
-        record.current_chat_id = Some(chat_id.to_owned());
-        record.chain = vec![chat_id.to_owned()];
-        self.write(
+        let record = match existing {
+            Some(existing) if existing.current_chat_id.is_some() => {
+                return Err("role already has a different chat; rotate it instead".into());
+            }
+            Some(existing) => existing,
+            None => StandingRole {
+                id: id.clone(),
+                role,
+                scope_item_id: scope_item_id.to_owned(),
+                current_chat_id: None,
+                chain: Vec::new(),
+                fallback_chain: fallback_chain.to_vec(),
+                state: StandingRoleState::Idle,
+            },
+        };
+        let record = StandingRole {
+            current_chat_id: Some(chat_id.to_owned()),
+            chain: vec![chat_id.to_owned()],
+            ..record
+        };
+        self.commit_rows(vec![(
             KIND_STANDING_ROLES,
-            &record.id.clone(),
+            id,
             OpKind::Upsert,
             role_fields(&record),
-        );
+        )])?;
         Ok(record)
     }
 
@@ -197,8 +268,53 @@ impl RegistryDoc {
         if from == to {
             return Err("a chat cannot take over its own role".into());
         }
+        if let Some(pending) = self.pending_hand_off_of(&role.id)
+            && pending.to_chat_id != to
+            && self.hand_off_recorded(&pending.from_chat_id, &pending.to_chat_id)
+        {
+            return Err(format!(
+                "a hand-off to chat {} is part-done; retry it to finish",
+                pending.to_chat_id
+            ));
+        }
         self.check_rotation_destination(&source, to, to_space)?;
         Ok(Some((role, false)))
+    }
+
+    /// Persist the source's choice of successor before the launch creates,
+    /// moves or queues anything. The reservation blocks a different successor
+    /// only once the hand-off has moved workers (until then it is replaceable,
+    /// since nothing irreversible happened); the rotation clears it.
+    /// Ordinary chats and replays reserve nothing.
+    pub fn reserve_standing_role_hand_off(
+        &mut self,
+        from: &str,
+        to: &str,
+        operation_id: &str,
+        to_space: Option<&str>,
+    ) -> Result<(), String> {
+        let Some((role, false)) = self.plan_standing_role_hand_off(from, to, to_space)? else {
+            return Ok(());
+        };
+        let pending = PendingStandingHandOff {
+            from_chat_id: from.to_owned(),
+            to_chat_id: to.to_owned(),
+            operation_id: operation_id.to_owned(),
+        };
+        if role.state == StandingRoleState::HandingOff
+            && self.pending_hand_off_of(&role.id).as_ref() == Some(&pending)
+        {
+            return Ok(());
+        }
+        self.commit_rows(vec![(
+            KIND_STANDING_ROLES,
+            role.id,
+            OpKind::Update,
+            fields([
+                ("state", json!(StandingRoleState::HandingOff)),
+                ("pendingHandOff", json!(pending)),
+            ]),
+        )])
     }
 
     /// Read-only precheck for a hand-off launch, run before anything is
@@ -266,21 +382,20 @@ impl RegistryDoc {
             record.chain.drain(..excess);
         }
         record.state = StandingRoleState::Idle;
-        self.write(
-            KIND_STANDING_ROLES,
-            &id,
-            OpKind::Update,
-            role_fields(&record),
-        );
-        self.write(
-            KIND_CHATS,
-            from,
-            OpKind::Update,
-            fields([
-                ("standingRoleSuccessor", json!(to)),
-                ("archived", json!(true)),
-            ]),
-        );
+        let mut role_set = role_fields(&record);
+        role_set.insert("pendingHandOff".into(), Value::Null);
+        self.commit_rows(vec![
+            (KIND_STANDING_ROLES, id, OpKind::Update, role_set),
+            (
+                KIND_CHATS,
+                from.to_owned(),
+                OpKind::Update,
+                fields([
+                    ("standingRoleSuccessor", json!(to)),
+                    ("archived", json!(true)),
+                ]),
+            ),
+        ])?;
         Ok((record, false))
     }
 
@@ -292,13 +407,12 @@ impl RegistryDoc {
     ) -> Result<(), String> {
         let id = standing_role_id(role, scope_item_id);
         self.standing_role_by_id(&id).ok_or("role does not exist")?;
-        self.write(
+        self.commit_rows(vec![(
             KIND_STANDING_ROLES,
-            &id,
+            id,
             OpKind::Update,
             fields([("state", json!(state))]),
-        );
-        Ok(())
+        )])
     }
 }
 

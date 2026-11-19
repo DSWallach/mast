@@ -1426,13 +1426,23 @@ impl RegistryDoc {
             .ok_or("source chat does not exist")?;
         let destination = self.chat(to).map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
-        // A retry of a recorded hand-off must still replay after the source
-        // was archived (a standing role archives it when it rotates).
-        let already_recorded = self.overlay_row(KIND_CHATS, to)
+        // A recorded hand-off replays before any live check: the source may
+        // since have been archived by a standing role rotation, and the
+        // destination may itself have handed off again (A to B, then B to C).
+        // The saved workers come back and nothing is redone.
+        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
             .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
-            .is_some_and(|p| p.get("fromChatId").and_then(Value::as_str) == Some(from)
-                && p.get("actorChatId").and_then(Value::as_str) == Some(actor));
-        if from == to || destination.archived || (source.archived && !already_recorded) {
+        {
+            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
+                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
+            {
+                return Err("destination already has a different hand-off".into());
+            }
+            return serde_json::from_value(provenance["workerChatIds"].clone())
+                .map(|workers| (workers, true))
+                .map_err(|e| format!("invalid hand-off provenance: {e}"));
+        }
+        if from == to || source.archived || destination.archived {
             return Err("hand-off requires two distinct, active chats".into());
         }
         if source.space_id.is_none() || source.space_id != destination.space_id {
@@ -1454,18 +1464,6 @@ impl RegistryDoc {
             remaining -= 1;
             ancestor = chats.iter().find(|chat| chat.id == id)
                 .and_then(|chat| chat.parent_chat_id.as_deref());
-        }
-        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
-            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
-        {
-            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
-                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
-            {
-                return Err("destination already has a different hand-off".into());
-            }
-            return serde_json::from_value(provenance["workerChatIds"].clone())
-                .map(|workers| (workers, true))
-                .map_err(|e| format!("invalid hand-off provenance: {e}"));
         }
         let workers: Vec<String> = chats.into_iter()
             .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))

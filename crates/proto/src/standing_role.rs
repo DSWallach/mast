@@ -53,6 +53,45 @@ pub struct StandingRole {
     pub state: StandingRoleState,
 }
 
+/// Most fallback entries one role record may carry, and the longest harness
+/// or model string in one. The role row is a single registry op, so these
+/// keep it far under the op size limit.
+pub const MAX_FALLBACK_CHAIN: usize = 8;
+pub const MAX_FALLBACK_FIELD_LEN: usize = 128;
+
+impl StandingRoleModel {
+    pub fn validate_chain(chain: &[Self]) -> Result<(), String> {
+        if chain.len() > MAX_FALLBACK_CHAIN {
+            return Err(format!(
+                "a role takes at most {MAX_FALLBACK_CHAIN} fallback models"
+            ));
+        }
+        for entry in chain {
+            let too_long = entry.harness.len() > MAX_FALLBACK_FIELD_LEN
+                || entry
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| m.len() > MAX_FALLBACK_FIELD_LEN);
+            if entry.harness.is_empty() || too_long {
+                return Err("a fallback model needs a harness and short names".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A hand-off the source's host has committed to but not yet finished. It is
+/// recorded before the launch creates anything and cleared by the rotation,
+/// so a different successor cannot start while this one is part-done, and the
+/// same operation can be retried to completion after a crash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingStandingHandOff {
+    pub from_chat_id: String,
+    pub to_chat_id: String,
+    pub operation_id: String,
+}
+
 /// Row id: one role of one kind per scope item.
 pub fn standing_role_id(role: StandingRoleKind, scope_item_id: &str) -> String {
     format!("{}:{scope_item_id}", role.as_str())

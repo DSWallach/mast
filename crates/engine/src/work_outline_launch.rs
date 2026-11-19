@@ -579,12 +579,14 @@ impl WorkItemLaunchService {
                 "The work item is archived",
             ));
         }
-        // A hand-off from a chat that standing-role rules already replaced, or
-        // into a Space the role cannot follow, ends here: nothing is created,
-        // transferred or queued. The gate held above serializes launches.
+        // Reserve the successor on the source's role before anything is
+        // created, moved or queued. A source a role already replaced, a Space
+        // the role cannot follow, or another part-done hand-off ends the
+        // launch here, with nothing written. The gate held above serializes
+        // launches; the reservation survives a restart.
         if let Some((_, source)) = hand_off {
             self.workspace
-                .check_standing_role_hand_off(source, &chat_id, Some(&space_id))
+                .reserve_standing_role_hand_off(source, &chat_id, op, Some(&space_id))
                 .map_err(conflict)?;
         }
         if self

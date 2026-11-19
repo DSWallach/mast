@@ -790,7 +790,34 @@ impl WorkspaceHost {
         chat_id: &str,
         fallback_chain: &[mast_proto::StandingRoleModel],
     ) -> Result<mast_proto::StandingRole, String> {
+        // Only the chat's own host adopts it: that is the device whose
+        // hand-offs rotate the role (and it runs this build, which supports
+        // `standing-role-handoff-v1`).
+        let host = self.read(|doc| doc.chat(chat_id)).map_err(|e| e.to_string())?
+            .ok_or("chat does not exist")?.device_id;
+        if host != self.device_id() {
+            return Err("a role can only be adopted on the chat's own host".into());
+        }
         self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Whether `chat_id` holds, or was superseded in, a standing role. Hand-offs
+    /// of such chats need a host that moves roles.
+    pub fn chat_in_standing_role(&self, chat_id: &str) -> bool {
+        self.read(|doc| {
+            doc.standing_role_of_chat(chat_id).is_some()
+                || doc.chat(chat_id).ok().flatten().is_some_and(|c| c.is_standing_role_predecessor())
+        })
+    }
+
+    /// Persist the source's chosen successor before a hand-off launch writes
+    /// anything. See `RegistryDoc::reserve_standing_role_hand_off`.
+    pub fn reserve_standing_role_hand_off(&self, from: &str, to: &str, operation_id: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.mutate(|doc| doc.reserve_standing_role_hand_off(from, to, operation_id, to_space))
+    }
+
+    pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
     }
 
     /// Read-only precheck of a hand-off launch against the standing role

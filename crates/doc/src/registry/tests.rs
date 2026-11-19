@@ -372,37 +372,99 @@ fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
     assert_eq!(doc.chat("child").unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
 }
 
-fn role_doc(ids: &[&str]) -> RegistryDoc {
+/// A registry with one Space on `dev-a`, a work item to scope roles to, and
+/// the given chats in that Space. Returns the doc and the item id.
+fn role_doc(ids: &[&str]) -> (RegistryDoc, String) {
+    use mast_proto::work_outline::{
+        CreateWorkItemParams, WorkOutlineActor, WorkOutlineActorKind, WorkOutlineMutation,
+        WorkOutlinePlacement,
+    };
     let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_space(&space("space", "dev-a", "/tmp/role")).unwrap();
+    doc.upsert_space(&space("other-space", "dev-a", "/tmp/other")).unwrap();
+    let actor = WorkOutlineActor {
+        kind: WorkOutlineActorKind::User,
+        device_id: "dev-a".into(),
+        chat_id: None,
+        message_id: None,
+    };
+    let item = doc
+        .apply_work_outline_mutation(
+            &WorkOutlineMutation::CreateWorkItem(CreateWorkItemParams {
+                space_id: "space".into(),
+                parent_work_item_id: None,
+                placement: WorkOutlinePlacement::Last,
+                title: "Manager".into(),
+                description: None,
+                status: None,
+                operation_id: "role-item".into(),
+            }),
+            &actor,
+            1_700_000_000_000,
+        )
+        .unwrap()
+        .work_item_id
+        .unwrap();
     for id in ids {
         let mut row = chat(id, "dev-a");
         row.space_id = Some("space".into());
         doc.upsert_chat(&row).unwrap();
     }
-    doc
+    (doc, item)
 }
 
 #[test]
 fn standing_role_adoption_is_idempotent_and_refuses_a_second_holder() {
-    let mut doc = role_doc(&["first", "other"]);
-    let role = doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
-    assert_eq!(role.id, "manager:project");
+    let (mut doc, item) = role_doc(&["first", "other"]);
+    let role = doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    assert_eq!(role.id, format!("manager:{item}"));
     assert_eq!(role.chain, ["first"]);
-    assert_eq!(doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap(), role);
-    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, "project", "other", &[]).is_err());
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("first"));
-    // Roles of different kinds or scopes are independent records.
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Assistant, "project"), None);
-    doc.adopt_standing_role(StandingRoleKind::Assistant, "project", "other", &[]).unwrap();
+    assert_eq!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap(), role);
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "other", &[]).is_err());
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    // Roles of different kinds are independent records, but one chat holds one role.
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Assistant, &item), None);
+    assert!(doc.adopt_standing_role(StandingRoleKind::Assistant, &item, "first", &[]).is_err());
+    doc.adopt_standing_role(StandingRoleKind::Assistant, &item, "other", &[]).unwrap();
     assert_eq!(doc.standing_roles().len(), 2);
     assert_eq!(doc.standing_role_of_chat("other").unwrap().role, StandingRoleKind::Assistant);
 }
 
 #[test]
+fn standing_role_adoption_validates_scope_owner_and_size() {
+    use mast_proto::{StandingRoleModel, MAX_FALLBACK_CHAIN};
+    let (mut doc, item) = role_doc(&["first", "archived", "foreign", "elsewhere"]);
+    // Unknown scope item.
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, "no-such-item", "first", &[]).is_err());
+    // A chat in another Space than the scope item.
+    let mut elsewhere = doc.chat("elsewhere").unwrap().unwrap();
+    elsewhere.space_id = Some("other-space".into());
+    doc.upsert_chat(&elsewhere).unwrap();
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "elsewhere", &[]).is_err());
+    // A chat hosted by a device that does not own its Space.
+    let mut foreign = doc.chat("foreign").unwrap().unwrap();
+    foreign.device_id = "dev-b".into();
+    doc.upsert_chat(&foreign).unwrap();
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "foreign", &[]).is_err());
+    // Archived chats, and fallback chains the registry op could not carry.
+    doc.set_chat_archived("archived", true).unwrap();
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "archived", &[]).is_err());
+    let entry = |harness: &str| StandingRoleModel { harness: harness.into(), model: None };
+    let too_many: Vec<_> = (0..=MAX_FALLBACK_CHAIN).map(|n| entry(&format!("h{n}"))).collect();
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &too_many).is_err());
+    let too_long = [entry(&"h".repeat(10_000))];
+    assert!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &too_long).is_err());
+    // Nothing was written by any refusal, and a bounded chain is accepted.
+    assert!(doc.standing_roles().is_empty());
+    let ok: Vec<_> = (0..MAX_FALLBACK_CHAIN).map(|n| entry(&format!("h{n}"))).collect();
+    assert_eq!(doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &ok).unwrap().fallback_chain.len(), MAX_FALLBACK_CHAIN);
+}
+
+#[test]
 fn rotating_a_standing_role_leaves_one_current_chat_and_hides_the_predecessor() {
-    let mut doc = role_doc(&["first", "second", "third"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
-    let (role, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    let (mut doc, item) = role_doc(&["first", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    let (role, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second").unwrap();
     assert!(!replayed);
     assert_eq!(role.current_chat_id.as_deref(), Some("second"));
     assert_eq!(role.chain, ["first", "second"]);
@@ -413,12 +475,12 @@ fn rotating_a_standing_role_leaves_one_current_chat_and_hides_the_predecessor() 
     assert!(!second.archived && !second.is_standing_role_predecessor());
 
     // A retried rotation changes nothing; a stale source is refused.
-    let (again, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    let (again, replayed) = doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second").unwrap();
     assert!(replayed);
     assert_eq!(again, role);
-    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "third").is_err());
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "third").is_err());
 
-    let (role, _) = doc.rotate_standing_role(StandingRoleKind::Manager, "project", "second", "third").unwrap();
+    let (role, _) = doc.rotate_standing_role(StandingRoleKind::Manager, &item, "second", "third").unwrap();
     assert_eq!(role.chain, ["first", "second", "third"]);
     assert_eq!(role.predecessors(), ["first", "second"]);
     let visible: Vec<_> = doc
@@ -433,40 +495,60 @@ fn rotating_a_standing_role_leaves_one_current_chat_and_hides_the_predecessor() 
 }
 
 #[test]
+fn a_rotation_reaches_other_devices_as_one_batch() {
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.take_pushable();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second").unwrap();
+    let batches = doc.take_pushable();
+    let rotation: Vec<_> = batches
+        .iter()
+        .filter(|batch| batch.ops.iter().any(|op| op.kind == KIND_STANDING_ROLES))
+        .collect();
+    assert_eq!(rotation.len(), 1, "the role row and the predecessor ride one batch");
+    let kinds: Vec<_> = rotation[0].ops.iter().map(|op| (op.kind.as_str(), op.id.as_str())).collect();
+    assert!(kinds.contains(&(KIND_CHATS, "first")));
+    assert!(kinds.iter().any(|(kind, _)| *kind == KIND_STANDING_ROLES));
+    let marker = rotation[0].ops.iter().find(|op| op.kind == KIND_CHATS).unwrap();
+    let set = marker.set.as_ref().unwrap();
+    assert_eq!(set["standingRoleSuccessor"], "second");
+    assert_eq!(set["archived"], true);
+}
+
+#[test]
 fn stale_chat_upserts_cannot_clear_the_predecessor_marker() {
-    let mut doc = role_doc(&["first", "second"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     let stale = doc.chat("first").unwrap().unwrap();
-    doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", "second").unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second").unwrap();
     doc.upsert_chat(&stale).unwrap();
     assert_eq!(doc.chat("first").unwrap().unwrap().standing_role_successor.as_deref(), Some("second"));
 }
 
 #[test]
 fn standing_role_rotation_refuses_unsafe_destinations() {
-    let mut doc = role_doc(&["first", "second", "archived", "elsewhere"]);
+    let (mut doc, item) = role_doc(&["first", "second", "archived", "elsewhere"]);
     doc.set_chat_archived("archived", true).unwrap();
     let mut elsewhere = doc.chat("elsewhere").unwrap().unwrap();
     elsewhere.space_id = Some("other-space".into());
     doc.upsert_chat(&elsewhere).unwrap();
-    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     for destination in ["archived", "elsewhere", "missing", "first"] {
         assert!(
-            doc.rotate_standing_role(StandingRoleKind::Manager, "project", "first", destination).is_err(),
+            doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", destination).is_err(),
             "{destination}"
         );
     }
-    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, "project", "second", "first").is_err());
-    assert!(doc.rotate_standing_role(StandingRoleKind::Assistant, "project", "first", "second").is_err());
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, &item, "second", "first").is_err());
+    assert!(doc.rotate_standing_role(StandingRoleKind::Assistant, &item, "first", "second").is_err());
     assert!(!doc.chat("first").unwrap().unwrap().archived);
-    assert!(doc.adopt_standing_role(StandingRoleKind::Assistant, "project", "archived", &[]).is_err());
 }
 
 #[test]
 fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
-    let mut doc = role_doc(&["first", "second", "third", "plain", "archived"]);
+    let (mut doc, item) = role_doc(&["first", "second", "third", "plain", "archived"]);
     doc.set_chat_archived("archived", true).unwrap();
-    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     // Ordinary chats are never constrained.
     assert_eq!(doc.check_standing_role_hand_off("plain", "second", None), Ok(()));
     assert_eq!(doc.rotate_standing_role_for_chat("plain", "second").unwrap(), None);
@@ -475,7 +557,7 @@ fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
     assert!(doc.check_standing_role_hand_off("first", "first", None).is_err());
     assert!(doc.check_standing_role_hand_off("first", "future", Some("other-space")).is_err());
     assert_eq!(doc.check_standing_role_hand_off("first", "future", Some("space")), Ok(()));
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("first"));
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
     assert!(!doc.chat("first").unwrap().unwrap().archived);
 
     doc.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
@@ -483,30 +565,79 @@ fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
     assert_eq!(doc.check_standing_role_hand_off("first", "second", None), Ok(()));
     assert!(doc.check_standing_role_hand_off("first", "third", None).is_err());
     assert!(doc.rotate_standing_role_for_chat("first", "third").is_err());
-    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, "project").as_deref(), Some("second"));
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("second"));
     // The replay of an older hand-off after the role moved on is harmless.
     doc.rotate_standing_role_for_chat("second", "third").unwrap().unwrap();
     assert_eq!(doc.rotate_standing_role_for_chat("first", "second").unwrap(), None);
+    assert_eq!(doc.check_standing_role_hand_off("first", "second", None), Ok(()));
+}
+
+#[test]
+fn a_part_done_hand_off_blocks_other_successors_and_survives_restart() {
+    let (mut doc, item) = role_doc(&["first", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    // Reserved, nothing moved yet: another successor may replace it.
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    let pending = doc.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap();
+    assert_eq!((pending.from_chat_id.as_str(), pending.to_chat_id.as_str()), ("first", "second"));
+    assert_eq!(doc.standing_role(StandingRoleKind::Manager, &item).unwrap().state, mast_proto::StandingRoleState::HandingOff);
+    doc.reserve_standing_role_hand_off("first", "third", "op-third", Some("space")).unwrap();
+    assert_eq!(doc.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id, "third");
+
+    // Workers moved to `second`: now only that hand-off may finish, across a restart too.
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    let bytes = doc.to_bytes().unwrap();
+    let mut restarted = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    assert!(restarted.reserve_standing_role_hand_off("first", "third", "op-third", Some("space")).is_err());
+    assert!(restarted.check_standing_role_hand_off("first", "third", None).is_err());
+    assert!(restarted.rotate_standing_role_for_chat("first", "third").is_err());
+    assert_eq!(restarted.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    // The same operation finishes it, and the reservation is cleared.
+    restarted.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    restarted.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    assert_eq!(restarted.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
+    let role = restarted.standing_role(StandingRoleKind::Manager, &item).unwrap();
+    assert_eq!(role.state, mast_proto::StandingRoleState::Idle);
+    assert_eq!(role.current_chat_id.as_deref(), Some("second"));
+}
+
+#[test]
+fn a_recorded_hand_off_replays_before_live_checks() {
+    let (mut doc, _item) = role_doc(&["a", "b", "c", "worker"]);
+    let mut worker = doc.chat("worker").unwrap().unwrap();
+    worker.parent_chat_id = Some("a".into());
+    doc.upsert_chat(&worker).unwrap();
+    assert_eq!(doc.hand_off_chat_children("a", "b", "a", 1).unwrap(), (vec!["worker".to_owned()], false));
+    doc.set_chat_archived("a", true).unwrap();
+    assert_eq!(doc.hand_off_chat_children("b", "c", "b", 2).unwrap(), (vec!["worker".to_owned()], false));
+    doc.set_chat_archived("b", true).unwrap();
+    // A to B again, with A and B both archived and the workers now under C.
+    assert_eq!(doc.hand_off_chat_children("a", "b", "a", 3).unwrap(), (vec!["worker".to_owned()], true));
+    assert_eq!(doc.chat("worker").unwrap().unwrap().parent_chat_id.as_deref(), Some("c"));
+    // A different pairing onto B is still refused.
+    assert!(doc.hand_off_chat_children("c", "b", "c", 4).is_err());
 }
 
 #[test]
 fn hand_off_replay_survives_the_source_being_archived() {
-    let mut doc = role_doc(&["source", "destination"]);
+    let (mut doc, _item) = role_doc(&["source", "destination"]);
     doc.hand_off_chat_children("source", "destination", "source", 1).unwrap();
     doc.set_chat_archived("source", true).unwrap();
     assert_eq!(doc.hand_off_chat_children("source", "destination", "source", 2).unwrap(), (Vec::new(), true));
     // An archived source with no recorded hand-off is still refused.
-    let mut fresh = role_doc(&["a", "b"]);
+    let (mut fresh, _item) = role_doc(&["a", "b"]);
     fresh.set_chat_archived("a", true).unwrap();
     assert!(fresh.hand_off_chat_children("a", "b", "a", 1).is_err());
 }
 
 #[test]
 fn standing_role_rows_tolerate_newer_peers() {
-    let mut doc = role_doc(&["first"]);
-    doc.adopt_standing_role(StandingRoleKind::Manager, "project", "first", &[]).unwrap();
+    let (mut doc, item) = role_doc(&["first"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     // A newer peer adds a field and a role kind this build does not know.
-    doc.write(KIND_STANDING_ROLES, "manager:project", OpKind::Update, fields([("futureField", json!(1))]));
+    doc.write(KIND_STANDING_ROLES, &format!("manager:{item}"), OpKind::Update, fields([("futureField", json!(1))]));
     doc.write(
         KIND_STANDING_ROLES,
         "reviewer:project",

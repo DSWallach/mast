@@ -1314,6 +1314,68 @@ async fn role_hand_off_rotates_the_role_replays_and_refuses_a_second_successor()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_hand_off_replays_after_its_successor_handed_off_again() {
+    use mast_proto::StandingRoleKind;
+    let (rig, item) = role_rig("role-chain").await;
+    let first = json!({"chatId": CHAT, "summary":"Chain step one", "operationId":"chain-a-to-b"});
+    let b = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, first.clone()).await.unwrap()["chatId"].as_str().unwrap().to_owned();
+    let second = json!({"chatId": b, "summary":"Chain step two", "operationId":"chain-b-to-c"});
+    let c = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, second).await.unwrap()["chatId"].as_str().unwrap().to_owned();
+    let workspace = &rig.core.workspace;
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(c.as_str()));
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Chain step two")), "second turn").await;
+    let prompts = || rig.harness.requests.lock().unwrap().iter().filter(|r| r.prompt.contains("Chain step")).count();
+    let (chats, turns) = (workspace.read_chats().unwrap().len(), prompts());
+
+    // The retry of A to B returns B though B is archived and has handed off.
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, first).await.unwrap();
+    assert_eq!(retry["chatId"], b.as_str());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats, "no extra chat");
+    assert_eq!(prompts(), turns, "no extra turn");
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(c.as_str()));
+    assert_eq!(workspace.chat("role-chain-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(c.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
+    use mast_engine::work_outline_launch::LaunchStep;
+    use mast_proto::StandingRoleKind;
+    let (rig, item) = role_rig("role-crash").await;
+    let workspace = &rig.core.workspace;
+    let params = json!({"chatId": CHAT, "summary":"Crash-safe hand-off", "operationId":"crash-a"});
+    rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
+    assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await.is_err());
+
+    // Workers and the first turn moved, but the role has not: the source still holds it,
+    // and its reservation names the successor.
+    let pending = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).expect("reservation persisted");
+    let successor = pending.to_chat_id.clone();
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(CHAT));
+    assert_eq!(workspace.chat("role-crash-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+
+    // A different successor is refused before it creates a chat.
+    let chats = workspace.read_chats().unwrap().len();
+    let other = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": CHAT, "summary":"Different hand-off", "operationId":"crash-b"
+    })).await;
+    assert!(other.is_err());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats);
+
+    // The same operation finishes: one successor, role moved, reservation cleared.
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(reply["chatId"], successor.as_str());
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
+    assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
+    assert!(workspace.chat(CHAT).unwrap().unwrap().is_standing_role_predecessor());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats);
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Crash-safe hand-off")), "successor turn").await;
+    let turns = rig.harness.requests.lock().unwrap().iter().filter(|r| r.prompt.contains("Crash-safe hand-off")).count();
+    assert_eq!(turns, 1);
+    assert!(!rig.harness.requests.lock().unwrap().iter().any(|r| r.prompt.contains("Different hand-off")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_role_hand_offs_from_one_source_have_one_winner() {
     use mast_proto::StandingRoleKind;
     let (rig, item) = role_rig("role-race").await;
