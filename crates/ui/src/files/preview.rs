@@ -2726,9 +2726,10 @@ impl FilesSurface {
             return div()
                 .id("files-editor-body")
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    if !event.modifiers.secondary() || !super::editor::pointer_in_text(click_editor.read(cx), event.position) { return; }
+                    if !event.modifiers.secondary() { return; }
                     let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
                     if provider.take_navigation_handled() { return; }
+                    if !super::editor::pointer_in_text(click_editor.read(cx), event.position) { return; }
                     if provider.is_indexing() {
                         provider.start_watch(cx);
                         this.show_definition_notice("Indexing…".into(), true, cx);
