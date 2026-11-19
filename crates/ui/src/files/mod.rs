@@ -218,6 +218,8 @@ pub struct FilesSurface {
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
+    code_ref_status: Option<SharedString>,
+    code_ref_status_task: Option<Task<()>>,
     started: bool,
     _observe: Subscription,
     _search_events: Subscription,
@@ -255,7 +257,9 @@ impl Render for FilesSurface {
             .on_action(cx.listener(|this, _: &code_find::Open, window, cx| this.open_code_find(window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Next, window, cx| this.move_code_find(true, window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Previous, window, cx| this.move_code_find(false, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| this.add_selected_code_to_chat(cx)))
+            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| {
+                if this.has_code_selection(cx) { this.add_selected_code_to_chat(cx); }
+            }))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .size_full()
@@ -265,6 +269,7 @@ impl Render for FilesSurface {
             .flex_col()
             .children(header)
             .children(code_find)
+            .when_some(self.code_ref_status.clone(), |view, message| view.child(div().id("code-ref-status").px(px(10.0)).py(px(4.0)).text_color(theme.text_muted).child(message)))
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
             .children(blame_popover)
@@ -562,6 +567,8 @@ impl FilesSurface {
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
             error: None,
+            code_ref_status: None,
+            code_ref_status_task: None,
             started: false,
             _observe: observe,
             _search_events: search_events,

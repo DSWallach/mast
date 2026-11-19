@@ -1,4 +1,5 @@
 use gpui::{AnyElement, div, prelude::*, px};
+use crate::work_outline::hints::{HintKey, WithHint};
 
 pub(super) fn pinned_view(
     reference: &crate::code_ref::StagedCodeRef,
@@ -85,14 +86,45 @@ pub(super) fn pinned_view(
 // Actions for a selected range in the file editor.
 
 impl super::FilesSurface {
+    fn code_ref_message(&mut self, message: impl Into<gpui::SharedString>, clear: bool, cx: &mut gpui::Context<Self>) {
+        self.code_ref_status = Some(message.into());
+        self.code_ref_status_task = None;
+        if clear {
+            self.code_ref_status_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                let _ = this.update(cx, |this, cx| { this.code_ref_status = None; cx.notify(); });
+            }));
+        }
+        cx.notify();
+    }
+
+    fn selected_chat(&mut self, cx: &mut gpui::Context<Self>) -> Option<String> {
+        let key = self.state.read(cx).selected_chat.clone();
+        if key.is_none() { self.code_ref_message("Open a chat to add code to it.", false, cx); }
+        key
+    }
+
+    fn confirm_code_ref(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        let title = self.state.read(cx).chats.iter().find(|chat| chat.id == key)
+            .and_then(|chat| chat.title.as_deref()).filter(|title| !title.is_empty());
+        let message = title.map(|title| format!("Added to {title}")).unwrap_or_else(|| "Added to chat".into());
+        self.code_ref_message(message, true, cx);
+    }
+
     fn add_pinned_reference_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(mut reference) = self.pinned_reference.clone() else { return; };
+        let Some(key) = self.selected_chat(cx) else { return; };
+        let Some(mut reference) = self.pinned_reference.clone() else {
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
+        };
         reference.id = uuid::Uuid::new_v4().to_string();
-        let key = self.chat_id.clone();
-        self.state.update(cx, |state, cx| {
-            state.add_code_ref(&key, reference);
-            cx.notify();
-        });
+        self.state.update(cx, |state, cx| { state.add_code_ref(&key, reference); cx.notify(); });
+        self.confirm_code_ref(&key, cx);
+    }
+
+    pub(super) fn has_code_selection(&self, cx: &gpui::Context<Self>) -> bool {
+        self.editor_path.as_ref().and_then(|path| self.preview.documents.get(path))
+            .and_then(|document| document.editor.as_ref())
+            .is_some_and(|editor| !editor.read(cx).selected_range().is_empty())
     }
 
     fn show_reference_diff(&mut self, cx: &mut gpui::Context<Self>) {
@@ -163,6 +195,7 @@ impl super::FilesSurface {
         crate::components::code_ref::selection_action_bar(theme, top, left)
             .child(
                 crate::components::button("add-selection-to-chat", "Add to chat", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, theme)
+                    .hint("Add to chat", HintKey::App(crate::settings::ShortcutId::AddCodeToChat))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.add_selected_code_to_chat(cx))),
             )
@@ -201,16 +234,16 @@ impl super::FilesSurface {
         mut reference: crate::code_ref::StagedCodeRef,
         cx: &mut gpui::Context<Self>,
     ) {
+        let Some(key) = self.selected_chat(cx) else { return; };
         let Some(context) = self.request_context.clone() else {
-            return;
+            self.code_ref_message("Workspace is unavailable.", false, cx); return;
         };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
+        let engine = self.state.read(cx).engine().cloned();
+        let Some(engine) = engine else {
+            self.code_ref_message("Workspace service is unavailable.", false, cx); return;
         };
-        let key = self.chat_id.clone();
         let Some(queue_permit) = crate::code_ref::try_queue_io() else {
-            self.error = Some("Too many code references are loading.".into());
-            cx.notify();
+            self.code_ref_message("Too many code references are loading.", false, cx);
             return;
         };
         let accepted = self.state.update(cx, |state, cx| {
@@ -219,8 +252,7 @@ impl super::FilesSurface {
             accepted
         });
         if !accepted {
-            self.error = Some("Too many code references are loading.".into());
-            cx.notify();
+            self.code_ref_message("Too many code references are loading.", false, cx);
             return;
         }
         let state_handle = self.state.clone();
@@ -234,7 +266,7 @@ impl super::FilesSurface {
             });
             let _ = this.update(cx, |this, cx| {
                 if this.request_context.as_ref() != Some(&context) {
-                    return;
+                    this.code_ref_message("Workspace changed while adding code.", false, cx); return;
                 }
                 if let Some(identity) = identity {
                     reference.reference.location.repo_id = identity.repo_id;
@@ -244,9 +276,9 @@ impl super::FilesSurface {
                         state.add_code_ref(&key, reference);
                         cx.notify();
                     });
+                    this.confirm_code_ref(&key, cx);
                 } else {
-                    this.error = Some("Could not identify the workspace repository.".into());
-                    cx.notify();
+                    this.code_ref_message("Could not identify the workspace repository.", false, cx);
                 }
             });
         })
@@ -254,8 +286,9 @@ impl super::FilesSurface {
     }
 
     pub(super) fn add_selected_code_to_chat(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(key) = self.selected_chat(cx) else { return; };
         let Some(path) = self.editor_path.clone() else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let Some(editor) = self
             .preview
@@ -263,19 +296,20 @@ impl super::FilesSurface {
             .get(&path)
             .and_then(|document| document.editor.as_ref())
         else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let state = editor.read(cx);
         let value = state.value().to_string();
         let selection = state.selected_range();
         let Some(range) = crate::code_ref::selection_lines(&value, selection) else {
-            return;
+            self.code_ref_message("Select code to add to chat.", false, cx); return;
         };
         let Some(snippet) = crate::code_ref::snippet(&value, range) else {
-            return;
+            self.code_ref_message("Could not read the selection.", false, cx); return;
         };
-        let Some(member) = self.state.read(cx).selected_execution_member(&self.chat_id) else {
-            return;
+        let member = self.state.read(cx).selected_execution_member(&key);
+        let Some(member) = member else {
+            self.code_ref_message("No workspace is available for this chat.", false, cx); return;
         };
         let reference = crate::code_ref::StagedCodeRef {
             id: uuid::Uuid::new_v4().to_string(),

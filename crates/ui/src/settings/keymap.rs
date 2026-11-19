@@ -207,7 +207,7 @@ impl ShortcutId {
             ShortcutId::FileNavigationBack => "Navigate back",
             ShortcutId::FileNavigationForward => "Navigate forward",
             ShortcutId::ToggleBlameGutter => "Toggle blame",
-            ShortcutId::AddCodeToChat => "Add code to chat",
+            ShortcutId::AddCodeToChat => "Add selection to chat",
             ShortcutId::ReviewNextStep => "Next review step",
             ShortcutId::ReviewPreviousStep => "Previous review step",
             ShortcutId::ReviewNextStepArrow => "Next review step (arrow)",
