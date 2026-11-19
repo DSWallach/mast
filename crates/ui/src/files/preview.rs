@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{
     AnyElement, App, Context, Entity, Focusable as _, HighlightStyle, ListAlignment,
-    ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Window, div,
+    ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Task, Window, div,
     font, list, prelude::*, px,
 };
 use gpui_base::input::{RopeExt as _, TextDecoration, TextDecorationCollection};
@@ -121,10 +121,10 @@ pub(super) struct FilePreviewState {
     images_visible: bool,
     pub(super) documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
-    active: Option<String>,
+    pub(super) active: Option<String>,
     highlights: HashMap<String, HighlightedFile>,
     syntax_cache: SyntaxHighlightCache,
-    list: ListState,
+    pub(super) list: ListState,
     horizontal_scroll: ScrollHandle,
     word_wrap: bool,
     editor_font_size: f32,
@@ -136,6 +136,11 @@ pub(super) struct FilePreviewState {
     comment_draft: Option<EditorCommentDraft>,
     active_comment: Option<String>,
     typography_generation: u32,
+    outline_open: bool,
+    outline_path: Option<String>,
+    outline_symbols: Vec<mast_syntax::symbols::Symbol>,
+    outline_list: ListState,
+    outline_task: Option<Task<()>>,
 }
 
 impl FilePreviewState {
@@ -164,6 +169,11 @@ impl FilePreviewState {
             comment_draft: None,
             active_comment: None,
             typography_generation: 0,
+            outline_open: false,
+            outline_path: None,
+            outline_symbols: Vec::new(),
+            outline_list: ListState::new(0, ListAlignment::Top, px(180.0)),
+            outline_task: None,
         }
     }
 
@@ -184,6 +194,10 @@ impl FilePreviewState {
         self.comment_anchors.clear();
         self.comment_draft = None;
         self.active_comment = None;
+        self.outline_open = false;
+        self.outline_path = None;
+        self.outline_symbols.clear();
+        self.outline_task = None;
     }
 
     pub(super) fn has_active(&self) -> bool {
@@ -976,6 +990,12 @@ impl FilesSurface {
     }
 
     pub(super) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.preview.active.as_deref() != Some(&path) {
+            self.preview.outline_symbols.clear();
+            self.preview.outline_path = None;
+            self.preview.outline_task = None;
+            self.preview.outline_list.reset(0);
+        }
         if self
             .preview
             .active
@@ -1023,6 +1043,7 @@ impl FilesSurface {
             self.sync_preview_list();
         }
         self.trim_document_cache(cx);
+        if self.preview.outline_open { self.request_file_outline(cx); }
         cx.notify();
     }
 
@@ -1085,6 +1106,7 @@ impl FilesSurface {
                         if let Some((source, hash)) = highlight {
                             surface.request_file_highlight(task_path.clone(), source, hash, cx);
                         }
+                        if surface.preview.outline_open && surface.preview.active.as_deref() == Some(&task_path) { surface.request_file_outline(cx); }
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file load failed");
@@ -1273,9 +1295,44 @@ impl FilesSurface {
             self.require_review_comment_flush(path, cx);
         }
         self.request_editor_highlight(path.to_string(), source, revision, cx);
+        if self.preview.outline_open && self.preview.active.as_deref() == Some(path) { self.request_file_outline(cx); }
         self.schedule_autosave(path.to_string(), cx);
         cx.emit(FilesEvent::TitleChanged);
         cx.notify();
+    }
+
+    fn request_file_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.preview.active.clone() else { return; };
+        let Some(document) = self.preview.documents.get(&path) else { return; };
+        let source = document.editor.as_ref().map(|editor| editor.read(cx).value().to_string())
+            .or_else(|| document.file.as_ref().and_then(|file| file.text.clone()));
+        let Some(source) = source else { return; };
+        let key = document.key.clone();
+        let generation = document.generation;
+        let revision = document.revision;
+        self.preview.outline_path = Some(path.clone());
+        self.preview.outline_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(120)).await;
+            let task_path = path.clone();
+            let symbols = cx.background_executor().spawn(async move { mast_syntax::symbols::extract(&source, &task_path, 5_000) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.preview.outline_open || this.preview.active.as_deref() != Some(&path) || !this.preview.documents.get(&path).is_some_and(|document| document.accepts(&key, generation) && document.revision == revision) { return; }
+                this.preview.outline_symbols = symbols;
+                this.preview.outline_list.reset_with_uniform_height(this.preview.outline_symbols.len(), px(28.0));
+                this.preview.outline_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn render_outline_row(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(symbol) = self.preview.outline_symbols.get(index) else { return gpui::Empty.into_any_element(); };
+        let line = symbol.start_line;
+        let label = format!("{}  {} · {}", format!("{:?}", symbol.kind).to_lowercase(), symbol.name, line);
+        let theme = Theme::of(cx).clone();
+        div().id(("file-outline-symbol", index)).h(px(28.0)).px(px(10.0)).w_full().flex().items_center().cursor_pointer().text_color(theme.text).hover(|style| style.bg(theme.surface_raised)).child(div().truncate().child(label))
+            .on_click(cx.listener(move |this, _, window, cx| { this.reveal_editor_location(line, None, cx); this.focus_editor(window, cx); }))
+            .into_any_element()
     }
 
     fn request_editor_highlight(
@@ -1980,6 +2037,15 @@ impl FilesSurface {
                 .values()
                 .any(document_blocks_lifecycle);
         let body = self.render_document_body(&active, &theme, window, cx);
+        let outline = self.preview.outline_open.then(|| {
+            if self.preview.outline_symbols.is_empty() {
+                div().px(px(10.0)).py(px(6.0)).text_color(theme.text_muted).child(if self.preview.outline_task.is_some() { "Loading symbols…" } else { "No symbols in this file" }).into_any_element()
+            } else {
+                list(self.preview.outline_list.clone(), cx.processor(Self::render_outline_row))
+                    .h(px((self.preview.outline_symbols.len() as f32 * 28.0).min(180.0)))
+                    .with_sizing_behavior(ListSizingBehavior::Auto).into_any_element()
+            }
+        });
         div()
             .size_full()
             .min_w_0()
@@ -2138,6 +2204,7 @@ impl FilesSurface {
                     )
                 },
             )
+            .children(outline)
             .child(body)
             .into_any_element()
     }
@@ -2259,6 +2326,17 @@ impl FilesSurface {
                 .flex_none(),
             )
             .child(crumbs)
+            .child(
+                toolbar_button("files-outline", "File symbols", theme)
+                    .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.preview.outline_open))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview.outline_open = !this.preview.outline_open;
+                        if this.preview.outline_open { this.request_file_outline(cx); }
+                        else { this.preview.outline_task = None; }
+                        cx.notify();
+                    }))
+                    .child(icon(icons::LIST).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)),
+            )
             .when(markdown, |element| {
                 element.child(
                     toolbar_button(
