@@ -91,8 +91,7 @@ the user stated a goal, decision or preference), call `artifact_publish` once wi
 `title: \"Manager status\"` and the whole document as inline `content` (no `path`; you cannot write files). \
 Start with a line `Updated: <current date and time>`, then use exactly these level-two sections in order: Goals and priorities; Active work items and workers; Decisions; \
 Open questions; Standing preferences; Recent user requests (the last 5, quoted verbatim). Write \"None\" for an \
-empty section. Rewrite the whole document each time so it stands alone for a successor. Mast checks for the new \
-revision after the turn and asks once if it is missing.";
+empty section. Rewrite the whole document each time so it stands alone for a successor.";
 
 /// What Mast sends when a state-changing turn ended without a new revision.
 /// It stands alone: a manager whose instructions predate the status rule can

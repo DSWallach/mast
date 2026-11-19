@@ -5444,67 +5444,46 @@ fn nudges(rig: &Rig) -> usize {
         .count()
 }
 
-/// A manager turn that dispatches a worker and does not publish gets exactly
-/// one reminder turn; the reminder turn failing to publish ends it. A later
-/// turn that dispatches and publishes is left alone.
+/// A real state-changing Manager turn must not create an automatic reminder;
+/// manual publication remains available in the same turn.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_manager_turn_that_dispatches_without_a_status_is_nudged_once_and_publishing_clears_it() {
-    let (rig, _item) = role_rig("status-nudge").await;
-    let status = rig.core.sessions.agent_tokens();
-    let open = || rig.core.sessions.turn_in_flight(CHAT);
-
-    // Turn 1 dispatches (creates a work item) and publishes nothing.
-    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && open(), "turn 1 tracked").await;
+async fn manager_changes_do_not_create_reminders_and_manual_publish_still_works() {
+    let (rig, _item) = role_rig("status-reminders-disabled").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("change and publish", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && rig.core.sessions.turn_in_flight(CHAT), "manager turn").await;
     let token = run_token(&rig, 0);
-    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "w1" }))
-        .await
-        .unwrap();
-    rig.harness.release.notify_one();
-
-    // Exactly one reminder turn follows, and it carries the system message.
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
-    assert_eq!(nudges(&rig), 1);
-    wait_for(open, "reminder turn tracked").await;
-    rig.harness.release.notify_one();
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 2, "no second reminder");
-    assert_eq!(nudges(&rig), 1);
-
-    // Turn 3 dispatches and publishes: no reminder.
-    rig.core.doc_host.queue_command(CHAT, run_command("another", &rig.space_path)).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 3 && open(), "turn 3 tracked").await;
-    let token = run_token(&rig, 2);
-    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Second", "idempotencyKey": "w2" }))
-        .await
-        .unwrap();
-    let published = tool(
-        &rig,
-        &token,
-        "artifact_publish",
-        json!({ "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "s1",
-                "content": status_document("09:00") }),
-    )
-    .await
-    .unwrap();
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "disabled-w1" })).await.unwrap();
+    let published = tool(&rig, &token, "artifact_publish", json!({
+        "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "disabled-s1",
+        "content": status_document("09:00")
+    })).await.unwrap();
     assert_eq!(published["revision"], 1);
+    // An additional uncovered mutation makes the no-reminder check meaningful.
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Later task", "idempotencyKey": "disabled-w2" })).await.unwrap();
     rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "manager turn to close").await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 3, "publishing clears the reminder");
-    assert_eq!(nudges(&rig), 1);
+    assert_eq!(nudges(&rig), 0);
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+    assert!(rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+}
 
-    // Turn 4 dispatches again without publishing: the earlier checkpoint
-    // (revision 1) does not satisfy it, so it is reminded.
-    rig.core.doc_host.queue_command(CHAT, run_command("and again", &rig.space_path)).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 4 && open(), "turn 4 tracked").await;
-    let token = run_token(&rig, 3);
-    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Third", "idempotencyKey": "w3" }))
-        .await
-        .unwrap();
-    rig.harness.release.notify_one();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 5, "the second turn's reminder").await;
-    assert_eq!(nudges(&rig), 2);
-    rig.harness.release.notify_one();
+/// Disabling reminders must not discard an ordinary queued message, even if
+/// the user copied the old reminder text into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn disabled_reminders_preserve_ordinary_queue_rows() {
+    let (rig, _item) = role_rig("status-disabled-queue").await;
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    rig.core.doc_host.pause_all_queues();
+    let text = mast_proto::manager_status_nudge_text(0);
+    rig.core.doc_host.queue_message_with_id(CHAT, "user-copy", &text, Vec::new(), true).await.unwrap();
+    rig.core.sessions.agent_tokens().manager_status().changed(CHAT);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "user-copy");
+    assert_eq!(rows[0].text, text);
+    assert_eq!(nudges(&rig), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5526,10 +5505,9 @@ async fn manager_admin_read_and_dry_run_do_not_owe_a_reminder() {
     assert_eq!(nudges(&rig), 0);
 }
 
-/// The watcher may not have seen the run start (or the turn may be over before
-/// it looks): the tool call itself opens the turn, and the end is read live.
+/// A fast tool call and turn close do not start a reminder.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_manager_turn_is_nudged_even_when_the_tool_call_beats_the_watcher() {
+async fn a_fast_manager_tool_call_does_not_create_a_reminder() {
     let (rig, _item) = role_rig("status-fast").await;
     rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
     // No wait for the tracker: call as soon as the run exists.
@@ -5539,9 +5517,9 @@ async fn a_manager_turn_is_nudged_even_when_the_tool_call_beats_the_watcher() {
         .await
         .unwrap();
     rig.harness.release.notify_one();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
-    assert_eq!(nudges(&rig), 1);
-    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
 }
 
 fn nudge_prompts(rig: &Rig) -> Vec<String> {
@@ -5592,10 +5570,9 @@ async fn plant_stamped_status(rig: &Rig, id: &str, item: &str, revisions: u32) {
     rig.core.workspace.put_artifact(&view).unwrap();
 }
 
-/// An existing status record sets where a turn starts from: its earlier
-/// revisions never satisfy a turn that changed state and published nothing.
+/// An existing status record does not cause a reminder.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_existing_status_record_seeds_the_turns_baseline() {
+async fn an_existing_status_record_does_not_trigger_a_reminder() {
     let (rig, item) = role_rig("status-seeded").await;
     plant_stamped_status(&rig, "status-seeded-doc", &item, 3).await;
     rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
@@ -5605,17 +5582,14 @@ async fn an_existing_status_record_seeds_the_turns_baseline() {
         .await
         .unwrap();
     rig.harness.release.notify_one();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains("latest revision is 3"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
 }
 
-/// Turn B starts the moment turn A ends. A's publication belongs to A: B
-/// changed state and published nothing, so B is reminded.
+/// Consecutive turns do not cause a reminder after the second changes state.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_turn_is_not_satisfied_by_the_previous_turns_publication() {
+async fn consecutive_manager_turns_do_not_trigger_reminders() {
     let (rig, _item) = role_rig("status-consecutive").await;
     rig.core.doc_host.queue_command(CHAT, run_command("first", &rig.space_path)).unwrap();
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "turn A").await;
@@ -5642,19 +5616,14 @@ async fn a_turn_is_not_satisfied_by_the_previous_turns_publication() {
         .await
         .unwrap();
     rig.harness.release.notify_one();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 3, "the reminder for B").await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains("latest revision is 1"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    wait_for(|| !rig.core.sessions.turn_in_flight(CHAT), "turn to close").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&rig), 0);
 }
 
-/// A Manager's first turn is queued before its chat becomes the role holder,
-/// so it can end first. Its project comes from the provisional marker, the
-/// record that already exists sets its baseline, and the check waits for
-/// adoption instead of discarding the turn.
+/// A provisional Manager can change state before adoption without a reminder.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
+async fn adopting_a_manager_does_not_trigger_a_reminder() {
     use mast_proto::StandingRoleKind;
     let rig = rig().await;
     let item = create_item(&rig, "status-first-item", "Manager", None).await;
@@ -5687,19 +5656,14 @@ async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "nothing is asked before adoption");
 
     rig.core.workspace.activate_standing_role_chat(StandingRoleKind::Manager, &item, first, &[]).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder after adoption").await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains("latest revision is 2"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
 }
 
-/// A hand-off's successor is a plain chat whose first turn is queued before the
-/// role rotates to it. The reserved hand-off names it, so the turn is placed in
-/// the intended project, starts from that project's existing record, and is
-/// checked once the successor holds the role.
+/// A successor can change state before rotation without a reminder.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_late() {
+async fn rotating_a_manager_does_not_trigger_a_reminder() {
     let (rig, item) = role_rig("status-successor").await;
     plant_stamped_status(&rig, "status-successor-doc", &item, 4).await;
     let successor = "successor-chat";
@@ -5727,18 +5691,14 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_la
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
 
     rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder after rotation").await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains("latest revision is 4"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
 }
 
-/// A reservation can stand while the successor runs many turns. Each of them
-/// is owed, none is lost however many there are, and they ask the same thing,
-/// so they share one reminder once the successor holds the role.
+/// Many successor changes followed by rotation do not create reminders.
 #[tokio::test(flavor = "multi_thread")]
-async fn many_turns_before_adoption_keep_their_obligation_and_ask_once() {
+async fn many_turns_before_rotation_do_not_trigger_reminders() {
     let (rig, item) = role_rig("status-many").await;
     plant_stamped_status(&rig, "status-many-doc", &item, 4).await;
     let successor = "many-successor";
@@ -5768,12 +5728,9 @@ async fn many_turns_before_adoption_keep_their_obligation_and_ask_once() {
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
 
     rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder").await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1, "one reminder, not one per held turn");
-    assert!(prompts[0].contains("latest revision is 4"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
 }
 
 /// A hand-off that never completes leaves its successor a non-holder: the
@@ -5810,7 +5767,7 @@ async fn a_failed_handoff_never_nudges_a_non_holder() {
 
     // The successor is deleted: that is a confirmed failure, the obligation ends.
     assert!(rig.core.workspace.delete_chat(successor).unwrap());
-    wait_for(|| !tokens.manager_status().owes(successor), "the obligation to end").await;
+
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
@@ -5839,7 +5796,7 @@ async fn a_replaced_handoff_reservation_drops_the_first_successors_turn() {
     // The first reservation is replaced before its turn ends.
     rig.core.workspace.reserve_standing_role_hand_off(CHAT, "second-successor", "op-r2", None).unwrap();
     drop(lease);
-    wait_for(|| !tokens.manager_status().owes("first-successor"), "the obligation to be dropped").await;
+
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
@@ -5849,6 +5806,7 @@ async fn a_replaced_handoff_reservation_drops_the_first_successors_turn() {
 /// and the next prompt is steered into the same run. Each turn is checked on its
 /// own, whatever the token does. The reminder is itself a steered turn.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
 async fn warm_turns_sharing_one_token_are_checked_separately() {
     let warm = Arc::new(Warm::default());
     let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
@@ -5972,7 +5930,8 @@ async fn a_prompt_steered_into_a_parked_run_is_numbered_before_the_agent_can_act
     // turn settles without a status, one reminder is steered in.
     *warm.on_steer.lock().unwrap() = None;
     feed_done();
-    wait_for(|| reminders() == 1, "the reminder for the change").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
 }
 
 /// The reminder is steered into a turn that is already running. No new turn
@@ -6023,7 +5982,8 @@ async fn a_reminder_steered_into_an_active_turn_does_not_strand_later_reminders(
         .await
         .unwrap();
     feed_done();
-    wait_for(|| reminders() == 1, "the next turn's reminder").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6066,6 +6026,7 @@ async fn delayed_old_session_closure_cannot_settle_a_newly_dispatched_reminder()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
 async fn watcher_retries_a_real_context_queue_failure_without_other_changes() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (rig, _) = role_rig("status-queue-retry").await;
@@ -6091,6 +6052,7 @@ async fn watcher_retries_a_real_context_queue_failure_without_other_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "automatic Manager reminders are temporarily disabled"]
 async fn watcher_withdraws_covered_queue_row_and_wakes_for_newer_generation() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let (rig, _) = role_rig("status-withdraw-wake").await;
@@ -6223,7 +6185,8 @@ async fn a_queued_reminder_steered_into_an_active_turn_is_settled_by_it() {
         .await
         .unwrap();
     feed_done();
-    wait_for(|| reminders() == 1, "the next turn's reminder").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
 }
 
 /// The user-message write fails after the mailbox accepted a prompt (injected
@@ -6262,7 +6225,8 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
         .await
         .unwrap();
     feed_done();
-    wait_for(|| reminders() == 1, "the reminder for the turn after the error").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
 }
 
 /// A warm run keeps its token while parked. A change made with it between turns
@@ -6287,13 +6251,13 @@ async fn a_change_made_on_a_parked_runs_token_between_turns_still_owes_a_status(
     tool(&rig, &token, "work_outline_create_child", json!({ "title": "Between turns", "idempotencyKey": "it1" }))
         .await
         .unwrap();
-    wait_for(|| reminders() == 1, "the reminder for the change made between turns").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reminders(), 0);
 }
 
-/// Adoption can land before anyone has looked at the turns that ended without
-/// the role. Their obligation was merged when they ended, so it is still one.
+/// Rotation immediately after successor changes does not create reminders.
 #[tokio::test(flavor = "multi_thread")]
-async fn adoption_right_after_the_turns_end_still_yields_one_reminder() {
+async fn immediate_rotation_does_not_trigger_a_reminder() {
     let (rig, item) = role_rig("status-adopt-fast").await;
     plant_stamped_status(&rig, "status-adopt-fast-doc", &item, 4).await;
     let successor = "fast-successor";
@@ -6318,12 +6282,9 @@ async fn adoption_right_after_the_turns_end_still_yields_one_reminder() {
     }
     // No pause: the role moves while the turns may still be unexamined.
     rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
-    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder").await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let prompts = nudge_prompts(&rig);
-    assert_eq!(prompts.len(), 1, "one reminder, not one per turn");
-    assert!(prompts[0].contains("latest revision is 4"), "{}", prompts[0]);
-    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(nudge_prompts(&rig).is_empty());
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
 }
 
 /// A worker chat's own dispatches are not a manager's: no reminder, and the
@@ -6341,7 +6302,7 @@ async fn a_chat_that_is_not_a_manager_is_never_reminded() {
         .unwrap();
     rig.harness.release.notify_one();
     let tokens = rig.core.sessions.agent_tokens();
-    wait_for(|| !tokens.manager_status().owes(CHAT), "the change to be forgiven: this chat manages nothing").await;
+
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
     assert_eq!(nudges(&rig), 0);

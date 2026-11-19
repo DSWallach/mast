@@ -227,8 +227,6 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
-    /// The Manager status reminder watcher, stopped first on shutdown.
-    manager_status_watch: std::sync::Mutex<Option<manager_status::ManagerStatusWatch>>,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -680,8 +678,8 @@ impl EngineCore {
             data_dir,
         )?;
         orchestrator_wakes.spawn_watchers();
-        let manager_status_watch =
-            manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone(), sessions.clone());
+        // Automatic Manager status reminders are disabled until their delivery
+        // can be fenced against role handoff and older hosts.
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
@@ -718,7 +716,6 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
-            manager_status_watch: std::sync::Mutex::new(Some(manager_status_watch)),
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -928,10 +925,6 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
-        let watch = self.manager_status_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        if let Some(watch) = watch {
-            watch.stop().await;
-        }
         let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;

@@ -38,15 +38,9 @@ A role chat can only hand off through a host that moves roles. If the chat's hos
 
 A project's manager keeps one artifact on the project item, **Manager status**, with a new revision for every update. It is what a replacement manager starts from after a hand-off, and you can open it from the item like any artifact. Its sections are fixed: goals and priorities, active work items and their workers, decisions, open questions, standing preferences, and your last five requests word for word. It begins with an `Updated:` line.
 
-**One update can cover several turns.** Mast does not ask for a status after every turn. It follows what the manager has actually changed:
+Automatic Manager status reminders are temporarily disabled. The manager can still publish a status manually after changing project state.
 
-- Each time one of the manager's state-changing calls succeeds (creating or dispatching a worker or item, changing a status, archiving a chat, raising or resolving a Required Action), the status is owed.
-- A status update covers every change that had completed before the manager started publishing it. A change that completes while the update is being published, or after it, is still owed, and a checkpoint made before a change never covers it. A replayed publish, or one with unchanged text, covers nothing new.
-- When the manager is idle and still owes the status, Mast sends it one reminder turn that asks for the update. If the reminder turn ends without covering what it asked about, Mast gives up on those changes and logs it. It does not ask again for them, but a newer change earns a new reminder.
-- Changes made with a warm session's token while it is parked between turns count too, so an idle manager can get a reminder.
-- Chats that do not manage a project are never reminded. A new manager or a hand-off's successor is reminded only once it holds the role.
-
-The manager is meant to update it at the end of any turn that changed state. The built-in manager instructions that ask for this arrive with the manager behavior work; until then Mast's reminder turn carries the full instructions (the `Updated:` line, the sections and the inline publish), so it works without them.
+Upgrading preserves existing queued messages. Reminders queued by an earlier build have no reliable marker that distinguishes them from ordinary messages, so they are not automatically removed; a prompt already accepted by a harness cannot be recalled. Older hosts can continue to create or deliver reminders until they are upgraded or fenced.
 
 The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
 

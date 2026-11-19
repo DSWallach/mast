@@ -1,4 +1,5 @@
-//! Keeps a project's Manager status record current.
+//! Tracks changes and publications for a project's Manager status record.
+//! Automatic reminders are temporarily disabled; the watcher is not started.
 //!
 //! A manager's changes and its status are tied together per chat, by the order
 //! in which things actually completed, not by turns:
