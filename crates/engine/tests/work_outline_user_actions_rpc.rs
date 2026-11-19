@@ -71,6 +71,14 @@ async fn seed(client: &mast_rpc::RpcClient) -> (String, String) {
             .await
             .unwrap();
     }
+    // New chats get a default work item; chat-2 is explicitly detached so it
+    // stays unassigned.
+    mutate(
+        client,
+        json!({ "op": "removeChatFromWorkItem", "chatId": "chat-2", "operationId": "op-detach-2" }),
+    )
+    .await
+    .unwrap();
     let a = derive_id("op-a", roles::ITEM);
     let b = derive_id("op-b", roles::ITEM);
     mutate(
