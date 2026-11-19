@@ -1219,6 +1219,27 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-19 14:30; coordinator d7779d53)
+
+- **Installed: release 114** (c68a6d151), full perf gate (soak vs 113: CPU 6.0 vs 5.7 %, footprint 510 vs 513 MB,
+  git/min 127 vs 123, within run-to-run noise). Code review & navigation waves 2–4 (Mikey: "make all of them",
+  2026-11-18; container item b8ccbcd9, plan mast-artifact:060317a6):
+  - **Review phase 6** (Sonnet after Terra stalled): "Submit review…" posts one batched review via the user's `gh`,
+    only on a click. SubmitReview/PrepareReviewSubmit are refused on the localhost WebSocket port and relay
+    (HumanOnlyGate, engine/src/human_only.rs); placement against GitHub's patch with ±2 context lines; a persisted
+    per-target nonce + saved comments (with body hashes) prevent double posts across lost responses, timeouts,
+    restarts and edits. Four review rounds. Untested against real GitHub: Mikey's first live post is the check.
+  - **Symbol index** (Terra): engine-owned tree-sitter index started on first use (LRU 2 checkouts, idle retire),
+    query RPC (≤200, truncated flag), symbol picker on **⌥⇧⌘O provisional** (Mikey to decide ⇧⌘O swap with
+    Overview, request a62da6b9), outline, ⌘F in code, back/forward (keymap), per-file history following renames.
+    Two review rounds plus coordinator follow-ups (ffe95781e).
+  - Installed-graph baseline updated (engine → mast-syntax; no new crates); the first release run failed only on that.
+- **Security follow-up logged** (Bugs, 3196df1d): the engine's localhost RPC port is unauthenticated and agents get
+  it; any agent shell can call any RPC. Only Submit review is gated so far. Needs a design pass.
+- In progress: scope map (Terra, fix round after review). Queued: pop-out windows spike, provenance + blame, review
+  phase 7, go-to-definition, then wave 4 (right-pane split, diagrams tied to code, dependency overlay, opt-in LSP).
+- Mikey's running Mast predates 112; one restart picks up 112–114.
+
 ## In flight (snapshot 2026-11-18 17:05; coordinator d7779d53)
 
 - **Installed: release 113** (2a24619b4), full perf gate (soak vs 112: CPU 6.0 vs 5.8 %, footprint 533 vs 572 MB,
