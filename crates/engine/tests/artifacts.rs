@@ -2884,16 +2884,14 @@ async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_pr
     assert_eq!(entries[0]["revision"], 2);
     assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:05"));
 
-    // A chat in another project sees nothing; a chat with no item reads nothing.
-    let other = tool(&rig, &rig.other_token, "briefing_read", json!({ "kind": "manager-status" }))
-        .await
-        .unwrap();
-    assert!(other["briefings"].as_array().unwrap().is_empty());
-    let lone = tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status" })).await;
-    assert!(
-        lone.as_ref().map_or(true, |read| read["briefings"].as_array().is_some_and(Vec::is_empty)),
-        "{lone:?}"
-    );
+    // A chat outside any project reads nothing, whether refused or empty.
+    for token in [&rig.other_token, &rig.lone_token] {
+        let outside = tool(&rig, token, "briefing_read", json!({ "kind": "manager-status" })).await;
+        assert!(
+            outside.as_ref().map_or(true, |read| read["briefings"].as_array().is_some_and(Vec::is_empty)),
+            "{outside:?}"
+        );
+    }
     // The default kind never returns the status record.
     let scheduled = tool(&rig, &rig.token, "briefing_read", json!({})).await.unwrap();
     assert!(scheduled["briefings"].as_array().unwrap().is_empty());
@@ -3008,4 +3006,77 @@ async fn the_stamped_manager_status_outlives_the_history_limit() {
     assert_eq!(entries.len(), 1, "{read}");
     assert_eq!(entries[0]["revision"], 1);
     assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:00"));
+}
+
+async fn plant_status(rig: &Rig, id: &str, item: &str) {
+    let role_id = mast_proto::standing_role_id(mast_proto::StandingRoleKind::Manager, item);
+    let view = ArtifactView {
+        id: id.into(),
+        space_id: SPACE.into(),
+        device_id: rig.core.device_id.clone(),
+        work_item_id: Some(item.into()),
+        title: "Manager status".into(),
+        role: Some("manager-status".into()),
+        kind: ArtifactKind::Markdown,
+        current_revision: 1,
+        revisions: vec![mast_proto::ArtifactRevision {
+            id: 1,
+            hash: format!("{:064x}", 1),
+            at: 10,
+            by: mast_proto::WorkOutlineActor {
+                kind: mast_proto::WorkOutlineActorKind::Agent,
+                chat_id: Some("gone".into()),
+                ..Default::default()
+            },
+            manager_status: Some(mast_proto::ManagerStatusStamp { role_id, chat_id: "gone".into() }),
+            ..Default::default()
+        }],
+        created_at: 1,
+        updated_at: 1,
+        ..Default::default()
+    };
+    rig.core.workspace.put_artifact(&view).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nested_project_reads_its_own_status_and_never_the_enclosing_one() {
+    let rig = rig().await;
+    let make = |op: &str, title: &str, parent: Option<&str>| {
+        let mut params = json!({ "op": "createWorkItem", "spaceId": SPACE, "title": title, "operationId": op });
+        if let Some(parent) = parent {
+            params["parentWorkItemId"] = json!(parent);
+        }
+        params
+    };
+    outline(&rig.client, make("op-outer", "Outer project", None)).await;
+    let outer = derive_id("op-outer", roles::ITEM);
+    outline(&rig.client, make("op-inner", "Inner project", Some(&outer))).await;
+    let inner = derive_id("op-inner", roles::ITEM);
+    outline(&rig.client, make("op-leaf", "Inner task", Some(&inner))).await;
+    let leaf = derive_id("op-leaf", roles::ITEM);
+    for (op, item) in [("op-mark-outer", &outer), ("op-mark-inner", &inner)] {
+        outline(
+            &rig.client,
+            json!({ "op": "updateWorkItem", "workItemId": item, "changes": { "isProject": true },
+                    "operationId": op }),
+        )
+        .await;
+    }
+    plant_status(&rig, "status-outer", &outer).await;
+    plant_status(&rig, "status-inner", &inner).await;
+    // LONE_CHAT works on a task inside the inner project.
+    outline(
+        &rig.client,
+        json!({ "op": "assignChatToWorkItem", "chatId": LONE_CHAT, "workItemId": leaf,
+                "operationId": "op-assign-leaf" }),
+    )
+    .await;
+
+    let read = tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status", "index": true }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{read}");
+    assert_eq!(entries[0]["artifactId"], "status-inner");
+    assert_eq!(entries[0]["workItemId"], inner.as_str());
 }

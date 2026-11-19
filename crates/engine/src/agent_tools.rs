@@ -939,13 +939,21 @@ impl AgentToolsService {
                         "the Manager status is read from a chat that works under a project item",
                     )
                 })?;
-                let scope = crate::briefing::ProjectSubtreeScope::new(&caller.space_id, item, |id| {
-                    snapshot
-                        .items
-                        .iter()
-                        .find(|i| i.id == id)
-                        .and_then(|i| i.parent_work_item_id.clone())
-                });
+                // The nearest project only: a manager reads its own project's
+                // record, and a chat in a nested project never the enclosing one.
+                let project = match crate::manager_status::managed_project(&self.workspace, &caller.chat_id) {
+                    Some((_, project)) => project,
+                    None => snapshot
+                        .project_root(item)
+                        .map(|project| project.id.clone())
+                        .ok_or_else(|| {
+                            AgentToolError::refused(
+                                AgentToolErrorCode::Unsupported,
+                                "the Manager status is read from a chat inside a project",
+                            )
+                        })?,
+                };
+                let scope = crate::briefing::ProjectSubtreeScope::new(&caller.space_id, &project);
                 let query = crate::briefing::BriefingQuery::new(kind).index_only(index_only);
                 (crate::briefing::read(&service, &scope, &query, &caller.space_id)?, 0)
             }
@@ -1119,7 +1127,7 @@ impl AgentToolsService {
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
         let result = self.dispatch(&context, &params.tool, &arguments);
         if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
-            self.tokens.manager_status().note_state_change(&context.grant.chat_id);
+            self.note_manager_state_change(&context);
         }
         result
             .map_err(|error| match error {
@@ -1129,6 +1137,20 @@ impl AgentToolsService {
                 } => AgentToolError::invalid(agent_tools::with_usage(&params.tool, &message)),
                 other => other,
             })
+    }
+
+    /// A state-changing call during a run: the chat's turn owes a Manager
+    /// status revision if the chat manages a project. Opens the turn when the
+    /// watcher has not seen the run start; ignored when no run is in flight.
+    fn note_manager_state_change(&self, context: &CallContext) {
+        let chat_id = &context.grant.chat_id;
+        if lock(&self.sessions).as_ref().is_some_and(|s| !s.turn_in_flight(chat_id)) {
+            return;
+        }
+        self.tokens.manager_status().note_state_change(chat_id, || {
+            crate::manager_status::managed_project(&self.workspace, chat_id)
+                .map_or(0, |(space, item)| crate::manager_status::status_revision(&self.workspace, &space, &item))
+        });
     }
 
     fn dispatch(

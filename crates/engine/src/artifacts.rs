@@ -3009,12 +3009,10 @@ impl ArtifactsService {
             return Err(invalid("the project is in another Space"));
         }
         mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
-        // Unique per call: processes sharing a temp folder and an operation id
-        // must not stage into, or delete, each other's directory.
-        let dir = std::env::temp_dir().join(format!("mast-manager-status-{}", crate::new_id()));
-        let source = dir.join("manager-status.md");
-        std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&source, content))
+        // A private folder per call, removed on every path out.
+        let dir = tempfile::tempdir().map_err(|e| ArtifactError::io(e.to_string()))?;
+        let source = dir.path().join("manager-status.md");
+        std::fs::write(&source, content)
             .map_err(|e| ArtifactError::invalid(format!("could not stage the status document: {e}")))?;
         let recorded = self.record(PublishRequest {
             space_id: caller.space_id.clone(),
@@ -3029,7 +3027,7 @@ impl ArtifactsService {
             operation_id: Some(operation_id),
             by: caller.actor(),
         });
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(dir);
         let reply = recorded?;
         Ok(json!({
             "artifactId": reply.artifact_id,

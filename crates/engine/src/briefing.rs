@@ -60,7 +60,7 @@ impl BriefingKind {
     /// The newest revision written by whoever may write this kind, if any. An
     /// artifact with none is treated as absent, and a later edit by anyone
     /// else never hides the last genuine revision.
-    fn newest_trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> Option<u32> {
+    pub(crate) fn newest_trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> Option<u32> {
         match self {
             Self::ScheduledResults => artifact
                 .revisions
@@ -161,25 +161,18 @@ impl BriefingScope for SpaceScope<'_> {
 }
 
 /// A chat inside a project reads that project's Manager status and nothing
-/// else: only the status kind, and only on the caller's item or one of its
-/// ancestors. Other projects' records are refused like missing ones.
+/// else: only the status kind, and only the record on the nearest project
+/// around the caller. An enclosing project's record, another project's, and
+/// everything outside are refused like missing ones.
 pub struct ProjectSubtreeScope {
     space_id: String,
-    items: Vec<String>,
+    project_id: String,
 }
 
 impl ProjectSubtreeScope {
-    /// `item_id` is the item the caller works under; `parents` maps an item id
-    /// to its parent id.
-    pub fn new(space_id: &str, item_id: &str, parent_of: impl Fn(&str) -> Option<String>) -> Self {
-        let mut items = vec![item_id.to_owned()];
-        while let Some(parent) = parent_of(items.last().expect("never empty")) {
-            if items.contains(&parent) {
-                break;
-            }
-            items.push(parent);
-        }
-        Self { space_id: space_id.to_owned(), items }
+    /// `project_id` is the nearest project at or above the caller's item.
+    pub fn new(space_id: &str, project_id: &str) -> Self {
+        Self { space_id: space_id.to_owned(), project_id: project_id.to_owned() }
     }
 }
 
@@ -187,15 +180,11 @@ impl BriefingScope for ProjectSubtreeScope {
     fn permits(&self, source: &BriefingSource<'_>) -> bool {
         source.kind == BriefingKind::ManagerStatus
             && source.artifact.space_id == self.space_id
-            && source
-                .artifact
-                .work_item_id
-                .as_ref()
-                .is_some_and(|item| self.items.contains(item))
+            && source.artifact.work_item_id.as_deref() == Some(self.project_id.as_str())
     }
 
     fn permits_work_item(&self, space_id: &str, work_item_id: &str) -> bool {
-        space_id == self.space_id && self.items.iter().any(|item| item == work_item_id)
+        space_id == self.space_id && work_item_id == self.project_id
     }
 }
 
@@ -949,6 +938,7 @@ mod tests {
             0
         );
     }
+
     fn status(id: &str, item: &str, space: &str, at: i64) -> ArtifactView {
         let mut a = artifact(id, "unused", "Manager status", space, at);
         a.role = Some(mast_proto::MANAGER_STATUS_ROLE.into());
@@ -979,47 +969,33 @@ mod tests {
     }
 
     #[test]
-    fn the_project_scope_admits_the_callers_project_and_refuses_the_rest() {
-        let parent = |item: &str| match item {
-            "worker-item" => Some("proj".to_owned()),
-            "proj" => Some("root".to_owned()),
-            _ => None,
-        };
+    fn the_project_scope_admits_only_its_own_projects_record() {
         let all = || {
             vec![
                 status("mine", "proj", "s", 1),
-                status("theirs", "other-proj", "s", 2),
-                status("elsewhere", "proj", "other-space", 3),
+                status("enclosing", "outer", "s", 2),
+                status("theirs", "other-proj", "s", 3),
+                status("elsewhere", "proj", "other-space", 4),
             ]
         };
-        for caller_item in ["proj", "worker-item"] {
-            let scope = ProjectSubtreeScope::new("s", caller_item, parent);
-            let found = pick(all(), &scope, &BriefingQuery::new(BriefingKind::ManagerStatus)).unwrap();
-            assert_eq!(ids(&found), ["mine"], "{caller_item}");
-        }
-        let stranger = ProjectSubtreeScope::new("s", "unrelated", parent);
-        assert!(pick(all(), &stranger, &BriefingQuery::new(BriefingKind::ManagerStatus)).unwrap().is_empty());
+        let scope = ProjectSubtreeScope::new("s", "proj");
+        let found = pick(all(), &scope, &BriefingQuery::new(BriefingKind::ManagerStatus)).unwrap();
+        assert_eq!(ids(&found), ["mine"]);
         // The scope never opens scheduled results.
-        let scope = ProjectSubtreeScope::new("s", "proj", parent);
         let mut results = artifact("a", "t1", "Results: Slack", "s", 1);
         results.work_item_id = Some("proj".into());
         assert!(pick(vec![results], &scope, &BriefingQuery::new(BriefingKind::ScheduledResults)).unwrap().is_empty());
     }
 
     #[test]
-    fn the_project_scope_counts_required_actions_only_inside_the_project() {
-        let scope = ProjectSubtreeScope::new("s", "worker-item", |i| (i == "worker-item").then(|| "proj".to_owned()));
+    fn the_project_scope_counts_required_actions_only_in_its_project() {
+        let scope = ProjectSubtreeScope::new("s", "proj");
         assert!(scope.permits_work_item("s", "proj"));
-        assert!(scope.permits_work_item("s", "worker-item"));
+        assert!(!scope.permits_work_item("s", "outer"));
         assert!(!scope.permits_work_item("s", "other-proj"));
         assert!(!scope.permits_work_item("other-space", "proj"));
     }
 
-    #[test]
-    fn a_parent_cycle_ends() {
-        let scope = ProjectSubtreeScope::new("s", "a", |i| Some(if i == "a" { "b" } else { "a" }.to_owned()));
-        assert!(pick(vec![status("x", "b", "s", 1)], &scope, &BriefingQuery::new(BriefingKind::ManagerStatus)).unwrap().len() == 1);
-    }
     #[test]
     fn a_manager_status_revision_is_trusted_by_its_stamp_not_by_a_live_chat() {
         use mast_proto::{ManagerStatusStamp, WorkOutlineActor};
@@ -1046,6 +1022,7 @@ mod tests {
         let wrong = ArtifactRevision { by: agent("gone"), manager_status: stamp("elsewhere"), ..Default::default() };
         assert!(!manager_provenance(&artifact, &wrong));
     }
+
     #[test]
     fn a_newer_unstamped_edit_does_not_hide_the_last_stamped_manager_status() {
         use mast_proto::{ManagerStatusStamp, WorkOutlineActor};

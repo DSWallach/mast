@@ -95,6 +95,8 @@ empty section. Rewrite the whole document each time so it stands alone for a suc
 revision after the turn and asks once if it is missing.";
 
 /// What Mast sends when a state-changing turn ended without a new revision.
+/// It stands alone: a manager whose instructions predate the status rule can
+/// still do exactly what it asks.
 pub fn manager_status_nudge_text(baseline_revision: u32) -> String {
     let basis = if baseline_revision == 0 {
         "no revision exists yet".to_owned()
@@ -103,9 +105,12 @@ pub fn manager_status_nudge_text(baseline_revision: u32) -> String {
     };
     format!(
         "{} for the Manager status record]\nYour last turn changed state but did not publish a new Manager status ({basis}). \
-Publish it now with `artifact_publish` (`role: \"manager-status\"`, `title: \"Manager status\"`, inline `content`), \
-then stop. Do not do other work in this turn.",
-        crate::SYSTEM_MESSAGE_PREFIX
+Publish it now with `artifact_publish`: `role: \"manager-status\"`, `title: \"Manager status\"`, the whole document as inline `content` (no `path`), a one-line `note` and an `idempotencyKey`. \
+Start the document with a line `Updated: <current date and time>`, then exactly these level-two sections in order: {sections}. \
+Put the last {recent} user requests word for word under the last one, and write \"None\" under an empty section. Then stop; do not do other work in this turn.",
+        crate::SYSTEM_MESSAGE_PREFIX,
+        sections = MANAGER_STATUS_SECTIONS.join("; "),
+        recent = MANAGER_STATUS_RECENT_REQUESTS,
     )
 }
 
@@ -187,5 +192,11 @@ mod tests {
         assert!(manager_status_nudge_text(3).starts_with(crate::SYSTEM_MESSAGE_PREFIX));
         assert!(manager_status_nudge_text(3).contains("revision is 3"));
         assert!(manager_status_nudge_text(0).contains("no revision exists"));
+        // It stands alone: the sections, the first line and the inline content.
+        let text = manager_status_nudge_text(1);
+        for section in MANAGER_STATUS_SECTIONS {
+            assert!(text.contains(section), "{section}");
+        }
+        assert!(text.contains("Updated:") && text.contains("inline `content`"));
     }
 }

@@ -174,9 +174,11 @@ work items inside the manager's project subtree.
 
 `briefing_read {kind: "manager-status"}` reads a project's Manager status record
 (default kind is `scheduled-results`). The scope is `ProjectSubtreeScope`: the
-record on the caller's own item or one of its ancestors, and nothing else. A
-chat in another project gets an empty list, and a chat with no work item is
-refused. The reply has the same shape, with one entry and `needYou: 0`. An unknown
+record on the nearest project around the caller (a manager's own project; for
+any other chat, the nearest project at or above its item), and nothing else. A
+nested project's chat never receives the enclosing project's record, and a chat
+never receives another project's. A chat outside any project, or with no work
+item, is refused. The reply has the same shape, with one entry and `needYou: 0`. An unknown
 `kind` is an error.
 
 The Manager status is published with `artifact_publish` and inline `content`

@@ -44,8 +44,8 @@ pub mod linear;
 pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
-mod model_catalogs;
 pub mod manager_status;
+mod model_catalogs;
 pub mod orchestrator_wakes;
 pub mod permission_rules;
 pub mod personal_assistant;
@@ -225,6 +225,8 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
+    /// The Manager status reminder watcher, stopped first on shutdown.
+    manager_status_watch: std::sync::Mutex<Option<manager_status::ManagerStatusWatch>>,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -669,7 +671,8 @@ impl EngineCore {
             .personal_assistant()
             .set_store(data_dir.join("personal-assistant.json"));
         orchestrator_wakes.spawn_watchers();
-        manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone(), sessions.clone());
+        let manager_status_watch =
+            manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone(), sessions.clone());
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));
@@ -706,6 +709,7 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
+            manager_status_watch: std::sync::Mutex::new(Some(manager_status_watch)),
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -915,6 +919,10 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        let watch = self.manager_status_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(watch) = watch {
+            watch.stop().await;
+        }
         let retention=self.token_usage_retention.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(retention)=retention{retention.abort();let _=retention.await;}
         self.scheduled_tasks.shutdown().await;

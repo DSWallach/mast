@@ -91,24 +91,31 @@ impl Harness for GatedHarness {
     fn id(&self) -> HarnessId {
         if self.fake_codex { HarnessId::Codex } else { HarnessId::Mock }
     }
+
     fn display_name(&self) -> &str {
         "Gated"
     }
+
     fn supports_steering(&self) -> bool {
         false
     }
+
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::TurnBoundary
     }
+
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
     }
+
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
+
     fn supports_agent_tools(&self) -> bool {
         true
     }
+
     fn instruction_support(&self) -> mast_harness::InstructionSupport {
         mast_harness::InstructionSupport::Supported {
             channel: mast_harness::InstructionChannel::Test,
@@ -116,6 +123,7 @@ impl Harness for GatedHarness {
             max_bytes: 64 * 1024,
         }
     }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -127,6 +135,7 @@ impl Harness for GatedHarness {
         self.requests.lock().unwrap().push(request.clone());
         Ok(self.stream(&request))
     }
+
     async fn run_with_agent_tools(
         &self,
         request: RunRequest,
@@ -5113,4 +5122,65 @@ async fn a_manager_turn_that_dispatches_without_a_status_is_nudged_once_and_publ
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 5, "the second turn's reminder").await;
     assert_eq!(nudges(&rig), 2);
     rig.harness.release.notify_one();
+}
+
+/// The watcher may not have seen the run start (or the turn may be over before
+/// it looks): the tool call itself opens the turn, and the end is read live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_turn_is_nudged_even_when_the_tool_call_beats_the_watcher() {
+    let (rig, _item) = role_rig("status-fast").await;
+    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
+    // No wait for the tracker: call as soon as the run exists.
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the run").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "f1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
+    assert_eq!(nudges(&rig), 1);
+    rig.harness.release.notify_one();
+}
+
+/// A Manager's first turn is queued before its chat becomes the role holder.
+/// A state-changing call made in that window still owes a status once the
+/// role is adopted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_before_the_role_is_adopted_still_owes_a_status() {
+    use mast_proto::StandingRoleKind;
+    let rig = rig().await;
+    let item = create_item(&rig, "status-first-item", "Manager", None).await;
+    assign_chat(&rig, "status-first-assignment", CHAT, &item).await;
+    rig.core.doc_host.queue_command(CHAT, run_command("first message", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the first turn").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "p1" }))
+        .await
+        .unwrap();
+    rig.core.workspace.adopt_standing_role(StandingRoleKind::Manager, &item, CHAT, &[]).unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
+    assert_eq!(nudges(&rig), 1);
+    rig.harness.release.notify_one();
+}
+
+/// A worker chat's own dispatches are not a manager's: no reminder, and the
+/// tracker does not keep the chat's turn open afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_that_is_not_a_manager_is_never_reminded() {
+    let rig = rig().await;
+    let item = create_item(&rig, "status-plain-item", "Plain", None).await;
+    assign_chat(&rig, "status-plain-assignment", CHAT, &item).await;
+    rig.core.doc_host.queue_command(CHAT, run_command("go", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the run").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Child", "idempotencyKey": "n1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    let tokens = rig.core.sessions.agent_tokens();
+    wait_for(|| !tokens.manager_status().turn_open(CHAT), "the turn to be dropped").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
+    assert_eq!(nudges(&rig), 0);
 }
