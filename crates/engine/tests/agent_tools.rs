@@ -5413,7 +5413,7 @@ async fn a_batch_whose_preview_grew_gets_its_own_approval_and_the_old_token_cann
     let stale = admin(&rig, &token, json!({
         "idempotencyKey": "ap-grow", "steps": steps, "confirmToken": first["confirmToken"]
     })).await.unwrap_err();
-    assert!(stale.contains("more items than the user was shown"), "{stale}");
+    assert!(stale.contains("preview changed"), "{stale}");
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
 }
 
@@ -5491,4 +5491,110 @@ async fn a_create_under_a_container_template_is_charged_its_whole_expansion() {
     let actual = subtree(&snap, &created);
     assert_eq!(actual, 3, "the child and its two template items");
     assert_eq!(5 - enough.remaining(), actual, "charged exactly the subtree it created");
+}
+
+#[test]
+fn a_batch_budget_survives_a_restart_and_a_fresh_approval_adds_to_what_is_spent() {
+    use mast_engine::admin::AdminGrants;
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("admin-grants.json");
+    let first = AdminGrants::default();
+    first.set_store(store.clone());
+    let budget = first.batch_budget("exec-1", 10);
+    assert!(budget.reserve(4));
+    assert!(!budget.reserve(7), "only 6 are left");
+    assert_eq!(budget.remaining(), 6);
+    drop((budget, first));
+
+    // A restart keeps what the first attempt committed.
+    let second = AdminGrants::default();
+    second.set_store(store);
+    let budget = second.batch_budget("exec-1", 10);
+    assert_eq!(budget.remaining(), 6, "committed charges survive a restart");
+    // A fresh approval is for 12 more, on top of the 4 already spent.
+    budget.allow(12);
+    assert_eq!(budget.remaining(), 12);
+    assert!(budget.reserve(12));
+    assert_eq!(budget.remaining(), 0);
+    // A reservation whose write did not commit is given back.
+    budget.refund(5);
+    assert_eq!(budget.remaining(), 5);
+}
+
+#[test]
+fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
+    use mast_engine::admin::AdminGrants;
+    let grants = AdminGrants::default();
+    let token = grants.open_approval("chat", "exec-a", "hash-a", "request-1", 12);
+    // The same count with a different resolved preview is not what was shown.
+    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b").unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+    // Another chat or another batch cannot use it.
+    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a").is_err());
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a").unwrap_err().contains("another batch"));
+    // The first claim is fresh; a retry of that batch resumes it even though its
+    // own earlier steps moved the preview; no other batch can take it over.
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a").unwrap(), ("request-1".into(), 12, true));
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved").unwrap(), ("request-1".into(), 12, false));
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a").is_err());
+
+    // Racing claims from many batches: exactly one gets it.
+    let token = grants.open_approval("chat", "exec-0", "hash", "request-2", 11);
+    let wins = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let (grants, token) = (&grants, &token);
+                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash").is_ok())
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
+    });
+    assert_eq!(wins, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_is_priced_in_order_before_its_first_write() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    // Priced against the opening tree this is 1 + 1 + 4 = 6 items. In order, the
+    // template set by step 2 makes each later create expand to 3: 1 + 1 + 12.
+    let mut steps = vec![
+        json!({ "op": "create", "parentId": p.project, "title": "Boxed", "ref": "b" }),
+        json!({ "op": "template_set", "itemId": "$b",
+                "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } } }),
+    ];
+    for i in 0..4 {
+        steps.push(json!({ "op": "create", "parentId": "$b", "title": format!("Box item {i}") }));
+    }
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "seq-1", "steps": steps })).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert_eq!(reply["count"], 14, "{reply}");
+    assert!(
+        !snapshot(&rig).items.iter().any(|i| i.title == "Boxed"),
+        "nothing was written before approval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_distinct_execution_of_the_same_steps_gets_its_own_approval_and_a_committed_retry_replays() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("ex-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let one = admin(&rig, &token, json!({ "idempotencyKey": "exec-one", "steps": steps })).await.unwrap();
+    let two = admin(&rig, &token, json!({ "idempotencyKey": "exec-two", "steps": steps })).await.unwrap();
+    assert_ne!(one["requestId"], two["requestId"], "each execution asks on its own");
+    // One execution's token cannot authorize another.
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "exec-two", "steps": steps, "confirmToken": one["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("another batch"), "{err}");
+
+    // A committed batch retried with the same key replays instead of charging again.
+    let rename = json!([{ "op": "rename", "itemId": p.ticket, "title": "Once" }]);
+    admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
+    admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "Once");
 }

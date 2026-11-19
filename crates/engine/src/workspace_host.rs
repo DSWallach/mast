@@ -1110,6 +1110,15 @@ impl WorkspaceHost {
         })
     }
 
+    /// Run `f` on a scratch copy of the registry: nothing it does is written,
+    /// synced or kept. Used to price a batch step by step before any write.
+    pub fn stage<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> Result<R, String> {
+        let (bytes, device) = self.read(|doc| (doc.to_bytes(), doc.device_id().to_owned()));
+        let bytes = bytes.map_err(|error| error.to_string())?;
+        let mut staged = RegistryDoc::from_bytes(&bytes, &device).map_err(|error| error.to_string())?;
+        Ok(f(&mut staged))
+    }
+
     /// [`Self::work_outline_mutate`] for an agent holding a live admin grant
     /// on `admin_space` (the engine re-checks the grant per call).
     pub fn work_outline_mutate_admin(
@@ -1128,15 +1137,22 @@ impl WorkspaceHost {
                 _ => 0,
             };
             let request_item = guard.and_then(|g| g.request_item.as_deref());
-            let reply = doc.with_manager_request_item(request_item, |doc| {
+            let applied = doc.with_manager_request_item(request_item, |doc| {
                 doc.with_admin_scope(admin_space, |doc| {
                     doc.apply_work_outline_mutation(mutation, actor, now)
                 })
-            })?;
-            // Committed under this same lock: charge the batch what it affected.
-            if let Some(guard) = guard {
-                guard.debit(charge);
-            }
+            });
+            // The charge was reserved by the guard before the write; a write
+            // that did not commit gives it back.
+            let reply = match applied {
+                Ok(reply) => reply,
+                Err(error) => {
+                    if let Some(guard) = guard {
+                        guard.refund(charge);
+                    }
+                    return Err(error.into());
+                }
+            };
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
             Ok(reply)
         })

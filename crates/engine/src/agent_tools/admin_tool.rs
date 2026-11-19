@@ -738,23 +738,19 @@ impl AgentToolsService {
         let steps_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&actions).unwrap_or_default()));
         let op_for = |i: usize| agent_tools::operation_id(&context.grant.chat_id, &format!("{key}#{i}"));
 
-        // Preview: build every step against placeholders.
-        let mut refs: HashMap<String, String> = HashMap::new();
-        let mut preview = Vec::new();
-        for (i, step) in actions.iter().enumerate() {
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true, who: who() };
-            let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
-            if let Some(name) = built.creates_ref {
-                refs.insert(name.clone(), format!("${name}"));
-            }
-            preview.push(built.summary);
-        }
+        // Preview: price every step in order against a scratch copy of the
+        // registry, so what an earlier step sets up (a template, a new item)
+        // is in the cost of the later ones, and nothing is written before the
+        // whole batch is known to be within what may run.
+        let exec_key = format!("{}:{key}:{}", context.grant.chat_id, &steps_hash[..16]);
+        let sequence = self.preview_sequence(context, &space, &actions, &key, &who())?;
+        let preview = sequence.lines;
         let dry_run = arguments.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
         let grant = admin.live(&context.grant.chat_id);
         let skip_bulk = grant.as_ref().is_some_and(|g| g.skip_bulk_confirmation);
-        let step_weights: Vec<usize> = actions.iter().map(|a| step_weight(&snapshot, a)).collect();
-        let weight: usize = step_weights.iter().sum();
+        let weight: usize = sequence.weights.iter().sum();
         let mut approved_weight: Option<usize> = None;
+        let mut claimed_token: Option<String> = None;
         let bulk = weight > ADMIN_BULK_THRESHOLD && !skip_bulk;
         let shown: Vec<&String> = preview.iter().take(PREVIEW_LINES).collect();
 
@@ -764,17 +760,14 @@ impl AgentToolsService {
         }
         if bulk {
             match confirm {
-                None => return self.open_bulk_approval(context, &steps_hash, weight, &preview),
+                None => return self.open_bulk_approval(context, &exec_key, &sequence.hash, weight, &preview),
                 Some(token) => {
-                    let (request_id, shown_weight) = admin
-                        .check_approval(&token, &context.grant.chat_id, &steps_hash)
+                    let (request_id, shown_weight, fresh) = admin
+                        .claim_approval(&token, &context.grant.chat_id, &exec_key, &sequence.hash)
                         .map_err(forbidden)?;
-                    if weight > shown_weight {
-                        return Err(forbidden(
-                            "the change now affects more items than the user was shown: request a new preview",
-                        ));
+                    if fresh {
+                        approved_weight = Some(shown_weight);
                     }
-                    approved_weight = Some(shown_weight);
                     let approved = snapshot.user_action_requests.iter().find(|r| r.id == request_id).is_some_and(|r| {
                         !r.is_open()
                             && r.resolution
@@ -792,7 +785,7 @@ impl AgentToolsService {
                     if dry_run {
                         return Ok(json!({ "dryRun": true, "approved": true, "count": actions.len(), "preview": shown }));
                     }
-                    admin.use_approval(&token);
+                    claimed_token = Some(token);
                 }
             }
         }
@@ -802,12 +795,15 @@ impl AgentToolsService {
         let turn_id = context.grant.run_id.clone();
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
-        // One budget per batch, shared by its steps and any retry of it.
+        // One budget per batch, shared by its steps, its retries and restarts.
+        // A fresh approval is for what is left to do, on top of what the
+        // earlier attempts already committed.
         let budget = manager_root.as_ref().map(|_| {
-            admin.batch_budget(
-                &format!("{}:{key}:{}", context.grant.chat_id, &steps_hash[..16]),
-                approved_weight.unwrap_or(ADMIN_BULK_THRESHOLD),
-            )
+            let budget = admin.batch_budget(&exec_key, ADMIN_BULK_THRESHOLD);
+            if let Some(allowance) = approved_weight {
+                budget.allow(allowance);
+            }
+            budget
         });
         for (i, step) in actions.iter().enumerate() {
             let still_allowed = match &manager_root {
@@ -870,6 +866,9 @@ impl AgentToolsService {
             );
             results.push(json!({ "summary": built.summary, "workItemId": reply.work_item_id }));
         }
+        if let Some(token) = &claimed_token {
+            admin.complete_approval(token);
+        }
         Ok(json!({
             "applied": results.len(),
             "results": results,
@@ -882,7 +881,8 @@ impl AgentToolsService {
     fn open_bulk_approval(
         &self,
         context: &CallContext,
-        steps_hash: &str,
+        exec_key: &str,
+        preview_hash: &str,
         count: usize,
         preview: &[String],
     ) -> Result<Value, AgentToolError> {
@@ -909,10 +909,13 @@ impl AgentToolsService {
         } else {
             String::new()
         };
-        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}-w{count}{holder}", &steps_hash[..16]);
-        // The request's identity covers the count it shows: a preview that grew
-        // gets its own request, never a replay of (or conflict with) the old one.
-        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}:{count}", &steps_hash[..24]));
+        // The request's identity is this execution and the resolved preview it
+        // shows (targets and counts): a preview that changed is its own
+        // request, and a distinct execution of the same steps never reuses
+        // an approval given to another.
+        let ident = format!("{:x}", Sha256::digest(format!("{exec_key}|{preview_hash}")));
+        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}{holder}", &ident[..16]);
+        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}", &ident[..24]));
         let request_text = format!(
             "Approve bulk change: {count} outline changes {}",
             if context.admin_space.is_some() {
@@ -957,7 +960,7 @@ impl AgentToolsService {
         let request_id = reply
             .user_action_request_id
             .ok_or_else(|| invalid("the approval request was not created"))?;
-        let token = self.tokens.admin().open_approval(&context.grant.chat_id, steps_hash, &request_id, count);
+        let token = self.tokens.admin().open_approval(&context.grant.chat_id, exec_key, preview_hash, &request_id, count);
         Ok(json!({
             "needsApproval": true,
             "count": count,
@@ -990,6 +993,79 @@ impl AgentToolsService {
             }
         }
         Ok(reply)
+    }
+}
+
+/// What a batch looks like when priced in order.
+struct Sequence {
+    lines: Vec<String>,
+    /// Items each step affects at the point it runs (0 = already committed).
+    weights: Vec<usize>,
+    /// Digest of the resolved steps and weights: what the user is shown.
+    hash: String,
+}
+
+/// `step` with every `$ref` that an earlier step created replaced by its id.
+fn with_refs(step: &Map<String, Value>, refs: &HashMap<String, String>) -> Map<String, Value> {
+    step.iter()
+        .map(|(key, value)| {
+            let resolved = value
+                .as_str()
+                .and_then(|text| text.strip_prefix('$'))
+                .and_then(|name| refs.get(name))
+                .map_or_else(|| value.clone(), |id| json!(id));
+            (key.clone(), resolved)
+        })
+        .collect()
+}
+
+impl AgentToolsService {
+    /// Price `actions` in order on a scratch copy of the registry: each step
+    /// is built and counted against the state the earlier ones leave, then
+    /// applied to the copy. A step an earlier attempt already committed costs
+    /// nothing and only supplies its `$ref`. Nothing is written.
+    fn preview_sequence(
+        &self,
+        context: &CallContext,
+        space: &str,
+        actions: &[Map<String, Value>],
+        key: &str,
+        who: &str,
+    ) -> Result<Sequence, AgentToolError> {
+        let actor = self.work_outline.agent_actor(&context.grant.chat_id, None);
+        let synced = self.workspace.registry_synced();
+        let now = chrono::Utc::now().timestamp_millis();
+        let op_for = |i: usize| agent_tools::operation_id(&context.grant.chat_id, &format!("{key}#{i}"));
+        self.workspace
+            .stage(|doc| -> Result<Sequence, AgentToolError> {
+                let mut refs: HashMap<String, String> = HashMap::new();
+                let (mut lines, mut weights, mut canon) = (Vec::new(), Vec::new(), Vec::new());
+                for (i, step) in actions.iter().enumerate() {
+                    let snapshot = doc.work_outline_snapshot(space, synced);
+                    let ctx = Ctx { snapshot: &snapshot, space_id: space, refs: refs.clone(), dry: false, who: who.to_owned() };
+                    let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
+                    lines.push(built.summary.clone());
+                    if let Some(reply) = self.work_outline.committed_reply(&built.mutation) {
+                        if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id) {
+                            refs.insert(name, id);
+                        }
+                        weights.push(0);
+                        continue;
+                    }
+                    let weight = step_weight(&snapshot, &with_refs(step, &refs));
+                    let reply = doc
+                        .with_admin_scope(Some(space), |doc| doc.apply_work_outline_mutation(&built.mutation, &actor, now))
+                        .map_err(|e| step_error(i, invalid(e.to_wire_message())))?;
+                    if let (Some(name), Some(id)) = (built.creates_ref.clone(), reply.work_item_id.clone()) {
+                        refs.insert(name, id);
+                    }
+                    weights.push(weight);
+                    canon.push(json!({ "step": i, "mutation": built.mutation, "weight": weight }));
+                }
+                let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&canon).unwrap_or_default()));
+                Ok(Sequence { lines, weights, hash })
+            })
+            .map_err(invalid)?
     }
 }
 

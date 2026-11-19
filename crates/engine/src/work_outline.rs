@@ -304,25 +304,30 @@ impl ManagerGuard {
                 "a chat is no longer assigned inside the managed project; nothing was changed",
             ));
         }
-        // The step may affect no more items than the batch has left.
-        let charge: usize = self.effects.iter().map(|(op, item)| step_effects(&snapshot, op, item)).sum();
-        if self.budget.as_ref().is_some_and(|budget| charge > budget.remaining()) {
-            return Err(WorkOutlineError::unauthorized(
-                "the change now affects more items than were approved; ask again. Nothing was changed",
-            ));
-        }
         if let Some(item) = &self.request_item
             && (*item != self.root || snapshot.item(item).is_none())
         {
             return Err(WorkOutlineError::unauthorized("approval requests belong on the managed project item"));
         }
+        // Last, because it reserves: the step may affect no more items than
+        // the batch has left. Reserved before the write (and persisted), so a
+        // crash after it can only over-count; the caller refunds if the write
+        // does not commit.
+        let charge: usize = self.effects.iter().map(|(op, item)| step_effects(&snapshot, op, item)).sum();
+        if let Some(budget) = &self.budget
+            && !budget.reserve(charge)
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "the change now affects more items than were approved; ask again. Nothing was changed",
+            ));
+        }
         Ok(charge)
     }
 
-    /// Debit what a committed step affected from the batch budget.
-    pub fn debit(&self, charge: usize) {
+    /// Give back a reservation whose write did not commit.
+    pub fn refund(&self, charge: usize) {
         if let Some(budget) = &self.budget {
-            budget.debit(charge);
+            budget.refund(charge);
         }
     }
 }
@@ -469,6 +474,20 @@ impl WorkOutlineService {
             space_id: space_id.to_owned(),
             work_item,
         })
+    }
+
+    /// The reply of `mutation` if an earlier attempt already committed it
+    /// (the same replay check `mutate_as` makes), else `None`.
+    pub fn committed_reply(&self, mutation: &WorkOutlineMutation) -> Option<WorkOutlineMutateReply> {
+        let operation_id = mutation.operation_id().to_owned();
+        let recent = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, reply)) = recent.get(&operation_id) {
+            return Some(reply.clone());
+        }
+        drop(recent);
+        self.workspace
+            .ledger_holds(&ledger_operation_key(&operation_id))
+            .then(|| replay_reply(mutation))
     }
 
     /// Apply one mutation as `actor` (kill switch, replay ledger, then one
