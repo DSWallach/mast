@@ -42,15 +42,19 @@ pub(super) enum EditorContextAction {
 
 /// Locate the identifier at a cursor offset for keyboard and context-menu navigation.
 /// The editor exposes the cursor but not its syntax tree; use its source text here.
-pub(super) fn identifier_at_cursor(source: &str, offset: usize) -> Option<std::ops::Range<usize>> {
+pub(super) fn identifier_at_cursor(source: &str, offset: usize, path: &str) -> Option<std::ops::Range<usize>> {
     if offset > source.len() || !source.is_char_boundary(offset) { return None; }
+    let ruby = mast_syntax::language_for_path(path) == Some(mast_syntax::LanguageId::Ruby);
     let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
-    let start = source[..offset].char_indices().rev()
+    let anchor = if ruby && offset > 0 && matches!(source.as_bytes()[offset - 1], b'?' | b'!') { offset - 1 } else { offset };
+    let start = source[..anchor].char_indices().rev()
         .find(|(_, character)| !is_identifier(*character))
         .map_or(0, |(index, character)| index + character.len_utf8());
-    let end = source[offset..].char_indices()
+    let mut end = source[anchor..].char_indices()
         .find(|(_, character)| !is_identifier(*character))
-        .map_or(source.len(), |(index, _)| offset + index);
+        .map_or(source.len(), |(index, _)| anchor + index);
+    if ruby && start < end && matches!(source.as_bytes().get(end), Some(b'?' | b'!'))
+        && !(source.as_bytes()[end] == b'!' && source.as_bytes().get(end + 1) == Some(&b'=')) { end += 1; }
     (start < end).then_some(start..end)
 }
 
@@ -199,9 +203,14 @@ mod tests {
     #[test]
     fn identifier_at_cursor_respects_unicode_boundaries() {
         let text = "call(élève_2);";
-        assert_eq!(&text[identifier_at_cursor(text, 8).unwrap()], "élève_2");
-        assert!(identifier_at_cursor(text, 6).is_none());
-        assert!(identifier_at_cursor(text, text.len()).is_none());
+        assert_eq!(&text[identifier_at_cursor(text, 8, "a.rs").unwrap()], "élève_2");
+        assert!(identifier_at_cursor(text, 6, "a.rs").is_none());
+        assert!(identifier_at_cursor(text, text.len(), "a.rs").is_none());
+        for name in ["ready?", "save!"] {
+            assert_eq!(&name[identifier_at_cursor(name, name.len(), "a.rb").unwrap()], name);
+            assert_eq!(&name[identifier_at_cursor(name, name.len() - 1, "a.rb").unwrap()], name);
+        }
+        assert_eq!(&"ready?"[identifier_at_cursor("ready?", 2, "a.rs").unwrap()], "ready");
     }
 
     #[test]

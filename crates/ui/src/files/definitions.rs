@@ -396,7 +396,7 @@ impl super::FilesSurface {
         let editor = editor.read(cx);
         let source = editor.value();
         let cursor = editor.cursor();
-        let Some(range) = super::editor::identifier_at_cursor(source.as_ref(), cursor) else { return; };
+        let Some(range) = super::editor::identifier_at_cursor(source.as_ref(), cursor, &path) else { return; };
         let name = source[range].to_string();
         let original_source = source.to_string();
         let Some(context) = self.request_context.clone() else { return; };
