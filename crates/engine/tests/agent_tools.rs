@@ -5427,3 +5427,68 @@ async fn step_effects_counts_a_plain_create_as_one_and_an_archive_as_its_subtree
     assert_eq!(step_effects(&snap, "rename", &p.ticket), 1);
     assert_eq!(step_effects(&snap, "archive", &p.tickets), 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_under_a_container_template_is_charged_its_whole_expansion() {
+    use mast_engine::admin::BatchBudget;
+    use mast_engine::work_outline::{ManagerGuard, step_effects};
+    use mast_proto::WorkOutlineMutation;
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    // Every child of Tickets follows: the child itself plus Planning and Tickets (3 items).
+    admin(&rig, &token, json!({ "idempotencyKey": "tpl-set", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    assert_eq!(step_effects(&snapshot(&rig), "create", &p.tickets), 3);
+    // The preview counts the expansion: four creates are 12 items, over the
+    // threshold, though they are only four steps.
+    let steps: Vec<Value> = (0..4)
+        .map(|i| json!({ "op": "create", "parentId": p.tickets, "title": format!("Preview {i}") }))
+        .collect();
+    let preview = admin(&rig, &token, json!({ "idempotencyKey": "tpl-preview", "steps": steps })).await.unwrap();
+    assert_eq!(preview["needsApproval"], true, "{preview}");
+    assert_eq!(preview["count"], 12, "{preview}");
+
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let create = |op: &str, title: &str| -> WorkOutlineMutation {
+        serde_json::from_value(json!({
+            "op": "createWorkItem", "spaceId": SPACE, "title": title,
+            "parentWorkItemId": p.tickets, "operationId": op
+        })).unwrap()
+    };
+    let guard = |budget: &std::sync::Arc<BatchBudget>| ManagerGuard {
+        chat_id: CHAT.into(),
+        root: p.project.clone(),
+        inside: vec![p.tickets.clone()],
+        effects: vec![("create".into(), p.tickets.clone())],
+        budget: Some(budget.clone()),
+        ..Default::default()
+    };
+    let children = |rig: &Rig| snapshot(rig).item(&p.tickets).unwrap().child_ids.len();
+    let before = children(&rig);
+
+    // An approval of 2 cannot cover a create that expands to 3: refused, nothing written.
+    let small = BatchBudget::new(2);
+    let err = outline
+        .mutate_guarded(&create("tpl-small", "Too big"), &actor, Some(SPACE), Some(&guard(&small)))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert_eq!(children(&rig), before, "no item was created");
+    assert_eq!(small.remaining(), 2, "a refused step charges nothing");
+
+    // A sufficient budget creates it and is charged the actual subtree size.
+    let enough = BatchBudget::new(5);
+    let reply = outline
+        .mutate_guarded(&create("tpl-ok", "Fits"), &actor, Some(SPACE), Some(&guard(&enough)))
+        .unwrap();
+    let created = reply.work_item_id.expect("the new item id");
+    let snap = snapshot(&rig);
+    fn subtree(snap: &WorkOutlineSnapshot, id: &str) -> usize {
+        1 + snap.item(id).unwrap().child_ids.iter().map(|c| subtree(snap, c)).sum::<usize>()
+    }
+    let actual = subtree(&snap, &created);
+    assert_eq!(actual, 3, "the child and its two template items");
+    assert_eq!(5 - enough.remaining(), actual, "charged exactly the subtree it created");
+}
