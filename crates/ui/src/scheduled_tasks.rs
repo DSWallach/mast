@@ -2046,6 +2046,12 @@ mod tests {
         cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
         cx.run_until_parked();
         let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            // The page's own List request is never answered; it must not hold Save back.
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
             let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is offered")).center();
             cx.simulate_click(at, gpui::Modifiers::default());
             cx.run_until_parked();
@@ -2089,7 +2095,9 @@ mod tests {
         };
 
         // Off (the new-task default) -> on.
+        assert_eq!(setting(cx), Some(false));
         click(cx, "task-notion-writes");
+        assert_eq!(setting(cx), Some(true));
         click(cx, "task-save");
         let params = saved(&mut sent);
         assert_eq!(params["draft"]["writeToNotion"], true);
