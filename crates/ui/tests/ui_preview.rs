@@ -110,6 +110,8 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "team",
         "tracker-expanded",
         "code-reference",
+        "symbol-search",
+        "file-outline",
         "changes-expanded",
         "changes-collapsed",
         "changes-focus-resize",

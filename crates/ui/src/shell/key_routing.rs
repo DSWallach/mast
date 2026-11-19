@@ -23,12 +23,17 @@ pub fn apply_keymap(
     // gpui-base installed at startup. Reinitialize the component layer before
     // rebuilding Mast's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
+    crate::files::code_find::bind_keys(cx);
     crate::composer::init(cx, composer_send_behavior);
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
     crate::changes::walkthrough::bind_keys(cx, keymap);
+    cx.bind_keys([
+        KeyBinding::new("ctrl--", FileNavigationBack, Some("Files")),
+        KeyBinding::new("ctrl-shift--", FileNavigationForward, Some("Files")),
+    ]);
     // gpui-base binds Replace to Cmd+Shift+F in every Input. Remove that
     // binding before installing the user-configured search and replace keys.
     #[cfg(target_os = "macos")]

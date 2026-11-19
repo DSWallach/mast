@@ -18,6 +18,8 @@ use crate::{
 };
 
 mod code_ref_bar;
+pub(crate) mod code_find;
+mod file_history;
 pub mod client;
 pub mod document;
 pub mod editor;
@@ -125,6 +127,8 @@ pub(crate) fn workspace_path_drag_ghost(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
     OpenFile(String),
+    Jumped { path: String, from_line: u32, line: u32 },
+    OpenCommit(mast_proto::GitHistoryCommit),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
@@ -204,6 +208,8 @@ pub struct FilesSurface {
     watch_sequence: Option<u64>,
     watch_error: Option<SharedString>,
     preview: FilePreviewState,
+    code_find: Option<code_find::CodeFind>,
+    file_history: Option<file_history::FileHistoryView>,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
@@ -233,12 +239,16 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let code_find = if is_editor { self.render_code_find(window, cx) } else { None };
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
                 self.chat_id
             )))
             .key_context("Files")
+            .on_action(cx.listener(|this, _: &code_find::Open, window, cx| this.open_code_find(window, cx)))
+            .on_action(cx.listener(|this, _: &code_find::Next, window, cx| this.move_code_find(true, window, cx)))
+            .on_action(cx.listener(|this, _: &code_find::Previous, window, cx| this.move_code_find(false, window, cx)))
             .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| this.add_selected_code_to_chat(cx)))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
@@ -248,6 +258,7 @@ impl Render for FilesSurface {
             .bg(crate::theme::ink(0.0))
             .flex_col()
             .children(header)
+            .children(code_find)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
     }
@@ -538,6 +549,8 @@ impl FilesSurface {
                 word_wrap,
                 editor_font_size,
             ),
+            code_find: None,
+            file_history: None,
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
             error: None,
@@ -1030,6 +1043,8 @@ impl FilesSurface {
         self.watch_error = None;
         self.editor_context_menu = crate::popover::Popup::default();
         self.preview.reset();
+        self.code_find = None;
+        self.file_history = None;
         self.tree.reset();
         self.selected_editor_path = None;
         self.cancel_reveal();

@@ -58,9 +58,28 @@ struct ResultRow {
     changed: bool,
     symbol: Option<mast_syntax::symbols::Symbol>,
 }
-struct IndexedSymbol {
-    path: IndexedPath,
+pub(super) struct IndexedSymbol {
+    path: std::sync::Arc<str>,
+    lower_path: std::sync::Arc<str>,
+    lower_name: String,
     symbol: mast_syntax::symbols::Symbol,
+}
+
+fn symbol_score(symbol: &IndexedSymbol, query: &str) -> Option<i64> {
+    let name = &symbol.lower_name;
+    if name == query { return Some(10_000); }
+    if name.starts_with(query) { return Some(8_000 - name.len() as i64); }
+    if let Some(index) = name.find(query) { return Some(6_000 - index as i64 - name.len() as i64); }
+    if let Some(index) = symbol.lower_path.find(query) { return Some(4_000 - index as i64 - symbol.lower_path.len() as i64); }
+    let mut wanted = query.chars();
+    let mut current = wanted.next()?;
+    let mut gaps = 0;
+    for character in name.chars().chain(symbol.lower_path.chars()) {
+        if character == current {
+            match wanted.next() { Some(next) => current = next, None => return Some(2_000 - gaps - name.len() as i64), }
+        } else { gaps += 1; }
+    }
+    None
 }
 pub(super) struct WorkspaceSearch {
     chat_id: String,
@@ -85,26 +104,70 @@ pub(super) struct WorkspaceSearch {
     query_started: std::time::Instant,
     rendered_generation: Option<u64>,
     task: Option<Task<()>>,
-    symbol_task: Option<Task<()>>,
     symbols: Option<std::sync::Arc<Vec<IndexedSymbol>>>,
+    displayed_query: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
-    fn subscribe_workspace_symbols(&mut self, cx: &mut Context<Self>) {
-        let Some(search) = self.workspace_search.as_mut() else { return; };
-        let Some(context) = search.context.clone() else { search.status = "No workspace available".into(); return; };
-        let Some(engine) = self.state.read(cx).engine().cloned() else { search.status = "Workspace service unavailable".into(); return; };
+    fn refresh_workspace_symbols(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(context) = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat) else { return; };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let client = WorkspaceFilesClient::new(engine, context.clone());
-        search.status = "Indexing symbols…".into();
-        search.symbol_task = Some(cx.spawn(async move |this, cx| {
+        if self.workspace_symbol_index.is_some() {
+            self.workspace_symbol_updating = true;
+            if let Some(search) = self.workspace_search.as_mut().filter(|search| search.mode == SearchMode::Symbols) { search.status = "Updating…".into(); }
+            cx.notify();
+        }
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = client.refresh_symbols(force).await {
+                let _ = this.update(cx, |this, cx| {
+                    if FilesRequestContext::for_chat(this.state.read(cx), &this.active_chat).as_ref() != Some(&context) { return; }
+                    this.workspace_symbol_updating = false;
+                    if let Some(search) = this.workspace_search.as_mut().filter(|search| search.mode == SearchMode::Symbols) { search.status = error.to_string(); cx.notify(); }
+                });
+            }
+        }).detach();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_symbol_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_chat = "fixture-chat".into();
+        self.open_workspace_search(SearchMode::Symbols, window, cx);
+        if let Some(search) = self.workspace_search.as_mut() {
+            search.task = None;
+            search.rows = [("review_hunk_identity", "src/review.rs", 28, mast_syntax::symbols::SymbolKind::Function), ("ReviewHunk", "src/model.rs", 14, mast_syntax::symbols::SymbolKind::Type), ("review_hunk_stable", "tests/review.rs", 8, mast_syntax::symbols::SymbolKind::Test)].into_iter().map(|(name, path, line, kind)| ResultRow { path: path.into(), line: Some(line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(mast_syntax::symbols::Symbol { name: name.into(), kind, start_line: line, end_line: line + 2 }) }).collect();
+            search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+            search.status.clear();
+        }
+        cx.notify();
+    }
+
+    fn subscribe_workspace_symbols(&mut self, cx: &mut Context<Self>) {
+        let context = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat);
+        let engine = self.state.read(cx).engine().cloned();
+        let (Some(context), Some(engine)) = (context, engine) else {
+            self.workspace_symbol_key = None; self.workspace_symbol_engine = None; self.workspace_symbol_index = None; self.workspace_symbol_truncated = false; self.workspace_symbol_updating = false; self.workspace_symbol_task = None; self.workspace_symbol_error = None;
+            return;
+        };
+        let key = format!("{}\0{}", context.target_device_id.as_deref().unwrap_or(""), context.cwd);
+        if self.workspace_symbol_key.as_ref() == Some(&key) && self.workspace_symbol_engine.as_ref().is_some_and(|old| old.same_connection(&engine)) { return; }
+        self.workspace_symbol_key = Some(key.clone());
+        self.workspace_symbol_engine = Some(engine.clone());
+        self.workspace_symbol_index = None;
+        self.workspace_symbol_truncated = false;
+        self.workspace_symbol_updating = false;
+        self.workspace_symbol_error = None;
+        let client = WorkspaceFilesClient::new(engine, context.clone());
+        self.workspace_symbol_task = Some(cx.spawn(async move |this, cx| {
             let mut stream = match client.watch_symbols().await {
                 Ok(stream) => stream,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) {
-                            search.status = error.to_string(); cx.notify();
-                        }
+                        if this.workspace_symbol_key.as_ref() != Some(&key) { return; }
+                        this.workspace_symbol_error = Some(error.to_string());
+                        this.workspace_symbol_index = None;
+                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols) { search.status = error.to_string(); cx.notify(); }
                     });
                     return;
                 }
@@ -113,34 +176,64 @@ impl Shell {
                 if let Some(error) = frame.get("error").and_then(|value| value.as_str()) {
                     let error = error.to_owned();
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) { search.status = error; cx.notify(); }
+                        if this.workspace_symbol_key.as_ref() != Some(&key) { return; }
+                        this.workspace_symbol_error = Some(error.clone());
+                        this.workspace_symbol_index = None;
+                        if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols) { search.status = error; cx.notify(); }
                     });
                     continue;
                 }
-                let Some(files) = frame.as_object_mut().and_then(|object| object.remove("files")) else { continue; };
+                let truncated = frame.get("truncated").and_then(|value| value.as_bool()).unwrap_or(false);
+                let updating = frame.get("updating").and_then(|value| value.as_bool()).unwrap_or(false);
+                let files = frame.as_object_mut().and_then(|object| object.remove("files"));
+                if files.is_none() {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.workspace_symbol_key.as_ref() != Some(&key) { return; }
+                        this.workspace_symbol_updating = updating;
+                        this.workspace_symbol_truncated = truncated;
+                        if let Some(search) = this.workspace_search.as_mut().filter(|search| search.mode == SearchMode::Symbols) {
+                            search.status = if updating { "Updating…".into() } else if truncated { "Symbol index reached its limit; results are incomplete.".into() } else if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
+                            cx.notify();
+                        }
+                    });
+                    continue;
+                }
+                let files = files.unwrap();
                 let entries = cx.background_executor().spawn(async move {
                     let files = serde_json::from_value::<std::collections::BTreeMap<String, Vec<mast_syntax::symbols::Symbol>>>(files).ok()?;
                     let mut entries = Vec::new();
                     for (path, symbols) in files {
-                        let lower_path = path.to_lowercase();
+                        let lower_path: std::sync::Arc<str> = path.to_lowercase().into();
+                        let path: std::sync::Arc<str> = path.into();
                         for symbol in symbols {
-                            entries.push(IndexedSymbol { path: IndexedPath { path: path.clone(), lower_path: format!("{} {lower_path}", symbol.name.to_lowercase()), lower_name: symbol.name.to_lowercase() }, symbol });
+                            entries.push(IndexedSymbol { path: path.clone(), lower_path: lower_path.clone(), lower_name: symbol.name.to_lowercase(), symbol });
                         }
                     }
                     Some(std::sync::Arc::new(entries))
                 }).await;
                 let Some(entries) = entries else { continue; };
                 if !this.update(cx, |this, cx| {
-                    let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.context.as_ref() == Some(&context)) else { return false; };
-                    search.symbols = Some(entries);
-                    this.update_workspace_search(cx);
+                    if this.workspace_symbol_key.as_ref() != Some(&key) { return false; }
+                    this.workspace_symbol_index = Some(entries.clone());
+                    this.workspace_symbol_truncated = truncated;
+                    this.workspace_symbol_updating = updating;
+                    this.workspace_symbol_error = None;
+                    if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols) { search.symbols = Some(entries); this.update_workspace_search(cx); }
                     true
                 }).unwrap_or(false) { break; }
             }
+            let _ = this.update(cx, |this, cx| {
+                if this.workspace_symbol_key.as_ref() == Some(&key) && this.workspace_symbol_error.is_none() {
+                    this.workspace_symbol_error = Some("Symbol index disconnected".into());
+                    this.workspace_symbol_index = None;
+                    if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols) { search.status = "Symbol index disconnected".into(); cx.notify(); }
+                }
+            });
         }));
     }
 
     pub(super) fn prewarm_workspace_search(&mut self, cx: &mut Context<Self>) {
+        self.subscribe_workspace_symbols(cx);
         let context = FilesRequestContext::for_chat(self.state.read(cx), &self.active_chat);
         let engine = self.state.read(cx).engine().cloned();
         let (Some(context), Some(engine)) = (context, engine) else {
@@ -388,14 +481,24 @@ impl Shell {
             query_started: std::time::Instant::now(),
             rendered_generation: None,
             task: None,
-            symbol_task: None,
             symbols: None,
+            displayed_query: None,
             _subscriptions: subscriptions,
         });
         // Re-subscribe on an explicit open so the host requests a rate-limited
         // refresh even when this checkout was already prewarmed.
         if mode == SearchMode::Symbols {
+            if self.workspace_symbol_error.is_some() { self.workspace_symbol_key = None; }
             self.subscribe_workspace_symbols(cx);
+            if let Some(search) = self.workspace_search.as_mut() {
+                search.symbols = self.workspace_symbol_index.clone();
+                if let Some(entries) = &search.symbols {
+                    search.rows = entries.iter().take(200).map(|entry| ResultRow { path: entry.path.to_string(), line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol.clone()) }).collect();
+                    search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
+                    search.displayed_query = Some(String::new());
+                }
+            }
+            self.refresh_workspace_symbols(false, cx);
         } else {
             self.workspace_search_index_key = None;
             self.prewarm_workspace_search(cx);
@@ -436,19 +539,18 @@ impl Shell {
         search.generation = search.generation.wrapping_add(1);
         search.query_started = std::time::Instant::now();
         let generation = search.generation;
-        search.active = 0;
-        search.list.reset(0);
-        search.rows.clear();
-        search.status.clear();
         let mode = search.mode;
         let raw = search.input.read(cx).text().trim().to_owned();
+        let preserve = mode == SearchMode::Symbols && search.displayed_query.as_deref() == Some(raw.as_str());
+        if !preserve { search.active = 0; search.list.reset(0); search.rows.clear(); }
+        search.status.clear();
         if mode == SearchMode::Line {
             cx.notify();
             return;
         }
         if mode == SearchMode::Symbols {
             let Some(symbols) = search.symbols.clone() else {
-                search.status = "Indexing symbols…".into();
+                search.status = self.workspace_symbol_error.clone().unwrap_or_else(|| "Indexing symbols…".into());
                 cx.notify();
                 return;
             };
@@ -458,22 +560,29 @@ impl Shell {
                 return;
             }
             let query = raw.to_lowercase();
+            let displayed_query = raw.clone();
+            let index_truncated = self.workspace_symbol_truncated;
+            if self.workspace_symbol_updating { search.status = "Updating…".into(); }
             search.task = Some(cx.spawn(async move |this, cx| {
-                let rows = cx.background_executor().spawn(async move {
+                cx.background_executor().timer(Duration::from_millis(120)).await;
+                let (rows, results_truncated) = cx.background_executor().spawn(async move {
                     let mut matches: Vec<_> = symbols.iter().filter_map(|entry| {
-                        if query.is_empty() { Some((entry, 0)) } else { file_score(&entry.path, &query).map(|score| (entry, score)) }
+                        if query.is_empty() { Some((entry, 0)) } else { symbol_score(entry, &query).map(|score| (entry, score)) }
                     }).collect();
-                    let compare = |(a, a_score): &(&IndexedSymbol, i64), (b, b_score): &(&IndexedSymbol, i64)| b_score.cmp(a_score).then_with(|| a.path.lower_path.cmp(&b.path.lower_path)).then_with(|| a.symbol.start_line.cmp(&b.symbol.start_line));
-                    if matches.len() > 200 { matches.select_nth_unstable_by(200, compare); }
+                    let compare = |(a, a_score): &(&IndexedSymbol, i64), (b, b_score): &(&IndexedSymbol, i64)| b_score.cmp(a_score).then_with(|| a.lower_path.cmp(&b.lower_path)).then_with(|| a.symbol.start_line.cmp(&b.symbol.start_line));
+                    let results_truncated = matches.len() > 200;
+                    if results_truncated { matches.select_nth_unstable_by(200, compare); }
                     matches.truncate(200);
                     matches.sort_unstable_by(compare);
-                    matches.into_iter().map(|(entry, _)| ResultRow { path: entry.path.path.clone(), line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol.clone()) }).collect::<Vec<_>>()
+                    (matches.into_iter().map(|(entry, _)| ResultRow { path: entry.path.to_string(), line: Some(entry.symbol.start_line), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(entry.symbol.clone()) }).collect::<Vec<_>>(), results_truncated)
                 }).await;
                 let _ = this.update(cx, |this, cx| {
+                    let updating = this.workspace_symbol_updating;
                     let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols && s.generation == generation) else { return; };
                     search.rows = rows;
+                    search.displayed_query = Some(displayed_query);
                     search.list.reset_with_uniform_height(search.rows.len(), px(42.0));
-                    search.status = if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
+                    search.status = if updating { "Updating…".into() } else if index_truncated { "Symbol index reached its limit; results are incomplete.".into() } else if results_truncated { "Showing the first 200 matches".into() } else if search.rows.is_empty() { "No symbols found".into() } else { String::new() };
                     cx.notify();
                 });
             }));
@@ -809,7 +918,7 @@ impl Shell {
             match surface {
                 RightSurface::File(id) => {
                     if let Some(file) = self.file_surfaces.get(&id) {
-                        file.update(cx, |file, cx| file.reveal_editor_location(line, None, cx));
+                        file.update(cx, |file, cx| { file.record_code_jump(line, cx); file.reveal_editor_location(line, None, cx); });
                     }
                 }
                 RightSurface::Diff(id) => {
@@ -872,8 +981,8 @@ impl Shell {
                 if FilesRequestContext::for_chat(this.state.read(cx), &chat_id).as_ref() != Some(&context) { return; }
                 if let Some(reference) = reference {
                     this.state.update(cx, |state, cx| { state.add_code_ref(&chat_id, reference); cx.notify(); });
-                    if let Some(search) = this.workspace_search.as_mut() { search.status = "Added to chat".into(); }
-                } else if let Some(search) = this.workspace_search.as_mut() { search.status = "Symbol changed or could not be read.".into(); }
+                    if let Some(search) = this.workspace_search.as_mut().filter(|search| search.chat_id == chat_id && search.mode == SearchMode::Symbols) { search.status = "Added to chat".into(); }
+                } else if let Some(search) = this.workspace_search.as_mut().filter(|search| search.chat_id == chat_id && search.mode == SearchMode::Symbols) { search.status = "Symbol changed or could not be read.".into(); }
                 cx.notify();
             });
         }).detach();
@@ -977,9 +1086,18 @@ impl Shell {
                 .child(search.include.clone())
                 .child(search.exclude.clone());
         }
+        if mode == SearchMode::Symbols {
+            card = card.child(
+                div().flex().justify_end().child(
+                    crate::components::button("refresh-symbols", "Refresh", crate::components::ButtonVariant::Ghost, crate::components::ButtonSize::Sm, &theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_workspace_symbols(true, cx))),
+                ),
+            );
+        }
         let results = gpui::list(list, cx.processor(Self::render_workspace_search_row))
             .h(px(
-                320.0_f32.min((f32::from(viewport.height) - 200.0).max(80.0))
+                if mode == SearchMode::Symbols { (search.rows.len() as f32 * 42.0).clamp(42.0, 320.0).min((f32::from(viewport.height) - 200.0).max(80.0)) }
+                else { 320.0_f32.min((f32::from(viewport.height) - 200.0).max(80.0)) }
             ))
             .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
         card = card
@@ -1030,7 +1148,11 @@ impl Shell {
         };
         let theme = Theme::of(cx).for_popup();
         let label = if let Some(symbol) = &row.symbol {
-            format!("{}  {} · {}:{}", format!("{:?}", symbol.kind).to_lowercase(), symbol.name, row.path, symbol.start_line).into_any_element()
+            div().w_full().flex().items_center().gap(px(8.0))
+                .child(div().w(px(56.0)).flex_none().text_color(theme.text_muted).child(format!("{:?}", symbol.kind).to_lowercase()))
+                .child(div().min_w_0().flex_1().truncate().child(symbol.name.clone()))
+                .child(div().min_w_0().max_w(px(280.0)).truncate().text_color(theme.text_muted).child(format!("{}:{}", row.path, symbol.start_line)))
+                .into_any_element()
         } else if let Some(line) = row.line {
             let prefix = format!("{line}: ");
             let offset = prefix.len();
@@ -1114,6 +1236,56 @@ mod tests {
         };
         assert!(file_score(&path, "workspace").unwrap() > file_score(&path, "ws").unwrap());
         assert!(file_score(&path, "missing").is_none());
+    }
+
+    #[gpui::test]
+    fn alternate_enter_stages_the_selected_symbol(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut wire, engine, _guard) = crate::admin::tests::Wire::new();
+        cx.update(|cx| { settings::init(settings::UiSettings::default(), dir.path(), cx); gpui_base::init(cx); cx.set_global(Theme::default()); crate::app_menus::init(cx); });
+        let host = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(state, EngineBootConfig { data_dir: dir.path().into(), ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock }, cx)
+        });
+        host.update(cx, |shell, window, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![serde_json::from_value(serde_json::json!({"id":"chat", "deviceId":"local", "cwd":"/fixture", "archived":false, "createdAt":Utc::now()})).unwrap()];
+                state.set_test_engine(engine);
+                state.select_chat(Some("chat".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_workspace_search(SearchMode::Symbols, window, cx);
+            let search = shell.workspace_search.as_mut().unwrap();
+            search.task = None;
+            search.rows = vec![ResultRow { path: "src/a.rs".into(), line: Some(1), preview: String::new(), ranges: Vec::new(), changed: false, symbol: Some(mast_syntax::symbols::Symbol { name: "answer".into(), kind: mast_syntax::symbols::SymbolKind::Function, start_line: 1, end_line: 1 }) }];
+            search.list.reset_with_uniform_height(1, px(42.0));
+            window.focus(&search.input.focus_handle(cx), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        host.update(cx, |shell, window, cx| {
+            let search = shell.workspace_search.as_ref().unwrap();
+            window.focus(&search.input.focus_handle(cx), cx);
+        }).unwrap();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        cx.simulate_keystrokes(host.into(), "alt-enter");
+        for _ in 0..4 {
+            cx.run_until_parked();
+            wire.answer(&|method| match method {
+                mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY => Some(serde_json::json!({"repoId":"repo", "repoPath":"/fixture", "checkoutId":"checkout"})),
+                mast_rpc::methods::READ_WORKSPACE_FILE => Some(serde_json::json!({"checkoutId":"checkout", "path":"src/a.rs", "text":"fn answer() {}\n", "size":15, "encoding":"utf8", "truncated":false})),
+                _ => None,
+            });
+        }
+        cx.run_until_parked();
+        host.update(cx, |shell, _, cx| {
+            let refs = shell.state.read(cx).code_refs("chat");
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].reference.kind, mast_proto::CodeRefKind::Symbol);
+            assert_eq!(refs[0].reference.symbol.as_ref().unwrap().name, "answer");
+            assert_eq!(refs[0].snippet, "fn answer() {}");
+        }).unwrap();
     }
 
     #[gpui::test]

@@ -72,6 +72,19 @@ pub fn code_reference_fixture(window: &mut Window, cx: &mut App) -> Entity<impl 
     code_reference::fixture(window, cx)
 }
 
+pub fn symbol_search_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_symbol_search(window, cx));
+    shell
+}
+
+pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
+    let state = cx.new(|_| crate::state::AppState::new());
+    let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));
+    file.update(cx, |file, cx| file.fixture_file_outline(cx));
+    file
+}
+
 /// Construct the walkthrough test fixture using the production view.
 pub fn walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     crate::changes::walkthrough::snapshot_fixture(cx)

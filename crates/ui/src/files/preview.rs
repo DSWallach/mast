@@ -548,6 +548,35 @@ impl Render for FileEditorTooltip {
 }
 
 impl FilesSurface {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_file_outline(&mut self, cx: &mut Context<Self>) {
+        let path = "src/review.rs";
+        let source = "struct Review {\n    complete: bool,\n}\n\nimpl Review {\n    fn finish(&mut self) {\n        self.complete = true;\n    }\n}\n\nfn inspect(review: &Review) {\n    println!(\"{}\", review.complete);\n}\n";
+        let mut document = FileDocument::loading(DocumentKey { chat_id: self.chat_id.clone(), checkout_id: Some("fixture".into()), path: path.into() });
+        document.set_loaded(mast_proto::WorkspaceFileText { checkout_id: "fixture".into(), path: path.into(), text: Some(source.into()), content_hash: Some("fixture".into()), size: source.len() as u64, modified_at: None, encoding: mast_proto::WorkspaceTextEncoding::Utf8, line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false });
+        self.preview.active = Some(path.into());
+        self.preview.documents.insert(path.into(), document);
+        self.preview.outline_symbols = mast_syntax::symbols::extract(source, path, 100);
+        self.preview.outline_list.reset_with_uniform_height(self.preview.outline_symbols.len(), px(28.0));
+        self.preview.outline_open = true;
+        cx.notify();
+    }
+
+    pub(crate) fn current_code_line(&self, cx: &App) -> u32 {
+        if let Some((line, _)) = self.pending_editor_location { return line; }
+        let Some(editor) = self.preview.active.as_ref().and_then(|path| self.preview.documents.get(path)).and_then(|document| document.editor.as_ref()) else { return u32::try_from(self.preview.list.logical_scroll_top().item_ix).unwrap_or(u32::MAX - 1).saturating_add(1); };
+        let editor = editor.read(cx);
+        let text = editor.value();
+        let offset = editor.selected_range().start.min(text.len());
+        u32::try_from(text.as_bytes()[..offset].iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u32::MAX - 1).saturating_add(1)
+    }
+
+    pub(crate) fn record_code_jump(&self, line: u32, cx: &mut Context<Self>) {
+        if let Some(path) = self.preview.active.clone() {
+            cx.emit(FilesEvent::Jumped { path, from_line: self.current_code_line(cx), line });
+        }
+    }
+
     pub(crate) fn editor_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.preview
             .active
@@ -562,6 +591,7 @@ impl FilesSurface {
                         .markdown
                         .as_ref()
                         .is_some_and(|view| view.read(cx).focus.contains_focused(window, cx))
+                    || (!document.show_markdown && document.editor.is_none() && self.tree_focus.contains_focused(window, cx))
             })
     }
     #[cfg(test)]
@@ -612,6 +642,8 @@ impl FilesSurface {
             .and_then(|path| self.preview.documents.get(path))
             .and_then(|document| document.editor.clone())
         else {
+            let focus = self.tree_focus.clone();
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
             return;
         };
         let focus = editor.focus_handle(cx);
@@ -995,6 +1027,8 @@ impl FilesSurface {
             self.preview.outline_path = None;
             self.preview.outline_task = None;
             self.preview.outline_list.reset(0);
+            self.file_history = None;
+            self.reset_code_find_document();
         }
         if self
             .preview
@@ -1044,6 +1078,7 @@ impl FilesSurface {
         }
         self.trim_document_cache(cx);
         if self.preview.outline_open { self.request_file_outline(cx); }
+        if self.code_find.is_some() { self.update_code_find(cx); }
         cx.notify();
     }
 
@@ -1107,6 +1142,7 @@ impl FilesSurface {
                             surface.request_file_highlight(task_path.clone(), source, hash, cx);
                         }
                         if surface.preview.outline_open && surface.preview.active.as_deref() == Some(&task_path) { surface.request_file_outline(cx); }
+                        if surface.code_find.is_some() && surface.preview.active.as_deref() == Some(&task_path) { surface.update_code_find(cx); }
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file load failed");
@@ -1282,7 +1318,7 @@ impl FilesSurface {
         else {
             return;
         };
-        let source = editor.read(cx).value().to_string();
+        let source = editor.read(cx).value();
         let revision = {
             let Some(document) = self.preview.documents.get_mut(path) else {
                 return;
@@ -1294,29 +1330,35 @@ impl FilesSurface {
         if !self.staged_file_comments(path, cx).is_empty() {
             self.require_review_comment_flush(path, cx);
         }
-        self.request_editor_highlight(path.to_string(), source, revision, cx);
-        if self.preview.outline_open && self.preview.active.as_deref() == Some(path) { self.request_file_outline(cx); }
+        self.request_editor_highlight(path.to_string(), source.to_string(), revision, cx);
+        if self.preview.outline_open && self.preview.active.as_deref() == Some(path) { self.request_file_outline_with_source(Some(source.clone()), cx); }
+        if self.code_find.is_some() && self.preview.active.as_deref() == Some(path) { self.update_code_find_with_source(Some(source), cx); }
         self.schedule_autosave(path.to_string(), cx);
         cx.emit(FilesEvent::TitleChanged);
         cx.notify();
     }
 
     fn request_file_outline(&mut self, cx: &mut Context<Self>) {
+        self.request_file_outline_with_source(None, cx);
+    }
+
+    fn request_file_outline_with_source(&mut self, supplied: Option<SharedString>, cx: &mut Context<Self>) {
         let Some(path) = self.preview.active.clone() else { return; };
         let Some(document) = self.preview.documents.get(&path) else { return; };
-        let source = document.editor.as_ref().map(|editor| editor.read(cx).value().to_string())
-            .or_else(|| document.file.as_ref().and_then(|file| file.text.clone()));
+        let source = supplied.or_else(|| document.editor.as_ref().map(|editor| editor.read(cx).value()))
+            .or_else(|| document.file.as_ref().and_then(|file| file.text.as_ref().map(|text| SharedString::from(text.clone()))));
         let Some(source) = source else { return; };
         let key = document.key.clone();
         let generation = document.generation;
         let revision = document.revision;
+        let content_hash = document.loaded_hash.clone();
         self.preview.outline_path = Some(path.clone());
         self.preview.outline_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(120)).await;
             let task_path = path.clone();
             let symbols = cx.background_executor().spawn(async move { mast_syntax::symbols::extract(&source, &task_path, 5_000) }).await;
             let _ = this.update(cx, |this, cx| {
-                if !this.preview.outline_open || this.preview.active.as_deref() != Some(&path) || !this.preview.documents.get(&path).is_some_and(|document| document.accepts(&key, generation) && document.revision == revision) { return; }
+                if !this.preview.outline_open || this.preview.active.as_deref() != Some(&path) || !this.preview.documents.get(&path).is_some_and(|document| document.accepts(&key, generation) && document.revision == revision && document.loaded_hash == content_hash) { return; }
                 this.preview.outline_symbols = symbols;
                 this.preview.outline_list.reset_with_uniform_height(this.preview.outline_symbols.len(), px(28.0));
                 this.preview.outline_task = None;
@@ -1331,7 +1373,7 @@ impl FilesSurface {
         let label = format!("{}  {} · {}", format!("{:?}", symbol.kind).to_lowercase(), symbol.name, line);
         let theme = Theme::of(cx).clone();
         div().id(("file-outline-symbol", index)).h(px(28.0)).px(px(10.0)).w_full().flex().items_center().cursor_pointer().text_color(theme.text).hover(|style| style.bg(theme.surface_raised)).child(div().truncate().child(label))
-            .on_click(cx.listener(move |this, _, window, cx| { this.reveal_editor_location(line, None, cx); this.focus_editor(window, cx); }))
+            .on_click(cx.listener(move |this, _, window, cx| { this.record_code_jump(line, cx); this.reveal_editor_location(line, None, cx); this.focus_editor(window, cx); }))
             .into_any_element()
     }
 
@@ -1895,6 +1937,9 @@ impl FilesSurface {
             }
         }
         if !renames.is_empty() {
+            self.file_history = None;
+            if self.preview.outline_open { self.request_file_outline(cx); }
+            if self.code_find.is_some() { self.reset_code_find_document(); self.update_code_find(cx); }
             cx.notify();
         }
         renames
@@ -2038,14 +2083,18 @@ impl FilesSurface {
                 .any(document_blocks_lifecycle);
         let body = self.render_document_body(&active, &theme, window, cx);
         let outline = self.preview.outline_open.then(|| {
-            if self.preview.outline_symbols.is_empty() {
+            let contents = if self.preview.outline_symbols.is_empty() {
                 div().px(px(10.0)).py(px(6.0)).text_color(theme.text_muted).child(if self.preview.outline_task.is_some() { "Loading symbols…" } else { "No symbols in this file" }).into_any_element()
             } else {
                 list(self.preview.outline_list.clone(), cx.processor(Self::render_outline_row))
                     .h(px((self.preview.outline_symbols.len() as f32 * 28.0).min(180.0)))
                     .with_sizing_behavior(ListSizingBehavior::Auto).into_any_element()
-            }
+            };
+            div().flex_none().flex().flex_col().border_b_1().border_color(theme.border)
+                .child(div().px(px(10.0)).py(px(4.0)).text_color(theme.text_muted).child("Symbols"))
+                .child(contents).into_any_element()
         });
+        let history = self.render_file_history(cx);
         div()
             .size_full()
             .min_w_0()
@@ -2205,6 +2254,7 @@ impl FilesSurface {
                 },
             )
             .children(outline)
+            .children(history)
             .child(body)
             .into_any_element()
     }
@@ -2326,6 +2376,10 @@ impl FilesSurface {
                 .flex_none(),
             )
             .child(crumbs)
+            .child(toolbar_button("files-history", "File history", theme)
+                .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.file_history.is_some()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_file_history(cx)))
+                .child(icon(icons::CLOCK_CIRCLE).size(px(crate::surface_chrome::ICON_SIZE)).text_color(theme.text_muted)))
             .child(
                 toolbar_button("files-outline", "File symbols", theme)
                     .when(true, |element| crate::components::file_toolbar_selection(element, theme, self.preview.outline_open))
@@ -2619,6 +2673,13 @@ impl FilesSurface {
                 state.set_selected_range(offset..offset, cx);
             });
         }
+        if editor.is_none() && self.preview.list.item_count() > 0
+            && self.preview.documents.get(path).is_some_and(|document| !matches!(document.phase, DocumentPhase::Loading))
+            && let Some((line, _)) = self.pending_editor_location.take()
+        {
+            let index = (line.saturating_sub(1) as usize).min(self.preview.list.item_count() - 1);
+            self.preview.list.scroll_to_reveal_item(index);
+        }
         if let Some(editor) = &editor {
             self.sync_editor_comment_anchors(path, editor, cx);
         }
@@ -2738,7 +2799,7 @@ impl FilesSurface {
                         .child("Large file preview is truncated and read-only."),
                 )
             })
-            .child(code_scroll)
+            .child(code_scroll.key_context("FilePreview").track_focus(&self.tree_focus).on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.tree_focus, cx))))
             .into_any_element()
     }
 

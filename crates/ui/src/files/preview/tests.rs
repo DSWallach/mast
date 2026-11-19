@@ -19,11 +19,22 @@ fn file_outline_tracks_the_open_document_revision(cx: &mut gpui::TestAppContext)
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_millis(150));
     cx.run_until_parked();
-    window.update(cx, |surface, _, cx| {
+    window.update(cx, |surface, window, cx| {
         assert_eq!(surface.preview.outline_symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
         surface.reveal_editor_location(surface.preview.outline_symbols[1].start_line, None, cx);
         assert_eq!(surface.pending_location_for_test(), Some((2, None)));
+        if let Some(editor) = surface.preview.documents["src/a.rs"].editor.clone() {
+            editor.update(cx, |editor, cx| editor.set_value("fn revised() {}\n", window, cx));
+        }
+        let document = surface.preview.documents.get_mut("src/a.rs").unwrap();
+        document.file.as_mut().unwrap().text = Some("fn revised() {}\n".into());
+        document.mark_user_edit();
+        surface.request_file_outline(cx);
     }).unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    window.update(cx, |surface, _, _| assert_eq!(surface.preview.outline_symbols[0].name, "revised")).unwrap();
 }
 
 #[test]
