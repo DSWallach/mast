@@ -303,26 +303,113 @@ fn parse_hunk_ranges(header: &str) -> Option<((u32, u32), (u32, u32))> {
     Some((range(old)?, range(new)?))
 }
 
-/// An old-head hunk that the new head no longer has, as a reversion: additions become
-/// deletions (and the reverse), ranges swap, and the header carries [`REMOVED_LABEL`].
-fn reversed_hunk(hunk: &str) -> Option<String> {
+/// A contiguous block of changed lines inside a hunk, with the context git printed around it.
+/// Runs, not hunks, are the unit of "removed": a hunk's grouping depends on its neighbours,
+/// a run's content does not.
+struct Run<'a> {
+    key: [u8; 32],
+    before: Vec<&'a str>,
+    lines: Vec<&'a str>,
+    after: Vec<&'a str>,
+    /// Start lines (base side, head side) of the run including its leading context.
+    old_start: u32,
+    new_start: u32,
+}
+
+fn is_change(line: &str) -> bool {
+    matches!(line.as_bytes().first(), Some(b'+' | b'-'))
+}
+
+fn runs_of<'a>(path: &str, hunk: &'a str) -> Vec<Run<'a>> {
     let mut lines = hunk.lines();
-    let ((old_start, old_len), (new_start, new_len)) = parse_hunk_ranges(lines.next()?)?;
-    let mut out = format!("@@ -{new_start},{new_len} +{old_start},{old_len} @@ {REMOVED_LABEL}\n");
-    for line in lines {
-        match line.as_bytes().first() {
-            Some(b'+') => out.push('-'),
-            Some(b'-') => out.push('+'),
-            _ => {
-                out.push_str(line);
-                out.push('\n');
-                continue;
+    let Some(((old_start, _), (new_start, _))) = lines.next().and_then(parse_hunk_ranges) else {
+        return Vec::new();
+    };
+    let body: Vec<&str> = lines.collect();
+    let (mut o, mut n) = (old_start, new_start);
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        if !is_change(body[i]) {
+            if !body[i].starts_with('\\') {
+                o += 1;
+                n += 1;
+            }
+            i += 1;
+            continue;
+        }
+        let (run_o, run_n, first) = (o, n, i);
+        while i < body.len() && (is_change(body[i]) || body[i].starts_with('\\')) {
+            match body[i].as_bytes().first() {
+                Some(b'-') => o += 1,
+                Some(b'+') => n += 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        let mut before: Vec<&str> = body[..first].iter().rev().take_while(|l| l.starts_with(' ')).take(3).copied().collect();
+        before.reverse();
+        let after: Vec<&str> = body[i..].iter().take_while(|l| l.starts_with(' ')).take(3).copied().collect();
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        for line in &body[first..i] {
+            if is_change(line) {
+                hasher.update([0u8]);
+                hasher.update(line.as_bytes());
             }
         }
-        out.push_str(&line[1..]);
-        out.push('\n');
+        runs.push(Run {
+            key: hasher.finalize().into(),
+            old_start: run_o - before.len() as u32,
+            new_start: run_n - before.len() as u32,
+            before,
+            lines: body[first..i].to_vec(),
+            after,
+        });
     }
-    Some(out)
+    runs
+}
+
+/// A run the new head no longer has, as a reversion: additions become deletions (and the
+/// reverse), the ranges swap, and the header carries [`REMOVED_LABEL`]. Returns the hunk and
+/// its (additions, deletions) as shown.
+fn reversed_run(run: &Run<'_>) -> (String, u32, u32) {
+    let (mut adds, mut dels) = (0u32, 0u32);
+    let mut body = String::new();
+    for line in &run.before {
+        body.push_str(line);
+        body.push('\n');
+    }
+    for line in &run.lines {
+        match line.as_bytes().first() {
+            Some(b'+') => {
+                dels += 1;
+                body.push('-');
+                body.push_str(&line[1..]);
+            }
+            Some(b'-') => {
+                adds += 1;
+                body.push('+');
+                body.push_str(&line[1..]);
+            }
+            _ => body.push_str(line),
+        }
+        body.push('\n');
+    }
+    for line in &run.after {
+        body.push_str(line);
+        body.push('\n');
+    }
+    let context = (run.before.len() + run.after.len()) as u32;
+    // Reversed: the head's lines (the old '+' side) are what the patch removes.
+    let header = format!(
+        "@@ -{},{} +{},{} @@ {REMOVED_LABEL}\n",
+        run.new_start,
+        context + dels,
+        run.old_start,
+        context + adds
+    );
+    (header + &body, adds, dels)
 }
 
 fn count_changes(hunk: &str) -> (u32, u32) {
@@ -334,8 +421,10 @@ fn count_changes(hunk: &str) -> (u32, u32) {
 }
 
 /// What changed between two heads that were each diffed against their own merge-base:
-/// the new head's hunks the old head did not have, then (as reversions, in a
-/// "Removed since you reviewed" group) the old head's hunks the new head dropped.
+/// the new head's hunks the old head did not have, plus (as reversions labelled
+/// [`REMOVED_LABEL`], in the same per-file block) the old head's changed-line runs the new
+/// head no longer has. A dropped file with no hunks (binary, rename-only, mode-only) is
+/// reported with a one-line note.
 fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
     let old_chunks = split_patch(&before.patch);
     let new_chunks = split_patch(&after.patch);
@@ -343,15 +432,44 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         .iter()
         .flat_map(|file| file.hunks.iter().map(|hunk| hunk_key(&file.path, hunk)))
         .collect();
-    let present: HashSet<[u8; 32]> = new_chunks
+    let present_runs: HashSet<[u8; 32]> = new_chunks
         .iter()
-        .flat_map(|file| file.hunks.iter().map(|hunk| hunk_key(&file.path, hunk)))
+        .flat_map(|file| file.hunks.iter().flat_map(|hunk| runs_of(&file.path, hunk)))
+        .map(|run| run.key)
         .collect();
     let before_headers: HashSet<&str> = old_chunks
         .iter()
         .filter(|file| file.hunks.is_empty())
         .map(|file| file.header)
         .collect();
+    let new_paths: HashSet<&str> = new_chunks.iter().map(|file| file.path.as_str()).collect();
+
+    // Removed runs per path (old-head order), each with its shown counts.
+    let mut removed: Vec<(String, Vec<String>, u32, u32)> = Vec::new();
+    for file in &old_chunks {
+        let mut hunks = Vec::new();
+        let (mut adds, mut dels) = (0u32, 0u32);
+        for hunk in &file.hunks {
+            for run in runs_of(&file.path, hunk) {
+                if present_runs.contains(&run.key) {
+                    continue;
+                }
+                let (text, a, d) = reversed_run(&run);
+                hunks.push(text);
+                adds += a;
+                dels += d;
+            }
+        }
+        if file.hunks.is_empty() && !new_paths.contains(file.path.as_str()) {
+            hunks.push(format!(
+                "@@ -0,0 +0,0 @@ {REMOVED_LABEL}\n (binary, rename or mode-only change no longer in the PR)\n"
+            ));
+        }
+        if !hunks.is_empty() {
+            removed.push((file.path.clone(), hunks, adds, dels));
+        }
+    }
+
     let mut patch = String::new();
     let mut counts: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
     for file in &new_chunks {
@@ -362,10 +480,16 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
             .filter(|hunk| !seen.contains(&hunk_key(&file.path, hunk)))
             .collect();
         let headerless_change = file.hunks.is_empty() && !before_headers.contains(file.header);
-        if kept.is_empty() && !headerless_change {
+        let dropped = removed.iter().position(|(path, ..)| *path == file.path);
+        if kept.is_empty() && !headerless_change && dropped.is_none() {
             continue;
         }
-        patch.push_str(file.header);
+        if kept.is_empty() && !headerless_change {
+            // Only removals under this path: a minimal header, not the new head's.
+            patch.push_str(&format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", file.path));
+        } else {
+            patch.push_str(file.header);
+        }
         let (mut adds, mut dels) = (0u32, 0u32);
         for hunk in kept {
             patch.push_str(hunk);
@@ -373,34 +497,24 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
             adds += a;
             dels += d;
         }
-        counts.insert(file.path.clone(), (adds, dels));
-    }
-    // Removed: old-head hunks absent from the new head's diff, shown as reversions.
-    let mut removed_only: Vec<(String, u32, u32)> = Vec::new();
-    for file in &old_chunks {
-        let dropped: Vec<String> = file
-            .hunks
-            .iter()
-            .filter(|hunk| !present.contains(&hunk_key(&file.path, hunk)))
-            .filter_map(|hunk| reversed_hunk(hunk))
-            .collect();
-        if dropped.is_empty() {
-            continue;
-        }
-        patch.push_str(&format!(
-            "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n",
-            file.path
-        ));
-        let (mut adds, mut dels) = (0u32, 0u32);
-        for hunk in &dropped {
-            patch.push_str(hunk);
-            let (a, d) = count_changes(hunk);
+        if let Some(index) = dropped {
+            let (_, hunks, a, d) = removed.remove(index);
+            for hunk in hunks {
+                patch.push_str(&hunk);
+            }
             adds += a;
             dels += d;
         }
-        if !counts.contains_key(&file.path) {
-            removed_only.push((file.path.clone(), adds, dels));
+        counts.insert(file.path.clone(), (adds, dels));
+    }
+    // Paths only the old head touched: one block each.
+    let mut removed_only: Vec<(String, u32, u32)> = Vec::new();
+    for (path, hunks, adds, dels) in removed {
+        patch.push_str(&format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", path));
+        for hunk in hunks {
+            patch.push_str(&hunk);
         }
+        removed_only.push((path, adds, dels));
     }
     if patch.len() > MAX_PATCH_BYTES {
         let mut cut = MAX_PATCH_BYTES;
@@ -422,6 +536,7 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         }
         None => false,
     });
+    // Files that exist only as removals (and removal-only blocks) still need a summary.
     for (path, additions, deletions) in removed_only {
         after.files.push(mast_proto::DiffFileSummary {
             path,
@@ -431,6 +546,18 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
             deletions,
             binary: false,
         });
+    }
+    for (path, (additions, deletions)) in &counts {
+        if !after.files.iter().any(|file| &file.path == path) {
+            after.files.push(mast_proto::DiffFileSummary {
+                path: path.clone(),
+                old_path: None,
+                status: "M".into(),
+                additions: *additions,
+                deletions: *deletions,
+                binary: false,
+            });
+        }
     }
     after.additions = after.files.iter().map(|f| f.additions).sum();
     after.deletions = after.files.iter().map(|f| f.deletions).sum();

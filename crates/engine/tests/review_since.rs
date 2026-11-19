@@ -230,3 +230,107 @@ async fn cached_pair_computes_once_and_a_missing_head_is_not_refetched() {
     }
     assert_eq!(fetch_attempts_for(&root), attempts + 1);
 }
+
+fn long(changes: &[(usize, &str)]) -> String {
+    (1..=30)
+        .map(|n| match changes.iter().find(|(line, _)| *line == n) {
+            Some((_, text)) => format!("{text}\n"),
+            None => format!("l{n}\n"),
+        })
+        .collect()
+}
+
+/// A repo whose main also has a 30-line long.txt (so hunks can be far apart).
+fn long_repo() -> (tempfile::TempDir, std::path::PathBuf, Repos) {
+    let (tmp, root, repos) = repo();
+    write(&root, "long.txt", &long(&[]));
+    commit(&root, "long file");
+    (tmp, root, repos)
+}
+
+#[tokio::test]
+async fn hunks_that_merge_after_a_nearby_change_are_not_false_removals() {
+    let (_tmp, root, repos) = long_repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    // Two author hunks, far enough apart to stay separate.
+    write(&root, "long.txt", &long(&[(5, "FIVE"), (20, "TWENTY")]));
+    let old = commit(&root, "f1");
+    // Force-push: the author adds a nearby change between them, so git now prints one merged hunk.
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "long.txt", &long(&[(5, "FIVE"), (11, "ELEVEN"), (17, "SEVENTEEN"), (20, "TWENTY")]));
+    let new = commit(&root, "f1 rewritten");
+    assert!(!ancestor(&root, &old, &new));
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert!(!snapshot.patch.contains(mast_engine::diff_sync::since::REMOVED_LABEL), "no false removal:\n{}", snapshot.patch);
+    assert!(snapshot.patch.contains("+ELEVEN") && snapshot.patch.contains("+SEVENTEEN"), "the new changes show:\n{}", snapshot.patch);
+}
+
+#[tokio::test]
+async fn base_lines_between_author_hunks_are_not_false_removals() {
+    let (_tmp, root, repos) = long_repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "long.txt", &long(&[(3, "THREE"), (27, "TWENTY-SEVEN")]));
+    let old = commit(&root, "f1");
+    git(&root, &["checkout", "-q", "main"]);
+    write(&root, "long.txt", &long(&[(15, "BASE-FIFTEEN")]));
+    commit(&root, "main edits between the author's hunks");
+    git(&root, &["checkout", "-q", "feature"]);
+    git(&root, &["merge", "-q", "--no-ff", "-m", "Update branch", "main"]);
+    write(&root, "d.txt", "1\n2\nD\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f2");
+    assert!(ancestor(&root, &old, &new));
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(paths(&snapshot), vec!["d.txt"], "{}", snapshot.patch);
+    assert!(!snapshot.patch.contains(mast_engine::diff_sync::since::REMOVED_LABEL));
+}
+
+#[tokio::test]
+async fn a_genuinely_dropped_run_is_shown_even_beside_kept_runs() {
+    let (_tmp, root, repos) = long_repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "long.txt", &long(&[(5, "FIVE"), (20, "TWENTY")]));
+    let old = commit(&root, "f1");
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "long.txt", &long(&[(5, "FIVE")]));
+    let new = commit(&root, "f1 without the second change");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    let label = mast_engine::diff_sync::since::REMOVED_LABEL;
+    assert_eq!(snapshot.patch.matches(label).count(), 1, "{}", snapshot.patch);
+    assert!(snapshot.patch.contains("+l20\n-TWENTY\n"), "reversed, with context around it:\n{}", snapshot.patch);
+    assert_eq!(snapshot.patch.matches("diff --git").count(), 1, "one block per file");
+    let file = snapshot.files.iter().find(|f| f.path == "long.txt").unwrap();
+    assert_eq!((file.additions, file.deletions), (1, 1), "counts include the removed lines");
+    assert_eq!((snapshot.additions, snapshot.deletions), (1, 1));
+}
+
+#[tokio::test]
+async fn kept_and_removed_changes_share_one_block_with_summed_counts() {
+    let (_tmp, root, repos) = long_repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "long.txt", &long(&[(5, "FIVE")]));
+    let old = commit(&root, "f1");
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "long.txt", &long(&[(25, "TWENTY-FIVE")]));
+    let new = commit(&root, "f1 moved to another place");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(snapshot.patch.matches("diff --git").count(), 1, "{}", snapshot.patch);
+    assert!(snapshot.patch.contains("+TWENTY-FIVE") && snapshot.patch.contains("-FIVE"));
+    let file = snapshot.files.iter().find(|f| f.path == "long.txt").unwrap();
+    assert_eq!((file.additions, file.deletions), (2, 2), "one kept change plus one removed change");
+}
+
+#[tokio::test]
+async fn a_dropped_binary_file_is_reported_with_a_note() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    std::fs::write(root.join("blob.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+    let old = commit(&root, "f1 adds a binary");
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "d.txt", "1\n2\nD\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f1 without it");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    let got = paths(&snapshot);
+    assert!(got.contains(&"blob.bin".to_owned()) && got.contains(&"d.txt".to_owned()), "{got:?}");
+    assert!(snapshot.patch.contains("binary, rename or mode-only change no longer in the PR"), "{}", snapshot.patch);
+    assert!(snapshot.patch.contains(mast_engine::diff_sync::since::REMOVED_LABEL));
+}

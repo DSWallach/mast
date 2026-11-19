@@ -1342,4 +1342,35 @@ mod tests {
         let saves = script.calls_of(methods::SET_DIFF_REVIEW_STATE);
         assert!(saves.iter().any(|call| call["after"]["reviewedHead"] == "abc123"), "the baseline is persisted: {saves:?}");
     }
+
+    // A delta whose only hunk is a reversion (the PR dropped it): line 1 on both sides.
+    const DELTA_REMOVED: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@ Removed since you reviewed\n+dropped\n-fix\n";
+
+    #[gpui::test]
+    fn removed_code_cannot_be_commented_on_either_side(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, _script) = setup(cx);
+        vcx.update(|window, cx| changes.update(cx, |c, cx| {
+            enter_rereview(c, DELTA_REMOVED);
+            for side in [CommentSide::New, CommentSide::Old] {
+                c.local_draft_error = None;
+                c.open_draft("a".into(), side, 1, window, cx);
+                assert!(c.draft.is_none(), "no draft on a reverted hunk ({side:?})");
+                assert_eq!(c.local_draft_error.as_deref(), Some("Removed code can't be commented on GitHub"));
+            }
+            assert_eq!(c.adder_block(0, 0, CommentSide::New), Some("Removed code can't be commented on GitHub"));
+            assert_eq!(c.adder_block(0, 0, CommentSide::Old), Some("Removed code can't be commented on GitHub"));
+        }));
+    }
+
+    #[gpui::test]
+    fn a_regular_hunk_keeps_right_side_drafting_in_the_since_view(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, _script) = setup(cx);
+        vcx.update(|window, cx| changes.update(cx, |c, cx| {
+            enter_rereview(c, DELTA_A);
+            assert_eq!(c.adder_block(0, 1, CommentSide::New), None);
+            assert!(c.adder_block(0, 1, CommentSide::Old).is_some_and(|m| m.contains("Left-side")));
+            c.open_draft("a".into(), CommentSide::New, 1, window, cx);
+            assert!(c.draft.is_some(), "right side of a regular hunk can be drafted on");
+        }));
+    }
 }

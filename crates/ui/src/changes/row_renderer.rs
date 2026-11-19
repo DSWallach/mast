@@ -143,7 +143,7 @@ impl Changes {
                 let comment_anchor = hunk_diff.lines.iter().find_map(|line| line.new_no.map(|number| (CommentSide::New, number)).or_else(|| line.old_no.map(|number| (CommentSide::Old, number))));
                 let comment_path = file_diff.path.clone();
                 div().relative().child(hunk_header_row(&hunk_diff.header, symbol, &theme))
-                    .when_some(comment_anchor, |row, (side, line)| row.child(
+                    .when_some(comment_anchor.filter(|_| self.adder_block(file, hunk, CommentSide::New) != Some(super::rereview::REMOVED_COMMENT_MESSAGE)), |row, (side, line)| row.child(
                         crate::components::button(SharedString::from(format!("changes-hunk-comment-{file}-{hunk}")), "Comment", crate::components::ButtonVariant::Secondary, crate::components::ButtonSize::Sm, &theme)
                             .absolute().right(px(210.0)).top(px(Theme::SPACE_XS / 2.0))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_draft(comment_path.clone(), side, line, window, cx)))))
@@ -215,7 +215,7 @@ impl Changes {
                     .when(hovered, |el| {
                         el.child(positioned_adder(
                             comment_adder_left(side, gutter_px),
-                            render_comment_adder(&path, side, line_no, &theme, self.rereview_active(), cx),
+                            render_comment_adder(&path, side, line_no, &theme, self.adder_block(file, hunk, side), cx),
                         ))
                     })
                     .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -330,7 +330,7 @@ impl Changes {
                             .when(self.hovering(&path, anchor), |el| {
                                 el.relative().child(positioned_adder(
                                     split_adder_left(gutter_px),
-                                    render_comment_adder(&path, side, line_no, &theme, self.rereview_active(), cx),
+                                    render_comment_adder(&path, side, line_no, &theme, self.adder_block(file, hunk, side), cx),
                                 ))
                             })
                             .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {

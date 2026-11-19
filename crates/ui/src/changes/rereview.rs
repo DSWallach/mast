@@ -13,6 +13,9 @@
 
 use super::*;
 
+pub(super) const REMOVED_COMMENT_MESSAGE: &str = "Removed code can't be commented on GitHub";
+pub(super) const LEFT_COMMENT_MESSAGE: &str = "Left-side comments aren't available in the Since view: its old side is the previous head, not the base. Switch to the full diff to comment on removed lines.";
+
 impl Changes {
     /// `(old, new)` heads of the re-review range, when this review has a
     /// baseline that differs from the current head and that is still fetchable.
@@ -132,6 +135,59 @@ impl Changes {
             .as_ref()
             .filter(|(known, _)| known.eq_ignore_ascii_case(head))
             .map(|(_, identities)| identities.as_ref())
+    }
+
+    /// Why a comment cannot be added here, if it cannot: removed code (a hunk the PR no longer
+    /// has, shown as a reversion) is not on GitHub's diff, and the Since view's old side is the
+    /// previous head, not the base.
+    pub(super) fn adder_block(&self, file: u32, hunk: u32, side: CommentSide) -> Option<&'static str> {
+        if !self.rereview_active() {
+            return None;
+        }
+        let removed = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(file as usize))
+            .and_then(|file| file.hunks.get(hunk as usize))
+            .is_some_and(|hunk| hunk.header.contains(mast_engine::diff_sync::since::REMOVED_LABEL));
+        if removed {
+            Some(REMOVED_COMMENT_MESSAGE)
+        } else if side == CommentSide::Old {
+            Some(LEFT_COMMENT_MESSAGE)
+        } else {
+            None
+        }
+    }
+
+    /// The same question by coordinates (a draft being opened): a line that only exists in
+    /// removed hunks is blocked; a line also shown in a regular hunk is not.
+    pub(super) fn comment_block_for_line(&self, path: &str, side: CommentSide, line: u32) -> Option<&'static str> {
+        if !self.rereview_active() {
+            return None;
+        }
+        let matches = |l: &DiffLine| match side {
+            CommentSide::Old => l.old_no == Some(line),
+            CommentSide::New => l.new_no == Some(line),
+        };
+        let (mut in_removed, mut in_regular) = (false, false);
+        for file in self.parsed.iter().flat_map(|p| p.files.iter()).filter(|f| f.path == path) {
+            for hunk in &file.hunks {
+                if hunk.lines.iter().any(matches) {
+                    if hunk.header.contains(mast_engine::diff_sync::since::REMOVED_LABEL) {
+                        in_removed = true;
+                    } else {
+                        in_regular = true;
+                    }
+                }
+            }
+        }
+        if in_removed && !in_regular {
+            Some(REMOVED_COMMENT_MESSAGE)
+        } else if side == CommentSide::Old {
+            Some(LEFT_COMMENT_MESSAGE)
+        } else {
+            None
+        }
     }
 
     /// "Mark all reviewed": the current head becomes the baseline.
