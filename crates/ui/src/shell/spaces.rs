@@ -3025,7 +3025,7 @@ impl Shell {
     /// Set the sidebar's session filter (`None` = All spaces). On the
     /// new-session canvas the space context follows the filter — the canvas
     /// default is "the space you're looking at".
-    pub(super) fn set_space_filter(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_space_filter(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
         if self.settings.space_filter != filter {
             self.cancel_pinned_session_drag(cx);
         }
@@ -3443,7 +3443,7 @@ impl Shell {
             if id.starts_with(mast_proto::OUTLINE_SIDEBAR_SECTION_PREFIX));
         if managed_target
             || (managed_source
-                && !self.settings.sidebar_overview
+                && !self.sidebar_shows_overview()
                 && !matches!(target, SidebarSessionDrop::Pinned(_)))
         {
             self.sidebar_notice = Some("Move grouped sessions in Work Outline.".into());
@@ -6139,7 +6139,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.settings.sidebar_overview
+        if self.sidebar_shows_overview()
             || self.settings.sidebar_organization != SidebarOrganization::InOneList
         {
             return content;

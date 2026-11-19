@@ -4878,6 +4878,7 @@ impl Shell {
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
         self.settings.ui_style = current.ui_style;
+        self.settings.ui_layout = current.ui_layout;
         self.settings.dismissed_help_cards = current.dismissed_help_cards.clone();
         self.settings.terminal_font_family = current.terminal_font_family;
         self.settings.terminal_font_size = current.terminal_font_size;
@@ -5404,16 +5405,25 @@ impl Shell {
         match section {
             SettingsSection::TokenUsage => {
                 if self.token_usage_page.is_none() {
-                    let state=self.state.clone();
-                    let page=cx.new(|cx|crate::settings::token_usage::TokenUsagePage::new(state,cx));
-                    self.token_usage_sub=Some(cx.subscribe(&page,|this,_,event:&crate::settings::token_usage::OpenUsageChat,cx| {
-                        this.state.update(cx,|state,cx|state.select_chat(Some(event.0.clone()),cx));
-                        this.route=Route::Chat;
-                        cx.notify();
-                    }));
-                    self.token_usage_page=Some(page);
+                    let state = self.state.clone();
+                    let page =
+                        cx.new(|cx| crate::settings::token_usage::TokenUsagePage::new(state, cx));
+                    self.token_usage_sub = Some(cx.subscribe(
+                        &page,
+                        |this, _, event: &crate::settings::token_usage::OpenUsageChat, cx| {
+                            this.state.update(cx, |state, cx| {
+                                state.select_chat(Some(event.0.clone()), cx)
+                            });
+                            this.route = Route::Chat;
+                            cx.notify();
+                        },
+                    ));
+                    self.token_usage_page = Some(page);
                 }
-                self.token_usage_page.as_ref().map(|p|p.clone().into_any_element()).unwrap_or_else(||Empty.into_any_element())
+                self.token_usage_page
+                    .as_ref()
+                    .map(|p| p.clone().into_any_element())
+                    .unwrap_or_else(|| Empty.into_any_element())
             }
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
@@ -5451,6 +5461,10 @@ impl Shell {
                     self.appearance_settings_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::LayoutChanged(layout) => {
+                                this.settings.ui_layout = layout;
+                                cx.notify();
+                            }
                             AppearanceSettingsEvent::SidebarOutlineGroupsChanged(value) => {
                                 this.settings.sidebar_outline_groups = value;
                                 this.state.update(cx, |state, cx| {
@@ -6223,12 +6237,15 @@ impl Shell {
     fn holds_standing_role(&self, chat_id: &str, cx: &Context<Self>) -> bool {
         let state = self.state.read(cx);
         state.spaces.iter().any(|space| {
-            state.work_outline(&space.id).snapshot().is_some_and(|snapshot| {
-                snapshot
-                    .standing_roles
-                    .iter()
-                    .any(|role| role.current_chat_id.as_deref() == Some(chat_id))
-            })
+            state
+                .work_outline(&space.id)
+                .snapshot()
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .standing_roles
+                        .iter()
+                        .any(|role| role.current_chat_id.as_deref() == Some(chat_id))
+                })
         })
     }
 
@@ -8451,7 +8468,11 @@ impl Shell {
     /// Build the Sessions surface only when it is mounted. Overview changes
     /// frequently; preparing hidden session rows and archived chats here would
     /// clone every chat and advance list animations on each of those frames.
-    fn render_session_sidebar_lists(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_sidebar_lists(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
@@ -8827,7 +8848,7 @@ impl Shell {
         {
             self.cancel_pinned_session_drag(cx);
         }
-        self.overview_visible_chat_ids = if self.settings.sidebar_overview {
+        self.overview_visible_chat_ids = if self.sidebar_shows_overview() {
             let page = self.ensure_overview_page(cx);
             page.update(cx, |page, cx| {
                 page.set_sidebar_scope(self.settings.space_filter.clone(), cx);
@@ -8870,12 +8891,12 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
-        let assistant_section = if self.settings.sidebar_overview {
+        let assistant_section = if self.sidebar_shows_overview() {
             None
         } else {
             self.render_personal_assistant_section(theme, cx)
         };
-        let sidebar_lists = if self.settings.sidebar_overview {
+        let sidebar_lists = if self.sidebar_shows_overview() {
             None
         } else {
             Some(self.render_session_sidebar_lists(theme, cx))
@@ -8890,7 +8911,9 @@ impl Shell {
             // window above this column.)
             .children(assistant_section)
             .child(filter_row)
-            .child(self.render_overview_switch(theme, cx))
+            .when(theme.ui_style.layout != crate::ui_style::UiLayout::Compact, |el| {
+                el.child(self.render_overview_switch(theme, cx))
+            })
             .children(self.render_overview_filter_notice(theme, cx))
             .children(crate::ui_style::help_card(
                 "sidebar",
@@ -8899,7 +8922,7 @@ impl Shell {
                 cx,
             ))
             .children(sidebar_lists)
-            .when(self.settings.sidebar_overview, |el| {
+            .when(self.sidebar_shows_overview(), |el| {
                 el.child(
                     div()
                         .flex_1()
@@ -16352,7 +16375,11 @@ mod right_tab_mouse_regressions {
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
             assert_eq!(
-                shell.right_tabs.get(&shell.panel_key(cx)).unwrap().as_slice(),
+                shell
+                    .right_tabs
+                    .get(&shell.panel_key(cx))
+                    .unwrap()
+                    .as_slice(),
                 &[RightSurface::Subagent(2), RightSurface::Subagent(1)]
             );
         });
@@ -16370,7 +16397,9 @@ mod right_tab_mouse_regressions {
             cx.debug_bounds("right-surface-add").is_none(),
             "the picker already offers every surface"
         );
-        shell.update(cx, |shell, cx| shell.set_right_active(RightSurface::Item, cx));
+        shell.update(cx, |shell, cx| {
+            shell.set_right_active(RightSurface::Item, cx)
+        });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(
             cx.debug_bounds("right-surface-add").is_some(),
@@ -16647,8 +16676,9 @@ impl Shell {
         if let Ok(manager) = std::env::var("MAST_PREVIEW_MANAGER")
             && matches!(manager.as_str(), "placeholder" | "chat")
         {
-            self.ensure_overview_page(cx)
-                .update(cx, |page, cx| page.show_snapshot_manager(manager == "chat", cx));
+            self.ensure_overview_page(cx).update(cx, |page, cx| {
+                page.show_snapshot_manager(manager == "chat", cx)
+            });
         }
     }
 

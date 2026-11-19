@@ -89,6 +89,23 @@ fn a_selected_background_run_stays_out_of_the_overview_cards(cx: &mut gpui::Test
     assert!(vcx.debug_bounds("overview-assistant").is_none());
 }
 
+
+#[gpui::test]
+fn revealing_a_filtered_session_clears_filters(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (overview, _state, vcx) = outline_overview(cx, dir.path());
+    vcx.update(|window, cx| {
+        overview.update(cx, |overview, cx| {
+            overview.set_sidebar_scope(Some("other-space".into()), cx);
+            overview.search.update(cx, |search, cx| search.set_text("no matching session", cx));
+            overview.reveal_top_session(CHAT_API, window, cx);
+            assert!(overview.sidebar_scope.is_none());
+            assert!(overview.search.read(cx).text().is_empty());
+            assert_eq!(overview.outline.read(cx).selected_chat().as_deref(), Some(CHAT_API));
+        });
+    });
+}
+
 struct EmptyCopyHost {
     overview: Entity<Overview>,
     outline: bool,
