@@ -7227,6 +7227,13 @@ impl Overview {
             assignment.chat_id = chat.clone();
             assignment.work_item_id = Some(project.into());
             snapshot.assignments.push(assignment);
+            snapshot
+                .items
+                .iter_mut()
+                .find(|i| i.id == project)
+                .unwrap()
+                .chat_ids
+                .push(chat.clone());
         }
         snapshot.standing_roles.push(StandingRole {
             id: standing_role_id(StandingRoleKind::Manager, project),
