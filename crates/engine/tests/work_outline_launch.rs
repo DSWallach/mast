@@ -2671,3 +2671,128 @@ async fn a_manager_start_retry_reuses_its_stored_revision_when_later_project_tex
     assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_manager_upgrade_refuses_unsupported_harness_without_mutation() {
+    let rig = rig_with(unsupported_mock(), false).await;
+    let chat = pre_upgrade_manager(&rig, "op-unsupported-upgrade").await;
+    let before = commands(&rig, &chat).len();
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    let err = rig.core.doc_host.queue_command(&chat, SessionCommandPayload::Run {
+        request: run_request("unsupported follow up", &cwd),
+        message_id: "unsupported-follow-up".into(),
+    }).unwrap_err();
+    assert!(err.to_string().contains("instruction-delivery/"), "{err}");
+    assert_eq!(commands(&rig, &chat).len(), before);
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
+    assert!(applications_of(&rig, &chat).is_empty());
+    assert!(rig.core.doc_host.queue_message(&chat, "unsupported queued", Vec::new()).is_err());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_manager_failed_upgrade_does_not_send_or_change_selection() {
+    let rig = rig_with(InstructionMockHarness::default(), false).await;
+    overflow_the_manager_envelope(&rig).await;
+    let chat = pre_upgrade_manager(&rig, "op-overflow-upgrade").await;
+    let old = rig.core.workspace.selected_instruction_revision(&chat).unwrap();
+    let before = commands(&rig, &chat).len();
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    let error = rig.core.doc_host.queue_command(&chat, SessionCommandPayload::Run {
+        request: run_request("overflow follow up", &cwd), message_id: "overflow-follow-up".into(),
+    }).unwrap_err();
+    assert!(error.to_string().contains("Manager instructions"), "{error}");
+    assert_eq!(commands(&rig, &chat).len(), before);
+    assert_eq!(rig.core.workspace.selected_instruction_revision(&chat), Some(old));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_manager_remote_host_requires_capability_for_plain_pinned_and_queue() {
+    let rig = rig().await;
+    let chat = pre_upgrade_manager(&rig, "op-remote-old-manager").await;
+    let pin = rig.core.workspace.selected_instruction_revision(&chat).unwrap();
+    rig.core.workspace.set_chat_host(&chat, "older-host").unwrap();
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    let before = commands(&rig, &chat).len();
+    for known in [false, true] {
+        if known {
+            rig.core.workspace.upsert_device_row(&mast_proto::Device {
+                id: "older-host".into(), name: "Older host".into(), platform: "test".into(),
+                last_seen_at: None, created_at: None, version: None,
+                cursor_sdk_version: None, capabilities: Vec::new(),
+            });
+        }
+        let plain = SessionCommandPayload::Run { request: run_request("plain", &cwd), message_id: "remote-plain".into() };
+        let pinned = SessionCommandPayload::RunWithInstructions { request: run_request("pinned", &cwd), message_id: "remote-pin".into(), instructions: pin.clone(), context_reset_confirmed: false };
+        for payload in [plain, pinned] {
+            let error = rig.core.doc_host.queue_command(&chat, payload).unwrap_err();
+            assert!(error.to_string().contains("Update Mast"), "{error}");
+        }
+        assert!(rig.core.doc_host.queue_message(&chat, "remote queued", Vec::new()).is_err());
+    }
+    assert_eq!(commands(&rig, &chat).len(), before);
+    assert_eq!(rig.core.workspace.selected_instruction_revision(&chat), Some(pin));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_queued_row_stays_put_when_host_changes_before_drain() {
+    let rig = rig().await;
+    let chat = pre_upgrade_manager(&rig, "op-manager-owner-change").await;
+    let handle = rig.core.doc_host.open(&chat).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    let id = rig.core.doc_host.queue_message(&chat, "wait for owner", Vec::new()).unwrap();
+    rig.core.workspace.set_chat_host(&chat, "older-host").unwrap();
+    drop(guard);
+    rig.core.doc_host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert!(rows.iter().any(|row| row.id == id));
+    assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("wait for owner")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_sender_to_unsupported_manager_is_rejected_by_host() {
+    let rig = rig_with(unsupported_mock(), false).await;
+    let chat = pre_upgrade_manager(&rig, "op-legacy-unsupported").await;
+    let handle = rig.core.doc_host.open(&chat).unwrap();
+    let entry = SessionCommandEntry {
+        id: "legacy-unsupported-command".into(),
+        payload: SessionCommandPayload::Run {
+            request: run_request("legacy unsupported", &rig.repo.to_string_lossy()),
+            message_id: "legacy-unsupported-message".into(),
+        },
+        issued_by: DEVICE.into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    handle.doc().queue_command(&entry).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+    wait_for(|| commands(&rig, &chat).iter().any(|command|
+        command.id == entry.id && command.status == SessionCommandStatus::Rejected),
+        "legacy command rejection").await;
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
+    assert!(!rig.mock.turns().iter().any(|turn| turn.prompt.contains("legacy unsupported")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_without_selected_revision_cannot_send_to_unknown_remote_host() {
+    let rig = rig_with(InstructionMockHarness::default(), false).await;
+    let chat = pre_upgrade_manager(&rig, "op-remote-empty-manager").await;
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
+    rig.core.workspace.set_chat_host(&chat, "unknown-host").unwrap();
+    let before = commands(&rig, &chat).len();
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    let error = rig.core.doc_host.queue_command(&chat, SessionCommandPayload::Run {
+        request: run_request("remote empty", &cwd), message_id: "remote-empty".into(),
+    }).unwrap_err();
+    assert!(error.to_string().contains("Update Mast"), "{error}");
+    assert_eq!(commands(&rig, &chat).len(), before);
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
+    rig.core.shutdown().await;
+}

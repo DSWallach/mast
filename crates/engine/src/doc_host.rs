@@ -3034,7 +3034,13 @@ impl DocHost {
             turn_id: Some(m.id.clone()),
             frontier: None,
         });
-        let payload = self.capture_selected_revision(chat_id, payload);
+        if matches!(payload, SessionCommandPayload::Run { .. }
+            | SessionCommandPayload::RunWithInstructions { .. }
+            | SessionCommandPayload::Steer { .. })
+        {
+            self.preflight_manager_host(chat_id)?;
+        }
+        let payload = self.capture_selected_revision(chat_id, payload)?;
         let is_message = matches!(
             payload,
             SessionCommandPayload::Run { .. }
@@ -3081,34 +3087,40 @@ impl DocHost {
         &self,
         chat_id: &str,
         payload: SessionCommandPayload,
-    ) -> SessionCommandPayload {
-        match payload {
-            SessionCommandPayload::Run {
-                request,
-                message_id,
-            } => match self
-                // A Manager that predates its role gains it with this new
-                // submission; queued or explicitly pinned messages are left alone.
-                .sessions()
-                .and_then(|sessions| {
-                    let harness = self.harness_for_request(chat_id, &request);
-                    self.upgrade_manager_role(&sessions, chat_id, &message_id, harness)
-                })
-                .or_else(|| self.selected_instruction_revision(chat_id))
-            {
-                Some(instructions) => SessionCommandPayload::RunWithInstructions {
-                    request,
-                    message_id,
-                    instructions,
-                    context_reset_confirmed: false,
-                },
-                None => SessionCommandPayload::Run {
-                    request,
-                    message_id,
-                },
-            },
+    ) -> Result<SessionCommandPayload, EngineError> {
+        Ok(match payload {
+            SessionCommandPayload::Run { request, message_id } => {
+                let upgraded = match self.sessions() {
+                    Some(sessions) => self.upgrade_manager_role(
+                        &sessions, chat_id, &message_id, self.harness_for_request(chat_id, &request),
+                    )?,
+                    None => None,
+                };
+                match upgraded.or_else(|| self.selected_instruction_revision(chat_id)) {
+                    Some(instructions) => SessionCommandPayload::RunWithInstructions {
+                        request, message_id, instructions, context_reset_confirmed: false,
+                    },
+                    None => SessionCommandPayload::Run { request, message_id },
+                }
+            }
             other => other,
+        })
+    }
+
+    /// An older remote host can dispatch a Manager without its restrictions,
+    /// even when the message has no instruction pin.
+    fn preflight_manager_host(&self, chat_id: &str) -> Result<(), EngineError> {
+        let Some(workspace) = self.workspace() else { return Ok(()); };
+        if !workspace.chat_is_manager(chat_id) { return Ok(()); }
+        let Some(host_id) = self.remote_host_for(chat_id) else { return Ok(()); };
+        let devices = workspace.read_devices()?;
+        let host = devices.iter().find(|device| device.id == host_id);
+        if !host.is_some_and(|device| device.supports(mast_proto::capabilities::MANAGER_ROLE_V1)) {
+            return Err(EngineError::Other(format!(
+                "Update Mast on the device hosting this Manager ({host_id}) before sending. Nothing was sent"
+            )));
         }
+        Ok(())
     }
 
     /// Ingestion preflight for instruction-bearing commands (contract 5.5),
@@ -3260,14 +3272,9 @@ impl DocHost {
         from_user: bool,
         message_id: Option<&str>,
     ) -> Result<String, EngineError> {
+        self.preflight_manager_host(chat_id)?;
         if from_user {
             self.refuse_unstarted_role_chat(chat_id)?;
-            // User first: a wake still waiting in the queue is pulled back
-            // (its events return to the held batch) so it can never run
-            // ahead of this message, and a running event turn is
-            // interrupted so this message runs next.
-            self.pull_pending_event_message(chat_id);
-            self.spawn_interrupt_event_turn(chat_id);
         }
         let handle = self.open(chat_id)?;
         let id = message_id.map(str::to_owned).unwrap_or_else(new_id);
@@ -3277,9 +3284,10 @@ impl DocHost {
         // A new user send to a Manager that predates its role gains the role
         // here too; rows already queued keep the pin they were queued with.
         let upgraded = if from_user {
-            self.sessions().and_then(|sessions| {
-                self.upgrade_manager_role(&sessions, chat_id, &id, self.harness_for(chat_id))
-            })
+            match self.sessions() {
+                Some(sessions) => self.upgrade_manager_role(&sessions, chat_id, &id, self.harness_for(chat_id))?,
+                None => None,
+            }
         } else {
             None
         };
@@ -3288,6 +3296,11 @@ impl DocHost {
         // ignore the pin and run the row without instructions).
         if instructions.is_some() {
             self.preflight_instruction_host(chat_id, self.harness_for(chat_id))?;
+        }
+        if from_user {
+            // Only interrupt event work after all send preflights succeed.
+            self.pull_pending_event_message(chat_id);
+            self.spawn_interrupt_event_turn(chat_id);
         }
         handle.doc.push_queued_with_instructions(
             &QueuedMessage {
@@ -3989,6 +4002,11 @@ impl DocHost {
             // and abandon the question.
             if sessions.turn_in_flight(&handle.chat_id) {
                 return; // All queued messages wait, including rows from older clients.
+            }
+            // Ownership can change while this drain waits for a turn. Do not
+            // take a row after this device has ceased to be its host.
+            if !self.is_host(&handle.chat_id) {
+                return;
             }
             let send = QueueSend::NextTurn;
             let pin = handle.doc.queued_instructions(&head.id);
@@ -5572,32 +5590,28 @@ impl DocHost {
         chat_id: &str,
         message_id: &str,
         harness: HarnessId,
-    ) -> Option<InstructionRevisionPin> {
+    ) -> Result<Option<InstructionRevisionPin>, EngineError> {
         use mast_doc::work_outline::instructions::ManagerRoleUpgrade;
         use mast_proto::{
             ApplyInstructionRevisionParams, CreateInstructionRevisionParams,
             InstructionApplicationReason, InstructionTurnBoundary, WorkOutlineActor,
             WorkOutlineActorKind, WorkOutlineMutation, derive_id, roles,
         };
-        let workspace = self.workspace()?;
-        if crate::work_outline::writes_disabled()
-            || sessions.turn_instruction_pin(chat_id, message_id).is_some()
-        {
-            return None;
+        let Some(workspace) = self.workspace() else { return Ok(None); };
+        if sessions.turn_instruction_pin(chat_id, message_id).is_some() {
+            return Ok(None);
         }
         let ManagerRoleUpgrade::Needed {
             work_item_id,
             base_revision_id,
         } = workspace.manager_role_upgrade(chat_id)
         else {
-            return None;
+            return Ok(None);
         };
-        if !matches!(
-            sessions.instruction_support(harness),
-            Ok(mast_harness::InstructionSupport::Supported { .. })
-        ) {
-            return None;
+        if crate::work_outline::writes_disabled() {
+            return Err(EngineError::Other("Cannot add Manager instructions while Work Outline writes are disabled".into()));
         }
+        self.preflight_instruction_host(chat_id, harness)?;
         let actor = WorkOutlineActor {
             kind: WorkOutlineActorKind::User,
             device_id: self.inner.config.device_id.clone(),
@@ -5641,19 +5655,13 @@ impl DocHost {
             )?;
             Ok::<_, mast_proto::WorkOutlineError>(revision_id)
         })();
-        match upgraded {
-            Ok(revision_id) => {
-                let revision = workspace.instruction_revision(&revision_id)?;
-                Some(InstructionRevisionPin {
-                    revision_id,
-                    revision_hash: revision.body.hash,
-                })
-            }
-            Err(error) => {
-                tracing::warn!(chat_id, %error.message, "could not add the Manager role to its chat");
-                None
-            }
-        }
+        let revision_id = upgraded.map_err(|error| EngineError::Other(format!(
+            "Could not add Manager instructions: {}", error.message
+        )))?;
+        let revision = workspace.instruction_revision(&revision_id).ok_or_else(||
+            EngineError::Other("The new Manager instruction revision is unavailable".into())
+        )?;
+        Ok(Some(InstructionRevisionPin { revision_id, revision_hash: revision.body.hash }))
     }
 
     async fn execute_run(
@@ -5700,7 +5708,10 @@ impl DocHost {
         let upgrade_pin = match pinned {
             None => {
                 let harness = self.harness_for_request(chat_id, &request);
-                self.upgrade_manager_role(sessions, chat_id, message_id, harness)
+                match self.upgrade_manager_role(sessions, chat_id, message_id, harness) {
+                    Ok(pin) => pin,
+                    Err(error) => return Ok((SessionCommandStatus::Rejected, Some(error.to_string()))),
+                }
             }
             Some(_) => None,
         };
