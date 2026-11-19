@@ -600,15 +600,15 @@ impl Changes {
                 .h(px(r.height * scale_y))
                 .overflow_hidden();
             match &tile.kind {
-                TileKind::Folder(path) => {
-                    canvas = canvas.child(
-                        base.border_1().border_color(theme.border).child(
+                TileKind::Folder(_) => {
+                    canvas = canvas.child(base.border_1().border_color(theme.border).children(
+                        (r.height >= 50.0 && r.width >= 80.0).then(|| {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(theme.text_muted)
-                                .child(labels[tile_index].clone()),
-                        ),
-                    );
+                                .child(labels[tile_index].clone())
+                        }),
+                    ));
                 }
                 TileKind::More {
                     folder,
