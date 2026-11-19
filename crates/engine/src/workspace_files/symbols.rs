@@ -537,6 +537,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fuzzy_queries_do_not_receive_new_constant_kinds() {
+        use mast_syntax::symbols::SymbolKind;
+        let mut index = SymbolIndex::new(4, 20, 20);
+        index.apply(1, &[FileChange::Changed { path: "items.rs", source: "const ITEM: i32 = 1; fn item() {}" }]);
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let legacy = search_snapshot(&index, "item", 200, &generation, 1, false, None, None).unwrap();
+        assert_eq!(legacy.matches.len(), 1);
+        assert_eq!(legacy.matches[0].symbol.kind, SymbolKind::Function);
+        let current = search_snapshot(&index, "item", 200, &generation, 1, false, Some(&[SymbolKind::Function, SymbolKind::Constant]), None).unwrap();
+        assert_eq!(current.matches.len(), 2);
+    }
+
+    #[test]
     fn exact_query_ranks_before_applying_limit() {
         let mut index = SymbolIndex::new(10, 10, 10);
         index.apply(1, &[
