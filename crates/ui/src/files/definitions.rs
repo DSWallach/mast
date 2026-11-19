@@ -322,6 +322,8 @@ mod tests {
         let transport = Arc::new(DelayedEmptyTransport::default());
         let context = super::super::client::FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/fixture".into(), checkout_id: Some("checkout".into()) };
         let client = WorkspaceFilesClient::with_transport(transport.clone(), context.clone());
+        let warm_client = client.clone();
+        let warm_context = context.clone();
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
         let host = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
@@ -351,6 +353,16 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         host.update(cx, |surface, _, _| assert!(surface.definition_notice.is_none())).unwrap();
+        host.update(cx, |surface, _, cx| {
+            surface.start_definition_lookup(warm_client, DefinitionLookup { path: "src/a.rs".into(), name: "missing".into(), cursor: 3, source: "missing".into(), context: warm_context, index_ready: true }, cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert!(surface.definition_notice.is_none())).unwrap();
+        transport.sender.lock().unwrap().as_ref().unwrap().try_send(serde_json::json!({"revision": 1})).unwrap();
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("No definition found for missing"))).unwrap();
     }
 
     #[derive(Default)]
