@@ -500,6 +500,27 @@ impl WorkItemLaunchService {
             .map(|config| config.harness)
             .unwrap_or_else(|| self.doc_host.harness_for(source));
         successor.account_id = self.sessions.chat_account_pin(source, harness);
+        // A hand-off that stopped after workers moved is finished by asking
+        // again with the same summary and settings, even from a reopened
+        // dialog or after a restart that minted a fresh operation id.
+        if let Some(pending) = self.workspace.part_done_hand_off_from(source)
+            && pending.operation_id != successor.operation_id
+        {
+            let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
+                work_item_id: &successor.work_item_id,
+                initial_prompt: &successor.initial_prompt,
+                config: &successor.config,
+                execution_override: &successor.execution_override,
+                worktree_choice: &successor.worktree_choice,
+                parent_chat_id: &successor.parent_chat_id,
+            });
+            if self
+                .workspace
+                .ledger_holds(&ledger_launch_inputs_key(&hash, &pending.operation_id))
+            {
+                successor.operation_id = pending.operation_id;
+            }
+        }
         self.launch_chat_for_work_item(&successor, Some((wakes, source)))
             .await
     }
@@ -579,6 +600,16 @@ impl WorkItemLaunchService {
                 WorkOutlineErrorCode::Archived,
                 "The work item is archived",
             ));
+        }
+        // Reserve the successor on the source's role before anything is
+        // created, moved or queued. A source a role already replaced, a Space
+        // the role cannot follow, or another part-done hand-off ends the
+        // launch here, with nothing written. The gate held above serializes
+        // launches; the reservation survives a restart.
+        if let Some((_, source)) = hand_off {
+            self.workspace
+                .reserve_standing_role_hand_off(source, &chat_id, op, Some(&space_id))
+                .map_err(conflict)?;
         }
         if self
             .workspace
@@ -685,6 +716,13 @@ impl WorkItemLaunchService {
         }
         self.checkpoint(LaunchStep::BindingCaptured)?;
 
+        // The successor exists now, so the full destination rules apply
+        // before workers move or a second turn can be queued.
+        if let Some((_, source)) = hand_off {
+            self.workspace
+                .check_standing_role_hand_off(source, &chat_id, None)
+                .map_err(conflict)?;
+        }
         if let Some((wakes, source)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
@@ -771,6 +809,11 @@ impl WorkItemLaunchService {
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
         if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
+            // A manual hand-off of a standing role's chat moves the role too.
+            // Replays of this launch find the role already moved.
+            self.workspace
+                .rotate_standing_role_for_chat(source, &chat_id)
+                .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
             let handle = self.doc_host.open(source).map_err(engine_error)?;
             handle.write_user_message(
                 &derive_id(op, "hand-off-notice"),

@@ -1064,6 +1064,36 @@ impl AppState {
         }
     }
 
+    /// One chats watch frame, end to end: replace the list, move an open pane
+    /// off a chat a standing role rotated away from (re-subscribing its
+    /// transcript and queue watches), then reconcile the dependent watches.
+    pub(crate) fn apply_chats_frame(&mut self, chats: Vec<Chat>, cx: &mut Context<Self>) {
+        self.apply_chats(chats);
+        self.follow_standing_role_selection(cx);
+        self.apply_pending_deep_link(cx);
+        self.reconcile_change_request_watches(cx);
+        // A Chat's Space can arrive (or the selection vanish) with a chats
+        // frame.
+        self.reconcile_work_outline_watches(cx);
+        cx.notify();
+    }
+
+    /// The chat now holding the role of the selected chat, when the selected
+    /// chat was rotated away from. `None` when nothing needs to change.
+    pub(crate) fn standing_role_selection_target(&self) -> Option<String> {
+        let selected = self.selected_chat.as_deref()?;
+        let current = mast_proto::StandingRole::resolve_current(&self.chats, selected);
+        (current != selected).then(|| current.to_owned())
+    }
+
+    /// An open pane on a chat a standing role rotated away from swaps to the
+    /// successor in place, with no click.
+    pub(crate) fn follow_standing_role_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.standing_role_selection_target() {
+            self.select_chat(Some(target), cx);
+        }
+    }
+
     /// Replace one chat title in the shared presentation state and return its
     /// previous value. The shell uses this for an immediate rename preview;
     /// the registry watch remains authoritative and will reconcile the same
@@ -1940,6 +1970,7 @@ impl AppState {
             .chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| !c.is_standing_role_predecessor())
             .filter(|c| c.scheduled_task_info.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
@@ -2075,6 +2106,7 @@ impl AppState {
                 .map(|s| discriminant(&s))
                 .hash(&mut h);
             chat.scheduled_task_info.hash(&mut h);
+            chat.standing_role_successor.hash(&mut h);
             discriminant(&self.display_status_for(chat, now)).hash(&mut h);
             if let Some(failures) = self
                 .session_for(&chat.id)
@@ -3569,13 +3601,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 let alive = this.update(cx, |state, cx| {
                     #[cfg(feature = "startup-bench")]
                     startup_trace("chats_apply");
-                    state.apply_chats(parsed);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    // A Chat's Space can arrive (or the selection vanish)
-                    // with a chats frame.
-                    state.reconcile_work_outline_watches(cx);
-                    cx.notify();
+                    state.apply_chats_frame(parsed, cx);
                 });
                 #[cfg(feature = "startup-bench")]
                 drop(update_span);
@@ -4804,6 +4830,7 @@ mod tests {
             actual_model: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             parent_chat_id: None,
             side_of: None,
             side_absorbed_through: None,
@@ -6232,6 +6259,96 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn open_pane_follows_standing_role_rotation_to_the_current_chat() {
+        let mut state = AppState::new();
+        let mut first = chat("first", 0, None);
+        first.archived = true;
+        first.standing_role_successor = Some("second".into());
+        let mut second = chat("second", 1, None);
+        second.standing_role_successor = Some("third".into());
+        state.apply_chats(vec![first, second, chat("third", 2, None)]);
+        state.selected_chat = Some("first".into());
+        assert_eq!(state.standing_role_selection_target().as_deref(), Some("third"));
+        state.selected_chat = Some("third".into());
+        assert_eq!(state.standing_role_selection_target(), None);
+        state.selected_chat = None;
+        assert_eq!(state.standing_role_selection_target(), None);
+        assert!(
+            state
+                .overview_chats_with_archived(Utc::now(), true)
+                .iter()
+                .all(|(_, c)| !c.is_standing_role_predecessor())
+        );
+    }
+
+    #[gpui::test]
+    fn chats_frame_moves_an_open_pane_to_the_role_successor(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(vec![chat("first", 0, None), chat("second", 1, None)], cx);
+            state.select_chat(Some("first".into()), cx);
+            let revision = state.transcript_revision;
+            // The same frame a rotation produces: the predecessor is archived
+            // and points at its successor.
+            let mut first = chat("first", 0, None);
+            first.archived = true;
+            first.standing_role_successor = Some("second".into());
+            state.apply_chats_frame(vec![first, chat("second", 1, None)], cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert_ne!(state.transcript_revision, revision, "transcript was swapped, not kept");
+            assert!(!state.transcript_replayed);
+            // A frame that changes nothing about the role keeps the pane put.
+            let revision = state.transcript_revision;
+            state.apply_chats_frame(vec![chat("second", 1, None)], cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert_eq!(state.transcript_revision, revision);
+        });
+    }
+
+    #[gpui::test]
+    fn open_pane_resubscribes_its_transcript_to_the_role_successor(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound)));
+            state.apply_chats_frame(vec![chat("first", 0, None), chat("second", 1, None)], cx);
+            state.select_chat(Some("first".into()), cx);
+        });
+        cx.run_until_parked();
+        let watched = |requests: &mut tokio::sync::mpsc::Receiver<String>| {
+            let mut chats = Vec::new();
+            while let Ok(frame) = requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if request["method"] == methods::WATCH_DOC_MESSAGES {
+                    chats.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+                }
+            }
+            chats
+        };
+        assert_eq!(watched(&mut requests), ["first"]);
+
+        // The rotation frame arrives over the chats watch.
+        state.update(cx, |state, cx| {
+            let mut first = chat("first", 0, None);
+            first.archived = true;
+            first.standing_role_successor = Some("second".into());
+            state.apply_chats_frame(vec![first, chat("second", 1, None)], cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(watched(&mut requests), ["second"], "the pane subscribes to the successor, not the predecessor");
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_chat.as_deref(), Some("second"));
+            assert!(state.transcript_task.is_some(), "a live transcript watch is attached");
+        });
     }
 
     #[test]

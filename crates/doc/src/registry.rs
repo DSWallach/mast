@@ -48,6 +48,8 @@ mod diff_review;
 pub mod friction;
 mod sidebar_pins;
 mod sidebar_sections;
+mod standing_roles;
+pub use standing_roles::KIND_STANDING_ROLES;
 pub mod work_outline;
 pub use work_outline::{
     KIND_INSTRUCTION_REVISION_APPLICATIONS, KIND_INSTRUCTION_REVISIONS,
@@ -1356,7 +1358,7 @@ impl RegistryDoc {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
         };
-        let set = fields([
+        let mut set = fields([
             ("id", json!(chat.id)),
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
@@ -1407,6 +1409,11 @@ impl RegistryDoc {
             ("scheduledTaskInfo", serde_json::to_value(&chat.scheduled_task_info)?),
             ("scheduledTask", opt_str(chat.scheduled_task.as_deref())),
         ]);
+        // Write-once marker: omitted when absent so a stale upsert cannot
+        // clear a rotation recorded since the read.
+        if let Some(successor) = &chat.standing_role_successor {
+            set.insert("standingRoleSuccessor".into(), json!(successor));
+        }
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
     }
@@ -1485,6 +1492,22 @@ impl RegistryDoc {
             .ok_or("source chat does not exist")?;
         let destination = self.chat(to).map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
+        // A recorded hand-off replays before any live check: the source may
+        // since have been archived by a standing role rotation, and the
+        // destination may itself have handed off again (A to B, then B to C).
+        // The saved workers come back and nothing is redone.
+        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
+            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+        {
+            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
+                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
+            {
+                return Err("destination already has a different hand-off".into());
+            }
+            return serde_json::from_value(provenance["workerChatIds"].clone())
+                .map(|workers| (workers, true))
+                .map_err(|e| format!("invalid hand-off provenance: {e}"));
+        }
         if from == to || source.archived || destination.archived {
             return Err("hand-off requires two distinct, active chats".into());
         }
@@ -1507,18 +1530,6 @@ impl RegistryDoc {
             remaining -= 1;
             ancestor = chats.iter().find(|chat| chat.id == id)
                 .and_then(|chat| chat.parent_chat_id.as_deref());
-        }
-        if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
-            .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
-        {
-            if provenance.get("fromChatId").and_then(Value::as_str) != Some(from)
-                || provenance.get("actorChatId").and_then(Value::as_str) != Some(actor)
-            {
-                return Err("destination already has a different hand-off".into());
-            }
-            return serde_json::from_value(provenance["workerChatIds"].clone())
-                .map(|workers| (workers, true))
-                .map_err(|e| format!("invalid hand-off provenance: {e}"));
         }
         let workers: Vec<String> = chats.into_iter()
             .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))

@@ -72,6 +72,11 @@ pub mod capabilities {
     pub const SIDE_CHAT_V1: &str = "side-chat-v1";
     /// The host supports solo chat handoff and automatic work-item ownership.
     pub const CHAT_HANDOFF_V1: &str = "chat-handoff-v1";
+    /// The host moves a standing role (manager or assistant) to the
+    /// successor when one of its role chats hands off. Without it a hand-off
+    /// of a role chat would start the successor and move workers but leave
+    /// the role on the predecessor, so callers refuse to route one there.
+    pub const STANDING_ROLE_HANDOFF_V1: &str = "standing-role-handoff-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -107,6 +112,7 @@ pub mod capabilities {
         ARTIFACTS_V1,
         SIDE_CHAT_V1,
         CHAT_HANDOFF_V1,
+        STANDING_ROLE_HANDOFF_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -234,7 +240,8 @@ mod tests {
                     "pr-review-sync-v1",
                     "artifacts-v1",
                     "side-chat-v1",
-                    "chat-handoff-v1"
+                    "chat-handoff-v1",
+                    "standing-role-handoff-v1"
                 ],
             })
         );

@@ -15172,6 +15172,7 @@ mod exit_regressions {
                     state.chats.push(mast_proto::Chat {
                         id: "destination".into(),
                         scheduled_task_info: None,
+                        standing_role_successor: None,
                         scheduled_task: None,
                         side_of: None,
                         side_absorbed_through: None,
@@ -15442,6 +15443,7 @@ mod exit_regressions {
                         linked_ticket_source: None,
                         scheduled_task: None,
                         scheduled_task_info: None,
+                        standing_role_successor: None,
                         side_of: None,
                         side_absorbed_through: None,
                     });
@@ -15548,6 +15550,7 @@ mod exit_regressions {
                         actual_model: None,
                         scheduled_task: None,
                         scheduled_task_info: None,
+                        standing_role_successor: None,
                         parent_chat_id: None,
                         side_of: None,
                         side_absorbed_through: None,
@@ -16740,6 +16743,7 @@ mod titlebar_lamp_layout {
                             actual_model: None,
                             scheduled_task: None,
                             scheduled_task_info: None,
+                            standing_role_successor: None,
                             parent_chat_id: None,
                             side_of: None,
                             side_absorbed_through: None,

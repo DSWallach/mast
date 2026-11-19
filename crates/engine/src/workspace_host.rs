@@ -775,6 +775,70 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.hand_off_chat_children(from, to, actor, at_ms))
     }
 
+    pub fn standing_role(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role(role, scope_item_id))
+    }
+
+    pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
+        self.read(|doc| doc.standing_role_chat(role, scope_item_id))
+    }
+
+    pub fn adopt_standing_role(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[mast_proto::StandingRoleModel],
+    ) -> Result<mast_proto::StandingRole, String> {
+        // Only the chat's own host adopts it: that is the device whose
+        // hand-offs rotate the role (and it runs this build, which supports
+        // `standing-role-handoff-v1`).
+        let host = self.read(|doc| doc.chat(chat_id)).map_err(|e| e.to_string())?
+            .ok_or("chat does not exist")?.device_id;
+        if host != self.device_id() {
+            return Err("a role can only be adopted on the chat's own host".into());
+        }
+        self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Whether `chat_id` holds, or was superseded in, a standing role. Hand-offs
+    /// of such chats need a host that moves roles.
+    pub fn chat_in_standing_role(&self, chat_id: &str) -> bool {
+        self.read(|doc| {
+            doc.standing_role_of_chat(chat_id).is_some()
+                || doc.chat(chat_id).ok().flatten().is_some_and(|c| c.is_standing_role_predecessor())
+        })
+    }
+
+    /// Persist the source's chosen successor before a hand-off launch writes
+    /// anything. See `RegistryDoc::reserve_standing_role_hand_off`.
+    pub fn reserve_standing_role_hand_off(&self, from: &str, to: &str, operation_id: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.mutate(|doc| doc.reserve_standing_role_hand_off(from, to, operation_id, to_space))
+    }
+
+    /// The part-done hand-off from the role chat `from`, if workers already moved.
+    pub fn part_done_hand_off_from(&self, from: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.part_done_hand_off_from(from))
+    }
+
+    pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
+    }
+
+    /// Read-only precheck of a hand-off launch against the standing role
+    /// `from` holds. `to_space` stands in for a successor not yet created.
+    pub fn check_standing_role_hand_off(&self, from: &str, to: &str, to_space: Option<&str>) -> Result<(), String> {
+        self.read(|doc| doc.check_standing_role_hand_off(from, to, to_space))
+    }
+
+    /// If `from` holds a standing role, hand the role to `to` (archiving and
+    /// hiding `from`). `Ok(None)` when `from` holds no role, so ordinary
+    /// hand-offs are untouched. A replay returns the same role; a source
+    /// already replaced by a different chat is an error.
+    pub fn rotate_standing_role_for_chat(&self, from: &str, to: &str) -> Result<Option<mast_proto::StandingRole>, String> {
+        self.mutate(|doc| doc.rotate_standing_role_for_chat(from, to))
+    }
+
     /// Every durable PR linked to this chat. Independent link rows are
     /// authoritative; the legacy single-value slot is folded in as a fallback
     /// so pre-migration chats immediately read as a one-element collection.
@@ -1683,7 +1747,9 @@ impl WorkspaceHost {
             let chat = doc
                 .chat(chat_id)?
                 .ok_or_else(|| EngineError::Other("Chat not found".into()))?;
-            if chat.archived {
+            // A role's predecessor is archived by its own rotation; a retry of
+            // that hand-off only needs the item it already has.
+            if chat.archived && !chat.is_standing_role_predecessor() {
                 return Err(EngineError::Other(
                     "An archived chat cannot start new work".into(),
                 ));
@@ -2024,6 +2090,7 @@ impl WorkspaceHost {
                     .as_ref()
                     .map(|task| task.task_name.clone()),
                 scheduled_task_info,
+                standing_role_successor: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
@@ -2085,6 +2152,7 @@ impl WorkspaceHost {
             side_absorbed_through: None,
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             linked_pr_url: None,
             linked_pr_source: None,
             linked_ticket_id: None,

@@ -48,6 +48,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         actual_model: None,
         scheduled_task: None,
         scheduled_task_info: None,
+        standing_role_successor: None,
         parent_chat_id: None,
         side_of: None,
         side_absorbed_through: None,
@@ -581,6 +582,94 @@ async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
     assert!(!stats.connected, "no WS session ever joined");
 
     client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_standing_role_rotation_reaches_a_second_client_in_one_step() {
+    use mast_proto::work_outline::{
+        CreateWorkItemParams, WorkOutlineActor, WorkOutlineActorKind, WorkOutlineMutation,
+        WorkOutlinePlacement,
+    };
+    use mast_proto::{Space, StandingRoleKind};
+    let server = MockRegistryServer::start().await;
+    let doc_a = new_doc("dev-a");
+    let doc_b = new_doc("dev-b");
+    let item = {
+        let mut doc = doc_a.lock().unwrap();
+        doc.upsert_space(&Space {
+            id: "space".into(),
+            device_id: "dev-a".into(),
+            path: "/tmp/role".into(),
+            name: None,
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: ts(1_500),
+        })
+        .unwrap();
+        let actor = WorkOutlineActor {
+            kind: WorkOutlineActorKind::User,
+            device_id: "dev-a".into(),
+            chat_id: None,
+            message_id: None,
+        };
+        let item = doc
+            .apply_work_outline_mutation(
+                &WorkOutlineMutation::CreateWorkItem(CreateWorkItemParams {
+                    space_id: "space".into(),
+                    parent_work_item_id: None,
+                    placement: WorkOutlinePlacement::Last,
+                    title: "Manager".into(),
+                    description: None,
+                    status: None,
+                    operation_id: "transport-item".into(),
+                }),
+                &actor,
+                1_700_000_000_000,
+            )
+            .unwrap()
+            .work_item_id
+            .unwrap();
+        for id in ["first", "second"] {
+            let mut row = chat(id, "dev-a");
+            row.space_id = Some("space".into());
+            doc.upsert_chat(&row).unwrap();
+        }
+        doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+        item
+    };
+    let client_a = RegistryClient::connect(&server.url(), doc_a.clone(), "dev-a").await.expect("a connects");
+    client_a.nudge();
+    wait_until(|| doc_a.lock().unwrap().pending_len() == 0).await;
+    let client_b = RegistryClient::connect(&server.url(), doc_b.clone(), "dev-b").await.expect("b connects");
+    wait_until(|| {
+        doc_b.lock().unwrap().standing_role_chat(StandingRoleKind::Manager, &item).as_deref() == Some("first")
+    })
+    .await;
+
+    // Rotate on A. Whenever B sees the role pointing at the successor, the
+    // predecessor must already be archived and marked: one batch, not two.
+    doc_a
+        .lock()
+        .unwrap()
+        .rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second")
+        .unwrap();
+    client_a.nudge();
+    wait_until(|| {
+        let doc = doc_b.lock().unwrap();
+        if doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref() != Some("second") {
+            return false;
+        }
+        let first = doc.chat("first").unwrap().unwrap();
+        assert!(
+            first.archived && first.standing_role_successor.as_deref() == Some("second"),
+            "the role moved before its predecessor was hidden"
+        );
+        true
+    })
+    .await;
+    client_a.shutdown().await;
+    client_b.shutdown().await;
 }
 
 #[path = "../../../test_support/isolation.rs"]
