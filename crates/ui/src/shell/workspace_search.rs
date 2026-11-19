@@ -167,11 +167,12 @@ impl Shell {
                 let updating = frame.get("updating").and_then(|value| value.as_bool()).unwrap_or(false);
                 let _ = this.update(cx, |this, cx| {
                     if this.workspace_symbol_key.as_ref() != Some(&key) { return; }
+                    let first_snapshot = this.workspace_symbol_index.is_none();
                     this.workspace_symbol_index = Some(());
                     this.workspace_symbol_updating = updating;
                     this.workspace_symbol_truncated = truncated;
                     this.workspace_symbol_error = None;
-                    if !updating && this.workspace_search.as_ref().is_some_and(|s| s.mode == SearchMode::Symbols) { this.update_workspace_search(cx); }
+                    if (!updating || first_snapshot) && this.workspace_search.as_ref().is_some_and(|s| s.mode == SearchMode::Symbols) { this.update_workspace_search(cx); }
                     else if let Some(search) = this.workspace_search.as_mut().filter(|s| s.mode == SearchMode::Symbols) { search.status = "Updating…".into(); cx.notify(); }
                 });
             }
