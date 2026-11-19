@@ -402,9 +402,6 @@ pub fn read(
 ) -> Result<Vec<BriefingEntry>, ArtifactError> {
     let workspace = service.workspace();
     let kind = query.kind;
-    // Revisions published before stamps existed are stamped while their
-    // publishing chat can still prove them.
-    service.backfill_run_stamps(Some(space_id));
     let selected = select(
         workspace.artifacts_of_space(space_id),
         scope,

@@ -692,6 +692,8 @@ struct Inner {
     /// record, so two concurrent publishes cannot both pass the check.
     agent_publish_serial: Mutex<()>,
     render: Arc<RenderBroker>,
+    /// Test seam: make provenance stamp writes fail.
+    fail_stamp_writes: std::sync::atomic::AtomicBool,
     /// The user's home directory (deny-list anchor); `$HOME` by default.
     home: Mutex<Option<PathBuf>>,
 }
@@ -713,9 +715,18 @@ impl ArtifactsService {
                 gate: Mutex::new(HashMap::new()),
                 agent_publish_serial: Mutex::new(()),
                 render: Arc::new(RenderBroker::default()),
+                fail_stamp_writes: std::sync::atomic::AtomicBool::new(false),
                 home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             }),
         }
+    }
+
+    /// Test seam: while set, provenance stamp writes fail.
+    #[doc(hidden)]
+    pub fn fail_stamp_writes_for_test(&self, fail: bool) {
+        self.inner
+            .fail_stamp_writes
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Override the home directory the source deny-list is anchored to.
@@ -1484,13 +1495,12 @@ impl ArtifactsService {
     /// Stamp the revisions that Background scheduled runs published before
     /// stamps existed, while their publishing chat still proves it, so the
     /// provenance outlives that chat. Only artifacts this device owns are
-    /// rewritten. `space_id` limits the scan; `None` scans every Space. Returns
-    /// how many artifacts were rewritten.
-    pub(crate) fn backfill_run_stamps(&self, space_id: Option<&str>) -> usize {
-        let artifacts = match space_id {
-            Some(space) => self.workspace().artifacts_of_space(space),
-            None => self.workspace().all_artifacts(),
-        };
+    /// rewritten. `chat` limits it to that chat's revisions. Never called from
+    /// a read: reads leave the registry untouched. Returns how many artifacts
+    /// were rewritten, or the first write that failed (later ones are not
+    /// attempted, and a retry resumes where it stopped).
+    pub(crate) fn backfill_run_stamps(&self, chat: Option<&str>) -> Outcome<usize> {
+        let artifacts = self.workspace().all_artifacts();
         let pending: Vec<String> = artifacts
             .into_iter()
             .filter(|a| a.device_id == self.device_id() && a.archived_at.is_none())
@@ -1500,9 +1510,11 @@ impl ArtifactsService {
                     .is_some_and(mast_proto::ScheduledRunResults::is_results_role)
             })
             .filter(|a| {
-                a.revisions
-                    .iter()
-                    .any(|r| r.scheduled_task.is_none() && r.by.kind == WorkOutlineActorKind::Agent)
+                a.revisions.iter().any(|r| {
+                    r.scheduled_task.is_none()
+                        && r.by.kind == WorkOutlineActorKind::Agent
+                        && chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat))
+                })
             })
             .map(|a| a.id)
             .collect();
@@ -1521,17 +1533,61 @@ impl ArtifactsService {
                 continue;
             };
             let mut changed = false;
-            for revision in view.revisions.iter_mut().filter(|r| r.scheduled_task.is_none()) {
+            for revision in view
+                .revisions
+                .iter_mut()
+                .filter(|r| r.scheduled_task.is_none())
+                .filter(|r| chat.is_none_or(|chat| r.by.chat_id.as_deref() == Some(chat)))
+            {
                 if self.run_stamp(&revision.by).as_deref() == Some(key.as_str()) {
                     revision.scheduled_task = Some(key.clone());
                     changed = true;
                 }
             }
-            if changed && self.workspace().put_artifact(&view).is_ok() {
+            if changed {
+                if self.inner.fail_stamp_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(ArtifactError::io("provenance stamp write failed (injected)"));
+                }
+                self.workspace()
+                    .put_artifact(&view)
+                    .map_err(|e| ArtifactError::io(e.to_string()))?;
                 written += 1;
             }
         }
-        written
+        Ok(written)
+    }
+
+    /// Stamp what `chat` published before the chat is deleted, since the stamp
+    /// is what keeps a pre-stamp result readable afterwards.
+    /// An error means a stamp could not be written, and the caller must not
+    /// delete the chat.
+    pub(crate) fn stamp_chat_publications(&self, chat_id: &str) -> Outcome<()> {
+        self.backfill_run_stamps(Some(chat_id)).map(drop)
+    }
+
+    /// Run [`Self::backfill_run_stamps`] for every chat once the registry has
+    /// joined its room: before that, chats and artifacts may not all be here
+    /// yet. With no edge configured the registry is complete at once.
+    pub fn spawn_backfill_run_stamps(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if !service.workspace().registry_synced() {
+                    continue;
+                }
+                let attempt = service.clone();
+                match tokio::task::spawn_blocking(move || attempt.backfill_run_stamps(None)).await {
+                    Ok(Ok(_)) => break,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "run stamp backfill failed; will retry");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
     }
 
     /// The bytes of the newest revision exactly as recorded: its stored

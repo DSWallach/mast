@@ -19,7 +19,7 @@ use mast_proto::{
     derive_id, roles,
 };
 use mast_rpc::methods;
-use serde_json::json;
+use serde_json::{Value, json};
 
 const NOTICE: &str = "Latest briefings: Slack 05:31. Read them with briefing_read.\n\n";
 
@@ -363,9 +363,9 @@ async fn assemble_with_result(rig: &Rig) -> Assembled {
         .await
         .unwrap();
     Assembled {
-        rpc,
+        _rpc: rpc,
         client,
-        publisher,
+        _publisher: publisher,
         artifact_id,
     }
 }
@@ -504,7 +504,8 @@ async fn the_genuine_revision_outlives_the_history_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_result_from_before_stamps_is_stamped_while_its_chat_exists() {
+async fn a_result_from_before_stamps_is_verified_through_its_chat_and_stamped_when_the_chat_is_deleted()
+ {
     let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
     let assembled = assemble_with_result(&rig).await;
     // Simulate a result published before stamps existed.
@@ -516,19 +517,83 @@ async fn a_result_from_before_stamps_is_stamped_while_its_chat_exists() {
         rig.core.workspace.put_artifact(&view).unwrap();
     };
     clear_stamp();
-    // Chat still there: readable through the chat, and stamped by the read.
+    let before = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    let generation = rig.core.workspace.artifacts_generation();
+
+    // Readable through its chat, and reading changes nothing.
     assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+    assert_eq!(
+        rig.core.workspace.artifact(&assembled.artifact_id).unwrap(),
+        before
+    );
+    assert_eq!(rig.core.workspace.artifacts_generation(), generation);
+
+    // Deleting the chat through the engine stamps what it published first.
+    assembled
+        .client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "deleteChat", "chatId": "run-pub" }),
+        )
+        .await
+        .unwrap();
     let view = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
     assert!(
         view.revisions.iter().all(|r| r.scheduled_task.is_some()),
         "{view:?}"
     );
-    assert!(rig.core.workspace.delete_chat("run-pub").unwrap());
     assert_genuine_result(&read_briefing(&rig, &assembled).await);
 
-    // Unstamped and its chat already gone: cannot be verified, so not returned.
+    // Unstamped with its chat already gone: cannot be verified, so not returned.
     clear_stamp();
     let none = read_briefing(&rig, &assembled).await;
     assert!(none["briefings"].as_array().unwrap().is_empty(), "{none}");
+    rig.core.shutdown().await;
+}
+
+async fn delete_chat(client: &mast_rpc::RpcClient, chat: &str) -> Result<Value, String> {
+    client
+        .call(
+            methods::MUTATE,
+            json!({ "op": "deleteChat", "chatId": chat }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_is_not_deleted_when_its_results_cannot_be_stamped_first() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub", "chat-plain"]);
+    let assembled = assemble_with_result(&rig).await;
+    // A result published before stamps existed.
+    let mut view = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    for revision in &mut view.revisions {
+        revision.scheduled_task = None;
+    }
+    rig.core.workspace.put_artifact(&view).unwrap();
+    // The stamp cannot be written: the delete is refused and nothing changes.
+    rig.core.artifacts.fail_stamp_writes_for_test(true);
+    let refused = delete_chat(&assembled.client, "run-pub").await.unwrap_err();
+    assert!(refused.contains("was not deleted"), "{refused}");
+    assert!(rig.core.workspace.chat("run-pub").unwrap().is_some());
+    let kept = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    assert!(kept.revisions.iter().all(|r| r.scheduled_task.is_none()));
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
+
+    // Other chats still delete: an ordinary chat skips the scan, and a
+    // Background run that published nothing has nothing to stamp.
+    delete_chat(&assembled.client, "chat-plain").await.unwrap();
+    delete_chat(&assembled.client, "chat-bg").await.unwrap();
+    assert!(rig.core.workspace.chat("chat-plain").unwrap().is_none());
+    assert!(rig.core.workspace.chat("chat-bg").unwrap().is_none());
+
+    // Retried once stamps can be written: stamped, then deleted.
+    rig.core.artifacts.fail_stamp_writes_for_test(false);
+    delete_chat(&assembled.client, "run-pub").await.unwrap();
+    assert!(rig.core.workspace.chat("run-pub").unwrap().is_none());
+    let stamped = rig.core.workspace.artifact(&assembled.artifact_id).unwrap();
+    assert!(stamped.revisions.iter().all(|r| r.scheduled_task.is_some()));
+    assert_genuine_result(&read_briefing(&rig, &assembled).await);
     rig.core.shutdown().await;
 }
