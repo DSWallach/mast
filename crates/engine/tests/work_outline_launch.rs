@@ -2377,7 +2377,8 @@ async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rej
             message_id: message,
         },
         issued_by: rig.core.workspace.device_id().to_owned(),
-        issued_at: 0,
+        // Recent, or the drain expires it as stale.
+        issued_at: chrono::Utc::now().timestamp_millis(),
         based_on: None,
         expires_at: None,
         status: SessionCommandStatus::Pending,
