@@ -27,4 +27,4 @@ Evidence is from release 114 (`crates/ui/src`).
 - Quit and ⌘W: closing a popout closes only that window. `on_reopen` and `windows().is_empty()` checks are unchanged. A popout alone does not keep the app "open" differently from today.
 
 ## Decision for phase 2
-Build the popout for File, Diff (Changes), Review, Subagent and Artifact (non-web). Chat, Tracker, Item, Terminal and Browser are follow-ups (see the Required Action).
+Built: File, Diff (Changes) and Subagent tabs. Review is derived from an artifact (one host per chat, not a closable tab) and Artifact tabs can hold a native web view, so both join Browser, Terminal, Tracker, Item and chat as follow-ups. Session-only window frames; persistence is a follow-up.

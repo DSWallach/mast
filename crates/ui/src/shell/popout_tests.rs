@@ -190,7 +190,7 @@ fn a_popped_out_file_is_the_same_editor_and_closing_the_window_leaves_the_main_w
         cx.windows().into_iter().find_map(|w| w.downcast::<PopoutWindow>()).unwrap()
     });
     // The window renders (title strip + the editor) without a panic.
-    popout.update(cx, |_, window, cx| drop(window.draw(cx))).unwrap();
+    cx.update_window(popout.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
     popout
         .update(cx, |popout, _, cx| {
             assert_eq!(popout.title(cx).as_ref(), "main.rs");
