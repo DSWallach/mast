@@ -889,8 +889,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn grace_after_a_turn_ends_idle_but_not_after_it_parks_on_a_question() {
+    #[tokio::test]
+    async fn grace_after_a_turn_ends_idle_but_not_after_it_parks_on_a_question() {
         let f = fixture();
         f.recorder.observe_sessions(&[session("idle-chat", "working"), session("asking-chat", "working")], 1_000);
         f.recorder.observe_sessions(&[session("idle-chat", "idle"), session("asking-chat", "awaitingInput")], 10_000);
@@ -939,8 +939,8 @@ mod tests {
         assert!(f.workspace.commit_provenance(&shas[204]).is_some());
     }
 
-    #[test]
-    fn ref_tips_are_read_from_files_including_packed_and_nested_refs() {
+    #[tokio::test]
+    async fn ref_tips_are_read_from_files_including_packed_and_nested_refs() {
         let f = fixture();
         git(&f.repo, &["branch", "feature/nested", "HEAD"]);
         let main = head(&f.repo);
