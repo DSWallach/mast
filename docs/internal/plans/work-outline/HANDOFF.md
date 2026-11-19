@@ -1219,6 +1219,22 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-19 16:30; coordinator d7779d53)
+
+- **Installed: release 115** (aa41a65ff), full perf gate (soak vs 114: CPU 6.1 vs 6.2 %, git/min 126 vs 142, footprint
+  554 vs 507 MB, growth 13 MB). Contents:
+  - **Scope map** (Terra, two review rounds): folder treemap of a diff in Changes, Map/List toggle (default List),
+    folder rollup bars, min tile size + ≤300 tiles with "N more" groups, keyboard nav, risk outlines from the
+    walkthrough. Low-severity polish logged (item 9b626d42).
+  - **Pop-out windows** (Sonnet, three review rounds): ⌥⌘N / tab menu "Open in new window" for File, Diff/History and
+    Subagent; light PopoutWindow root (spike: docs/internal/plans/2026-11-19-popout-windows-spike.md); every exit path
+    gates on pop-out unsaved files; ref-counted subagent watches. Chat, Tracker, Item, Review, Artifact, Browser,
+    Terminal pop-outs deferred (item cf4d9687).
+- In progress: review phase 7 (final round: removal detection per changed-line run), provenance + blame (fix round:
+  attribution only for a chat's own first-parent commits during its turns; first writer wins). Queued: go-to-definition,
+  then wave 4.
+- Release runs: `/private/tmp/release-when-quiet.sh <dir>` waits for worktree cargo to stop, then builds + tests.
+
 ## In flight (snapshot 2026-11-19 14:30; coordinator d7779d53)
 
 - **Installed: release 114** (c68a6d151), full perf gate (soak vs 113: CPU 6.0 vs 5.7 %, footprint 510 vs 513 MB,
