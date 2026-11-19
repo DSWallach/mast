@@ -1409,7 +1409,7 @@ async fn user_hand_off_retries_a_failed_role_write_after_restart() {
         let successor = derive_id("handoff-role-write", roles::CHAT);
         let err = rig
             .client
-            .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
             .await
             .unwrap_err();
         assert!(err.to_string().contains(error_text), "{err}");
@@ -1417,8 +1417,6 @@ async fn user_hand_off_retries_a_failed_role_write_after_restart() {
         assert_eq!(tokens.admin().live(&successor).is_some(), admin_moved);
         assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
 
-        std::fs::remove_dir(&role_file).unwrap();
-        std::fs::rename(backup, role_file).unwrap();
         // A committed store must keep later edits even while the other
         // store's original transfer still needs to be retried.
         let renewed = admin_moved.then(|| tokens.admin().grant(CHAT, SPACE, None, false));
@@ -1434,20 +1432,15 @@ async fn user_hand_off_retries_a_failed_role_write_after_restart() {
         drop(service);
         core.shutdown().await;
         drop(core);
+        std::fs::remove_dir(&role_file).unwrap();
+        std::fs::rename(backup, role_file).unwrap();
 
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(GatedHarness::default()));
         let restarted =
             EngineCore::assemble(&data, Arc::new(registry), HarnessId::Mock, None).unwrap();
-        let client = mast_rpc::memory_client(restarted.rpc_service());
+        // A new client needs neither the summary nor the old operation ID.
         let tokens = restarted.sessions.agent_tokens();
-        assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
-        assert_eq!(tokens.admin().live(&successor).is_some(), admin_moved);
-        let reply = client
-            .call(methods::HAND_OFF_ORCHESTRATOR, params)
-            .await
-            .unwrap();
-        assert_eq!(reply["chatId"], successor);
         assert!(restarted.workspace.chat(CHAT).unwrap().unwrap().archived);
         assert_eq!(tokens.admin().live(CHAT), renewed);
         assert_eq!(
@@ -1688,8 +1681,20 @@ async fn an_interrupted_hand_off_resumes_under_a_new_operation_id_with_the_same_
     let again = json!({
         "chatId": CHAT, "summary": "Resume me", "operationId": "resume-fresh-id", "archive": false,
     });
-    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, again).await.unwrap();
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again.clone())
+        .await
+        .unwrap();
     assert_eq!(reply["chatId"], successor.as_str());
+    let retry = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, again)
+        .await
+        .unwrap();
+    assert_eq!(retry["chatId"], successor.as_str());
+    let row = workspace.registry_row(mast_doc::KIND_CHATS, &successor).unwrap();
+    assert_eq!(row.fields["userHandOffRetryChatIds"], json!([derive_id("resume-fresh-id", roles::CHAT)]));
     assert_eq!(workspace.read_chats().unwrap().len(), chats, "no second successor");
     assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
     assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));

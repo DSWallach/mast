@@ -39,6 +39,7 @@ pub mod friction_import;
 mod http_error;
 pub mod instance_lock;
 mod handoff_role_file;
+mod handoff_roles;
 pub mod instruction_delivery;
 pub mod instruction_registry;
 pub mod linear;
@@ -668,6 +669,13 @@ impl EngineCore {
             .agent_tokens()
             .personal_assistant()
             .set_store(data_dir.join("personal-assistant.json"));
+        handoff_roles::start_recovery(
+            workspace.clone(),
+            &doc_host,
+            sessions.agent_tokens(),
+            orchestrator_wakes.clone(),
+            data_dir,
+        )?;
         orchestrator_wakes.spawn_watchers();
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),

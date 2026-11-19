@@ -1918,7 +1918,7 @@ impl EngineRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
-        let mut handoff_source = None;
+        let mut handoff_intent = None;
         if method == methods::HAND_OFF_ORCHESTRATOR {
             use mast_proto::capabilities::{
                 CHAT_HANDOFF_PREFERENCES_V1, CHAT_HANDOFF_V1, STANDING_ROLE_HANDOFF_V1,
@@ -1956,7 +1956,23 @@ impl EngineRpc {
                 )));
             }
             if transfers_preferences {
-                handoff_source = Some(chat_id.to_owned());
+                let request: mast_proto::HandOffOrchestratorParams = parse_params(params.clone())?;
+                let requested = mast_proto::work_outline::derive_id(
+                    &request.operation_id,
+                    mast_proto::work_outline::roles::CHAT,
+                );
+                if let Some(source) = self
+                    .workspace
+                    .chat(chat_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?
+                    .filter(|chat| chat.device_id == target)
+                {
+                    handoff_intent = crate::handoff_roles::PendingHandoff::new(
+                        &source,
+                        &requested,
+                        request.archive,
+                    );
+                }
             }
         }
         let Some(links) = &self.links else {
@@ -2003,19 +2019,25 @@ impl EngineRpc {
             });
             return Ok(RpcReply::Stream(stream.boxed()));
         }
+        let tokens = self.sessions.agent_tokens();
+        if let Some(intent) = &handoff_intent {
+            tokens.pending_handoffs.prepare(intent).map_err(|err| {
+                RpcError::Failed(format!("Could not record the forwarded hand-off: {err}"))
+            })?;
+        }
         let deadline = forward_deadline(method);
         match tokio::time::timeout(deadline, client.call(method, params)).await {
             Ok(Ok(value)) => {
-                if let Some(source) = handoff_source {
+                if let Some(intent) = handoff_intent {
                     let reply: mast_proto::CreateChatForWorkItemReply =
                         serde_json::from_value(value.clone()).map_err(|e| {
                             RpcError::Failed(format!("Invalid hand-off reply: {e}"))
                         })?;
                     if reply.state != mast_proto::WorkItemLaunchState::Rejected {
-                        self.launch
-                            .complete_forwarded_user_hand_off(&source, target, &reply.chat_id)
-                            .await
-                            .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                        tokens
+                            .pending_handoffs
+                            .finish(&self.workspace, &tokens, &intent, &reply.chat_id)
+                            .map_err(|err| RpcError::Failed(err.to_string()))?;
                     }
                 }
                 Ok(RpcReply::Value(value))

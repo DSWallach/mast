@@ -451,7 +451,7 @@ mod tests {
             move |_, params| {
                 let mut recorded = recorded.lock().unwrap();
                 recorded.push(params);
-                if recorded.len() == 1 {
+                if recorded.len() <= crate::work_outline::actions::MAX_ATTEMPTS as usize {
                     Err(mast_rpc::RpcError::Transport("reply lost".into()))
                 } else {
                     Ok(
@@ -475,9 +475,13 @@ mod tests {
         shell.update(cx, |shell, cx| shell.submit_hand_off(cx));
         cx.run_until_parked();
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls.len(),
+            crate::work_outline::actions::MAX_ATTEMPTS as usize + 1
+        );
         assert_eq!(calls[0]["archive"], true);
-        assert_eq!(calls[0], calls[1]);
+        assert!(calls.iter().all(|request| request == &calls[0]));
+        shell.read_with(cx, |shell, _| assert!(shell.work_outline_modal.is_none()));
     }
 
     #[gpui::test]

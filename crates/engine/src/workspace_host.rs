@@ -900,13 +900,58 @@ impl WorkspaceHost {
         self.read(|doc| doc.hand_off_recorded(from, to))
     }
 
+    pub(crate) fn completed_user_hand_off_to(
+        &self,
+        from: &str,
+        requested: &str,
+        device: &str,
+        space: &str,
+        archive: Option<bool>,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            let chat = doc.chat(&successor).ok().flatten()?;
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            (row.fields
+                .get("userHandOffArchive")
+                .and_then(serde_json::Value::as_bool)
+                == archive
+                && chat.device_id == device
+                && chat.space_id.as_deref() == Some(space)
+                && chat.scheduled_task_info.is_none())
+            .then_some(successor)
+        })
+    }
+
+    pub(crate) fn completed_hand_off_retry_operation(
+        &self,
+        from: &str,
+        requested: &str,
+    ) -> Option<String> {
+        self.read(|doc| {
+            let successor = doc.completed_user_hand_off_to(from, requested)?;
+            if successor == requested {
+                return None;
+            }
+            let row = doc.row(mast_doc::KIND_CHATS, &successor)?;
+            row.fields
+                .get("userHandOffOperationId")?
+                .as_str()
+                .map(str::to_owned)
+        })
+    }
+
     pub(crate) fn complete_user_chat_hand_off(
         &self,
         from: &str,
         to: &str,
+        requested: &str,
+        operation_id: &str,
         archive: Option<bool>,
     ) -> Result<(), String> {
-        self.mutate(|doc| doc.complete_user_chat_hand_off(from, to, archive))
+        self.mutate(|doc| {
+            doc.complete_user_chat_hand_off(from, to, requested, operation_id, archive)
+        })
     }
 
     /// Every durable PR linked to this chat. Independent link rows are

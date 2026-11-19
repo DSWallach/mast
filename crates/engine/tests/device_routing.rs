@@ -573,6 +573,142 @@ async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
     core_b.shutdown().await;
 }
 
+struct LoseHandoffReply {
+    engine: Arc<mast_engine::EngineRpc>,
+    handoff_completed: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl RpcService for LoseHandoffReply {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let reply = self.engine.handle(method, params).await?;
+        if method == methods::HAND_OFF_ORCHESTRATOR {
+            self.handoff_completed.notify_one();
+            return std::future::pending().await;
+        }
+        Ok(reply)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_forwarded_handoff_reply_recovers_roles_after_restart_and_sync() {
+    use mast_proto::work_outline::{derive_id, roles};
+
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let origin_dir = dirs.path().join("origin");
+    let origin = assemble(&origin_dir, "origin");
+    let owner = assemble(&dirs.path().join("owner"), "owner");
+    owner
+        .workspace
+        .create_space("space", "owner", cwd.to_str().unwrap(), None, false)
+        .unwrap();
+    owner
+        .workspace
+        .create_chat("source", Some("space"), None, None, None)
+        .unwrap();
+    let source = owner.workspace.chat("source").unwrap().unwrap();
+    origin.workspace.import_chat_row(&source).unwrap();
+    let device = owner
+        .workspace
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.id == "owner")
+        .unwrap();
+    origin.workspace.upsert_device_row(&device);
+    let tokens = origin.sessions.agent_tokens();
+    let grant = tokens.admin().grant("source", "space", None, true);
+    let assistant = tokens.personal_assistant().set(&source);
+    drop(tokens);
+
+    let host = Arc::new(LoseHandoffReply {
+        engine: owner.rpc_service(),
+        handoff_completed: tokio::sync::Notify::new(),
+    });
+    let _host = HostRelay::spawn(
+        HostRelayConfig::new(
+            &relay_url,
+            "owner",
+            Arc::new(StaticToken("test-user".into())),
+        ),
+        host.clone(),
+        Arc::new(|_| {}),
+    );
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    origin.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(origin.rpc_service());
+    let request = tokio::spawn(async move {
+        client
+            .call(
+                methods::HAND_OFF_ORCHESTRATOR,
+                serde_json::json!({
+                    "chatId": "source", "summary": "Continue remotely",
+                    "operationId": "lost-forwarded-handoff"
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), host.handoff_completed.notified())
+        .await
+        .unwrap();
+    assert!(!request.is_finished(), "the host did not return its reply");
+    request.abort();
+    let _ = request.await;
+    let successor = derive_id("lost-forwarded-handoff", roles::CHAT);
+    let row = owner
+        .workspace
+        .registry_row(mast_doc::KIND_CHATS, &successor)
+        .unwrap();
+    origin.shutdown().await;
+    drop(origin);
+
+    // The new engine and client have no request payload or reply. The
+    // registry row arrives after startup, as it would after reconnect.
+    let restarted = assemble(&origin_dir, "origin");
+    let tokens = restarted.sessions.agent_tokens();
+    assert_eq!(tokens.admin().live("source"), Some(grant.clone()));
+    assert_eq!(tokens.personal_assistant().get(), Some(assistant.clone()));
+    assert!(
+        restarted
+            .workspace
+            .apply_registry_rows(row.seq.max(1), vec![row])
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tokens
+            .personal_assistant()
+            .get()
+            .as_ref()
+            .map(|a| a.chat_id.as_str())
+            != Some(successor.as_str())
+        {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(tokens.admin().live("source").is_none());
+    assert_eq!(
+        tokens.admin().live(&successor),
+        Some(mast_proto::AdminGrant {
+            chat_id: successor.clone(),
+            ..grant
+        })
+    );
+    assert_eq!(
+        tokens.personal_assistant().get(),
+        Some(mast_proto::PersonalAssistant {
+            chat_id: successor,
+            ..assistant
+        })
+    );
+    restarted.shutdown().await;
+    owner.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn role_handoff_needs_a_host_that_moves_roles_but_plain_handoff_does_not() {
     use mast_proto::StandingRoleKind;

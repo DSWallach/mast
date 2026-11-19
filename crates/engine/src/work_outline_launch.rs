@@ -511,6 +511,7 @@ impl WorkItemLaunchService {
             .chat(source)
             .map_err(engine_error)?
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
+        let requested_successor = derive_id(&p.operation_id, roles::CHAT);
         let mut successor = p.clone();
         let configuration = match self
             .workspace
@@ -535,7 +536,12 @@ impl WorkItemLaunchService {
         // A hand-off that stopped after workers moved is finished by asking
         // again with the same summary and settings, even from a reopened
         // dialog or after a restart that minted a fresh operation id.
-        if let Some(pending) = self.workspace.part_done_hand_off_from(source)
+        if let Some(operation) = self
+            .workspace
+            .completed_hand_off_retry_operation(source, &requested_successor)
+        {
+            successor.operation_id = operation;
+        } else if let Some(pending) = self.workspace.part_done_hand_off_from(source)
             && pending.operation_id != successor.operation_id
         {
             let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
@@ -555,7 +561,7 @@ impl WorkItemLaunchService {
                 successor.operation_id = pending.operation_id;
             }
         }
-        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin)))
+        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)))
             .await
     }
 
@@ -566,6 +572,7 @@ impl WorkItemLaunchService {
             &crate::orchestrator_wakes::OrchestratorWakes,
             &str,
             HandOffOrigin,
+            &str,
         )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
@@ -589,7 +596,7 @@ impl WorkItemLaunchService {
             worktree_choice: &p.worktree_choice,
             parent_chat_id: &p.parent_chat_id,
             standing_role: &p.standing_role,
-            hand_off_archive: hand_off.and_then(|(_, _, origin)| origin.archive_choice()),
+            hand_off_archive: hand_off.and_then(|(_, _, origin, _)| origin.archive_choice()),
         });
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
@@ -688,7 +695,7 @@ impl WorkItemLaunchService {
         // the role cannot follow, or another part-done hand-off ends the
         // launch here, with nothing written. The gate held above serializes
         // launches; the reservation survives a restart.
-        if let Some((_, source, _)) = hand_off {
+        if let Some((_, source, _, _)) = hand_off {
             self.workspace
                 .reserve_standing_role_hand_off(source, &chat_id, op, Some(&space_id))
                 .map_err(conflict)?;
@@ -803,12 +810,12 @@ impl WorkItemLaunchService {
 
         // The successor exists now, so the full destination rules apply
         // before workers move or a second turn can be queued.
-        if let Some((_, source, _)) = hand_off {
+        if let Some((_, source, _, _)) = hand_off {
             self.workspace
                 .check_standing_role_hand_off(source, &chat_id, None)
                 .map_err(conflict)?;
         }
-        if let Some((wakes, source, _)) = hand_off {
+        if let Some((wakes, source, _, _)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
             let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
@@ -914,7 +921,7 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
-        if let Some((wakes, source, origin)) = hand_off {
+        if let Some((wakes, source, origin, requested)) = hand_off {
             if state != WorkItemLaunchState::Rejected {
                 let handle = self.doc_host.open(source).map_err(engine_error)?;
                 handle
@@ -924,7 +931,7 @@ impl WorkItemLaunchService {
                         chrono::Utc::now().timestamp_millis(),
                     )
                     .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
-                self.complete_hand_off(source, &chat_id, &space_id, origin)?;
+                self.complete_hand_off(source, &chat_id, requested, op, &space_id, origin)?;
             }
             wakes.finish_orchestrator_hand_off(&chat_id);
             wakes.evaluate(&chat_id, false).await;
@@ -945,6 +952,8 @@ impl WorkItemLaunchService {
         &self,
         source: &str,
         successor: &str,
+        requested: &str,
+        operation_id: &str,
         space_id: &str,
         origin: HandOffOrigin,
     ) -> Result<(), WorkOutlineError> {
@@ -973,70 +982,28 @@ impl WorkItemLaunchService {
                 "Hand-off chats must belong to the same Space and device",
             ));
         }
-        // Persist the launch and registry hand-off before moving local roles
-        // that a retry must be able to find after a restart.
+        let tokens = self.sessions.agent_tokens();
+        let intent = crate::handoff_roles::PendingHandoff::new(&from, successor, archive)
+            .ok_or_else(|| conflict("Hand-off source has no Space"))?;
+        // Publish the registry completion only after recovery can find the
+        // roles and the successor's first turn is durable.
+        tokens
+            .pending_handoffs
+            .prepare(&intent)
+            .map_err(|err| engine_error(err.into()))?;
         self.doc_host
             .persist_chat_now(successor)
             .map_err(engine_error)?;
         self.workspace
-            .complete_user_chat_hand_off(source, successor, archive)
+            .complete_user_chat_hand_off(source, successor, requested, operation_id, archive)
             .map_err(invalid)?;
         self.workspace
             .persist_registry_now()
             .map_err(engine_error)?;
-        self.transfer_user_handoff_roles(&from, successor)
-    }
-
-    /// A forwarded User hand-off may also have device-local roles here. The
-    /// source host owns the registry hand-off; this only updates our stores.
-    pub(crate) async fn complete_forwarded_user_hand_off(
-        &self,
-        source: &str,
-        target_device: &str,
-        successor: &str,
-    ) -> Result<(), WorkOutlineError> {
-        let _gate = self.gate.lock().await;
-        if let Some(from) = self.workspace.chat(source).map_err(engine_error)?
-            && from.device_id == target_device
-        {
-            self.transfer_user_handoff_roles(&from, successor)?;
-        }
-        Ok(())
-    }
-
-    fn transfer_user_handoff_roles(
-        &self,
-        from: &mast_proto::Chat,
-        successor: &str,
-    ) -> Result<(), WorkOutlineError> {
-        let Some(space_id) = from.space_id.as_deref() else {
-            return Ok(());
-        };
-        let chats = if from.scheduled_task_info.is_some() {
-            self.workspace.read_chats().map_err(engine_error)?
-        } else {
-            Vec::new()
-        };
-        let tokens = self.sessions.agent_tokens();
         tokens
-            .admin()
-            .transfer_for_hand_off(&from.id, successor, space_id)
-            .map_err(|err| {
-                error(
-                    WorkOutlineErrorCode::Invalid,
-                    format!("Could not save the admin hand-off: {err}"),
-                )
-            })?;
-        tokens
-            .personal_assistant()
-            .transfer_for_hand_off(from, successor, &chats)
-            .map_err(|err| {
-                error(
-                    WorkOutlineErrorCode::Invalid,
-                    format!("Could not save the personal assistant hand-off: {err}"),
-                )
-            })?;
-        Ok(())
+            .pending_handoffs
+            .finish(&self.workspace, &tokens, &intent, successor)
+            .map_err(engine_error)
     }
 
     /// Make a provisional first-start chat the role's chat: save its session

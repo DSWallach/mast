@@ -42,22 +42,13 @@ impl HandoffRoleFile {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(
-            &mut staged,
+        write_json(
+            path,
             &RoleSnapshot {
                 roles,
                 completed_handoffs: &self.completed,
             },
         )
-        .map_err(io::Error::other)?;
-        staged.as_file().sync_all()?;
-        staged.persist(path).map_err(|err| err.error)?;
-        Ok(())
     }
 
     /// The caller updates its in-memory role only after this write succeeds.
@@ -69,4 +60,16 @@ impl HandoffRoleFile {
         }
         Ok(())
     }
+}
+
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut staged, value).map_err(io::Error::other)?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|err| err.error)?;
+    Ok(())
 }
