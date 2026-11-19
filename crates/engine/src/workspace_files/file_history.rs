@@ -47,6 +47,17 @@ pub struct FileHistory {
 pub struct FileHistoryCache {
     histories: tokio::sync::Mutex<HashMap<(String, String, String), Arc<FileHistory>>>,
     diffs: tokio::sync::Mutex<HashMap<(String, String, String, Option<String>), Arc<String>>>,
+    history_flights: std::sync::Mutex<HashMap<(String, String, String), std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    diff_flights: std::sync::Mutex<HashMap<(String, String, String, Option<String>), std::sync::Weak<tokio::sync::Mutex<()>>>>,
+}
+
+fn flight<K: Eq + std::hash::Hash + Clone>(flights: &std::sync::Mutex<HashMap<K, std::sync::Weak<tokio::sync::Mutex<()>>>>, key: &K) -> Arc<tokio::sync::Mutex<()>> {
+    let mut flights = lock(flights);
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    if let Some(existing) = flights.get(key).and_then(std::sync::Weak::upgrade) { return existing; }
+    let flight = Arc::new(tokio::sync::Mutex::new(()));
+    flights.insert(key.clone(), Arc::downgrade(&flight));
+    flight
 }
 
 impl WorkspaceFiles {
@@ -67,8 +78,12 @@ impl WorkspaceFiles {
             revision.clone(),
             path.clone(),
         );
-        let mut cache = self.inner.file_history.histories.lock().await;
-        if let Some(history) = cache.get(&key) {
+        if let Some(history) = self.inner.file_history.histories.lock().await.get(&key) {
+            return Ok(history.clone());
+        }
+        let flight = flight(&self.inner.file_history.history_flights, &key);
+        let _guard = flight.lock().await;
+        if let Some(history) = self.inner.file_history.histories.lock().await.get(&key) {
             return Ok(history.clone());
         }
         let output = run_git(
@@ -97,6 +112,7 @@ impl WorkspaceFiles {
             commits,
             truncated,
         });
+        let mut cache = self.inner.file_history.histories.lock().await;
         evict_if_full(&mut cache, MAX_HISTORY_CACHE_ENTRIES);
         cache.insert(key, history.clone());
         Ok(history)
@@ -125,8 +141,12 @@ impl WorkspaceFiles {
             path.clone(),
             previous.clone(),
         );
-        let mut cache = self.inner.file_history.diffs.lock().await;
-        if let Some(diff) = cache.get(&key) {
+        if let Some(diff) = self.inner.file_history.diffs.lock().await.get(&key) {
+            return Ok(diff.clone());
+        }
+        let flight = flight(&self.inner.file_history.diff_flights, &key);
+        let _guard = flight.lock().await;
+        if let Some(diff) = self.inner.file_history.diffs.lock().await.get(&key) {
             return Ok(diff.clone());
         }
         let mut args = vec![
@@ -144,6 +164,7 @@ impl WorkspaceFiles {
             args.push(previous);
         }
         let diff = Arc::new(run_git(&workspace.root, &args).await?);
+        let mut cache = self.inner.file_history.diffs.lock().await;
         evict_if_full(&mut cache, MAX_DIFF_CACHE_ENTRIES);
         cache.insert(key, diff.clone());
         Ok(diff)
