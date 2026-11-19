@@ -894,6 +894,33 @@ impl WorkspaceHost {
         })
     }
 
+    /// Whether `chat_id` holds the Manager role of `scope_item_id`, is about to
+    /// (a provisional first start or a reserved hand-off successor), or neither,
+    /// read from one registry snapshot so adoption cannot land between the
+    /// holder and the reservation being looked at.
+    pub fn manager_claim(&self, chat_id: &str, scope_item_id: &str) -> ManagerClaim {
+        self.read(|doc| {
+            let kind = mast_proto::StandingRoleKind::Manager;
+            let holds = doc
+                .standing_role(kind, scope_item_id)
+                .is_some_and(|role| role.current_chat_id.as_deref() == Some(chat_id));
+            if holds {
+                return ManagerClaim::Holds;
+            }
+            let Some(chat) = doc.chat(chat_id).ok().flatten().filter(|chat| !chat.archived) else {
+                return ManagerClaim::None;
+            };
+            let reserved = doc
+                .pending_standing_hand_off(kind, scope_item_id)
+                .is_some_and(|pending| pending.to_chat_id == chat_id);
+            if chat.is_provisional_for(kind, scope_item_id) || reserved {
+                ManagerClaim::Pending
+            } else {
+                ManagerClaim::None
+            }
+        })
+    }
+
     pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
         self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
     }
@@ -3682,6 +3709,17 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
                 .map_err(|e| mast_sync::SyncError::WebSocket(describe_http_error(e)))
         })
     }
+}
+
+/// How a chat stands to a project's Manager role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerClaim {
+    /// The chat holds the role.
+    Holds,
+    /// The chat is about to hold it: a first start or a reserved successor.
+    Pending,
+    /// Neither: the chat will not hold the role.
+    None,
 }
 
 #[cfg(test)]

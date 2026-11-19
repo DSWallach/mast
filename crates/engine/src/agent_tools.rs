@@ -256,8 +256,6 @@ impl AgentTokens {
                 ttl,
             },
         );
-        // A run starts when its token is minted, and ends when it is revoked.
-        self.manager_status.run_started(chat_id, run_id);
         AgentTokenLease {
             tokens: Arc::downgrade(self),
             key,
@@ -281,7 +279,7 @@ impl AgentTokens {
         if grant.expires_at.is_some_and(|at| Instant::now() >= at) {
             grants.remove(&key);
             drop(grants);
-            self.manager_status.run_ended(&grant.chat_id, &grant.run_id);
+            self.manager_status.end_run(&grant.chat_id, &grant.run_id);
             return Err(AgentToolError::unauthenticated());
         }
         Ok(grant)
@@ -295,7 +293,7 @@ impl AgentTokens {
     fn revoke(&self, key: &TokenKey) {
         let grant = lock(&self.grants).remove(key);
         if let Some(grant) = grant {
-            self.manager_status.run_ended(&grant.chat_id, &grant.run_id);
+            self.manager_status.end_run(&grant.chat_id, &grant.run_id);
         }
     }
 

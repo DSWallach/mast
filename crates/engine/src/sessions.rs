@@ -2142,6 +2142,7 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
+        let mut turn_boundary: Option<bool> = None;
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -2166,6 +2167,15 @@ impl Inner {
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
             );
+            // A turn begins when a settled session turns active and ends when
+            // an active one settles: the same boundaries `started_at` and the
+            // tool-failure ledger use, so a warm session's next prompt, steered
+            // into a parked run on the same token, is a new turn.
+            turn_boundary = match (was_active, status) {
+                (false, SessionStatus::Working | SessionStatus::AwaitingInput) => Some(true),
+                (true, SessionStatus::Idle | SessionStatus::Errored) => Some(false),
+                _ => None,
+            };
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
             }
@@ -2208,6 +2218,13 @@ impl Inner {
         // remote devices' sidebars show this run (staleness-checked client-side).
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
+        }
+        // The Manager status check follows the session's own turn boundaries.
+        // No lock is held here.
+        match turn_boundary {
+            Some(true) => self.agent_tokens.manager_status().begin(chat_id),
+            Some(false) => self.agent_tokens.manager_status().end(chat_id),
+            None => {}
         }
     }
 
