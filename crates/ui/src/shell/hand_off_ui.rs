@@ -131,22 +131,21 @@ impl Shell {
     }
 
     pub(super) fn note_local_pin_handoff_edit(&mut self, chat_id: &str) -> bool {
-        let mut changed = false;
         for intent in &mut self.settings.local_pin_handoffs {
             if intent.cancelled {
                 continue;
             }
             if intent.source == chat_id || intent.requested_successor == chat_id {
                 intent.cancelled = true;
-                changed = true;
             } else if !intent.edited_chats.iter().any(|id| id == chat_id) {
                 // A resumed hand-off can return a different successor. Save
                 // edits until the completion identifies which chat it used.
                 intent.edited_chats.push(chat_id.to_owned());
-                changed = true;
             }
         }
-        changed
+        // Save the pin order even if this edit repeats a cancellation.
+        // Otherwise a restart can keep the earlier pin but lose the unpin.
+        !self.settings.local_pin_handoffs.is_empty()
     }
 
     fn record_local_pin_handoff(

@@ -109,7 +109,7 @@ impl Shell {
             return false;
         };
         if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local) {
-            let mut cancelled = false;
+            let mut save_pin_now = false;
             if let SidebarSectionChange::Assign {
                 session_id,
                 section_id,
@@ -122,7 +122,7 @@ impl Shell {
                     return false;
                 }
                 if section_id.is_some() {
-                    cancelled = self.note_local_pin_handoff_edit(session_id);
+                    save_pin_now = self.note_local_pin_handoff_edit(session_id);
                 }
                 if let Some(pins) = self
                     .settings
@@ -142,7 +142,7 @@ impl Shell {
                     .or_default(),
             );
             self.schedule_save(cx);
-            if cancelled {
+            if save_pin_now {
                 settings::flush(cx);
             }
             cx.notify();

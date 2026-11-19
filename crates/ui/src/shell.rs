@@ -6066,7 +6066,7 @@ impl Shell {
         }
         match self.state.read(cx).workspace_scope {
             Some(WorkspaceScope::Local) => {
-                let cancelled = self.note_local_pin_handoff_edit(change.session_id());
+                let save_pin_now = self.note_local_pin_handoff_edit(change.session_id());
                 if pinned_session_ids.is_empty() {
                     self.settings
                         .sidebar_pinned_session_ids_by_profile
@@ -6077,7 +6077,7 @@ impl Shell {
                         .insert(profile_key, pinned_session_ids);
                 }
                 self.schedule_save(cx);
-                if cancelled {
+                if save_pin_now {
                     settings::flush(cx);
                 }
             }
