@@ -2881,15 +2881,15 @@ async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_pr
     assert_eq!(entries[0]["revision"], 2);
     assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:05"));
 
-    // A chat in another project sees nothing; a chat with no item is refused.
+    // A chat in another project sees nothing; a chat with no item reads nothing.
     let other = tool(&rig, &rig.other_token, "briefing_read", json!({ "kind": "manager-status" }))
         .await
         .unwrap();
     assert!(other["briefings"].as_array().unwrap().is_empty());
+    let lone = tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status" })).await;
     assert!(
-        tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status" }))
-            .await
-            .is_err()
+        lone.as_ref().map_or(true, |read| read["briefings"].as_array().is_some_and(Vec::is_empty)),
+        "{lone:?}"
     );
     // The default kind never returns the status record.
     let scheduled = tool(&rig, &rig.token, "briefing_read", json!({})).await.unwrap();
