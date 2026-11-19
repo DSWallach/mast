@@ -1328,7 +1328,7 @@ fn menu_dismiss_all_handles_available_and_missing_chats_once(cx: &mut gpui::Test
     for id in [m4::R_UI, m4::R_API] {
         let resolution = resolved.iter().find(|params| params["userActionRequestId"] == id).unwrap();
         assert_eq!(resolution["outcome"], "dismissed");
-        assert_eq!(resolution["via"], "menu");
+        assert_eq!(resolution["via"], "card");
     }
     let sent = sends(&calls);
     assert_eq!(sent.len(), 1);

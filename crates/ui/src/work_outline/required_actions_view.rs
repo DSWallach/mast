@@ -671,6 +671,7 @@ impl RequiredActionsList {
             .cloned()
         {
             self.in_flight.insert(request_id.clone());
+            self.clear_error();
             self.resolve_reply(request_id, intent, cx);
             return;
         }
