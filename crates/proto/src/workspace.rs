@@ -76,6 +76,8 @@ pub mod capabilities {
     pub const SIDE_CHAT_V1: &str = "side-chat-v1";
     /// The host supports solo chat handoff and automatic work-item ownership.
     pub const CHAT_HANDOFF_V1: &str = "chat-handoff-v1";
+    /// The host applies the user's archive choice and transfers chat pins and roles.
+    pub const CHAT_HANDOFF_PREFERENCES_V1: &str = "chat-handoff-preferences-v1";
     /// The host moves a standing role (manager or assistant) to the
     /// successor when one of its role chats hands off. Without it a hand-off
     /// of a role chat would start the successor and move workers but leave
@@ -117,6 +119,7 @@ pub mod capabilities {
         ARTIFACTS_V1,
         SIDE_CHAT_V1,
         CHAT_HANDOFF_V1,
+        CHAT_HANDOFF_PREFERENCES_V1,
         STANDING_ROLE_HANDOFF_V1,
     ];
 

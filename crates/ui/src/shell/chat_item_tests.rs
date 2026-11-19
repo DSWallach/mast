@@ -11,6 +11,7 @@ use mast_proto::{
     ChatAccountPin, HarnessId, ManagedAccount, ManagedAccountsSnapshot, WorkOutlineSnapshot,
 };
 
+use super::work_outline_ui::WorkOutlineModal;
 use super::*;
 use crate::work_outline::required_actions::fixture::{R_UI, request};
 use crate::work_outline::store::{fixture_ids::*, fixture_snapshot};
@@ -23,10 +24,10 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::default();
         let tab = self.tab;
-        let (header, body, dialog) = self.shell.update(cx, |shell, cx| {
+        let (header, body, admin_dialog, hand_off_dialog) = self.shell.update(cx, |shell, cx| {
             let header = shell.render_chat_header_metadata(&theme, cx);
             let body = tab.then(|| {
                 if shell.resolved_right_active(cx) == RightSurface::Team {
@@ -35,16 +36,23 @@ impl Render for Host {
                     shell.render_item_tab(cx)
                 }
             });
-            let dialog = shell.render_admin_dialog(gpui::size(px(900.0), px(600.0)), cx);
-            (header, body, dialog)
+            let viewport = gpui::size(px(900.0), px(600.0));
+            let admin = shell.render_admin_dialog(viewport, cx);
+            let hand_off = if matches!(shell.work_outline_modal, Some(WorkOutlineModal::HandOff(_))) {
+                shell.render_work_outline_modal(viewport, window, cx)
+            } else {
+                None
+            };
+            (header, body, admin, hand_off)
         });
         div()
             .relative()
             .w(px(900.0))
             .h(px(600.0))
             .children(header)
-            .children(dialog)
+            .children(admin_dialog)
             .children(body.map(|body| div().w(px(420.0)).h(px(500.0)).child(body)))
+            .children(hand_off_dialog)
     }
 }
 

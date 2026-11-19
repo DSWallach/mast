@@ -2,8 +2,8 @@
 //! inverse mutations (for one-step undo of a sweep), and bulk-change
 //! approvals (contract amendment "admin chats").
 //!
-//! Only the RPC layer (`GrantAdmin`, `RevokeAdmin`) writes grants; no agent
-//! tool does. A grant names one chat and one Space, may expire, and is
+//! User RPCs manage grants, including moving an existing grant during a
+//! hand-off. A grant names one chat and one Space, may expire, and is
 //! re-checked on every agent call (and between the steps of a batch), so a
 //! revoke or expiry takes effect immediately.
 
@@ -108,6 +108,29 @@ impl AdminGrants {
         state.grants.insert(chat_id.to_owned(), grant.clone());
         Self::persist(&state);
         grant
+    }
+
+    /// Reassign a live grant within its original Space. A direct grant to
+    /// the successor takes precedence.
+    pub(crate) fn transfer_for_hand_off(&self, from: &str, to: &str, space_id: &str) {
+        let now = self.now_ms();
+        let mut state = lock(&self.state);
+        if !state
+            .grants
+            .get(from)
+            .is_some_and(|grant| grant.is_live(now) && grant.space_id == space_id)
+        {
+            return;
+        }
+        let mut grant = state
+            .grants
+            .remove(from)
+            .expect("source grant checked under lock");
+        if !state.grants.get(to).is_some_and(|grant| grant.is_live(now)) {
+            grant.chat_id = to.to_owned();
+            state.grants.insert(grant.chat_id.clone(), grant);
+        }
+        Self::persist(&state);
     }
 
     /// The default grant length, for callers without a choice.

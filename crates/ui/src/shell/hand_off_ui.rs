@@ -49,12 +49,14 @@ impl Shell {
     }
 
     pub(super) fn can_hand_off(&self, chat_id: &str, cx: &App) -> bool {
-        self.state.read(cx).chats.iter().any(|chat| chat.id == chat_id && !chat.archived)
+        self.state.read(cx).chats.iter().any(|chat| {
+            chat.id == chat_id && !chat.archived && !chat.is_standing_role_predecessor()
+        })
     }
 
     pub(super) fn open_hand_off(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id && !chat.archived) else { return };
+        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id && !chat.archived && !chat.is_standing_role_predecessor()) else { return };
         let load = chat.space_id.as_deref().map(|space_id| state.work_outline(space_id));
         let snapshot = load.as_ref().and_then(|load| load.snapshot());
         let item = snapshot.and_then(|snapshot| crate::work_outline::instructions::assigned_chats(snapshot).remove(&chat_id)
@@ -92,7 +94,7 @@ impl Shell {
             self.open_chat(chat_id.clone(), cx);
         }
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
-            chat_id, input, default_summary: summary, pickers, _picker_observe: picker_observe, workers, details_available, archive: false, submitting: false,
+            chat_id, input, default_summary: summary, pickers, _picker_observe: picker_observe, workers, details_available, archive: true, submitting: false,
             error: None,
             operation: OperationSlot::default(),
         }), cx);
@@ -127,8 +129,46 @@ impl Shell {
         dialog.default_summary = summary;
     }
 
+    fn transfer_local_handoff_pin(
+        &mut self,
+        profile: &str,
+        source: &str,
+        successor: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pins) = self
+            .settings
+            .sidebar_pinned_session_ids_by_profile
+            .get_mut(profile)
+        else {
+            return;
+        };
+        if !pins.iter().any(|id| id == source) {
+            return;
+        }
+        pins.retain(|id| id != successor);
+        if let Some(pin) = pins.iter_mut().find(|id| id.as_str() == source) {
+            *pin = successor.to_owned();
+        }
+        // The launch reply may arrive before the chat watch shows the successor.
+        if !self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == successor)
+        {
+            self.unobserved_local_handoff_pins
+                .insert(successor.to_owned());
+        }
+        self.schedule_save(cx);
+    }
+
     fn submit_hand_off(&mut self, cx: &mut Context<Self>) {
         let actions = self.state.read(cx).work_outline_actions();
+        let local_pin_profile = (self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local))
+            .then(|| self.active_sidebar_pin_profile_key(cx))
+            .flatten();
         let Some(WorkOutlineModal::HandOff(dialog)) = self.work_outline_modal.as_mut() else { return };
         if dialog.submitting { return; }
         let summary = dialog.input.read(cx).text().trim().to_owned();
@@ -139,7 +179,7 @@ impl Shell {
         let model = choice.model;
         let reasoning = choice.reasoning;
         let operation_id = dialog.operation.id_for(&format!("{summary}|{harness:?}|{model:?}|{reasoning:?}"));
-        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams { chat_id: source.clone(), summary, operation_id, harness, model, reasoning });
+        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams { chat_id: source.clone(), summary, operation_id, archive: Some(dialog.archive), harness, model, reasoning });
         dialog.submitting = true;
         dialog.error = None;
         cx.notify();
@@ -151,11 +191,16 @@ impl Shell {
                 dialog.submitting = false;
                 match result {
                     Ok(reply) if reply.state != mast_proto::WorkItemLaunchState::Rejected => {
-                        let archive = dialog.archive;
                         this.work_outline_modal = None;
                         this.work_outline_modal_focus_pending = false;
                         this.work_outline_prior_focus = None;
-                        if archive { this.archive_chat(source, cx); }
+                        if let Some(profile) = local_pin_profile.as_deref() {
+                            this.transfer_local_handoff_pin(profile, &source, &reply.chat_id, cx);
+                        }
+                        this.state.update(cx, |state, cx| {
+                            state.refresh_admin_grants(cx);
+                            state.refresh_personal_assistant(cx);
+                        });
                         this.open_chat(reply.chat_id, cx);
                     }
                     Ok(reply) => { dialog.error = Some(reply.detail.unwrap_or_else(|| "The host rejected the first turn".into())); cx.notify(); }
@@ -165,10 +210,6 @@ impl Shell {
         }).detach();
     }
 }
-
-/// The archive choice does not apply to a project's manager or the assistant:
-/// the engine moves the role to the successor and archives the source itself.
-const ROLE_ARCHIVE_NOTE: &str = "A manager or assistant chat is always archived when it hands off, whatever you choose above.";
 
 fn hand_off_summary(title: Option<&str>) -> String {
     format!("Continue {}. Read the source chat and work item for context, instructions, and any active workers.", title.unwrap_or("this work"))
@@ -185,10 +226,14 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         .when(!dialog.workers.is_empty(), |card| card
             .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
             .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers)))
-        .child(div().id("hand-off-archive").mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-            if let Some(WorkOutlineModal::HandOff(dialog)) = this.work_outline_modal.as_mut() { dialog.archive = !dialog.archive; cx.notify(); }
-        })).child(SharedString::from(if dialog.archive { "☑ Archive this chat after hand-off" } else { "☐ Archive this chat after hand-off" })))
-        .child(div().id("hand-off-role-note").mt(px(4.0)).text_color(theme.text_muted).child(SharedString::from(ROLE_ARCHIVE_NOTE)))
+        .child(div().id("hand-off-archive").debug_selector(|| "hand-off-archive".into()).mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+            if let Some(WorkOutlineModal::HandOff(dialog)) = this.work_outline_modal.as_mut()
+                && !dialog.submitting
+            {
+                dialog.archive = !dialog.archive;
+                cx.notify();
+            }
+        })).child(SharedString::from(if dialog.archive { "☑ Archive old chat" } else { "☐ Archive old chat" })))
         .when_some(dialog.error.clone(), |card, error| card.child(div().mt(px(8.0)).text_color(theme.warning).child(SharedString::from(error))))
         .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
             .child(popover::btn_ghost(theme, "Cancel", "hand-off-cancel").id("hand-off-cancel").on_click(cx.listener(|this, _, window, cx| { this.cancel_work_outline_modal(window, cx); })))
@@ -265,7 +310,7 @@ mod tests {
             assert_eq!(dialog.workers.len(), 1);
             assert!(dialog.workers[0].contains("Title of"));
             assert!(dialog.workers[0].contains("0 open requests"));
-            assert!(!dialog.archive);
+            assert!(dialog.archive);
         });
     }
 
@@ -290,7 +335,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn submit_sends_summary_and_archives_after_success(cx: &mut gpui::TestAppContext) {
+    fn hand_off_submit_sends_summary_and_default_archive_choice(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
@@ -305,8 +350,11 @@ mod tests {
                     harness: mast_proto::HarnessId::Codex, model: Some("source-model".into()), reasoning: None,
                     model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
                 });
+                state.workspace_scope = Some(WorkspaceScope::Local);
                 state.work_outline_actions_override = Some(actions);
             });
+            let profile = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            *shell.settings.sidebar_pins_mut(profile) = vec![CHAT_API.into(), CHAT_UI.into()];
             shell.open_hand_off(CHAT_API.into(), cx);
             let Some(WorkOutlineModal::HandOff(dialog)) = shell.work_outline_modal.as_mut() else { panic!() };
             dialog.pickers.update(cx, |pickers, cx| {
@@ -317,7 +365,6 @@ mod tests {
                 pickers.pick_model_for_tests("claude-opus-5-5", cx);
             });
             dialog.input.update(cx, |input, cx| input.set_text("Continue coordinating", cx));
-            dialog.archive = true;
             shell.submit_hand_off(cx);
         });
         cx.run_until_parked();
@@ -326,13 +373,57 @@ mod tests {
         assert_eq!(calls[0].0, mast_rpc::methods::HAND_OFF_ORCHESTRATOR);
         assert_eq!(calls[0].1["chatId"], CHAT_API);
         assert_eq!(calls[0].1["summary"], "Continue coordinating");
+        assert_eq!(calls[0].1["archive"], true);
         assert_eq!(calls[0].1["harness"], "claude-code");
         assert_eq!(calls[0].1["model"], "claude-opus-5-5");
         assert!(calls[0].1["operationId"].as_str().is_some());
-        shell.read_with(cx, |shell, _| {
+        shell.update(cx, |shell, cx| {
             assert!(shell.work_outline_modal.is_none());
-            assert!(shell.mutations.iter().any(|mutation| mutation["op"] == "setChatArchived" && mutation["chatId"] == CHAT_API && mutation["archived"] == true));
+            // A success before the watch sees the successor must survive pin cleanup.
+            shell.state.update(cx, |state, _| state.chats_synced = true);
+            shell.reconcile_sidebar_pins(cx);
+            let profile = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            assert_eq!(
+                shell.settings.sidebar_pins(&profile),
+                ["successor", CHAT_UI]
+            );
+            assert!(
+                !shell
+                    .mutations
+                    .iter()
+                    .any(|mutation| mutation["op"] == "setChatArchived")
+            );
         });
+    }
+
+    #[gpui::test]
+    fn hand_off_sends_unchecked_archive_choice(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(
+            move |_, params| {
+                recorded.lock().unwrap().push(params);
+                Ok(
+                    serde_json::json!({"chatId":"successor", "messageId":"m", "commandId":"c",
+                    "executionRoot":"/work", "state":"queued"}),
+                )
+            },
+        ));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.work_outline_actions_override = Some(actions)
+            });
+            shell.open_hand_off(CHAT_API.into(), cx);
+        });
+        super::super::chat_item_tests::draw(cx);
+        let archive = cx.debug_bounds("hand-off-archive").unwrap().center();
+        cx.simulate_click(archive, gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| shell.submit_hand_off(cx));
+        cx.run_until_parked();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["archive"], false);
     }
 
     #[gpui::test]

@@ -485,6 +485,61 @@ async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
             .unwrap()["chatId"],
         successor
     );
+
+    // The explicit choice needs a host that can apply it. Each device keeps
+    // its own designation and grant for the chat, with its own settings.
+    let mut on_b = core_b.workspace.chat("remote-handoff").unwrap().unwrap();
+    on_b.id = "remote-handoff-preferences".into();
+    core_b.workspace.import_chat_row(&on_b).unwrap();
+    core_a.workspace.import_chat_row(&on_b).unwrap();
+    let tokens_a = core_a.sessions.agent_tokens();
+    let tokens_b = core_b.sessions.agent_tokens();
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        tokens.personal_assistant().set(&on_b);
+        tokens
+            .admin()
+            .grant(&on_b.id, "handoff-space", None, skip_bulk);
+    }
+    let params = serde_json::json!({
+        "chatId": on_b.id, "summary": "Continue with preferences",
+        "operationId": "remote-handoff-preferences", "archive": true,
+    });
+    let error = client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Update Mast"), "{error}");
+    assert!(!core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    device
+        .capabilities
+        .push(mast_proto::capabilities::CHAT_HANDOFF_PREFERENCES_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let reply = loop_hand_off(&client, params.clone()).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert!(core_b.workspace.chat(&on_b.id).unwrap().unwrap().archived);
+    for (tokens, skip_bulk) in [(&tokens_a, true), (&tokens_b, false)] {
+        assert_eq!(
+            tokens.personal_assistant().get().unwrap().chat_id,
+            successor
+        );
+        assert!(tokens.admin().live(&on_b.id).is_none());
+        let grant = tokens.admin().live(successor).unwrap();
+        assert_eq!(grant.space_id, "handoff-space");
+        assert_eq!(grant.skip_bulk_confirmation, skip_bulk);
+    }
+    tokens_a.personal_assistant().set(&on_b);
+    assert_eq!(
+        client
+            .call(methods::HAND_OFF_ORCHESTRATOR, params)
+            .await
+            .unwrap()["chatId"],
+        successor
+    );
+    assert_eq!(
+        tokens_a.personal_assistant().get().unwrap().chat_id,
+        on_b.id
+    );
+
     core_a.shutdown().await;
     core_b.shutdown().await;
 }

@@ -1864,6 +1864,7 @@ pub struct Shell {
     sidebar_session_return: Option<SidebarSessionReturn>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
+    unobserved_local_handoff_pins: std::collections::HashSet<String>,
     sidebar_pin_write_generation: u64,
     sidebar_pin_write_notice: Option<SharedString>,
     /// `settings.last_space_id` applied once after the first spaces frame.
@@ -2395,6 +2396,7 @@ impl Shell {
             sidebar_session_transfer: None,
             sidebar_session_return: None,
             sidebar_pin_write: None,
+            unobserved_local_handoff_pins: std::collections::HashSet::new(),
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
             space_boot_applied: false,
@@ -5957,7 +5959,11 @@ impl Shell {
             if !state.chats_synced {
                 return;
             }
-            let known = state.chats.iter().map(|chat| chat.id.clone()).collect();
+            let mut known: std::collections::HashSet<_> =
+                state.chats.iter().map(|chat| chat.id.clone()).collect();
+            self.unobserved_local_handoff_pins
+                .retain(|id| !known.contains(id));
+            known.extend(self.unobserved_local_handoff_pins.iter().cloned());
             let changed = self
                 .settings
                 .sidebar_pinned_session_ids_by_profile

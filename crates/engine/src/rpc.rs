@@ -1909,6 +1909,7 @@ impl EngineRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcReply, RpcError> {
+        let mut handoff_source = None;
         if method == methods::HAND_OFF_ORCHESTRATOR {
             let supported = self.workspace.read_devices().ok().is_some_and(|devices| {
                 devices.iter().any(|device| {
@@ -1922,10 +1923,27 @@ impl EngineRpc {
                     self.device_label(target)
                 )));
             }
+            if params.get("archive").is_some_and(|value| !value.is_null())
+                && !self.workspace.read_devices().ok().is_some_and(|devices| {
+                    devices.iter().any(|device| {
+                        device.id == target
+                            && device
+                                .supports(mast_proto::capabilities::CHAT_HANDOFF_PREFERENCES_V1)
+                    })
+                })
+            {
+                return Err(RpcError::Failed(format!(
+                    "Update Mast on {} and reconnect to hand off this chat with its preferences.",
+                    self.device_label(target)
+                )));
+            }
             // An older host would start the successor and move workers but
             // leave the role on the predecessor, so a role chat needs a host
             // that moves roles.
             let chat_id = params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default();
+            if params.get("archive").is_some_and(serde_json::Value::is_boolean) {
+                handoff_source = Some(chat_id.to_owned());
+            }
             if self.workspace.chat_in_standing_role(chat_id) {
                 let role_capable = self.workspace.read_devices().ok().is_some_and(|devices| {
                     devices.iter().any(|device| {
@@ -1987,7 +2005,21 @@ impl EngineRpc {
         }
         let deadline = forward_deadline(method);
         match tokio::time::timeout(deadline, client.call(method, params)).await {
-            Ok(Ok(value)) => Ok(RpcReply::Value(value)),
+            Ok(Ok(value)) => {
+                if let Some(source) = handoff_source {
+                    let reply: mast_proto::CreateChatForWorkItemReply =
+                        serde_json::from_value(value.clone()).map_err(|e| {
+                            RpcError::Failed(format!("Invalid hand-off reply: {e}"))
+                        })?;
+                    if reply.state != mast_proto::WorkItemLaunchState::Rejected {
+                        self.launch
+                            .complete_forwarded_user_hand_off(&source, target, &reply.chat_id)
+                            .await
+                            .map_err(|e| RpcError::Failed(e.to_wire_message()))?;
+                    }
+                }
+                Ok(RpcReply::Value(value))
+            }
             Ok(Err(err)) => {
                 if should_invalidate_link(&err) {
                     links.invalidate(target);
@@ -3824,7 +3856,10 @@ impl RpcService for EngineRpc {
                         match tokio::task::spawn_blocking(move || service.prepare_orchestrator_successor(&p)).await {
                             Ok(Ok((mut launch, source, harness, model, reasoning))) => {
                                 launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning).await?;
-                                self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
+                                self.launch.create_orchestrator_successor(
+                                    &launch, &self.orchestrator_wakes, &source,
+                                    crate::work_outline_launch::HandOffOrigin::Agent,
+                                )
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
                                 .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string())))
@@ -3863,9 +3898,6 @@ impl RpcService for EngineRpc {
                 let source = self.workspace.chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
-                if source.archived && !source.is_standing_role_predecessor() {
-                    return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
-                }
                 if source.device_id != self.workspace.device_id() {
                     if routed {
                         return Err(RpcError::Failed("The chat's host changed. Reconnect and try the handoff again.".into()));
@@ -3874,8 +3906,26 @@ impl RpcService for EngineRpc {
                     forwarded["targetDeviceId"] = serde_json::json!(source.device_id);
                     return self.forward(&source.device_id, methods::HAND_OFF_ORCHESTRATOR, forwarded).await;
                 }
-                let item = self.workspace.ensure_chat_work_item(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let item = if source.archived && !source.is_standing_role_predecessor() {
+                    let successor = mast_proto::work_outline::derive_id(
+                        &p.operation_id,
+                        mast_proto::work_outline::roles::CHAT,
+                    );
+                    source
+                        .space_id
+                        .as_deref()
+                        .filter(|_| self.workspace.hand_off_recorded(&p.chat_id, &successor))
+                        .and_then(|space| self.workspace.chat_assigned_work_item(&successor, space))
+                        .ok_or_else(|| {
+                            RpcError::Failed(
+                                "An archived chat cannot hand off orchestration".into(),
+                            )
+                        })?
+                } else {
+                    self.workspace
+                        .ensure_chat_work_item(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                };
                 let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
@@ -3888,7 +3938,10 @@ impl RpcService for EngineRpc {
                     target_device_id: None,
                     account_id: None,
                 };
-                let reply = self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &p.chat_id)
+                let reply = self.launch.create_orchestrator_successor(
+                    &launch, &self.orchestrator_wakes, &p.chat_id,
+                    crate::work_outline_launch::HandOffOrigin::User { archive: p.archive },
+                )
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;
                 RpcReply::value(&reply)
             }

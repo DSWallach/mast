@@ -2,6 +2,74 @@ use super::*;
 use mast_proto::{SidebarPinChange, pin_order_key_between, valid_pin_order_key};
 
 impl RegistryDoc {
+    fn user_chat_hand_off_completed(&self, from: &str, to: &str) -> bool {
+        self.hand_off_recorded(from, to)
+            && self.overlay_row(KIND_CHATS, to).is_some_and(|row| {
+                row.fields
+                    .get("userHandOffCompleted")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            })
+    }
+
+    /// Move the pin in place and record completion in the same registry batch.
+    /// A replay must leave later pin and archive edits alone.
+    pub fn complete_user_chat_hand_off(
+        &mut self,
+        from: &str,
+        to: &str,
+        archive: Option<bool>,
+    ) -> Result<(), String> {
+        use super::sidebar_sections::LOCATIONS;
+
+        if self.user_chat_hand_off_completed(from, to) {
+            return Ok(());
+        }
+        if !self.hand_off_recorded(from, to) {
+            return Err("the chat hand-off was not recorded".into());
+        }
+        let mut rows = self.user_hand_off_role_rows(from, to, archive)?;
+        rows.push((
+            KIND_CHATS,
+            to.to_owned(),
+            OpKind::Update,
+            fields([("userHandOffCompleted", json!(true))]),
+        ));
+        if let Some((_, order_key)) = self
+            .ordered_sidebar_pins()
+            .into_iter()
+            .find(|(id, _)| id == from)
+        {
+            rows.extend([
+                (
+                    LOCATIONS,
+                    from.to_owned(),
+                    OpKind::Upsert,
+                    fields([("location", json!(""))]),
+                ),
+                (
+                    LOCATIONS,
+                    to.to_owned(),
+                    OpKind::Upsert,
+                    fields([("location", json!("pinned"))]),
+                ),
+                (
+                    KIND_SIDEBAR_PINS,
+                    from.to_owned(),
+                    OpKind::Upsert,
+                    fields([("pinned", json!(false))]),
+                ),
+                (
+                    KIND_SIDEBAR_PINS,
+                    to.to_owned(),
+                    OpKind::Upsert,
+                    fields([("pinned", json!(true)), ("orderKey", json!(order_key))]),
+                ),
+            ]);
+        }
+        self.commit_rows(rows)
+    }
+
     pub fn sidebar_pins_initialized(&self) -> bool {
         self.overlay_row(KIND_PREFERENCES, SIDEBAR_PINS_STATE_ID)
             .is_some()

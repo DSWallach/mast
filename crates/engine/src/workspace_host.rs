@@ -839,6 +839,19 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.rotate_standing_role_for_chat(from, to))
     }
 
+    pub(crate) fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
+        self.read(|doc| doc.hand_off_recorded(from, to))
+    }
+
+    pub(crate) fn complete_user_chat_hand_off(
+        &self,
+        from: &str,
+        to: &str,
+        archive: Option<bool>,
+    ) -> Result<(), String> {
+        self.mutate(|doc| doc.complete_user_chat_hand_off(from, to, archive))
+    }
+
     /// Every durable PR linked to this chat. Independent link rows are
     /// authoritative; the legacy single-value slot is folded in as a fallback
     /// so pre-migration chats immediately read as a one-element collection.

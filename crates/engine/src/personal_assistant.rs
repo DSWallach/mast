@@ -1,7 +1,7 @@
 //! The device's personal assistant chat: the device-local designation store.
 //!
-//! Only the RPC layer (`SetPersonalAssistant`, `ClearPersonalAssistant`)
-//! writes it; no agent tool does. Authenticate re-reads it on every agent
+//! User RPCs set or clear the designation and can move it during a hand-off.
+//! Authenticate re-reads it on every agent
 //! call, so a clear takes effect immediately.
 
 use std::path::PathBuf;
@@ -53,6 +53,20 @@ impl PersonalAssistantStore {
         state.current = Some(assistant.clone());
         Self::persist(&state);
         assistant
+    }
+
+    pub(crate) fn transfer_for_hand_off(&self, from: &Chat, successor: &str, chats: &[Chat]) {
+        let mut state = lock(&self.state);
+        if let Some(assistant) = &state.current
+            && assistant.covers(from, chats)
+        {
+            state.current = Some(PersonalAssistant {
+                chat_id: successor.to_owned(),
+                designated_at_ms: assistant.designated_at_ms,
+                scheduled_task: None,
+            });
+            Self::persist(&state);
+        }
     }
 
     pub fn clear(&self) {
