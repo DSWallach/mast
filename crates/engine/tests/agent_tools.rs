@@ -1376,6 +1376,27 @@ async fn a_hand_off_interrupted_after_queueing_is_finished_by_its_own_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_hand_off_resumes_under_a_new_operation_id_with_the_same_inputs() {
+    use mast_engine::work_outline_launch::LaunchStep;
+    use mast_proto::StandingRoleKind;
+    let (rig, item) = role_rig("role-resume").await;
+    let workspace = &rig.core.workspace;
+    rig.service.inject_launch_fault(Some(LaunchStep::TurnQueued));
+    let first = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-a"});
+    assert!(rig.client.call(methods::HAND_OFF_ORCHESTRATOR, first).await.is_err());
+    let successor = workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id;
+    let chats = workspace.read_chats().unwrap().len();
+
+    // A reopened dialog or a restarted Mast sends a fresh operation id, same inputs.
+    let again = json!({"chatId": CHAT, "summary":"Resume me", "operationId":"resume-fresh-id"});
+    let reply = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, again).await.unwrap();
+    assert_eq!(reply["chatId"], successor.as_str());
+    assert_eq!(workspace.read_chats().unwrap().len(), chats, "no second successor");
+    assert_eq!(workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor.as_str()));
+    assert_eq!(workspace.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_role_hand_offs_from_one_source_have_one_winner() {
     use mast_proto::StandingRoleKind;
     let (rig, item) = role_rig("role-race").await;

@@ -499,6 +499,27 @@ impl WorkItemLaunchService {
             .map(|config| config.harness)
             .unwrap_or_else(|| self.doc_host.harness_for(source));
         successor.account_id = self.sessions.chat_account_pin(source, harness);
+        // A hand-off that stopped after workers moved is finished by asking
+        // again with the same summary and settings, even from a reopened
+        // dialog or after a restart that minted a fresh operation id.
+        if let Some(pending) = self.workspace.part_done_hand_off_from(source)
+            && pending.operation_id != successor.operation_id
+        {
+            let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
+                work_item_id: &successor.work_item_id,
+                initial_prompt: &successor.initial_prompt,
+                config: &successor.config,
+                execution_override: &successor.execution_override,
+                worktree_choice: &successor.worktree_choice,
+                parent_chat_id: &successor.parent_chat_id,
+            });
+            if self
+                .workspace
+                .ledger_holds(&ledger_launch_inputs_key(&hash, &pending.operation_id))
+            {
+                successor.operation_id = pending.operation_id;
+            }
+        }
         self.launch_chat_for_work_item(&successor, Some((wakes, source)))
             .await
     }

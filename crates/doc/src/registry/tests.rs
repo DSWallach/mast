@@ -574,7 +574,7 @@ fn standing_role_hand_off_check_rejects_stale_and_invalid_without_writing() {
 
 #[test]
 fn a_part_done_hand_off_blocks_other_successors_and_survives_restart() {
-    let (mut doc, item) = role_doc(&["first", "second", "third"]);
+    let (mut doc, item) = role_doc(&["first", "second", "third", "fourth"]);
     doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
     // Reserved, nothing moved yet: another successor may replace it.
     doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
@@ -585,22 +585,123 @@ fn a_part_done_hand_off_blocks_other_successors_and_survives_restart() {
     doc.reserve_standing_role_hand_off("first", "third", "op-third", Some("space")).unwrap();
     assert_eq!(doc.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id, "third");
 
-    // Workers moved to `second`: now only that hand-off may finish, across a restart too.
-    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
-    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    // Workers moved to `fourth`: now only that hand-off may finish, across a restart too.
+    doc.reserve_standing_role_hand_off("first", "fourth", "op-fourth", Some("space")).unwrap();
+    doc.hand_off_chat_children("first", "fourth", "first", 1).unwrap();
     let bytes = doc.to_bytes().unwrap();
     let mut restarted = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
     assert!(restarted.reserve_standing_role_hand_off("first", "third", "op-third", Some("space")).is_err());
     assert!(restarted.check_standing_role_hand_off("first", "third", None).is_err());
     assert!(restarted.rotate_standing_role_for_chat("first", "third").is_err());
     assert_eq!(restarted.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    assert_eq!(restarted.part_done_hand_off_from("first").unwrap().operation_id, "op-fourth");
     // The same operation finishes it, and the reservation is cleared.
-    restarted.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
-    restarted.rotate_standing_role_for_chat("first", "second").unwrap().unwrap();
+    restarted.reserve_standing_role_hand_off("first", "fourth", "op-fourth", Some("space")).unwrap();
+    restarted.rotate_standing_role_for_chat("first", "fourth").unwrap().unwrap();
     assert_eq!(restarted.pending_standing_hand_off(StandingRoleKind::Manager, &item), None);
     let role = restarted.standing_role(StandingRoleKind::Manager, &item).unwrap();
     assert_eq!(role.state, mast_proto::StandingRoleState::Idle);
-    assert_eq!(role.current_chat_id.as_deref(), Some("second"));
+    assert_eq!(role.current_chat_id.as_deref(), Some("fourth"));
+}
+
+#[test]
+fn replacing_a_reservation_hides_its_provisional_successor() {
+    let (mut doc, item) = role_doc(&["first", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    // `second` exists (the launch created it) but never got workers or a turn.
+    doc.reserve_standing_role_hand_off("first", "second", "op-second", Some("space")).unwrap();
+    assert_eq!(doc.part_done_hand_off_from("first"), None, "nothing moved yet");
+    doc.reserve_standing_role_hand_off("first", "third", "op-third", Some("space")).unwrap();
+    assert!(doc.chat("second").unwrap().unwrap().archived, "the abandoned successor is hidden");
+    assert!(!doc.chat("third").unwrap().unwrap().archived);
+    assert_eq!(doc.pending_standing_hand_off(StandingRoleKind::Manager, &item).unwrap().to_chat_id, "third");
+}
+
+#[test]
+fn a_rotation_beats_newer_synced_clocks_on_both_rows() {
+    use mast_proto::StandingRoleKind;
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    let role = doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.take_pushable();
+    // A peer's clocks (or a restored snapshot) run far ahead of this device's.
+    let ahead = encode_hlc(chrono::Utc::now().timestamp_millis() + 10 * 365 * 24 * 3_600_000, 0, "dev-z");
+    let mut rows = Vec::new();
+    for (kind, id) in [(KIND_STANDING_ROLES, role.id.as_str()), (KIND_CHATS, "first")] {
+        let mut row = doc.row(kind, id).unwrap();
+        for clock in row.clocks.values_mut() {
+            *clock = ahead.clone();
+        }
+        rows.push(row);
+    }
+    let _ = doc.apply_rows(1, rows);
+    assert!(
+        doc.row(KIND_CHATS, "first").unwrap().clocks.values().all(|c| *c == ahead),
+        "the peer's clocks are in force before the rotation"
+    );
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "second").unwrap();
+    // Both halves of the batch win, not just the one on the row with the older clock.
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("second"));
+    let first = doc.chat("first").unwrap().unwrap();
+    assert!(first.archived);
+    assert_eq!(first.standing_role_successor.as_deref(), Some("second"));
+}
+
+#[test]
+fn a_hand_off_a_roleless_binary_completed_is_repaired_by_an_updated_device() {
+    use mast_proto::StandingRoleKind;
+    let (mut doc, item) = role_doc(&["first", "second", "third", "plain", "plain-next"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    // Nothing to repair while no hand-off happened, and ordinary chats are not roles.
+    assert_eq!(doc.repair_stranded_standing_roles(), 0);
+    doc.hand_off_chat_children("plain", "plain-next", "plain", 1).unwrap();
+    assert!(doc.stranded_standing_role_hand_offs().is_empty());
+    // An older host hands off the role chat: workers move and provenance is recorded,
+    // but the role stays on the predecessor.
+    doc.hand_off_chat_children("first", "second", "first", 2).unwrap();
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    assert_eq!(doc.stranded_standing_role_hand_offs(), [("first".to_owned(), "second".to_owned())]);
+    assert_eq!(doc.repair_stranded_standing_roles(), 1);
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("second"));
+    let first = doc.chat("first").unwrap().unwrap();
+    assert!(first.archived && first.is_standing_role_predecessor());
+    assert_eq!(doc.repair_stranded_standing_roles(), 0, "idempotent");
+}
+
+#[test]
+fn stranded_repair_leaves_ambiguous_and_in_flight_hand_offs_alone() {
+    use mast_proto::StandingRoleKind;
+    // Two successors recorded from the role chat: ambiguous, so nothing moves.
+    let (mut doc, item) = role_doc(&["first", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    doc.hand_off_chat_children("first", "third", "first", 2).unwrap();
+    assert_eq!(doc.repair_stranded_standing_roles(), 0);
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    // A live host mid-launch (the reservation names the successor) finishes its own hand-off.
+    let (mut doc, item) = role_doc(&["first", "second"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.reserve_standing_role_hand_off("first", "second", "op", Some("space")).unwrap();
+    doc.hand_off_chat_children("first", "second", "first", 1).unwrap();
+    assert_eq!(doc.repair_stranded_standing_roles(), 0);
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+}
+
+#[test]
+fn rotation_enforces_the_holder_invariants_adoption_does() {
+    use mast_proto::StandingRoleKind;
+    let (mut doc, item) = role_doc(&["first", "holder", "foreign", "ok"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "first", &[]).unwrap();
+    doc.adopt_standing_role(StandingRoleKind::Assistant, &item, "holder", &[]).unwrap();
+    let mut foreign = doc.chat("foreign").unwrap().unwrap();
+    foreign.device_id = "dev-b".into();
+    doc.upsert_chat(&foreign).unwrap();
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "holder").is_err());
+    assert!(doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "foreign").is_err());
+    assert!(doc.check_standing_role_hand_off("first", "holder", None).is_err());
+    assert!(doc.check_standing_role_hand_off("first", "foreign", None).is_err());
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("first"));
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "first", "ok").unwrap();
+    assert_eq!(doc.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("ok"));
 }
 
 #[test]

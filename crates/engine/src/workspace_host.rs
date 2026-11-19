@@ -816,6 +816,20 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.reserve_standing_role_hand_off(from, to, operation_id, to_space))
     }
 
+    /// The part-done hand-off from the role chat `from`, if workers already moved.
+    pub fn part_done_hand_off_from(&self, from: &str) -> Option<mast_proto::PendingStandingHandOff> {
+        self.read(|doc| doc.part_done_hand_off_from(from))
+    }
+
+    /// Finish hand-offs an older binary completed without moving the role.
+    /// Reads first so an idle sweep never bumps the change counter.
+    pub fn repair_stranded_standing_roles(&self) -> usize {
+        if self.read(|doc| doc.stranded_standing_role_hand_offs().is_empty()) {
+            return 0;
+        }
+        self.mutate(|doc| doc.repair_stranded_standing_roles())
+    }
+
     pub fn pending_standing_hand_off(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::PendingStandingHandOff> {
         self.read(|doc| doc.pending_standing_hand_off(role, scope_item_id))
     }

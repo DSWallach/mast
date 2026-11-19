@@ -93,10 +93,16 @@ impl RegistryDoc {
         &mut self,
         rows: Vec<(&str, String, OpKind, BTreeMap<String, Value>)>,
     ) -> Result<(), String> {
+        // Every affected row is observed before the one shared clock is
+        // minted (rule R3), so the clock beats the newest clock on any of
+        // them. Minting first would let a row with a newer synced or restored
+        // clock reject its half of the batch while the other half applies.
+        for (kind, id, _, _) in &rows {
+            self.observe_row(kind, id);
+        }
         let hlc = self.mint_hlc();
         let mut ops = Vec::with_capacity(rows.len());
         for (kind, id, op, set) in rows {
-            self.observe_row(kind, &id);
             ops.push(RowOp {
                 kind: kind.to_owned(),
                 id,
@@ -227,6 +233,20 @@ impl RegistryDoc {
         if source.space_id.is_none() || source.space_id != space {
             return Err("chats must belong to the same Space".into());
         }
+        // The same invariants adoption enforces: one role per chat, and the
+        // chat lives on the device that owns the Space.
+        if let Some(destination) = self.chat(to).map_err(|e| e.to_string())? {
+            if self.standing_role_of_chat(to).is_some() {
+                return Err("the destination chat already holds a role".into());
+            }
+            let owner = self
+                .space(space.as_deref().unwrap_or_default())
+                .map_err(|e| e.to_string())?
+                .ok_or("the chat's Space does not exist")?;
+            if owner.device_id != destination.device_id {
+                return Err("the destination chat's host does not own its Space".into());
+            }
+        }
         Ok(())
     }
 
@@ -306,7 +326,24 @@ impl RegistryDoc {
         {
             return Ok(());
         }
-        self.commit_rows(vec![(
+        let mut rows = Vec::new();
+        // Replacing a reservation whose successor was created but never got
+        // workers or a turn: hide that provisional chat in the same batch, so
+        // it does not linger as a stray empty session.
+        if let Some(old) = self.pending_hand_off_of(&role.id)
+            && old.to_chat_id != to
+            && !self.hand_off_recorded(&old.from_chat_id, &old.to_chat_id)
+            && let Some(provisional) = self.chat(&old.to_chat_id).map_err(|e| e.to_string())?
+            && !provisional.archived
+        {
+            rows.push((
+                KIND_CHATS,
+                old.to_chat_id,
+                OpKind::Update,
+                fields([("archived", json!(true))]),
+            ));
+        }
+        rows.push((
             KIND_STANDING_ROLES,
             role.id,
             OpKind::Update,
@@ -314,7 +351,70 @@ impl RegistryDoc {
                 ("state", json!(StandingRoleState::HandingOff)),
                 ("pendingHandOff", json!(pending)),
             ]),
-        )])
+        ));
+        self.commit_rows(rows)
+    }
+
+    /// The part-done hand-off reserved on the role `from` holds: workers
+    /// already moved to its successor, the role has not. A new request from
+    /// `from` that carries the same inputs resumes this operation.
+    pub fn part_done_hand_off_from(&self, from: &str) -> Option<PendingStandingHandOff> {
+        let role = self.standing_role_of_chat(from)?;
+        let pending = self.pending_hand_off_of(&role.id)?;
+        (pending.from_chat_id == from
+            && self.hand_off_recorded(&pending.from_chat_id, &pending.to_chat_id))
+        .then_some(pending)
+    }
+
+    /// Hand-offs a binary without role support completed: the successor
+    /// recorded a hand-off from the chat that still holds a role, and nothing
+    /// moved the role. Each is `(role chat, its sole active successor)`;
+    /// ambiguous cases (several successors), hand-offs a live host is
+    /// finishing (a reservation names that successor), and successors that
+    /// cannot hold the role are left alone.
+    pub fn stranded_standing_role_hand_offs(&self) -> Vec<(String, String)> {
+        let chats = self.read_chats().unwrap_or_default();
+        let mut stranded = Vec::new();
+        for role in self.standing_roles() {
+            let Some(current) = role.current_chat_id.as_deref() else {
+                continue;
+            };
+            let pending_to = self.pending_hand_off_of(&role.id).map(|p| p.to_chat_id);
+            let successors: Vec<&Chat> = chats
+                .iter()
+                .filter(|c| !c.archived && !c.is_standing_role_predecessor() && c.id != current)
+                .filter(|c| self.hand_off_recorded(current, &c.id))
+                .collect();
+            let [successor] = successors.as_slice() else {
+                continue;
+            };
+            if pending_to.as_deref() == Some(successor.id.as_str()) {
+                continue;
+            }
+            if self
+                .check_standing_role_hand_off(current, &successor.id, None)
+                .is_ok()
+            {
+                stranded.push((current.to_owned(), successor.id.clone()));
+            }
+        }
+        stranded
+    }
+
+    /// Finish the stranded hand-offs found by
+    /// [`Self::stranded_standing_role_hand_offs`]. Returns how many moved.
+    pub fn repair_stranded_standing_roles(&mut self) -> usize {
+        let mut repaired = 0;
+        for (from, to) in self.stranded_standing_role_hand_offs() {
+            match self.rotate_standing_role_for_chat(&from, &to) {
+                Ok(Some(_)) => repaired += 1,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(from = %from, to = %to, %error, "standing role repair failed");
+                }
+            }
+        }
+        repaired
     }
 
     /// Read-only precheck for a hand-off launch, run before anything is
