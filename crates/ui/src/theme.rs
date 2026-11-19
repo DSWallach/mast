@@ -832,6 +832,49 @@ impl Theme {
         colors[index]
     }
 
+    /// Pinned sessions wear the interaction accent.
+    pub fn pinned_accent(&self) -> Hsla {
+        self.accent
+    }
+
+    /// Manager rows take the first ANSI hue of the active palette that stays
+    /// clear of the pinned accent and the danger and warning roles, so the
+    /// two never read alike after a palette or accent change.
+    pub fn manager_accent(&self) -> Hsla {
+        let pinned = self.pinned_accent();
+        let clear = |color: Hsla, other: Hsla, gap: f32| {
+            let distance = (color.h - other.h).abs();
+            other.s < 0.15 || distance.min(1.0 - distance) > gap
+        };
+        [5, 6, 4, 2, 3]
+            .into_iter()
+            .map(|index| flatten(self.terminal.ansi[index], self.bg))
+            .find(|color| {
+                color.s >= 0.15
+                    && clear(*color, pinned, 0.12)
+                    && clear(*color, self.danger, 0.08)
+                    && clear(*color, self.warning, 0.08)
+            })
+            .unwrap_or_else(|| {
+                // A monochrome palette: the neutral furthest from the accent.
+                let neutrals = [
+                    flatten(self.text, self.bg),
+                    flatten(self.text_muted, self.bg),
+                ];
+                let gap = |color: &Hsla| (color.l - flatten(pinned, self.bg).l).abs();
+                neutrals
+                    .into_iter()
+                    .max_by(|a, b| gap(a).total_cmp(&gap(b)))
+                    .unwrap_or(self.text)
+            })
+    }
+
+    /// Low-emphasis Manager row fill, at the weight of [`Self::accent_wash`].
+    pub fn manager_wash(&self) -> Hsla {
+        let alpha = if self.appearance.is_dark() { 0.22 } else { 0.12 };
+        self.manager_accent().opacity(alpha)
+    }
+
     /// Select a theme text role with the strongest contrast on an identity fill.
     pub fn identity_text(&self, fill: Hsla) -> Hsla {
         [self.text, self.solid, self.on_solid, self.on_accent]
@@ -1990,6 +2033,46 @@ mod tests {
             theme.terminal.ansi[3] = theme.danger;
             assert_ne!(theme.agent_identity_color(Some(HarnessId::ClaudeCode), Some("opus")), flatten(theme.danger, theme.bg));
         }
+    }
+
+    #[test]
+    fn manager_and_pinned_accents_stay_distinct_in_every_palette() {
+        let registry = ThemeRegistry::active();
+        let selections = std::iter::once(AccentSelection::ThemeDefault)
+            .chain(AccentPreset::ALL.into_iter().map(AccentSelection::Preset));
+        let mut checked = 0;
+        for selection in selections {
+            for appearance in [mast_theme::Appearance::Light, mast_theme::Appearance::Dark] {
+                for variant in registry.variants_for(appearance) {
+                    let theme = Theme::from_variant(variant, selection, SurfacePreference::Opaque);
+                    let (manager, pinned) = (
+                        theme.manager_accent(),
+                        flatten(theme.pinned_accent(), theme.bg),
+                    );
+                    let hue = (manager.h - pinned.h).abs();
+                    let distinct = if manager.s >= 0.15 && pinned.s >= 0.15 {
+                        hue.min(1.0 - hue) > 0.12
+                    } else {
+                        (manager.s >= 0.15) != (pinned.s >= 0.15)
+                            || (manager.l - pinned.l).abs() > 0.15
+                    };
+                    assert!(
+                        distinct,
+                        "{} {selection:?}: Manager {manager:?} vs pinned {pinned:?}",
+                        variant.id
+                    );
+                    assert_ne!(
+                        flatten(theme.manager_wash(), theme.surface),
+                        flatten(theme.accent_wash, theme.surface),
+                        "{} {selection:?}",
+                        variant.id
+                    );
+                    assert!(contrast_ratio(theme.identity_foreground(manager), theme.bg) >= 4.5);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 16, "only {checked} palettes checked");
     }
 
     #[test]

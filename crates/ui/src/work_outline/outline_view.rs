@@ -2889,17 +2889,25 @@ impl OutlineView {
             || row
                 .open_chat()
                 .is_some_and(|chat| self.panel_chat.as_deref() == Some(chat.chat.id.as_str()));
+        let manager = row.manager().is_some();
         let pinned_chat = row
             .open_chat()
-            .filter(|chat| !chat.dangling && self.pinned_chats.contains(&chat.chat.id));
+            .filter(|chat| !chat.dangling)
+            .map(|chat| chat.chat.id.as_str())
+            .or_else(|| row.manager().and_then(|manager| manager.chat_id.as_deref()))
+            .filter(|chat_id| self.pinned_chats.contains(*chat_id));
         let pinned = pinned_chat.is_some();
-        let pin_mark = pinned_chat.map(|chat| {
-            let selector = format!("outline-pinned-chat-{}", chat.chat.id);
+        let pin_mark = pinned_chat.map(|chat_id| {
+            let selector = format!("outline-pinned-chat-{chat_id}");
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .flex_none()
-                .text_color(if selected { theme.text } else { theme.accent })
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.pinned_accent()
+                })
                 .child(crate::icons::icon(crate::icons::PIN).size(px(12.0)))
                 .hint("Pinned", HintKey::None)
         });
@@ -3276,8 +3284,16 @@ impl OutlineView {
         .when(highlighted, |el| {
             el.border_color(crate::components::outline_row_highlight(theme))
         })
-        .when(pinned && !(selected || in_group), |el| {
+        // A Manager keeps its own fill; pinning one adds the pinned accent as
+        // its outline.
+        .when(manager && !(selected || in_group), |el| {
+            el.bg(theme.manager_wash())
+        })
+        .when(pinned && !manager && !(selected || in_group), |el| {
             el.bg(theme.accent_wash)
+        })
+        .when(pinned && manager, |el| {
+            el.border_color(theme.pinned_accent())
         })
         .when((selected || in_group) && focused, |el| {
             el.bg(theme.element_active)

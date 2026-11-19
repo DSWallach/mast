@@ -1167,6 +1167,66 @@ mod tests {
         assert!(!menu_open(&shell, cx));
     }
 
+    /// Project LAUNCH > group API > session CHAT_API, driven through the
+    /// sidebar: pin from the row menu, then fold the group and the project.
+    #[gpui::test]
+    fn a_pinned_session_stays_visible_when_its_own_group_collapses(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::work_outline::store::fixture_snapshot("s1");
+        let (shell, outline, _calls, cx) = menu_shell(cx, dir.path(), fixture);
+        let group = row_key::item("s1", API);
+        let project = row_key::item("s1", LAUNCH);
+        let session = row_key::chat(CHAT_API);
+        let shown = |cx: &mut gpui::VisualTestContext, key: &str| {
+            cx.debug_bounds(selector(format!("outline-row-{key}")))
+                .is_some()
+        };
+        let toggle = |cx: &mut gpui::VisualTestContext, key: &str| {
+            let disclosure = cx
+                .debug_bounds(selector(format!("outline-disclosure-{key}")))
+                .unwrap_or_else(|| panic!("{key} has a disclosure"));
+            cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
+            redraw(cx);
+        };
+        let session_rows = |cx: &mut gpui::VisualTestContext| {
+            outline.read_with(cx, |outline, _| {
+                let model = outline.model();
+                let rows = model.rows.iter().filter(|row| row.key == session).count();
+                let collapsed = model.row(&group).is_some_and(|row| row.collapsed);
+                (rows, collapsed)
+            })
+        };
+        let pin_mark = selector(format!("outline-pinned-chat-{CHAT_API}"));
+
+        right_click(cx, &session);
+        click(cx, "pin");
+        settle(&shell, cx);
+        assert!(cx.debug_bounds(pin_mark).is_some());
+
+        toggle(cx, &group);
+        assert!(shown(cx, &session), "the pin stays at its collapsed level");
+        assert!(!shown(cx, &row_key::item("s1", API_AUTH)));
+        assert!(!shown(cx, &row_key::chat(CHAT_AUTH)));
+        assert_eq!(session_rows(cx), (1, true));
+
+        toggle(cx, &project);
+        assert!(!shown(cx, &group) && !shown(cx, &session));
+
+        toggle(cx, &project);
+        assert!(shown(cx, &session), "reopening the project reveals the pin");
+        assert_eq!(session_rows(cx), (1, true), "the group stays collapsed");
+
+        right_click(cx, &session);
+        assert_eq!(row(&shell, cx, "pin").label, "Unpin");
+        click(cx, "pin");
+        settle(&shell, cx);
+        assert!(!shown(cx, &session), "unpinned, it folds with its group");
+
+        toggle(cx, &group);
+        assert!(shown(cx, &session) && cx.debug_bounds(pin_mark).is_none());
+        assert_eq!(session_rows(cx), (1, false));
+    }
+
     /// Chat rows, the Space root, and the Unassociated group get their own
     /// menus; Chat rows reuse the sidebar Chat menu's actions.
     #[gpui::test]
