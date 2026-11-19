@@ -667,15 +667,19 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     // counting server, and lands late under load. Let those drain so only
     // requests sent after shutdown count against the boundary.
     let mut after = requests.load(Ordering::SeqCst);
-    let mut stable_since = tokio::time::Instant::now();
-    while stable_since.elapsed() < std::time::Duration::from_millis(500) {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        let now = requests.load(Ordering::SeqCst);
-        if now != after {
-            after = now;
-            stable_since = tokio::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut stable_since = tokio::time::Instant::now();
+        while stable_since.elapsed() < std::time::Duration::from_millis(500) {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let now = requests.load(Ordering::SeqCst);
+            if now != after {
+                after = now;
+                stable_since = tokio::time::Instant::now();
+            }
         }
-    }
+    })
+    .await
+    .expect("edge still receiving requests after shutdown returned");
     drop(runtime);
 
     wait_until(
