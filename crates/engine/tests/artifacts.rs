@@ -2730,18 +2730,68 @@ async fn structured_plan_card_tracks_its_sheet_decision() {
     assert_eq!(open_texts(&rig, id), ["1 open question in Plan"]);
 }
 
+/// A Background scheduled-run chat on the rig's item, with its own token.
+async fn background_run(rig: &Rig, chat: &str, task_id: &str, name: &str) -> (AgentTokenLease, String) {
+    mutate(
+        &rig.client,
+        json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE,
+                "deviceId": rig.core.device_id, "cwd": rig.worktree.to_string_lossy() }),
+    )
+    .await;
+    outline(
+        &rig.client,
+        json!({ "op": "assignChatToWorkItem", "chatId": chat, "workItemId": rig.item,
+                "operationId": format!("assign-{chat}") }),
+    )
+    .await;
+    rig.core
+        .workspace
+        .set_chat_scheduled_task_info(
+            chat,
+            &mast_proto::ScheduledChat {
+                task_id: task_id.into(),
+                task_name: name.into(),
+                run_id: chat.into(),
+                output: mast_proto::ScheduledTaskOutput::Background,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let lease = rig.core.sessions.agent_tokens().mint(chat, &format!("run-{chat}"), SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    (lease, token)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn briefing_read_returns_the_latest_results_with_run_times_for_any_chat() {
     let rig = rig().await;
     let role = mast_proto::ScheduledRunResults::role_for("task-slack");
     let file = rig.worktree.join("slack.md");
-    for (run, body, key) in [("run-1", "all quiet", "k1"), ("run-2", "2 PRs need review", "k2")] {
+
+    // An ordinary chat cannot write the reserved role, so it cannot spoof a result.
+    std::fs::write(&file, "Run: fake\n# Slack\nspoof\n").unwrap();
+    let spoof = tool(
+        &rig,
+        &rig.token,
+        "artifact_publish",
+        json!({ "path": file.to_string_lossy(), "title": "Results: Slack", "role": role,
+                "note": "run", "idempotencyKey": "spoof" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(spoof.contains("reserved"), "{spoof}");
+
+    // Each Background run publishes one revision from its own chat.
+    let mut leases = Vec::new();
+    for (chat, run, body) in [("run-chat-1", "run-1", "all quiet"), ("run-chat-2", "run-2", "2 PRs need review")] {
+        let (lease, token) = background_run(&rig, chat, "task-slack", "Slack").await;
+        leases.push(lease);
         std::fs::write(&file, format!("Run: {run}\n# Slack\n{body}\n")).unwrap();
         publish(
             &rig,
-            &rig.token,
+            &token,
             json!({ "path": file.to_string_lossy(), "title": "Results: Slack", "role": role,
-                    "note": "run", "idempotencyKey": key }),
+                    "note": "run", "idempotencyKey": format!("scheduled-run-{run}") }),
         )
         .await;
     }
@@ -2771,24 +2821,26 @@ async fn briefing_read_returns_the_latest_results_with_run_times_for_any_chat() 
         assert_eq!(all["needYou"], 0);
     }
 
-    // One task by name, id or artifact id; run times only on request.
+    // One task by name or id; run times only on request.
     for task in ["slack", "task-slack"] {
         let one = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": task }))
             .await
             .unwrap();
-        assert_eq!(one["briefings"][0]["runId"], "run-2", "{task}");
+        assert_eq!(one["briefings"][0]["revision"], 2, "{task}");
     }
     let index = tool(&rig, &rig.other_token, "briefing_read", json!({ "index": true }))
         .await
         .unwrap();
     assert_eq!(index["briefings"][0]["content"], Value::Null);
     assert_eq!(index["briefings"][0]["revision"], 2);
+    assert_eq!(index["briefings"][0]["contentAvailable"], true);
 
     let missing = tool(&rig, &rig.other_token, "briefing_read", json!({ "task": "GitHub" }))
         .await
         .unwrap_err();
     assert!(missing.contains("available: Slack"), "{missing}");
     assert!(tool(&rig, "zat_forged", "briefing_read", json!({})).await.is_err());
+    drop(leases);
 }
 
 fn status_document(stamp: &str) -> String {

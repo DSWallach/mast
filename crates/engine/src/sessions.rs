@@ -1202,6 +1202,20 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        // The chat's first turn is the one whose message is the first user
+        // entry. It stays so across retries and fresh restarts of that turn,
+        // and is never true for a later turn that merely starts a new session.
+        let first_turn = handle
+            .doc()
+            .read_entries()
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|e| e.role == MessageRole::User)
+                    .map(|e| e.id == user_id)
+            })
+            .unwrap_or(false);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1258,10 +1272,15 @@ impl SessionsEngine {
         let notices = delivered_prompt
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
-        // A new native session (nothing resumed) of a main chat also gets the
-        // briefing index; it is delivered like a notice and never in the transcript.
-        let start_notice = if request.resume.is_none() && !side_chat {
-            lock(&self.inner.chat_start_notice).clone().and_then(|notice| notice(chat_id))
+        // The first turn of a main chat also gets the briefing index. It is
+        // delivered like a notice, never in the transcript, and never ahead of
+        // a leading slash command, which must stay first to be routed.
+        let start_notice = if first_turn
+            && !side_chat
+            && !shown_prompt.trim_start().starts_with('/')
+        {
+            let notice = lock(&self.inner.chat_start_notice).clone();
+            notice.and_then(|notice| notice(chat_id))
         } else {
             None
         };

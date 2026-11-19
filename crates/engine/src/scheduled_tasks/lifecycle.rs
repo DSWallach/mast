@@ -100,7 +100,7 @@ impl ScheduledTasks {
 
     fn reconcile_run_action(&self, run: &ScheduledRun) -> Result<bool, EngineError> {
         let workspace = &self.0.workspace;
-        let dedupe_key = format!("scheduled-run-failed:{}", run.task_id);
+        let dedupe_key = format!("{}{}", ScheduledRunResults::FAILED_DEDUPE_PREFIX, run.task_id);
         let actor = WorkOutlineActor {
             kind: WorkOutlineActorKind::System,
             device_id: workspace.device_id().into(),

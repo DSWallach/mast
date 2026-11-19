@@ -1018,6 +1018,8 @@ impl EngineRpc {
     /// Share the engine's artifact service (render broker, watcher cache)
     /// with this RPC surface and its agent tools.
     pub fn with_scheduled_tasks(mut self, service: crate::scheduled_tasks::ScheduledTasks) -> Self {
+        self.agent_tools
+            .set_scheduled_task_names(std::sync::Arc::new(service.task_names_reader()));
         self.scheduled_tasks = Some(service);
         self
     }
