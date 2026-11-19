@@ -283,7 +283,7 @@ impl TitleGenerator {
             serde_json::to_string(prompt).ok()?
         );
         for attempt in 0..=RETRY_DELAYS_MS.len() {
-            let request = RunRequest { scheduled_task: None, approval_rules: false,
+            let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
                 prompt: title_prompt.clone(),
                 harness: Some(harness_id),
                 model: model.clone(),
@@ -585,7 +585,7 @@ mod tests {
                 },
             ],
         };
-        let request = RunRequest { scheduled_task: None, approval_rules: false,
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "Title only".into(),
             harness: None,
             model: None,

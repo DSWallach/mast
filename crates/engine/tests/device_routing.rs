@@ -955,7 +955,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {
-        request: RunRequest { scheduled_task: None, approval_rules: false,
+        request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: "run remotely".into(),
             harness: None,
             model: None,

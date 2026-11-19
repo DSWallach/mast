@@ -198,7 +198,7 @@ impl Rig {
     /// Queue a turn and wait for it to reach the harness (not to finish).
     async fn start(&self, chat: &str, prompt: &str) {
         let before = self.harness.requests.lock().unwrap().len();
-        let request = RunRequest { scheduled_task: None, approval_rules: false,
+        let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: prompt.into(),
             harness: Some(HarnessId::Mock),
             model: None,

@@ -26,7 +26,7 @@ const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -2078,7 +2078,7 @@ async fn real_claude_sees_uploaded_image_inline() {
          what solid color is this image? Reply with exactly one lowercase word.\n\n\
          Attached images (local files — open them to view):\n- {path}"
     );
-    let request = RunRequest { scheduled_task: None, approval_rules: false,
+    let request = RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt,
         harness: None,
         model: Some("haiku".into()),

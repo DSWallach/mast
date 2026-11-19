@@ -132,6 +132,14 @@ impl ScheduledTasksPage {
         }));
         page
     }
+    /// Offline new-task editor for the preview renderer.
+    pub(crate) fn offline_editor_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.target = Some("local".into());
+        page.edit(None, cx);
+        page.error = None;
+        page
+    }
     pub fn show_task(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
         if let Some(device) = device {
             if self.target.as_ref() != Some(&device) {
@@ -203,6 +211,14 @@ impl ScheduledTasksPage {
         })
     }
 
+    fn notion_writes_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::SCHEDULED_TASK_NOTION_WRITES_V1)
+        })
+    }
+
     fn call(&mut self, request: ScheduledTasksRequest, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -258,6 +274,10 @@ impl ScheduledTasksPage {
                 draft.entry("afterSuccess").or_insert(serde_json::json!(ScheduledTaskAfterSuccess::Archive));
             } else {
                 draft.remove("afterSuccess");
+            }
+            // An older host would drop the field, so it is never sent to one.
+            if !self.notion_writes_supported(cx) {
+                draft.remove("writeToNotion");
             }
         }
         params["targetDeviceId"] = serde_json::json!(target);
@@ -516,6 +536,7 @@ impl ScheduledTasksPage {
                         ScheduledTaskOutput::Interactive
                     },
                     after_success: Default::default(),
+                    write_to_notion: self.notion_writes_supported(cx).then_some(false),
                 },
             )
         };
@@ -1443,6 +1464,9 @@ impl Render for ScheduledTasksPage {
                 );
             }
             let enabled = e.draft.enabled;
+            // A task saved before the setting existed already runs unrestricted.
+            let notion_writes = e.draft.write_to_notion.unwrap_or(true);
+            let notion_writes_supported = self.notion_writes_supported(cx);
             let mode = crate::pickers::approval::ApprovalMode::from_config(&e.draft.config);
             content = content.child(
                 div()
@@ -1467,6 +1491,28 @@ impl Render for ScheduledTasksPage {
                             cx.notify();
                         })),
                     )
+                    .when(notion_writes_supported, |row| {
+                        row.child(
+                            popover::btn_ghost(
+                                &theme,
+                                if notion_writes {
+                                    "✓ Write to Notion on"
+                                } else {
+                                    "○ Write to Notion off"
+                                },
+                                "task-notion-writes",
+                            )
+                            .id("task-notion-writes")
+                            .debug_selector(|| "task-notion-writes".into())
+                            .on_click(cx.listener(|p, _, _, cx| {
+                                if let Some(e) = p.editor.as_mut() {
+                                    e.draft.write_to_notion =
+                                        Some(!e.draft.write_to_notion.unwrap_or(true));
+                                }
+                                cx.notify();
+                            })),
+                        )
+                    })
                     .child(
                         popover::btn_ghost(
                             &theme,
@@ -1799,6 +1845,7 @@ mod tests {
                         capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
                         capabilities::SCHEDULED_TASK_OUTPUT_V1,
                         capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
                     ],
                 ),
                 ("item-only", vec![capabilities::SCHEDULED_TASK_WORK_ITEM_V1]),
@@ -1824,7 +1871,9 @@ mod tests {
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_some());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_some());
+        assert!(cx.debug_bounds("task-notion-writes").is_some());
         page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, Some(false));
             assert_eq!(
                 p.editor_draft(cx).unwrap().output,
                 ScheduledTaskOutput::Background
@@ -1854,6 +1903,10 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            assert_eq!(p.editor_draft(cx).unwrap().write_to_notion, None);
+        });
         assert!(cx.debug_bounds("task-select-workItem").is_some());
         assert!(cx.debug_bounds("task-select-output").is_none());
         assert!(cx.debug_bounds("task-select-afterSuccess").is_none());
@@ -1864,6 +1917,218 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-select-workItem").is_none());
         assert!(cx.debug_bounds("task-select-space").is_some());
+    }
+
+    #[gpui::test]
+    fn the_notion_toggle_round_trips_through_save_and_reopen(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            s.devices.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "current", "name": "current", "platform": "macos",
+                    "capabilities": [
+                        capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                        capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                        capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                    ],
+                }))
+                .unwrap(),
+            );
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let toggle = |cx: &mut gpui::VisualTestContext| {
+            let at = cx.debug_bounds("task-notion-writes").expect("the toggle is offered").center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // What Save sends, and a reopen of the task as the host would store it.
+        let saved = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| {
+                let draft = p.editor_draft(cx).unwrap();
+                let wire = serde_json::to_value(&draft).unwrap().get("writeToNotion").cloned();
+                let task = ScheduledTask {
+                    id: "task".into(),
+                    revision: 1,
+                    device_id: "current".into(),
+                    draft: draft.clone(),
+                    created_at: 0,
+                    updated_at: 0,
+                    next_due: None,
+                    deleted: false,
+                    import_source: None,
+                    source_handoff_at: None,
+                };
+                p.edit(Some(task), cx);
+                p.error = None;
+                (draft.write_to_notion, wire)
+            })
+        };
+        let draft = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+        assert_eq!(draft(cx), Some(false));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(true), Some(serde_json::json!(true))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(true));
+        toggle(cx);
+        assert_eq!(saved(cx), (Some(false), Some(serde_json::json!(false))));
+        cx.run_until_parked();
+        assert_eq!(draft(cx), Some(false));
+
+        // A task saved before the setting shows on, and its first toggle turns it off.
+        page.update(cx, |p, cx| {
+            let mut legacy = p.editor_draft(cx).unwrap();
+            legacy.write_to_notion = None;
+            let task = ScheduledTask {
+                id: "legacy".into(),
+                revision: 1,
+                device_id: "current".into(),
+                draft: legacy,
+                created_at: 0,
+                updated_at: 0,
+                next_due: None,
+                deleted: false,
+                import_source: None,
+                source_handoff_at: None,
+            };
+            p.edit(Some(task), cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert_eq!(draft(cx), None);
+        toggle(cx);
+        assert_eq!(draft(cx), Some(false));
+    }
+
+    #[gpui::test]
+    fn the_save_action_sends_the_notion_setting_and_reopens_both_ways(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |s, _| {
+            for (id, capabilities) in [
+                ("current", vec![capabilities::SCHEDULED_TASK_NOTION_WRITES_V1]),
+                ("older", vec![]),
+            ] {
+                s.devices.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "name": id, "platform": "macos", "capabilities": capabilities,
+                    }))
+                    .unwrap(),
+                );
+            }
+        });
+        // Records every request the page sends, like the shell's `record_engine`.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let guard = runtime.enter();
+        let (out, mut sent) = tokio::sync::mpsc::channel::<String>(32);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(4);
+        let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+        std::mem::forget(_replies);
+        state.update(cx, |s, _| s.set_test_engine(engine));
+        drop(guard);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let mut p = ScheduledTasksPage::new(state.clone(), cx);
+            p.target = Some("current".into());
+            p.edit(None, cx);
+            p.error = None;
+            p
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(2200.0)));
+        cx.run_until_parked();
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            // The page's own List request is never answered; it must not hold Save back.
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is offered")).center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        // The Save request the page just sent, as the host would receive it.
+        let saved = |sent: &mut tokio::sync::mpsc::Receiver<String>| {
+            std::iter::from_fn(|| sent.try_recv().ok())
+                .map(|line| serde_json::from_str::<serde_json::Value>(&line).unwrap())
+                .filter(|call| call["method"] == mast_rpc::methods::SCHEDULED_TASKS)
+                .map(|call| call["params"].clone())
+                .find(|params| params.get("draft").is_some())
+                .expect("Save was sent")
+        };
+        let reopen = |cx: &mut gpui::VisualTestContext, params: serde_json::Value| {
+            let ScheduledTasksRequest::Save { draft, .. } = serde_json::from_value(params).unwrap() else {
+                panic!("a Save request");
+            };
+            page.update(cx, |p, cx| {
+                p.busy = false;
+                p.edit(
+                    Some(ScheduledTask {
+                        id: "task".into(),
+                        revision: 1,
+                        device_id: "current".into(),
+                        draft,
+                        created_at: 0,
+                        updated_at: 0,
+                        next_due: None,
+                        deleted: false,
+                        import_source: None,
+                        source_handoff_at: None,
+                    }),
+                    cx,
+                );
+                p.error = None;
+            });
+            cx.run_until_parked();
+        };
+        let setting = |cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |p, cx| p.editor_draft(cx).unwrap().write_to_notion)
+        };
+
+        // Off (the new-task default) -> on.
+        assert_eq!(setting(cx), Some(false));
+        click(cx, "task-notion-writes");
+        assert_eq!(setting(cx), Some(true));
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], true);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(true));
+        // On -> off.
+        click(cx, "task-notion-writes");
+        click(cx, "task-save");
+        let params = saved(&mut sent);
+        assert_eq!(params["draft"]["writeToNotion"], false);
+        reopen(cx, params);
+        assert_eq!(setting(cx), Some(false));
+
+        // A host that predates the setting never receives the field.
+        page.update(cx, |p, cx| {
+            p.busy = false;
+            p.target = Some("older".into());
+            p.edit(None, cx);
+            p.error = None;
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-notion-writes").is_none());
+        page.update(cx, |p, cx| {
+            if let Some(e) = p.editor.as_mut() {
+                e.draft.write_to_notion = Some(true);
+            }
+            cx.notify();
+        });
+        click(cx, "task-save");
+        assert!(saved(&mut sent)["draft"].get("writeToNotion").is_none());
+        drop(runtime);
     }
 
     #[gpui::test]

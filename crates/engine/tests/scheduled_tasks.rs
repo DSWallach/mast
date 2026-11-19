@@ -26,6 +26,7 @@ fn draft(root: &std::path::Path) -> ScheduledTaskDraft {
         work_item_id: None,
         output: Default::default(),
         after_success: Default::default(),
+        write_to_notion: None,
     }
 }
 #[tokio::test]
@@ -184,6 +185,9 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
     assert_eq!(preview.candidates[0].draft.grace_minutes, 360);
     assert!(!preview.candidates[0].draft.enabled);
     assert!(!preview.candidates[0].draft.config.auto_approve);
+    assert_eq!(preview.candidates[0].draft.write_to_notion, Some(false));
+    // A client that predates the setting submits the candidate without it.
+    preview.candidates[0].draft.write_to_notion = None;
     let import = ScheduledTasksRequest::Import {
         candidate: preview.candidates[0].clone(),
         operation_id: "import-one".into(),
@@ -197,6 +201,7 @@ async fn claude_import_is_previewed_paused_and_deduplicated() {
         .unwrap();
     assert_eq!(result.tasks.len(), 1);
     assert!(!result.tasks[0].draft.enabled);
+    assert_eq!(result.tasks[0].draft.write_to_notion, Some(false));
     assert!(result.runs.is_empty());
     let original_task = result.tasks[0].clone();
     core.scheduled_tasks
@@ -1883,4 +1888,72 @@ async fn cleanup_leaves_running_turns_and_pending_input_alone() {
         assert!(preview.tasks.is_empty(), "{status:?} must keep the old run eligible for interaction");
         core.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn write_to_notion_setting_reaches_the_run_prompt_and_chat_and_survives_old_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let mut revisions = std::collections::HashMap::new();
+    for (id, setting) in [("legacy", None), ("off", Some(false)), ("on", Some(true))] {
+        let mut task = draft(dir.path());
+        task.write_to_notion = setting;
+        core.scheduled_tasks
+            .request(ScheduledTasksRequest::Save {
+                id: id.into(),
+                expected_revision: 0,
+                draft: task,
+                operation_id: format!("save-{id}"),
+            })
+            .await
+            .unwrap();
+        revisions.insert(id, 1);
+        let run = claim_lifecycle_run(&core, id, &format!("run-{id}")).await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Completed).await;
+        assert_eq!(run.snapshot.write_to_notion, setting);
+        let chat_id = run.chat_id.as_deref().unwrap();
+        let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+        assert_eq!(chat.scheduled_task_info.unwrap().write_to_notion, setting);
+        // The dispatched request carries what the harness exports as env.
+        let dispatched = core.sessions.last_request(chat_id).unwrap();
+        assert_eq!(dispatched.scheduled_task.as_deref(), Some("Scheduled integration"));
+        assert_eq!(dispatched.scheduled_notion_writes, setting);
+        let commands = core.doc_host.open(chat_id).unwrap().doc().read_commands().unwrap();
+        let mast_doc::SessionCommandPayload::Run { request, .. } = &commands[0].payload else {
+            panic!("expected a plain run for {id}");
+        };
+        match setting {
+            None => assert_eq!(request.prompt, "Hello"),
+            Some(allowed) => {
+                assert!(request.prompt.starts_with("Hello\n\n---\n"));
+                assert!(request.prompt.contains(&format!(
+                    "MAST_SCHEDULED_WRITE_TO_NOTION={}",
+                    u8::from(allowed)
+                )));
+            }
+        }
+    }
+
+    // A save from a client that predates the setting omits it and keeps the stored value.
+    let mut legacy_client = draft(dir.path());
+    legacy_client.write_to_notion = None;
+    let saved = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::Save {
+            id: "off".into(),
+            expected_revision: revisions["off"],
+            draft: legacy_client,
+            operation_id: "legacy-client-save".into(),
+        })
+        .await
+        .unwrap();
+    let off = saved.tasks.iter().find(|t| t.id == "off").unwrap();
+    assert_eq!(off.draft.write_to_notion, Some(false));
+    core.shutdown().await;
 }

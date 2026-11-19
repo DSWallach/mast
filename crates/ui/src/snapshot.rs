@@ -264,6 +264,39 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
 }
 
+/// Offline Scheduled tasks editor for a new task on a current device.
+pub fn scheduled_task_editor_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.devices.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "local", "name": "This Mac", "platform": "macos",
+                "capabilities": [
+                    mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                    mast_proto::capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                    mast_proto::capabilities::SCHEDULED_TASK_AFTER_SUCCESS_V1,
+                    mast_proto::capabilities::SCHEDULED_TASK_NOTION_WRITES_V1,
+                ],
+            }))
+            .unwrap(),
+        );
+        state
+    });
+    let page = cx.new(|cx| crate::scheduled_tasks::ScheduledTasksPage::offline_editor_fixture(state, cx));
+    cx.new(|_| ScrolledEditorFixture(page))
+}
+
+/// The editor taller than the preview window, shifted up so its lower controls show.
+struct ScrolledEditorFixture(Entity<crate::scheduled_tasks::ScheduledTasksPage>);
+impl Render for ScrolledEditorFixture {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{IntoElement, ParentElement, Styled, div, px};
+        div().size_full().relative().overflow_hidden().child(
+            div().absolute().top(px(-520.0)).left_0().w_full().h(px(1500.0)).child(self.0.clone()),
+        )
+    }
+}
+
 /// Offline chat shell where the agent asks a question and the user has typed
 /// a long answer of their own. The host takes side chats, so the panel offers
 /// Clarify.

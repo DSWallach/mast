@@ -114,6 +114,7 @@ fn render_preview(request: Option<&serde_json::Value>) -> anyhow::Result<std::pa
         "token-usage-rules",
         "token-usage-trends",
         "token-usage-efficiency",
+        "scheduled-task-editor",
         "team",
         "side-chat",
         "question",
