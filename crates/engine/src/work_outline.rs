@@ -206,7 +206,7 @@ pub struct WorkOutlineService {
 /// What a project manager's step may touch, re-checked by the registry
 /// writer under its lock so a concurrent move or hand-off cannot slip a
 /// target out of the project between the check and the write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ManagerGuard {
     pub chat_id: String,
     /// The project item the role is scoped to.
@@ -215,6 +215,44 @@ pub struct ManagerGuard {
     pub inside: Vec<String>,
     /// Items that must be strictly below `root`.
     pub strict: Vec<String>,
+    /// Chats a step reassigns: each must be assigned inside `root` right now.
+    pub chats: Vec<String>,
+    /// The one item (the project) a bulk approval request may be raised on.
+    pub request_item: Option<String>,
+    /// `(op, item)` of cascading steps, re-counted against the current tree.
+    pub effects: Vec<(String, String)>,
+    /// The most items one of those steps may now affect.
+    pub max_effects: usize,
+}
+
+/// Items one step affects against `snapshot`: an archive or restore covers the
+/// whole subtree, and a template apply puts the template's nodes under each
+/// child (a child following its parent's template gets one copy). A
+/// conservative count: it never undercounts what the writer will touch.
+pub fn step_effects(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> usize {
+    fn subtree(snapshot: &WorkOutlineSnapshot, id: &str, depth: usize) -> usize {
+        let Some(item) = snapshot.item(id) else { return 1 };
+        if depth > snapshot.items.len() {
+            return 1;
+        }
+        1 + item.child_ids.iter().map(|c| subtree(snapshot, c, depth + 1)).sum::<usize>()
+    }
+    match op {
+        "archive" | "restore" => subtree(snapshot, item_id, 0),
+        "template_apply" => {
+            let Some(item) = snapshot.item(item_id) else { return 1 };
+            match &item.container_template {
+                Some(template) => item.child_ids.len().max(1) * template.root.node_count(),
+                None => item
+                    .parent_work_item_id
+                    .as_deref()
+                    .and_then(|parent| snapshot.item(parent))
+                    .and_then(|parent| parent.container_template.as_ref())
+                    .map_or(1, |template| template.root.node_count()),
+            }
+        }
+        _ => 1,
+    }
 }
 
 impl ManagerGuard {
@@ -245,6 +283,30 @@ impl ManagerGuard {
             return Err(WorkOutlineError::unauthorized(
                 "a target is no longer inside the managed project; nothing was changed",
             ));
+        }
+        // A chat being reassigned must be in the project as of this write,
+        // not as of the call's opening snapshot.
+        let chat_outside = |chat: &String| {
+            !snapshot.assignments.iter().any(|a| {
+                a.chat_id == *chat
+                    && a.work_item_id.as_deref().is_some_and(|item| snapshot.is_within(&self.root, item))
+            })
+        };
+        if self.chats.iter().any(chat_outside) {
+            return Err(WorkOutlineError::unauthorized(
+                "a chat is no longer assigned inside the managed project; nothing was changed",
+            ));
+        }
+        // The step may affect no more items than were approved or allowed.
+        if self.effects.iter().any(|(op, item)| step_effects(&snapshot, op, item) > self.max_effects) {
+            return Err(WorkOutlineError::unauthorized(
+                "the change now affects more items than were approved; ask again. Nothing was changed",
+            ));
+        }
+        if let Some(item) = &self.request_item
+            && (*item != self.root || snapshot.item(item).is_none())
+        {
+            return Err(WorkOutlineError::unauthorized("approval requests belong on the managed project item"));
         }
         Ok(())
     }

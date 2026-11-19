@@ -1126,8 +1126,11 @@ impl WorkspaceHost {
             if let (Some(guard), Some(space)) = (guard, admin_space) {
                 guard.verify(doc, space, synced)?;
             }
-            let reply = doc.with_admin_scope(admin_space, |doc| {
-                doc.apply_work_outline_mutation(mutation, actor, now)
+            let request_item = guard.and_then(|g| g.request_item.as_deref());
+            let reply = doc.with_manager_request_item(request_item, |doc| {
+                doc.with_admin_scope(admin_space, |doc| {
+                    doc.apply_work_outline_mutation(mutation, actor, now)
+                })
             })?;
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
             Ok(reply)

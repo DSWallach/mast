@@ -1025,7 +1025,14 @@ impl AgentToolsService {
             .tokens
             .personal_assistant()
             .is_assistant(&chat, || self.workspace.read_chats().unwrap_or_default());
-        let manager_scope = self.manager_scope_of(&chat);
+        // One precedence rule: a grant the user made on purpose (a Space
+        // admin grant, or the personal-assistant designation) wins everywhere,
+        // so the manager's narrower reach never applies on top of it.
+        let manager_scope = if admin_space.is_some() || personal_assistant {
+            None
+        } else {
+            self.manager_scope_of(&chat)
+        };
         Ok(CallContext {
             grant,
             workspace: &self.workspace,

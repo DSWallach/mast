@@ -5219,6 +5219,7 @@ async fn the_registry_writer_rechecks_the_manager_guard_under_its_lock() {
         root: p.project.clone(),
         inside,
         strict,
+        ..Default::default()
     };
     // A target that is outside the project (it moved out after the check).
     let err = outline
@@ -5286,4 +5287,64 @@ async fn a_managers_bulk_count_covers_a_cascading_archive_and_anchors_to_the_pro
     ]})).await.unwrap();
     let turns = rig.core.sessions.agent_tokens().admin().turns(Some(SPACE));
     assert!(turns.iter().all(|t| t.label.starts_with("by project manager")), "{turns:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_guard_rechecks_chat_assignments_and_the_effect_budget_under_the_lock() {
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let archive = |op: &str, item: &str| {
+        WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: item.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        })
+    };
+    let guard = ManagerGuard { chat_id: CHAT.into(), root: p.project.clone(), ..Default::default() };
+    // A chat moved out of the project since the opening snapshot.
+    let err = outline
+        .mutate_guarded(&archive("g2-chat", &p.ticket), &actor, Some(SPACE),
+            Some(&ManagerGuard { chats: vec![OUTSIDE_CHAT.into()], ..guard.clone() }))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("no longer assigned"), "{err:?}");
+    // The subtree grew past what was approved: tickets now holds 1 + 11 items.
+    for i in 0..11 {
+        create_item(&rig, &format!("g2-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let err = outline
+        .mutate_guarded(&archive("g2-grew", &p.tickets), &actor, Some(SPACE),
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], max_effects: 10, ..guard.clone() }))
+        .unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // A budget that covers it passes.
+    outline
+        .mutate_guarded(&archive("g2-ok", &p.tickets), &actor, Some(SPACE),
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], max_effects: 13, ..guard }))
+        .unwrap();
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_admin_grant_wins_over_the_manager_role_everywhere() {
+    let (rig, p) = manager_rig().await;
+    grant(&rig, CHAT, None, false).await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let origin = auth_origin(&rig, &token).await;
+    assert_eq!(origin["adminSpaceId"], SPACE);
+    assert!(origin.get("managerScopeItemId").is_none(), "{origin}");
+    // The manager's project list is empty, and the admin sees the whole Space.
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&scope["managerChatIds"]).is_empty());
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get(OUTSIDE_CHAT).is_some(), "admin reaches every chat: {info}");
+    let view = admin(&rig, &token, json!({ "read": true })).await.unwrap();
+    assert!(view.to_string().contains("Bystander"), "admin reads the whole Space: {view}");
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-admin-wins", "steps": [
+        { "op": "rename", "itemId": p.other_tickets, "title": "Admin renamed" }
+    ]})).await.unwrap();
+    assert_eq!(title_of(&rig, &p.other_tickets), "Admin renamed");
 }

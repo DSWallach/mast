@@ -32,6 +32,8 @@ struct Approval {
     chat_id: String,
     steps_hash: String,
     request_id: String,
+    /// What the user was shown: the batch's effect count at request time.
+    weight: usize,
     expires_at_ms: i64,
     used: bool,
 }
@@ -237,7 +239,7 @@ impl AdminGrants {
 
     // ---- bulk approvals --------------------------------------------------------
 
-    pub fn open_approval(&self, chat_id: &str, steps_hash: &str, request_id: &str) -> String {
+    pub fn open_approval(&self, chat_id: &str, steps_hash: &str, request_id: &str, weight: usize) -> String {
         let token = format!(
             "bulk_{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -250,6 +252,7 @@ impl AdminGrants {
                 chat_id: chat_id.to_owned(),
                 steps_hash: steps_hash.to_owned(),
                 request_id: request_id.to_owned(),
+                weight,
                 expires_at_ms: self.now_ms() + BULK_APPROVAL_TTL_MS,
                 used: false,
             },
@@ -264,7 +267,7 @@ impl AdminGrants {
         token: &str,
         chat_id: &str,
         steps_hash: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, usize), String> {
         let state = lock(&self.state);
         let Some(a) = state.approvals.get(token) else {
             return Err("unknown confirmToken: request a new preview".into());
@@ -283,7 +286,7 @@ impl AdminGrants {
                 "the steps differ from the ones the user was shown: request a new preview".into(),
             );
         }
-        Ok(a.request_id.clone())
+        Ok((a.request_id.clone(), a.weight))
     }
 
     pub fn use_approval(&self, token: &str) {

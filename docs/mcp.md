@@ -83,6 +83,10 @@ have no grant.
 
 The workflow-pack tools stay admin-only. Every other tool is unchanged.
 
+Precedence: a grant the user made on purpose wins. A chat that also holds a Space admin grant, or is the personal assistant, gets that wider reach in every tool, and the manager's narrower reach does not apply on top of it (the engine leaves `managerScopeItemId` empty for it).
+
+The writer also re-reads, under its lock, the current assignment of any chat a step reassigns, and re-counts a cascading step (an archive or restore covers the subtree as it is now, a template apply covers the template's nodes under each child) against what the user approved, or against the 10-item threshold when no approval was needed. A step that grew past that is refused with nothing changed. The approval records the count the user was shown, and a confirm token is refused if the batch now affects more. Only the guarded bulk approval may raise its Required Action on the project item; every other request still sits on the chat's own item.
+
 Mixed versions: the field is optional on the wire. An engine that predates the
 grant sends none, and a client that predates it ignores it, so the grant is
 simply absent there and a manager is refused its project's chats (never
