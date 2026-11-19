@@ -88,10 +88,6 @@ pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
 /// change; this is only the net under changes that touch the role alone.
 const DEFAULT_RECHECK: Duration = Duration::from_secs(30);
 
-/// Most turns held for one chat that does not hold the role yet. A chat runs a
-/// handful of turns before it is adopted; the oldest go first beyond this.
-const MAX_HELD_PER_CHAT: usize = 16;
-
 struct Run {
     run_id: String,
     baseline: u32,
@@ -108,6 +104,9 @@ pub struct EndedRun {
     pub end_revision: u32,
     pub project: (String, String),
     pub ask: bool,
+    /// Held for a chat that did not hold the role when the turn ended, so the
+    /// turn cannot have published and is owed whatever the revisions say.
+    forced: bool,
 }
 
 #[derive(Default)]
@@ -217,6 +216,7 @@ impl StatusTracker {
                 end_revision: end_revision.max(run.baseline),
                 project: run.project,
                 ask: run.ask,
+                forced: false,
             });
         }
     }
@@ -240,14 +240,21 @@ impl StatusTracker {
         std::mem::take(&mut self.state().ended)
     }
 
-    fn hold(&self, ended: EndedRun) {
+    /// Keep a turn for a chat that is about to hold the role. Such a turn ended
+    /// while the chat held nothing, so it cannot have published: it is owed
+    /// outright. Every owed turn of one chat asks the same thing, a status now,
+    /// so they share one obligation rather than a list that could grow without
+    /// bound while a reservation stands.
+    fn hold(&self, mut ended: EndedRun) {
+        ended.forced = true;
         let mut state = self.state();
-        state.ended.push(ended.clone());
-        let held = state.ended.iter().filter(|e| e.chat_id == ended.chat_id).count();
-        if held > MAX_HELD_PER_CHAT
-            && let Some(oldest) = state.ended.iter().position(|e| e.chat_id == ended.chat_id)
-        {
-            state.ended.remove(oldest);
+        match state.ended.iter_mut().find(|e| e.chat_id == ended.chat_id && e.forced) {
+            Some(held) => {
+                held.baseline = held.baseline.max(ended.baseline);
+                held.end_revision = held.end_revision.max(ended.end_revision);
+                held.ask = held.ask && ended.ask;
+            }
+            None => state.ended.push(ended),
         }
     }
 
@@ -293,24 +300,18 @@ pub fn status_revision(workspace: &WorkspaceHost, space_id: &str, item_id: &str)
     status_artifact(workspace, space_id, item_id).map_or(0, |a| a.current_revision)
 }
 
-/// Whether a Manager-stamped revision in `(baseline, end]` exists: one the
-/// turn itself published, not an earlier turn's or a later one's.
-pub fn published_between(artifact: Option<&ArtifactView>, baseline: u32, end: u32) -> bool {
+/// Whether `chat_id` published a Manager-stamped revision in `(baseline, end]`:
+/// one the turn itself made, not another chat's, an earlier turn's or a later
+/// one's.
+pub fn published_between(artifact: Option<&ArtifactView>, chat_id: &str, baseline: u32, end: u32) -> bool {
     artifact.is_some_and(|a| {
-        a.revisions
-            .iter()
-            .any(|r| r.id > baseline && r.id <= end && manager_provenance(a, r))
+        a.revisions.iter().any(|r| {
+            r.id > baseline
+                && r.id <= end
+                && manager_provenance(a, r)
+                && r.manager_status.as_ref().is_some_and(|stamp| stamp.chat_id == chat_id)
+        })
     })
-}
-
-/// The project a chat manages, as `(space id, project item id)`.
-pub fn managed_project(workspace: &WorkspaceHost, chat_id: &str) -> Option<(String, String)> {
-    let role = workspace.standing_role_of_chat(chat_id)?;
-    if role.role != StandingRoleKind::Manager {
-        return None;
-    }
-    let space = workspace.work_item_space(&role.scope_item_id)?;
-    Some((space, role.scope_item_id))
 }
 
 /// The project of a chat the Manager role is about to adopt: a first start
@@ -356,7 +357,8 @@ fn check(workspace: &WorkspaceHost, ended: &EndedRun) -> Check {
     if holds {
         let artifact = status_artifact(workspace, space, item);
         return Check::Ready {
-            published: published_between(artifact.as_ref(), ended.baseline, ended.end_revision),
+            published: !ended.forced
+                && published_between(artifact.as_ref(), &ended.chat_id, ended.baseline, ended.end_revision),
         };
     }
     // A chat that is gone or archived will never hold the role.
@@ -503,7 +505,7 @@ mod tests {
 
     fn published(tracker: &StatusTracker, ended: &EndedRun, stamped: &[u32]) -> Verdict {
         let artifact = status_with_stamped(stamped);
-        let published = published_between(Some(&artifact), ended.baseline, ended.end_revision);
+        let published = published_between(Some(&artifact), &ended.chat_id, ended.baseline, ended.end_revision);
         tracker.conclude(ended, published)
     }
 
@@ -634,16 +636,46 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_held_for_adoption_comes_back() {
+    fn a_turn_held_for_adoption_comes_back_owed_outright() {
         let (t, _s) = tracker(true, 0);
         t.run_started("m", "r1");
         t.note_state_change("m", "r1");
         t.run_ended("m", "r1");
         let ended = t.take_ended().remove(0);
         assert_eq!(t.pending("m"), 0);
-        t.hold(ended.clone());
+        assert!(!ended.forced);
+        t.hold(ended);
         assert_eq!(t.pending("m"), 1);
-        assert_eq!(t.take_ended(), vec![ended]);
+        let back = t.take_ended().remove(0);
+        assert!(back.forced, "a turn that ended before the chat held the role cannot have published");
+    }
+
+    #[test]
+    fn many_held_turns_of_one_chat_keep_one_obligation_however_many_there_are() {
+        let (t, shared) = tracker(true, 4);
+        for n in 0..40u32 {
+            set_revision(&shared, 4 + n);
+            let run = format!("r{n}");
+            t.run_started("m", &run);
+            t.note_state_change("m", &run);
+            t.run_ended("m", &run);
+            for ended in t.take_ended() {
+                t.hold(ended);
+            }
+            // Past any fixed list length the obligation is still there, once.
+            assert_eq!(t.pending("m"), 1, "after {} turns", n + 1);
+        }
+        let held = t.take_ended().remove(0);
+        assert!(held.forced);
+        assert_eq!(held.baseline, 4 + 39, "the newest turn's baseline");
+        // Another chat's held turn is its own obligation.
+        t.run_started("other", "o1");
+        t.note_state_change("other", "o1");
+        t.run_ended("other", "o1");
+        for ended in t.take_ended() {
+            t.hold(ended);
+        }
+        assert_eq!((t.pending("m"), t.pending("other")), (0, 1));
     }
 
     #[test]
@@ -670,10 +702,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(published_between(Some(&a), 0, 3));
-        assert!(!published_between(Some(&a), 2, 3), "an unstamped revision is not a publication");
-        assert!(!published_between(Some(&a), 0, 0));
-        assert!(!published_between(None, 0, 9));
+        assert!(published_between(Some(&a), "m", 0, 3));
+        assert!(!published_between(Some(&a), "m", 2, 3), "an unstamped revision is not a publication");
+        assert!(!published_between(Some(&a), "m", 0, 0));
+        assert!(!published_between(None, "m", 0, 9));
+        assert!(!published_between(Some(&a), "another-chat", 0, 3), "another chat's publication is not this turn's");
     }
 
     #[test]

@@ -5336,6 +5336,48 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_la
     rig.harness.release.notify_one();
 }
 
+/// A reservation can stand while the successor runs many turns. Each of them
+/// is owed, none is lost however many there are, and they ask the same thing,
+/// so they share one reminder once the successor holds the role.
+#[tokio::test(flavor = "multi_thread")]
+async fn many_turns_before_adoption_keep_their_obligation_and_ask_once() {
+    let (rig, item) = role_rig("status-many").await;
+    plant_stamped_status(&rig, "status-many-doc", &item, 4).await;
+    let successor = "many-successor";
+    rig.core
+        .workspace
+        .create_chat(successor, Some(SPACE), Some(&rig.core.device_id), None, Some(rig.space_path.clone()))
+        .unwrap();
+    assign_chat(&rig, "status-many-assignment", successor, &item).await;
+    rig.core.workspace.reserve_standing_role_hand_off(CHAT, successor, "op-many", None).unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
+
+    // Past any fixed number of held turns.
+    for n in 0..24 {
+        let lease = tokens.mint(successor, &format!("run-many-{n}"), SPACE, &rig.core.device_id);
+        tool(
+            &rig,
+            lease.token(),
+            "work_outline_create_child",
+            json!({ "title": format!("Worker {n}"), "idempotencyKey": format!("many-{n}") }),
+        )
+        .await
+        .unwrap();
+        drop(lease);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
+
+    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1, "the reminder").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let prompts = nudge_prompts(&rig);
+    assert_eq!(prompts.len(), 1, "one reminder, not one per held turn");
+    assert!(prompts[0].contains("latest revision is 4"), "{}", prompts[0]);
+    rig.harness.release.notify_one();
+}
+
 /// A hand-off that never completes leaves its successor a non-holder: the
 /// obligation is kept while the reservation stands, and nothing is sent to a
 /// chat that does not hold the role. When the successor is gone the obligation
