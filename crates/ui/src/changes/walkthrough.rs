@@ -1302,7 +1302,7 @@ pub(crate) fn snapshot_fixture_with_changes(populated: bool, cx: &mut App) -> En
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changes::parse_patch;
+    use crate::changes::*;
     use mast_proto::ReviewSidecar;
 
     impl From<ReviewSidecar> for TourReview {
@@ -1334,6 +1334,43 @@ mod tests {
         );
         review.steps[0].hunks[0].hunk_hash = Some(hunk_identity("a.rs", &files[0].hunks[0]));
         (review, files)
+    }
+
+    #[gpui::test]
+    fn scope_map_risk_outline_tracks_walkthrough_revision(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        let target = ReviewTarget::Branch { repo: Some("o/r".into()), checkout_path: Some("/repo".into()), branch: Some("feature".into()), base_ref: Some("main".into()), base_sha: None, head_sha: "a".into() };
+        changes.update(vcx, |changes, cx| {
+            changes.owner = Some(ChangesTarget { chat_id: "chat".into(), device_id: "local".into(), cwd: Some("/repo".into()), checkout_id: Some("checkout".into()), branch: Some("feature".into()), unconfirmed: None, exact_checkout: false, range: Some(crate::work_outline::execution::RefRange { label: "feature".into(), head_branch: "feature".into(), head_ref: "feature".into(), head_sha: Some("a".into()), pr_url: None, base_branch: "main".into(), base_ref: "main".into() }) });
+            changes.scope = DiffScope::Range;
+            changes.walkthrough_target = Some(target.clone());
+            let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
+            let diff = CheckoutDiff { checkout_id: "checkout".into(), device_id: "local".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "risk-test".into(), updated_at: chrono::Utc::now() };
+            let key = changes.parse_key(&diff);
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            changes.parsed = Some(ParsedDiff { key, truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal: files.iter().map(FileHorizontalState::new).collect(), hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.scoped = Some(diff);
+            changes.scope_map_selected = true;
+            changes.refresh_scope_map_data();
+            changes.scope_map_resize(224.0, 320.0, cx);
+            changes.reflatten(cx);
+        });
+        let (sidecar, _) = fixture();
+        let mut review: TourReview = sidecar.into();
+        review.target_key = target.state_key();
+        let tour = vcx.update(|_, cx| cx.new(|cx| Walkthrough::new(review, changes.clone(), cx)));
+        changes.update(vcx, |changes, cx| { changes.review_tour = false; cx.notify(); });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("scope-map-file-0-unviewed-risk").is_some());
+        assert!(vcx.debug_bounds("scope-map-file-1-unviewed-no-risk").is_some());
+        changes.update(vcx, |changes, cx| { changes.owner.as_mut().unwrap().range.as_mut().unwrap().head_sha = Some("new-head".into()); cx.notify(); });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("scope-map-file-0-unviewed-no-risk").is_some());
+        drop(tour);
     }
 
     #[test]

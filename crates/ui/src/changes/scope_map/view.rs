@@ -412,7 +412,12 @@ impl Changes {
         self.scope_map_view.progress_key = None;
     }
 
-    fn scope_map_resize(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
+    pub(in crate::changes) fn scope_map_resize(
+        &mut self,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
         let Some(parsed) = self.parsed.as_ref() else {
             return;
         };
