@@ -406,8 +406,11 @@ async fn own_commits(root: &Path, old: &str, new: &str) -> Result<Vec<OwnCommit>
         .to_vec();
     args.push(max);
     args.extend([new.to_owned(), "--not".into(), old.to_owned()]);
-    if let Some(current) = current {
-        args.push(format!("--exclude={current}"));
+    // `--exclude` is matched against the name without `refs/heads/` for `--branches`.
+    if let Some(short) = current.as_deref().and_then(|name| name.strip_prefix("refs/heads/"))
+        && !short.contains(['*', '?', '[', '\\'])
+    {
+        args.push(format!("--exclude={short}"));
     }
     args.extend(["--branches".into(), "--remotes".into()]);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -714,16 +717,16 @@ mod tests {
     #[test]
     fn turn_range_and_edit_turn_lookup() {
         let entries = vec![
-            entry("u1", MessageRole::User, 100, serde_json::json!([])),
-            entry("a1", MessageRole::Assistant, 110, edit("/w/repo/src/old.rs")),
-            entry("u2", MessageRole::User, 200, serde_json::json!([])),
-            entry("a2", MessageRole::Assistant, 210, edit("/w/repo/src/a.rs")),
-            entry("u3", MessageRole::User, 300, serde_json::json!([])),
-            entry("a3", MessageRole::Assistant, 310, edit("/w/repo/src/later.rs")),
+            entry("u1", MessageRole::User, 1_000_000, serde_json::json!([])),
+            entry("a1", MessageRole::Assistant, 1_100_000, edit("/w/repo/src/old.rs")),
+            entry("u2", MessageRole::User, 2_000_000, serde_json::json!([])),
+            entry("a2", MessageRole::Assistant, 2_100_000, edit("/w/repo/src/a.rs")),
+            entry("u3", MessageRole::User, 3_000_000, serde_json::json!([])),
+            entry("a3", MessageRole::Assistant, 3_100_000, edit("/w/repo/src/later.rs")),
         ];
-        assert_eq!(turn_range(&entries, 250, 400), (Some("u2".into()), Some("u3".into())));
-        assert_eq!(turn_range(&entries, 50, 400), (Some("u1".into()), Some("u3".into())));
-        assert_eq!(turn_range(&entries, 50, 250), (Some("u1".into()), Some("u2".into())));
+        assert_eq!(turn_range(&entries, 2_500_000, 4_000_000), (Some("u2".into()), Some("u3".into())));
+        assert_eq!(turn_range(&entries, 500_000, 4_000_000), (Some("u1".into()), Some("u3".into())));
+        assert_eq!(turn_range(&entries, 500_000, 2_500_000), (Some("u1".into()), Some("u2".into())));
         assert_eq!(turn_range(&[], 0, 10), (None, None));
         assert_eq!(turn_for_path(&entries, Some("u2"), Some("u3"), "src/a.rs"), Some("u2".into()));
         assert_eq!(turn_for_path(&entries, Some("u2"), Some("u3"), "src/old.rs"), None);

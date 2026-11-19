@@ -838,7 +838,7 @@ async fn blame_attributes_lines_to_records_and_guesses_only_within_the_branch() 
 async fn transcript_peek_is_read_only() {
     let temp = tempfile::tempdir().unwrap();
     let core = assemble(&temp.path().join("data"), "device-peek");
-    core.workspace.create_chat("chat-peek", None, None, None, None).unwrap();
+    core.workspace.create_chat("chat-peek", None, Some("device-peek"), None, None).unwrap();
     // A missing (or remote) chat has no local transcript, and peeking does not
     // conjure one: a second peek still sees nothing.
     assert!(core.doc_host.peek_entries("chat-missing").is_none());
