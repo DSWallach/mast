@@ -1104,6 +1104,14 @@ pub mod agent_tools {
         /// Checked at every authenticate.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pub personal_assistant: bool,
+        /// This chat is the current holder of a project manager role: its
+        /// chat tools and `work_outline_admin` reach the subtree of this
+        /// item and nothing else. Derived from the role record at every
+        /// authenticate, so it follows a hand-off and ends on a rotation. An
+        /// engine or client that predates it never sets or reads it, so the
+        /// grant is simply absent there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub manager_scope_item_id: Option<String>,
     }
 
     /// Params of [`TOOL_CALL_METHOD`].
@@ -1653,6 +1661,23 @@ pub mod agent_tools {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn the_manager_scope_is_optional_on_the_wire_both_ways() {
+            // An engine that predates the grant sends no field: no manager reach.
+            let old: AgentOrigin = serde_json::from_value(serde_json::json!({
+                "chatId": "c", "runId": "r", "spaceId": "s", "deviceId": "d"
+            }))
+            .unwrap();
+            assert_eq!(old.manager_scope_item_id, None);
+            // A newer engine's origin reads in a client that ignores the field,
+            // and an origin without a grant leaves the field off the wire.
+            assert!(!serde_json::to_string(&old).unwrap().contains("managerScopeItemId"));
+            let managed = AgentOrigin { manager_scope_item_id: Some("item".into()), ..old };
+            let wire = serde_json::to_value(&managed).unwrap();
+            assert_eq!(wire["managerScopeItemId"], "item");
+            assert_eq!(serde_json::from_value::<AgentOrigin>(wire).unwrap(), managed);
+        }
 
         #[test]
         fn operation_ids_are_per_chat_and_stable() {

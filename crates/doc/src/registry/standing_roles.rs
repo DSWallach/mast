@@ -84,9 +84,11 @@ impl RegistryDoc {
     /// The role `chat_id` currently holds, if any. A superseded chat holds
     /// nothing.
     pub fn standing_role_of_chat(&self, chat_id: &str) -> Option<StandingRole> {
-        self.standing_roles()
+        // Decode and convert only the match: this runs on every agent call.
+        self.read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
             .into_iter()
-            .find(|role| role.current_chat_id.as_deref() == Some(chat_id))
+            .find(|raw| raw.current_chat_id.as_deref() == Some(chat_id))
+            .map(StandingRole::from)
     }
 
     /// Whether `chat_id` is, or is about to become, a project's Manager: the
@@ -123,9 +125,9 @@ impl RegistryDoc {
     /// Write rows as one checked registry batch: every op is size-gated first
     /// and nothing is enqueued unless all pass, and the ops go out together,
     /// so a second device never sees half of a role change.
-    fn commit_rows(
+    pub(super) fn commit_rows(
         &mut self,
-        rows: Vec<(&str, String, OpKind, BTreeMap<String, Value>)>,
+        rows: Vec<RegistryUpdate>,
     ) -> Result<(), String> {
         // Every affected row is observed before the one shared clock is
         // minted (rule R3), so the clock beats the newest clock on any of
@@ -166,7 +168,7 @@ impl RegistryDoc {
 
     /// Whether the hand-off `from -> to` already moved workers: the point
     /// after which it must be finished by retrying it, not replaced.
-    fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
+    pub fn hand_off_recorded(&self, from: &str, to: &str) -> bool {
         self.overlay_row(KIND_CHATS, to)
             .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
             .is_some_and(|p| p.get("fromChatId").and_then(Value::as_str) == Some(from))
@@ -497,6 +499,49 @@ impl RegistryDoc {
             .map_err(|e| e.to_string())?
             .ok_or("destination chat does not exist")?;
         self.check_rotation_destination(&source, to, None)?;
+        self.commit_rows(Self::standing_role_rotation_rows(
+            &mut record,
+            from,
+            to,
+            true,
+        ))?;
+        Ok((record, false))
+    }
+
+    /// Rows for the role rotation and the user's archive choice, ready to
+    /// commit alongside the sidebar pin and hand-off completion marker.
+    pub(super) fn user_hand_off_role_rows(
+        &self,
+        from: &str,
+        to: &str,
+        archive: Option<bool>,
+    ) -> Result<Vec<RegistryUpdate>, String> {
+        if let Some((mut record, false)) = self.plan_standing_role_hand_off(from, to, None)? {
+            return Ok(Self::standing_role_rotation_rows(
+                &mut record,
+                from,
+                to,
+                archive.unwrap_or(true),
+            ));
+        }
+        Ok(if archive == Some(true) {
+            vec![(
+                KIND_CHATS,
+                from.to_owned(),
+                OpKind::Update,
+                fields([("archived", json!(true))]),
+            )]
+        } else {
+            Vec::new()
+        })
+    }
+
+    fn standing_role_rotation_rows(
+        record: &mut StandingRole,
+        from: &str,
+        to: &str,
+        archive: bool,
+    ) -> Vec<RegistryUpdate> {
         record.current_chat_id = Some(to.to_owned());
         record.chain.push(to.to_owned());
         if record.chain.len() > MAX_CHAIN {
@@ -504,21 +549,21 @@ impl RegistryDoc {
             record.chain.drain(..excess);
         }
         record.state = StandingRoleState::Idle;
-        let mut role_set = role_fields(&record);
+        let mut role_set = role_fields(record);
         role_set.insert("pendingHandOff".into(), Value::Null);
-        self.commit_rows(vec![
-            (KIND_STANDING_ROLES, id, OpKind::Update, role_set),
+        let mut source_set = fields([("standingRoleSuccessor", json!(to))]);
+        if archive {
+            source_set.insert("archived".into(), json!(true));
+        }
+        vec![
             (
-                KIND_CHATS,
-                from.to_owned(),
+                KIND_STANDING_ROLES,
+                record.id.clone(),
                 OpKind::Update,
-                fields([
-                    ("standingRoleSuccessor", json!(to)),
-                    ("archived", json!(true)),
-                ]),
+                role_set,
             ),
-        ])?;
-        Ok((record, false))
+            (KIND_CHATS, from.to_owned(), OpKind::Update, source_set),
+        ]
     }
 
     /// Set the model a Manager's workers start on; `None` restores the

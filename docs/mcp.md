@@ -62,6 +62,38 @@ the original tools to the token's Chat, project, and device:
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
 
+### Project manager grant
+
+The chat that holds a project's **manager** role (the standing role record,
+`role: manager`, scope item = the project) gets a standing grant over that
+project's subtree. It has no expiry and belongs to the role, not the chat, so it
+moves to the successor on hand-off and ends for the predecessor at the same
+moment. The engine re-derives it from the synced role record on every
+`AgentAuthenticate` and `AgentToolCall`, exactly as it does the personal
+assistant flag and admin grants, and `AgentOrigin.managerScopeItemId` carries
+the project item. A chat with no role, a superseded predecessor, a chat holding
+the `assistant` role, and a manager whose scope item is archived or missing
+have no grant.
+
+| Tool | With the grant |
+| --- | --- |
+| `read_chat`, `send_message`, `wait_for_turn`, `interrupt_chat`, `respond_to_input`, `get_chat`, `list_chats` | Every chat assigned to an item inside the project, however it was started (including by hand), plus every chat that held a role scoped inside the project (its own archived predecessors, which `list_chats` never shows but `read_chat` reads by id), never itself. Archived chats only for `read_chat`, `get_chat`, `list_chats` and `archive_chat`. The grant bounds the manager's reach: a chat it created or a parent link that points outside the project is refused like any other chat of another project, and the manager's own other routes (children, parent, item subtree) add nothing. Chats of any other project or Space are refused as if they did not exist. |
+| `archive_chat` | The same chats, with the usual finished-worker check (`force` with a reason otherwise). |
+| `work_outline_admin` | Steps on items and chats inside the project only. A step that names an item outside the subtree, creates or moves at the Space root, adds a Space-wide instruction, assigns a chat that is not already in the project, or edits, moves, archives or re-flags the project item itself (it is a container: the manager adds and moves things under it) is refused before anything runs, and the registry writer re-checks the holder and every target under its lock immediately before each write, so a concurrent move or hand-off cannot slip one through. The bulk count is the concrete effect: an archive or restore counts its whole subtree and a template apply counts each child, with ids resolved the way execution resolves them. The approval request is anchored to the project item and is per holder, so a successor's is a distinct request. No instruction-proposal steps, and `read` shows only the subtree. Over 10 changes still opens the "Approve bulk change" Required Action and needs the user's approval (the confirm token is per chat). Attributed "by project manager <title>", never as the user. |
+
+The workflow-pack tools stay admin-only. Every other tool is unchanged.
+
+Precedence: a grant the user made on purpose wins. A chat that also holds a Space admin grant, or is the personal assistant, gets that wider reach in every tool, and the manager's narrower reach does not apply on top of it (the engine leaves `managerScopeItemId` empty for it).
+
+The writer also re-reads, under its lock, the current assignment of any chat a step reassigns, and re-counts a cascading step (an archive or restore covers the subtree as it is now, a template apply covers the template's nodes under each child) against what the user approved, or against the 10-item threshold when no approval was needed. Before any write, the batch is priced in order on a scratch copy of the registry, so a template or new item an early step sets up counts toward the later steps; a step an earlier attempt already committed costs nothing. The budget is one per batch (chat, idempotency key and steps), shared by the call, its retries and a restart: the writer reserves each step's charge under its lock and persists it before the write, and gives it back if the write does not commit, so a crash can only over-count and cumulative effects cannot pass the approved total. A fresh approval is for what is left, on top of what is already spent, and whether a retry must ask again compares the remaining work with the batch's remaining allowance (the 10-item default only for a new batch). The budget fails closed: if it cannot be saved or was unreadable the step is refused, and a batch that already committed steps but has lost its budget record is not started over (use a new idempotencyKey). A create counts the template it expands under its parent. A step that would pass what is left is refused with nothing changed. The approval records the count the user was shown, a confirm token is refused if the batch now affects more, and the request's operation id and dedupe key include that count, so a preview that grew is a new request rather than a replay of (or conflict with) the old one. More exactly, the request and its token are bound to one execution (the idempotency key) and to the resolved preview (target ids and counts, not just the raw steps and a count). A token is claimed atomically by one execution; its retries resume that claim even after their own earlier steps moved the preview, and no other execution, chat or changed preview can use it. The preview digest covers what is displayed and which items each cascading step affects, and the writer re-checks the affected items under its lock. Confirming before the user approves, or a dry run, only validates: the token is claimed, with its allowance installed in the same step, when the approved batch starts to run. Only the guarded bulk approval may raise its Required Action on the project item; every other request still sits on the chat's own item.
+
+Mixed versions: the field is optional on the wire. An engine that predates the
+grant sends none, and a client that predates it ignores it, so the grant is
+simply absent there and a manager is refused its project's chats (never
+widened). The engine advertises `project-manager-grant-v1`; place a manager
+only on a host that lists it. The chat tools learn the project's chats from
+`chat_project_scope_chats` (`managerChatIds`, empty for everyone else).
+
 Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
 `docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".
