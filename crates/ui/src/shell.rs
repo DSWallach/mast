@@ -7425,7 +7425,7 @@ impl Shell {
                             icons::CLOSE,
                             true,
                             theme,
-                            |_, window, _| window.remove_window(),
+                            |_, window, cx| crate::close_main_window(window, cx),
                         )
                         .into_any_element(),
                     }
@@ -12461,7 +12461,7 @@ impl Render for Shell {
                         .update(cx, |shell, cx| match action {
                             PendingExit::CloseWindow => {
                                 if shell.prepare_window_close(cx) {
-                                    window.remove_window();
+                                    crate::close_main_window(window, cx);
                                 }
                             }
                             PendingExit::RuntimeChange => shell.quit_for_runtime_change(cx),
@@ -14713,6 +14713,7 @@ mod exit_regressions {
             let code_size = 11.0 + index as f32;
             let transcript_width = 736.0 + 16.0 * index as f32;
             let geometry = Some(settings::WindowGeometry {
+                maximized: true,
                 display_uuid: Some(uuid::Uuid::from_u128(7)),
                 x: 80.0 + index as f32,
                 y: 60.0,
