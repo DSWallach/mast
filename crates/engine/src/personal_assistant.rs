@@ -64,8 +64,12 @@ impl PersonalAssistantStore {
         assistant
     }
 
-    pub(crate) fn observe_hand_off(&self) -> Option<StoredAssistant> {
-        lock(&self.state).current.clone()
+    pub(crate) fn observe_hand_off(&self, from: &Chat, chats: &[Chat]) -> Option<StoredAssistant> {
+        lock(&self.state)
+            .current
+            .as_ref()
+            .filter(|entry| entry.assistant.covers(from, chats))
+            .cloned()
     }
 
     pub(crate) fn transfer_for_hand_off(

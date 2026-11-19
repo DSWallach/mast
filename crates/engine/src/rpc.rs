@@ -1976,6 +1976,7 @@ impl EngineRpc {
                         (
                             intent,
                             crate::handoff_roles::RoleObservations::capture(
+                                &self.workspace,
                                 &self.sessions.agent_tokens(),
                                 &source,
                             ),
@@ -3958,6 +3959,7 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?
                 };
                 let observed_roles = crate::handoff_roles::RoleObservations::capture(
+                    &self.workspace,
                     &self.sessions.agent_tokens(),
                     &source,
                 );

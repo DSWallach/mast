@@ -3173,6 +3173,7 @@ mod tests {
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
+            local_pin_handoffs: Vec::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
                     "local".to_string(),

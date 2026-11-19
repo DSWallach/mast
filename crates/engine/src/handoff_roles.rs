@@ -31,13 +31,18 @@ pub(crate) struct RoleObservations {
 }
 
 impl RoleObservations {
-    pub(crate) fn capture(tokens: &AgentTokens, source: &Chat) -> Self {
+    pub(crate) fn capture(workspace: &WorkspaceHost, tokens: &AgentTokens, source: &Chat) -> Self {
+        let chats = if source.scheduled_task_info.is_some() {
+            workspace.read_chats().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Self {
             admin: source
                 .space_id
                 .as_deref()
                 .and_then(|space| tokens.admin().observe_hand_off(&source.id, space)),
-            assistant: tokens.personal_assistant().observe_hand_off(),
+            assistant: tokens.personal_assistant().observe_hand_off(source, &chats),
         }
     }
 }
