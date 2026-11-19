@@ -5026,3 +5026,91 @@ async fn assistant_management_edits_tasks_and_reruns_with_revision_and_replay_ch
     assert_eq!(history["runs"].as_array().unwrap().len(), 1);
     assert_eq!(history["runs"][0]["snapshot"]["prompt"], "Updated prompt");
 }
+
+fn status_document(stamp: &str) -> String {
+    let sections: String = mast_proto::MANAGER_STATUS_SECTIONS
+        .iter()
+        .map(|s| format!("## {s}\nNone\n\n"))
+        .collect();
+    format!("Updated: {stamp}\n\n{sections}")
+}
+
+fn run_token(rig: &Rig, run: usize) -> String {
+    match rig.harness.spawns.lock().unwrap()[run].clone() {
+        Spawn::WithTools { tools, .. } => tools.env["MAST_AGENT_TOKEN"].clone(),
+        other => panic!("run {run} had no agent tools: {other:?}"),
+    }
+}
+
+fn nudges(rig: &Rig) -> usize {
+    rig.harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("did not publish a new Manager status"))
+        .count()
+}
+
+/// A manager turn that dispatches a worker and does not publish gets exactly
+/// one reminder turn; the reminder turn failing to publish ends it. A later
+/// turn that dispatches and publishes is left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_turn_that_dispatches_without_a_status_is_nudged_once_and_publishing_clears_it() {
+    let (rig, _item) = role_rig("status-nudge").await;
+    let status = rig.core.sessions.agent_tokens();
+    let open = || status.manager_status().turn_open(CHAT);
+
+    // Turn 1 dispatches (creates a work item) and publishes nothing.
+    rig.core.doc_host.queue_command(CHAT, run_command("add a worker", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && open(), "turn 1 tracked").await;
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Worker task", "idempotencyKey": "w1" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+
+    // Exactly one reminder turn follows, and it carries the system message.
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "the reminder turn").await;
+    assert_eq!(nudges(&rig), 1);
+    wait_for(open, "reminder turn tracked").await;
+    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 2, "no second reminder");
+    assert_eq!(nudges(&rig), 1);
+
+    // Turn 3 dispatches and publishes: no reminder.
+    rig.core.doc_host.queue_command(CHAT, run_command("another", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 3 && open(), "turn 3 tracked").await;
+    let token = run_token(&rig, 2);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Second", "idempotencyKey": "w2" }))
+        .await
+        .unwrap();
+    let published = tool(
+        &rig,
+        &token,
+        "artifact_publish",
+        json!({ "title": "Manager status", "role": "manager-status", "note": "n", "idempotencyKey": "s1",
+                "content": status_document("09:00") }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(published["revision"], 1);
+    rig.harness.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.harness.spawns.lock().unwrap().len(), 3, "publishing clears the reminder");
+    assert_eq!(nudges(&rig), 1);
+
+    // Turn 4 dispatches again without publishing: the earlier checkpoint
+    // (revision 1) does not satisfy it, so it is reminded.
+    rig.core.doc_host.queue_command(CHAT, run_command("and again", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 4 && open(), "turn 4 tracked").await;
+    let token = run_token(&rig, 3);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Third", "idempotencyKey": "w3" }))
+        .await
+        .unwrap();
+    rig.harness.release.notify_one();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 5, "the second turn's reminder").await;
+    assert_eq!(nudges(&rig), 2);
+    rig.harness.release.notify_one();
+}

@@ -91,6 +91,15 @@ impl StatusTracker {
         }
     }
 
+    /// Whether a tracked turn is in flight on the chat.
+    pub fn turn_open(&self, chat_id: &str) -> bool {
+        self.chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(chat_id)
+            .is_some_and(|e| e.in_turn)
+    }
+
     /// The chat called a state-changing tool. Ignored outside a tracked turn.
     pub fn note_state_change(&self, chat_id: &str) {
         let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
