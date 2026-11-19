@@ -2121,6 +2121,43 @@ async fn manager_defers_handoff_until_queued_user_message_runs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn manager_user_send_during_rotation_reaches_successor_once() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "during-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
+    settle(&rig, &source).await;
+    rig.mock.hold_matching(Some("Threshold work for rotation"));
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Threshold work for rotation" }, "operationId": "during-threshold" })).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Threshold work for rotation")), "threshold turn").await;
+    let launch_guard = rig.core.test_work_item_launch_guard().await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tokio::time::timeout(Duration::from_millis(150), handle.test_queue_drain_guard()).await.is_err() { break; }
+        assert!(tokio::time::Instant::now() < deadline, "handoff did not acquire the source queue gate");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    let send = rig.client.call(methods::QUEUE_MESSAGE, json!({ "chatId": source, "messageId": "during-rotation-user-message", "text": "Decision during rotation", "attachments": [], "holdForTurnEnd": true }));
+    tokio::pin!(send);
+    assert!(tokio::time::timeout(Duration::from_millis(150), &mut send).await.is_err(), "send must wait for rotation");
+    drop(launch_guard);
+    send.await.expect("send after rotation");
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "automatic successor").await;
+    let successor = manager_chat(&rig).unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Decision during rotation")), "user message at successor").await;
+    wait_for(|| rig.core.doc_host.open(&successor).unwrap().doc().read_entries().unwrap().iter().any(|entry| entry.id == "during-rotation-user-message"), "user message recorded in successor").await;
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Decision during rotation")).count(), 1);
+    assert!(rig.core.doc_host.open(&source).unwrap().doc().read_queue().unwrap().iter().all(|row| row.id != "during-rotation-user-message"));
+    assert_ne!(source, successor);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn manager_unknown_context_window_explains_manual_handoff() {
     let rig = rig().await;
     mark_project(&rig).await;

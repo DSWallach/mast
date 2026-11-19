@@ -252,6 +252,12 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
+    /// Hold launch serialization for deterministic integration tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_work_item_launch_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.work_item_launch.test_gate().await
+    }
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$MAST_ORG_ID` / `$MAST_USER_ID` (dev defaults `dev-org` / `dev-user`);

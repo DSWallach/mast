@@ -421,7 +421,7 @@ pub struct WorkItemLaunchService {
 }
 
 impl WorkItemLaunchService {
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(crate) async fn test_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.gate.lock().await
     }
