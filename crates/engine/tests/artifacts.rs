@@ -2872,6 +2872,9 @@ async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_pr
     let row = artifact(&rig, first["artifactId"].as_str().unwrap());
     assert_eq!(row.work_item_id.as_deref(), Some(rig.item.as_str()));
     assert_eq!(row.role.as_deref(), Some("manager-status"));
+    let stamp = row.revisions[0].manager_status.clone().expect("the publish stamps the revision");
+    assert_eq!(stamp.role_id, format!("manager:{}", rig.item));
+    assert_eq!(stamp.chat_id, CHAT);
 
     let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
         .await

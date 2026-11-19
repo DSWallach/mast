@@ -273,6 +273,16 @@ pub struct ArtifactRevision {
     /// this revision). Internal; ≤ 64 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
+    /// The task key (the hash in its `scheduled-results:` role) of the
+    /// Background scheduled run that published this revision, stamped when it
+    /// is recorded. Absent for every other writer and for revisions recorded
+    /// before the stamp existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task: Option<String>,
+    /// The Manager role and chat that published this revision through the
+    /// inline Manager status publish. Absent for every other writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_status: Option<crate::manager_status::ManagerStatusStamp>,
 }
 
 /// One artifact as the registry row holds it (metadata only). This is both

@@ -323,8 +323,14 @@ fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<
     }).collect()
 }
 
-/// Given a chat id, the text to show its agent before its first prompt, if any.
-pub type ChatStartNotice = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// What a new chat's agent is shown before its first prompt. `enabled` is a
+/// cheap check made before anything else; `text` builds the notice for a chat.
+/// Neither may hold anything that leads back to the sessions engine.
+#[derive(Clone)]
+pub struct ChatStartNotice {
+    pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub text: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
 
 fn prepare_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> (String, Vec<(std::path::PathBuf, u128)>) {
     if prompt.trim_start().starts_with('/') { return (prompt.to_owned(), Vec::new()); }
@@ -1202,20 +1208,19 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
-        // The chat's first turn is the one whose message is the first user
-        // entry. It stays so across retries and fresh restarts of that turn,
-        // and is never true for a later turn that merely starts a new session.
-        let first_turn = handle
-            .doc()
-            .read_entries()
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|e| e.role == MessageRole::User)
-                    .map(|e| e.id == user_id)
-            })
-            .unwrap_or(false);
+        // The briefing index goes with a main chat's first turn only, never
+        // ahead of a leading slash command. With the setting off nothing more
+        // is read; otherwise the first turn is the one whose message is the
+        // first user entry, which holds across retries and fresh restarts of
+        // that turn and never for a later turn that merely starts a session.
+        let start_notice = if side_chat || request.prompt.trim_start().starts_with('/') {
+            None
+        } else {
+            let notice = lock(&self.inner.chat_start_notice).clone();
+            notice
+                .filter(|notice| (notice.enabled)())
+                .filter(|_| handle.doc().first_user_message_id().as_deref() == Some(user_id.as_str()))
+        };
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1272,18 +1277,7 @@ impl SessionsEngine {
         let notices = delivered_prompt
             .strip_suffix(shown_prompt.as_str())
             .unwrap_or_default();
-        // The first turn of a main chat also gets the briefing index. It is
-        // delivered like a notice, never in the transcript, and never ahead of
-        // a leading slash command, which must stay first to be routed.
-        let start_notice = if first_turn
-            && !side_chat
-            && !shown_prompt.trim_start().starts_with('/')
-        {
-            let notice = lock(&self.inner.chat_start_notice).clone();
-            notice.and_then(|notice| notice(chat_id))
-        } else {
-            None
-        };
+        let start_notice = start_notice.and_then(|notice| (notice.text)(chat_id));
         request.prompt = format!("{}{notices}{}", start_notice.unwrap_or_default(), request.prompt);
 
         let run_id = new_id();

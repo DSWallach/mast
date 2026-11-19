@@ -857,10 +857,7 @@ impl EngineCore {
             let task_names = self.scheduled_tasks.task_names_reader();
             let artifacts = self.artifacts.clone();
             let workspace = self.workspace.clone();
-            self.sessions.set_chat_start_notice(Arc::new(move |chat_id: &str| {
-                if !index_enabled() {
-                    return None;
-                }
+            let text = Arc::new(move |chat_id: &str| {
                 let chat = workspace.chat(chat_id).ok().flatten()?;
                 if chat.is_background_task_run() {
                     return None;
@@ -880,7 +877,11 @@ impl EngineCore {
                 let outline = mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space));
                 let need = briefing::need_you_in_space(&outline.user_action_requests, &scope, &space);
                 briefing::index_line(&entries, need, now_ms()).map(|line| briefing::chat_start_notice(&line))
-            }));
+            });
+            self.sessions.set_chat_start_notice(sessions::ChatStartNotice {
+                enabled: Arc::new(index_enabled),
+                text,
+            });
         }
         rpc.work_outline()
             .workflow_pack()

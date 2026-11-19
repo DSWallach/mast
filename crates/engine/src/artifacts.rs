@@ -1185,6 +1185,8 @@ impl ArtifactsService {
                     by: request.by.clone(),
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
+                    scheduled_task: self.run_stamp(&request.by),
+                    manager_status: self.manager_stamp(&request, role.as_deref()),
                 },
             );
             if manifest.is_some() {
@@ -1282,6 +1284,8 @@ impl ArtifactsService {
                     },
                     size_bytes: bytes.len() as u64,
                     op: None,
+                    scheduled_task: None,
+                    manager_status: None,
                 },
             );
             view.current_revision = next;
@@ -1435,6 +1439,46 @@ impl ArtifactsService {
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
                 .map_err(|e| io_error("read snapshot of", Path::new(&artifact.stored_path), e))
         })
+    }
+
+    /// The stamp for a Manager status revision: only when an agent chat that is
+    /// the current holder of the Manager role of the item publishes the status
+    /// role. `None` for any other writer or role.
+    fn manager_stamp(
+        &self,
+        request: &PublishRequest,
+        role: Option<&str>,
+    ) -> Option<mast_proto::ManagerStatusStamp> {
+        if request.by.kind != WorkOutlineActorKind::Agent
+            || !role.is_some_and(mast_proto::is_manager_status_role)
+        {
+            return None;
+        }
+        let chat_id = request.by.chat_id.as_deref()?;
+        let item = request.work_item_id.as_deref()?;
+        let held = self.workspace().standing_role(mast_proto::StandingRoleKind::Manager, item)?;
+        (held.current_chat_id.as_deref() == Some(chat_id)).then(|| mast_proto::ManagerStatusStamp {
+            role_id: held.id,
+            chat_id: chat_id.to_owned(),
+        })
+    }
+
+    /// The task key to stamp on a revision published by a Background scheduled
+    /// run; `None` for any other writer.
+    fn run_stamp(&self, by: &WorkOutlineActor) -> Option<String> {
+        if by.kind != WorkOutlineActorKind::Agent {
+            return None;
+        }
+        let info = self
+            .workspace()
+            .chat(by.chat_id.as_deref()?)
+            .ok()
+            .flatten()?
+            .scheduled_task_info
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)?;
+        mast_proto::ScheduledRunResults::key_of_role(&mast_proto::ScheduledRunResults::role_for(
+            &info.task_id,
+        ))
     }
 
     /// The bytes of the newest revision exactly as recorded: its stored

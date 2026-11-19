@@ -71,6 +71,18 @@ pub fn validate_manager_status(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Recorded on a revision when the inline publish writes it: which role
+/// published it and which chat held that role at the time. It lives with the
+/// publication, so it holds after a hand-off deletes the chat. Absent for a
+/// revision anyone else wrote and for revisions made before it existed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerStatusStamp {
+    /// The role row id, `manager:<project item id>`.
+    pub role_id: String,
+    pub chat_id: String,
+}
+
 /// The manager's standing rule for keeping the record current. One bullet:
 /// the built-in instructions prefix it with "- ".
 pub const MANAGER_STATUS_RULE: &str = "Keep the Manager status current. At the end of every turn that changed \
@@ -152,6 +164,22 @@ mod tests {
             assert!(MANAGER_STATUS_RULE.contains(section), "{section}");
         }
         assert!(!MANAGER_STATUS_RULE.starts_with('-'));
+    }
+
+    #[test]
+    fn the_stamp_round_trips_and_is_optional_on_a_revision() {
+        let stamp = ManagerStatusStamp { role_id: "manager:p".into(), chat_id: "c".into() };
+        let value = serde_json::to_value(&stamp).unwrap();
+        assert_eq!(value, serde_json::json!({"roleId": "manager:p", "chatId": "c"}));
+        let revision: crate::artifacts::ArtifactRevision =
+            serde_json::from_value(serde_json::json!({"id": 1})).unwrap();
+        assert!(revision.manager_status.is_none());
+        let mut with = revision.clone();
+        with.manager_status = Some(stamp);
+        let back: crate::artifacts::ArtifactRevision =
+            serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(back.manager_status, with.manager_status);
+        assert!(serde_json::to_value(&revision).unwrap().get("managerStatus").is_none());
     }
 
     #[test]
