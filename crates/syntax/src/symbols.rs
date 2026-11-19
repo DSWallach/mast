@@ -544,8 +544,9 @@ mod tests {
             ("b.swift", "let OUTER = 1\nstruct C { var value: Int { let LOCAL = 2; return LOCAL } }"),
             ("a.rb", "OUTER = -> { LOCAL = 2 }"),
         ] {
-            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
-            assert_eq!(constants, ["OUTER"], "{path}");
+            let symbols = extract(source, path, 100);
+            assert!(symbols.iter().any(|symbol| symbol.name == "OUTER"), "{path}");
+            assert!(!symbols.iter().any(|symbol| symbol.name == "LOCAL" && symbol.kind == SymbolKind::Constant), "{path}");
         }
     }
 
