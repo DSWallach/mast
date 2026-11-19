@@ -20,9 +20,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::WorkspaceHost;
 
-/// A commit made this soon after a Working interval ended still belongs to it
-/// (the agent commits just before the status flips).
-const ACTIVE_GRACE_MS: i64 = 60_000;
+/// A commit made this soon after a turn ends (Working → idle) still belongs to
+/// it: the agent commits just before the status flips. Not granted when the
+/// chat parked on a question (Working → AwaitingInput): what follows is a human.
+const ACTIVE_GRACE_MS: i64 = 15_000;
 /// Status updates trail the turn start a little.
 const START_SLACK_MS: i64 = 2_000;
 /// Output cap for the `git log -p` feeding `git patch-id`.
@@ -37,12 +38,18 @@ const MAX_INTERVALS: usize = 16;
 #[derive(Debug, Clone)]
 pub struct HeadMove {
     pub root: PathBuf,
+    /// The checkout's git dir (worktree-specific for linked worktrees).
+    pub git_dir: PathBuf,
     pub old: String,
     pub new: String,
     /// Chats that bound this checkout.
     pub chats: Vec<String>,
     /// Epoch ms diff-sync last saw `old` as HEAD.
     pub since_ms: i64,
+    /// Branch and remote-tracking ref tips as of diff-sync's capture BEFORE the
+    /// move. Commits reachable from these are not the chat's. Empty when no
+    /// snapshot exists yet (the recorder then reads the refs itself).
+    pub prior_tips: Vec<String>,
 }
 
 pub type HeadMoveListener = Arc<dyn Fn(HeadMove) + Send + Sync>;
@@ -54,8 +61,10 @@ pub type TranscriptReader = Arc<dyn Fn(&str) -> Option<Vec<SessionMessageEntry>>
 #[derive(Debug, Clone, Default)]
 struct Activity {
     open_since: Option<i64>,
-    /// Closed `(start, end)` intervals, oldest first.
-    closed: std::collections::VecDeque<(i64, i64)>,
+    /// Closed `(start, end, grace_ms)` intervals, oldest first. `grace_ms` is
+    /// [`ACTIVE_GRACE_MS`] after a turn ended idle, 0 after it parked on a
+    /// question.
+    closed: std::collections::VecDeque<(i64, i64, i64)>,
 }
 
 impl Activity {
@@ -70,8 +79,8 @@ impl Activity {
         self.closed
             .iter()
             .rev()
-            .find(|(start, end)| t_ms >= start - START_SLACK_MS && t_ms <= end + ACTIVE_GRACE_MS)
-            .copied()
+            .find(|(start, end, grace)| t_ms >= start - START_SLACK_MS && t_ms <= end + grace)
+            .map(|(start, end, _)| (*start, *end))
     }
 
     fn overlaps(&self, from_ms: i64, to_ms: i64) -> bool {
@@ -79,7 +88,7 @@ impl Activity {
             || self
                 .closed
                 .iter()
-                .any(|(start, end)| *start <= to_ms && end + ACTIVE_GRACE_MS >= from_ms)
+                .any(|(start, end, grace)| *start <= to_ms && end + grace >= from_ms)
     }
 }
 
@@ -118,7 +127,8 @@ impl ProvenanceRecorder {
                 (true, None) => entry.open_since = Some(now_ms),
                 (false, Some(start)) => {
                     entry.open_since = None;
-                    entry.closed.push_back((start, now_ms));
+                    let grace = if session.status == SessionStatus::AwaitingInput { 0 } else { ACTIVE_GRACE_MS };
+                    entry.closed.push_back((start, now_ms, grace));
                     while entry.closed.len() > MAX_INTERVALS {
                         entry.closed.pop_front();
                     }
@@ -141,7 +151,7 @@ impl ProvenanceRecorder {
         let mut activity = lock(&self.activity);
         let entry = activity.entry(chat_id.to_owned()).or_default();
         match end_ms {
-            Some(end) => entry.closed.push_back((start_ms, end)),
+            Some(end) => entry.closed.push_back((start_ms, end, ACTIVE_GRACE_MS)),
             None => entry.open_since = Some(start_ms),
         }
     }
@@ -178,18 +188,34 @@ impl ProvenanceRecorder {
             return Ok(0);
         }
         self.walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let added = own_commits(root, &head_move.old, &head_move.new).await?;
+        let tips = if head_move.prior_tips.is_empty() {
+            // No snapshot yet (first move since the checkout was bound): read
+            // the refs now, minus the tip HEAD itself just moved to.
+            let mut tips = read_ref_tips(&head_move.git_dir);
+            tips.retain(|tip| tip != &head_move.new);
+            tips
+        } else {
+            head_move.prior_tips.clone()
+        };
+        let added = own_commits(root, &head_move.old, &head_move.new, &tips).await?;
         if added.is_empty() {
             return Ok(0);
         }
-        // Patch-ids only when a remap is possible.
-        let mut by_patch: HashMap<String, CommitProvenance> = HashMap::new();
+        // Patch-ids only when commits were removed (rebase, amend, reset): an
+        // added commit matching ANY removed commit is a rewrite, never fresh
+        // work. It inherits the removed commit's record, or stays unattributed.
+        let mut by_patch: HashMap<String, Option<CommitProvenance>> = HashMap::new();
         let mut added_ids: HashMap<String, String> = HashMap::new();
-        if !removed_records.is_empty() {
+        if !removed.is_empty() {
             self.patch_id_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let removed_ids = patch_ids(root, &removed_records.iter().map(|r| r.sha.clone()).collect::<Vec<_>>()).await;
-            for record in removed_records {
-                let id = removed_ids.get(&record.sha).cloned().unwrap_or(record.patch_id.clone());
+            let removed_ids = patch_ids(root, &removed).await;
+            for sha in &removed {
+                let record = removed_records.iter().find(|r| &r.sha == sha).cloned();
+                let id = removed_ids
+                    .get(sha)
+                    .cloned()
+                    .or_else(|| record.as_ref().map(|r| r.patch_id.clone()))
+                    .unwrap_or_default();
                 if !id.is_empty() {
                     by_patch.insert(id, record);
                 }
@@ -203,6 +229,7 @@ impl ProvenanceRecorder {
         for commit in &added {
             let patch_id = added_ids.get(&commit.sha).cloned().unwrap_or_default();
             if let Some(source) = (!patch_id.is_empty()).then(|| by_patch.get(&patch_id)).flatten() {
+                let Some(source) = source else { continue }; // rewrite of an unrecorded commit
                 records.push(CommitProvenance {
                     sha: commit.sha.clone(),
                     repo_id: repo_id.clone(),
@@ -391,30 +418,19 @@ struct OwnCommit {
     committed_ms: i64,
 }
 
-/// Commits new in `old..new`, first-parent only, that are not reachable from
-/// any remote-tracking ref or any local branch other than the one HEAD is on,
-/// oldest first, at most [`MAX_PROVENANCE_WALK`].
-async fn own_commits(root: &Path, old: &str, new: &str) -> Result<Vec<OwnCommit>, String> {
-    let current = git_bytes(root, &["symbolic-ref", "-q", "HEAD"], 4096)
-        .await
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
-        .filter(|name| name.starts_with("refs/heads/"));
+/// Commits new in `old..new`, first-parent only, not reachable from `tips`
+/// (the branch and remote-tracking ref tips before the move), oldest first, at
+/// most [`MAX_PROVENANCE_WALK`]. The tips go in on stdin, so any number is fine.
+async fn own_commits(root: &Path, old: &str, new: &str, tips: &[String]) -> Result<Vec<OwnCommit>, String> {
     let max = format!("--max-count={MAX_PROVENANCE_WALK}");
-    let mut args: Vec<String> = ["log", "--first-parent", "--reverse", "--no-show-signature", "--format=%H %ct %P"]
-        .map(str::to_owned)
-        .to_vec();
-    args.push(max);
-    args.extend([new.to_owned(), "--not".into(), old.to_owned()]);
-    // `--exclude` is matched against the name without `refs/heads/` for `--branches`.
-    if let Some(short) = current.as_deref().and_then(|name| name.strip_prefix("refs/heads/"))
-        && !short.contains(['*', '?', '[', '\\'])
-    {
-        args.push(format!("--exclude={short}"));
+    let mut stdin = format!("{new}\n^{old}\n");
+    for tip in tips.iter().take(MAX_TIPS).filter(|t| matches!(t.len(), 40 | 64)) {
+        stdin.push('^');
+        stdin.push_str(tip);
+        stdin.push('\n');
     }
-    args.extend(["--branches".into(), "--remotes".into()]);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = git_bytes(root, &refs, 1024 * 1024).await?;
+    let args = ["log", "--first-parent", "--reverse", "--no-show-signature", "--format=%H %ct %P", max.as_str(), "--stdin"];
+    let out = git_with_stdin(root, &args, stdin.as_bytes(), 1024 * 1024).await?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .filter_map(|line| {
@@ -427,6 +443,83 @@ async fn own_commits(root: &Path, old: &str, new: &str) -> Result<Vec<OwnCommit>
             Some(OwnCommit { sha: sha.to_owned(), committed_ms: time * 1000 })
         })
         .collect())
+}
+
+/// Most ref tips handed to one walk.
+const MAX_TIPS: usize = 10_000;
+/// Most ref files read when snapshotting tips.
+const MAX_TIP_FILES: usize = 10_000;
+
+/// Tips of every branch and remote-tracking ref of the repository whose git
+/// dir is `git_dir`, read from the files (packed-refs plus loose refs): no
+/// spawn. Bounded; symbolic refs and unreadable files are skipped.
+pub(crate) fn read_ref_tips(git_dir: &Path) -> Vec<String> {
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|rel| git_dir.join(rel.trim()))
+        .and_then(|path| path.canonicalize().ok())
+        .unwrap_or_else(|| git_dir.to_path_buf());
+    let mut tips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {
+        for line in packed.lines().take(MAX_TIP_FILES) {
+            let mut parts = line.split(' ');
+            if let (Some(sha), Some(name)) = (parts.next(), parts.next())
+                && (name.starts_with("refs/heads/") || name.starts_with("refs/remotes/"))
+                && matches!(sha.len(), 40 | 64)
+            {
+                tips.insert(sha.to_owned());
+            }
+        }
+    }
+    let mut stack = vec![(common.join("refs/heads"), 0usize), (common.join("refs/remotes"), 0usize)];
+    let mut files = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for entry in read.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() && depth < 8 => stack.push((path, depth + 1)),
+                Ok(kind) if kind.is_file() => {
+                    files += 1;
+                    if files > MAX_TIP_FILES {
+                        return tips.into_iter().collect();
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        let sha = text.trim();
+                        if matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            tips.insert(sha.to_owned());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    tips.into_iter().collect()
+}
+
+async fn git_with_stdin(root: &Path, args: &[&str], input: &[u8], max: usize) -> Result<Vec<u8>, String> {
+    let mut child = mast_harness::git_command_async()
+        .current_dir(root)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let input = input.to_vec();
+    let write = tokio::spawn(async move {
+        let _ = stdin.write_all(&input).await;
+    });
+    let result = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output()).await;
+    let _ = write.await;
+    let out = result.map_err(|_| "git timed out".to_string())?.map_err(|e| e.to_string())?;
+    if !out.status.success() || out.stdout.len() > max {
+        return Err("git failed or output too large".into());
+    }
+    Ok(out.stdout)
 }
 
 /// Stable id of the repository (hash of its git common dir).
@@ -535,13 +628,29 @@ mod tests {
         head(repo)
     }
 
-    fn mv(f: &Fixture, old: &str, chats: &[&str]) -> HeadMove {
+    /// What diff-sync holds just before a move: HEAD and every ref tip.
+    struct Before {
+        old: String,
+        tips: Vec<String>,
+    }
+
+    fn before(f: &Fixture) -> Before {
+        let tips = git(&f.repo, &["for-each-ref", "--format=%(objectname)", "refs/heads", "refs/remotes"])
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        Before { old: head(&f.repo), tips }
+    }
+
+    fn mv(f: &Fixture, before: &Before, chats: &[&str]) -> HeadMove {
         HeadMove {
             root: f.repo.clone(),
-            old: old.into(),
+            git_dir: f.repo.join(".git"),
+            old: before.old.clone(),
             new: head(&f.repo),
             chats: chats.iter().map(|c| (*c).to_owned()).collect(),
             since_ms: now() - 3_600_000,
+            prior_tips: before.tips.clone(),
         }
     }
 
@@ -559,38 +668,49 @@ mod tests {
         f.recorder.note_working_for_test(chat, now() - 7_200_000, Some(now() - 3_600_000));
     }
 
+    fn fresh_recorder(f: Fixture) -> Fixture {
+        Fixture { recorder: ProvenanceRecorder::new(f.workspace.clone(), Arc::new(|_| None)), ..f }
+    }
+
     #[tokio::test]
     async fn records_a_chats_own_commit() {
         let f = fixture();
-        let old = head(&f.repo);
+        let b = before(&f);
         working(&f, "chat-1");
         let sha = commit_file(&f.repo, "b.txt", "b\n", "add b");
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 1);
         let record = f.workspace.commit_provenance(&sha).unwrap();
         assert_eq!(record.chat_id, "chat-1");
         assert_eq!(record.source, ProvenanceSource::Recorded);
         assert!(!record.repo_id.is_empty());
-        // The same move again changes nothing.
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_push_or_new_branch_right_after_the_commit_cannot_hide_it() {
+        let f = fixture();
+        let b = before(&f);
+        working(&f, "chat-1");
+        let sha = commit_file(&f.repo, "b.txt", "b\n", "add b");
+        // Pushed (remote-tracking ref) and branched off before the recorder runs.
+        git(&f.repo, &["update-ref", "refs/remotes/origin/main", &sha]);
+        git(&f.repo, &["branch", "coordinator-branch", &sha]);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.workspace.commit_provenance(&sha).unwrap().chat_id, "chat-1");
     }
 
     #[tokio::test]
     async fn nothing_for_idle_unbound_ambiguous_or_awaiting_input() {
         let f = fixture();
-        let old = head(&f.repo);
+        let b = before(&f);
         let sha = commit_file(&f.repo, "b.txt", "b\n", "add b");
-        // Never seen working.
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
-        // Worked, then parked on a question for an hour (AwaitingInput closes
-        // the Working interval): the human's commit is not the chat's.
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
         worked_long_ago(&f, "chat-1");
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
-        // Unbound worktree: diff-sync passes no chats.
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
         working(&f, "chat-1");
-        assert_eq!(f.recorder.handle(mv(&f, &old, &[])).await.unwrap(), 0);
-        // Two chats Working on the same worktree: ambiguous, attribute none.
+        assert_eq!(f.recorder.handle(mv(&f, &b, &[])).await.unwrap(), 0);
         working(&f, "chat-2");
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1", "chat-2"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1", "chat-2"])).await.unwrap(), 0);
         assert!(f.workspace.commit_provenance(&sha).is_none());
     }
 
@@ -598,7 +718,6 @@ mod tests {
     async fn fast_forward_pull_and_merge_of_origin_main_attribute_nothing() {
         let f = fixture();
         git(&f.repo, &["checkout", "-q", "-b", "feature"]);
-        // origin/main advances by two commits made elsewhere.
         git(&f.repo, &["checkout", "-q", "-b", "upstream", "main"]);
         commit_file(&f.repo, "u1.txt", "1\n", "upstream 1");
         let upstream = commit_file(&f.repo, "u2.txt", "2\n", "upstream 2");
@@ -606,75 +725,91 @@ mod tests {
         git(&f.repo, &["branch", "-q", "-D", "upstream"]);
         git(&f.repo, &["update-ref", "refs/remotes/origin/main", &upstream]);
         working(&f, "chat-1");
-        // Fast-forward pull.
-        let old = head(&f.repo);
+        let b = before(&f);
         git(&f.repo, &["merge", "-q", "--ff-only", "origin/main"]);
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
-        // Merge of origin/main into a diverged branch: the merge commit is
-        // skipped and the pulled commits are on a remote-tracking ref.
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
         git(&f.repo, &["reset", "-q", "--hard", "main"]);
         let own = commit_file(&f.repo, "own.txt", "x\n", "own");
-        let before_merge = head(&f.repo);
+        let b = before(&f);
         git(&f.repo, &["merge", "-q", "--no-edit", "origin/main"]);
-        assert_eq!(f.recorder.handle(mv(&f, &before_merge, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
         assert!(f.workspace.commit_provenance(&own).is_none());
     }
 
     #[tokio::test]
     async fn rebase_onto_main_brings_nothing_in_and_remaps_own_commits() {
         let f = fixture();
-        let base = head(&f.repo);
         git(&f.repo, &["checkout", "-q", "-b", "feature"]);
+        let b = before(&f);
         working(&f, "chat-1");
         let c1 = commit_file(&f.repo, "b.txt", "b\n", "add b");
         let c2 = commit_file(&f.repo, "c.txt", "c\n", "add c");
-        assert_eq!(f.recorder.handle(mv(&f, &base, &["chat-1"])).await.unwrap(), 2);
-        // The chat stops; main moves on; feature is rebased onto it.
-        let f2 = Fixture { recorder: ProvenanceRecorder::new(f.workspace.clone(), Arc::new(|_| None)), ..f };
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 2);
+        let f2 = fresh_recorder(f);
         worked_long_ago(&f2, "chat-1");
         git(&f2.repo, &["checkout", "-q", "main"]);
         let main_commit = commit_file(&f2.repo, "m.txt", "m\n", "main moves");
         git(&f2.repo, &["checkout", "-q", "feature"]);
+        let b = before(&f2);
         git(&f2.repo, &["rebase", "-q", "main"]);
         let new = head(&f2.repo);
         assert_ne!(new, c2);
-        assert_eq!(f2.recorder.handle(mv(&f2, &c2, &["chat-1"])).await.unwrap(), 2);
+        assert_eq!(f2.recorder.handle(mv(&f2, &b, &["chat-1"])).await.unwrap(), 2);
         let tip = f2.workspace.commit_provenance(&new).unwrap();
         assert_eq!(tip.source, ProvenanceSource::Remapped);
         assert_eq!(tip.remapped_from.as_deref(), Some(c2.as_str()));
         assert!(f2.workspace.commit_provenance(&main_commit).is_none(), "main's commit is not attributed");
         assert!(f2.workspace.commit_provenance(&c1).is_some());
-        // Reset back onto the old history (force-push shape): records exist.
+        let b = before(&f2);
         git(&f2.repo, &["reset", "-q", "--hard", &c2]);
-        assert_eq!(f2.recorder.handle(mv(&f2, &new, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f2.recorder.handle(mv(&f2, &b, &["chat-1"])).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_human_commit_rebased_while_a_chat_works_is_not_the_chats() {
+        let f = fixture();
+        git(&f.repo, &["checkout", "-q", "-b", "feature"]);
+        let human = commit_file(&f.repo, "h.txt", "h\n", "human commit");
+        git(&f.repo, &["checkout", "-q", "main"]);
+        commit_file(&f.repo, "m.txt", "m\n", "main moves");
+        git(&f.repo, &["checkout", "-q", "feature"]);
+        working(&f, "chat-1");
+        let b = before(&f);
+        git(&f.repo, &["rebase", "-q", "main"]);
+        let rebased = head(&f.repo);
+        assert_ne!(rebased, human);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
+        assert!(f.workspace.commit_provenance(&rebased).is_none());
     }
 
     #[tokio::test]
     async fn rebase_with_no_chat_working_and_no_records_attributes_nothing() {
         let f = fixture();
         git(&f.repo, &["checkout", "-q", "-b", "feature"]);
-        let c1 = commit_file(&f.repo, "b.txt", "b\n", "add b");
+        commit_file(&f.repo, "b.txt", "b\n", "add b");
         git(&f.repo, &["checkout", "-q", "main"]);
         commit_file(&f.repo, "m.txt", "m\n", "main moves");
         git(&f.repo, &["checkout", "-q", "feature"]);
+        let b = before(&f);
         git(&f.repo, &["rebase", "-q", "main"]);
         worked_long_ago(&f, "chat-1");
-        assert_eq!(f.recorder.handle(mv(&f, &c1, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn amend_remaps_by_patch_id() {
         let f = fixture();
-        let base = head(&f.repo);
+        let b = before(&f);
         working(&f, "chat-1");
         let first = commit_file(&f.repo, "b.txt", "b\n", "add b");
-        f.recorder.handle(mv(&f, &base, &["chat-1"])).await.unwrap();
-        let f = Fixture { recorder: ProvenanceRecorder::new(f.workspace.clone(), Arc::new(|_| None)), ..f };
+        f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap();
+        let f = fresh_recorder(f);
         worked_long_ago(&f, "chat-1");
+        let b = before(&f);
         git(&f.repo, &["commit", "-q", "--amend", "-m", "add b (reworded)"]);
         let amended = head(&f.repo);
         assert_ne!(first, amended);
-        assert_eq!(f.recorder.handle(mv(&f, &first, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 1);
         let record = f.workspace.commit_provenance(&amended).unwrap();
         assert_eq!(record.source, ProvenanceSource::Remapped);
         assert_eq!(record.remapped_from.as_deref(), Some(first.as_str()));
@@ -695,10 +830,9 @@ mod tests {
             .unwrap();
         git(&f.repo, &["checkout", "-q", "-b", "coordinator", &base]);
         working(&f, "coordinator-chat");
-        // Fast-forward merge: the worker's commit is first-parent on the
-        // coordinator's line but lives on a local branch.
+        let b = before(&f);
         git(&f.repo, &["merge", "-q", "--ff-only", "worker-1"]);
-        assert_eq!(f.recorder.handle(mv(&f, &base, &["coordinator-chat"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["coordinator-chat"])).await.unwrap(), 0);
         assert_eq!(f.workspace.commit_provenance(&w).unwrap().chat_id, "worker-chat");
     }
 
@@ -732,57 +866,91 @@ mod tests {
         assert_eq!(turn_for_path(&entries, Some("u2"), Some("u3"), "src/old.rs"), None);
         assert_eq!(turn_for_path(&entries, Some("u1"), Some("u3"), "src/old.rs"), Some("u1".into()));
         assert_eq!(turn_for_path(&entries, Some("gone"), Some("u3"), "src/a.rs"), None);
-        // Respects turn_end: an edit in a later turn is outside the range.
         assert_eq!(turn_for_path(&entries, Some("u1"), Some("u2"), "src/later.rs"), None);
         assert_eq!(turn_for_path(&entries, Some("u1"), Some("u3"), "src/later.rs"), Some("u3".into()));
     }
 
     #[test]
     fn activity_intervals_follow_working_only() {
-        let mut a = Activity::default();
-        a.open_since = Some(1_000);
+        let mut a = Activity { open_since: Some(1_000), ..Default::default() };
         assert_eq!(a.interval_at(1_500, 2_000), Some((1_000, 2_000)));
         assert_eq!(a.interval_at(-5_000, 2_000), None);
         a.open_since = None;
-        a.closed.push_back((1_000, 2_000));
+        a.closed.push_back((1_000, 2_000, ACTIVE_GRACE_MS));
         assert!(a.interval_at(2_000 + ACTIVE_GRACE_MS, 9_999_999).is_some());
         assert!(a.interval_at(2_000 + ACTIVE_GRACE_MS + 1, 9_999_999).is_none());
     }
 
+    fn session(chat: &str, status: &str) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "chatId": chat, "deviceId": "d", "status": status,
+            "startedAt": null, "updatedAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn grace_after_a_turn_ends_idle_but_not_after_it_parks_on_a_question() {
+        let f = fixture();
+        f.recorder.observe_sessions(&[session("idle-chat", "working"), session("asking-chat", "working")], 1_000);
+        f.recorder.observe_sessions(&[session("idle-chat", "idle"), session("asking-chat", "awaitingInput")], 10_000);
+        // 5 s after the turn ended idle: still the chat's. 5 s after it parked
+        // on a question: a human's.
+        assert!(f.recorder.sole_working_chat(&["idle-chat".into()], 15_000, 20_000).is_some());
+        assert!(f.recorder.sole_working_chat(&["asking-chat".into()], 15_000, 20_000).is_none());
+        // Past the 15 s grace even the idle chat no longer claims it.
+        assert!(f.recorder.sole_working_chat(&["idle-chat".into()], 10_000 + ACTIVE_GRACE_MS + 1, 99_000).is_none());
+        // While it was Working, both did.
+        assert!(f.recorder.sole_working_chat(&["asking-chat".into()], 5_000, 20_000).is_some());
+    }
+
     #[tokio::test]
-    async fn idle_moves_do_no_walk_and_patch_ids_only_run_for_remaps() {
+    async fn idle_moves_do_no_walk_and_patch_ids_only_run_when_commits_were_removed() {
         let f = fixture();
-        let old = head(&f.repo);
+        let b = before(&f);
         commit_file(&f.repo, "b.txt", "b\n", "human commit");
-        // No chat working and no records among the removed: nothing but the
-        // single removed-commit listing.
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 0);
         assert_eq!(f.recorder.work_counters_for_test(), (0, 0));
-        // An attributed commit needs a walk but no patch-ids.
         let f = fixture();
-        let old = head(&f.repo);
+        let b = before(&f);
         working(&f, "chat-1");
         commit_file(&f.repo, "b.txt", "b\n", "chat commit");
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 1);
         assert_eq!(f.recorder.work_counters_for_test(), (1, 0));
-        // An amend of a recorded commit is the remap case: patch-ids run.
         let recorded = head(&f.repo);
+        let b = before(&f);
         git(&f.repo, &["commit", "-q", "--amend", "-m", "reworded"]);
-        assert_eq!(f.recorder.handle(mv(&f, &recorded, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), 1);
         assert_eq!(f.recorder.work_counters_for_test(), (2, 1));
+        assert_ne!(recorded, head(&f.repo));
     }
 
     #[tokio::test]
     async fn one_move_records_at_most_the_newest_200_commits() {
         let f = fixture();
-        let old = head(&f.repo);
+        let b = before(&f);
         working(&f, "chat-1");
         let mut shas = Vec::new();
         for i in 0..205 {
             shas.push(commit_file(&f.repo, "many.txt", &format!("{i}\n"), &format!("c{i}")));
         }
-        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), MAX_PROVENANCE_WALK);
+        assert_eq!(f.recorder.handle(mv(&f, &b, &["chat-1"])).await.unwrap(), MAX_PROVENANCE_WALK);
         assert!(f.workspace.commit_provenance(&shas[0]).is_none(), "oldest are beyond the cap");
         assert!(f.workspace.commit_provenance(&shas[204]).is_some());
+    }
+
+    #[test]
+    fn ref_tips_are_read_from_files_including_packed_and_nested_refs() {
+        let f = fixture();
+        git(&f.repo, &["branch", "feature/nested", "HEAD"]);
+        let main = head(&f.repo);
+        git(&f.repo, &["update-ref", "refs/remotes/origin/main", &main]);
+        let second = commit_file(&f.repo, "x.txt", "x\n", "second");
+        git(&f.repo, &["branch", "packed-branch", &second]);
+        git(&f.repo, &["pack-refs", "--all"]);
+        git(&f.repo, &["branch", "loose-branch", &second]);
+        let tips = read_ref_tips(&f.repo.join(".git"));
+        assert!(tips.contains(&main), "nested/remote tip");
+        assert!(tips.contains(&second), "packed and loose tip");
     }
 }

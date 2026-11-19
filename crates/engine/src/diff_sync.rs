@@ -213,6 +213,9 @@ struct CheckoutEntry {
     /// HEAD sha and epoch-ms of the last capture that saw it; a change is a
     /// HEAD move (see [`HeadMove`]). In memory only.
     last_head: Mutex<Option<(String, i64)>>,
+    /// Branch and remote-tracking ref tips as of the last capture of this
+    /// (bound) checkout; the "before" picture for the next HEAD move.
+    last_tips: Mutex<Option<Vec<String>>>,
 }
 
 /// Kick channel into an entry's sync task that also counts sends, so
@@ -1428,6 +1431,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         initial_kicked: AtomicBool::new(false),
         probed_after_attach: AtomicBool::new(false),
         last_head: Mutex::new(None),
+        last_tips: Mutex::new(None),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -1901,8 +1905,10 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
 
 /// Compare the captured HEAD with the last one seen for this checkout. A change
 /// in a checkout that some chat has bound as a diff target is a HEAD move: hand
-/// it to the listener (commit provenance). Free when nothing moved, and when no
-/// listener is set or no chat is bound it only updates the remembered sha.
+/// it to the listener (commit provenance), together with the ref tips as of the
+/// PREVIOUS capture, so a push or a new branch made right after a commit cannot
+/// hide it. Ref tips are read from the git dir's files (no spawn) and only for
+/// bound checkouts. Free when nothing moved and no chat is bound.
 fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Option<&str>) {
     let Some(head) = head else { return };
     let now = chrono::Utc::now().timestamp_millis();
@@ -1910,11 +1916,21 @@ fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Optio
         let mut last = lock(&entry.last_head);
         let previous = last.clone();
         if previous.as_ref().is_some_and(|(sha, _)| sha == head) {
+            drop(last);
+            // Same HEAD: refresh the tips snapshot for the next move.
+            if is_bound_target(inner, entry) && lock(&inner.head_move_listener).is_some() {
+                *lock(&entry.last_tips) = Some(crate::provenance::read_ref_tips(&entry.identity.git_dir));
+            }
             return;
         }
         *last = Some((head.to_owned(), now));
         previous
     };
+    let prior_tips = lock(&entry.last_tips).take().unwrap_or_default();
+    let bound = is_bound_target(inner, entry);
+    if bound && lock(&inner.head_move_listener).is_some() {
+        *lock(&entry.last_tips) = Some(crate::provenance::read_ref_tips(&entry.identity.git_dir));
+    }
     let Some((old, since_ms)) = previous else { return };
     let Some(listener) = lock(&inner.head_move_listener).clone() else { return };
     let chats: Vec<String> = lock(&inner.resolved_targets)
@@ -1931,11 +1947,21 @@ fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Optio
     }
     listener(crate::provenance::HeadMove {
         root: entry.identity.root.clone(),
+        git_dir: entry.identity.git_dir.clone(),
         old,
         new: head.to_owned(),
         chats,
         since_ms,
+        prior_tips,
     });
+}
+
+fn is_bound_target(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) -> bool {
+    lock(&inner.resolved_targets).iter().any(|chat| {
+        chat.targets
+            .iter()
+            .any(|target| target.identity.id == entry.identity.id)
+    })
 }
 
 /// Re-emit the watch channel from the current entries' cached diffs, replacing (or
