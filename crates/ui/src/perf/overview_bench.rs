@@ -326,3 +326,57 @@ fn outline_fixture_overview(
     std::mem::forget(dir);
     (overview, vcx)
 }
+
+/// Rendering Overview (List and Outline) with snapshot data must not panic;
+/// gpui panics when one element sets its hover style twice.
+#[gpui::test]
+fn overview_renders_snapshot_data_in_both_modes_without_panicking(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.data_dir = Some(dir.path().to_path_buf());
+        state.chats = (0..12).map(chat_row).collect();
+        state.spaces = vec![mast_proto::Space {
+            id: SPACE.into(),
+            device_id: "local".into(),
+            path: "/work".into(),
+            name: Some("Preview".into()),
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        }];
+    });
+    let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+    let st = state.clone();
+    let (overview, vcx) = cx.add_window_view(move |_, cx| {
+        Overview::new(st, gpui::WeakEntity::new_invalid(), transcript, composer, cx)
+    });
+    vcx.run_until_parked();
+    overview.update(vcx, |o, _| {
+        let mut map = HashMap::new();
+        map.insert(
+            SPACE.to_string(),
+            WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot(3))),
+        );
+        o.outline_fixture = Some(map);
+        o.rows_dirty = true;
+    });
+    for mode in [OverviewMode::List, OverviewMode::Outline] {
+        overview.update(vcx, |o, cx| {
+            o.view_mode = mode;
+            o.rows_dirty = true;
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+}
