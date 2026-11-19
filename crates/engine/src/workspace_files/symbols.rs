@@ -219,6 +219,7 @@ async fn run_index(
             event = changes.recv(), if !first => {
                 let Some(event) = event else { return Err("workspace file watcher stopped".into()); };
                 let mut next = Some(event);
+                let mut remaining = 256;
                 while let Some(event) = next {
                     if event.resync_required { check_freshness = true; repair = true; }
                     for change in event.changes {
@@ -228,7 +229,8 @@ async fn run_index(
                             else { removed.remove(&change.path); updates.insert(change.path); }
                         }
                     }
-                    next = changes.try_recv();
+                    remaining -= 1;
+                    next = if remaining == 0 { None } else { changes.try_recv() };
                 }
             }
             _ = async {}, if first => {}
