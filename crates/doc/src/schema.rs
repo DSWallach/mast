@@ -435,6 +435,27 @@ impl SessionDoc {
             .collect()
     }
 
+    /// The id of the first user message, from its scalar fields only: no part
+    /// text is read, and the scan ends at the first user entry (normally the
+    /// first message).
+    pub fn first_user_message_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).find_map(|index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index)
+            else {
+                return None;
+            };
+            match (map.get("role"), map.get("id")) {
+                (
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(role))),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(id))),
+                ) if role.as_str() == "user" => Some(id.as_str().to_owned()),
+                _ => None,
+            }
+        })
+    }
+
     /// Read a bounded suffix directly from the containers, without expanding
     /// the full messages tree. For first paint only: the full watch must follow.
     /// Limits count parts rather than joined messages (one turn can have tens

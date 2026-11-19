@@ -15,6 +15,8 @@ mod artifacts;
 mod auth;
 #[path = "../born_chat2_race.rs"]
 mod born_chat2_race;
+#[path = "../briefing_delivery.rs"]
+mod briefing_delivery;
 #[path = "../chat_workspace_plan_rpc.rs"]
 mod chat_workspace_plan_rpc;
 #[path = "../codex_catalog.rs"]
