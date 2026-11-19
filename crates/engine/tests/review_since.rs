@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use mast_engine::diff_sync::since::{SinceError, capture_since_diff};
+use mast_engine::diff_sync::since::{SinceError, capture_since_diff, computes_for, fetch_attempts_for};
 use mast_engine::repos::Repos;
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -131,4 +131,95 @@ async fn missing_heads_are_fetched_from_origin() {
     assert!(!Command::new("git").args(["cat-file", "-e", &old]).current_dir(&clone).status().unwrap().success());
     let snapshot = capture_since_diff(&repos, &clone, "origin/main", &old, &new).await.unwrap();
     assert_eq!(paths(&snapshot), vec!["d.txt"]);
+}
+
+const TEN: &str = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+
+fn ancestor(root: &Path, old: &str, new: &str) -> bool {
+    Command::new("git").args(["merge-base", "--is-ancestor", old, new]).current_dir(root).status().unwrap().success()
+}
+
+#[tokio::test]
+async fn force_push_that_drops_a_hunk_or_a_file_shows_no_reversions() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "a.txt", "1\nA\n3\n4\n5\n6\n7\n8\n9\nTEN\n");
+    write(&root, "d.txt", "1\n2\nD\n4\n5\n6\n7\n8\n9\n10\n");
+    let old = commit(&root, "f1: two hunks in a.txt and a change to d.txt");
+    // Rewrite: keep a.txt's first hunk, drop its second hunk and drop d.txt entirely.
+    git(&root, &["reset", "-q", "--hard", "main"]);
+    write(&root, "a.txt", "1\nA\n3\n4\n5\n6\n7\n8\n9\n10\n");
+    write(&root, "c.txt", "1\n2\nC\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f1 rewritten");
+    assert!(!ancestor(&root, &old, &new));
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(paths(&snapshot), vec!["c.txt"], "only the added change shows; dropped hunks and files are not reversions");
+    assert!(!snapshot.patch.contains("TEN") && !snapshot.patch.contains("+D") && !snapshot.patch.contains("-A"));
+}
+
+#[tokio::test]
+async fn base_merged_into_the_branch_shows_only_the_authors_changes() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "a.txt", "1\n2\nA\n4\n5\n6\n7\n8\n9\n10\n");
+    let old = commit(&root, "f1");
+    git(&root, &["checkout", "-q", "main"]);
+    write(&root, "c.txt", "1\n2\nC\n4\n5\n6\n7\n8\n9\n10\n");
+    commit(&root, "main moves");
+    git(&root, &["checkout", "-q", "feature"]);
+    git(&root, &["merge", "-q", "--no-ff", "-m", "Update branch", "main"]);
+    write(&root, "d.txt", "1\n2\nD\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f2");
+    assert!(ancestor(&root, &old, &new), "a merge keeps old as an ancestor");
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(paths(&snapshot), vec!["d.txt"], "the base's c.txt change is not the author's");
+}
+
+#[tokio::test]
+async fn rename_deletion_and_binary_changes_are_kept_when_new() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "a.txt", "1\n2\nA\n4\n5\n6\n7\n8\n9\n10\n");
+    let old = commit(&root, "f1");
+    git(&root, &["checkout", "-q", "main"]);
+    write(&root, "c.txt", "1\n2\nC\n4\n5\n6\n7\n8\n9\n10\n");
+    commit(&root, "main moves");
+    git(&root, &["checkout", "-q", "-B", "feature", "main"]);
+    write(&root, "a.txt", "1\n2\nA\n4\n5\n6\n7\n8\n9\n10\n");
+    git(&root, &["mv", "d.txt", "moved name.txt"]);
+    git(&root, &["rm", "-q", "c.txt"]);
+    std::fs::write(root.join("blob.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+    let new = commit(&root, "f2: rename, delete, binary");
+    assert!(!ancestor(&root, &old, &new));
+    let snapshot = capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    let got = paths(&snapshot);
+    assert!(got.contains(&"moved name.txt".to_owned()), "{got:?}");
+    assert!(got.contains(&"c.txt".to_owned()), "deletion kept: {got:?}");
+    assert!(got.contains(&"blob.bin".to_owned()), "binary kept: {got:?}");
+    assert!(!got.contains(&"a.txt".to_owned()), "carried hunk dropped: {got:?}");
+    assert!(snapshot.patch.contains("moved name.txt"));
+}
+
+#[tokio::test]
+async fn cached_pair_computes_once_and_a_missing_head_is_not_refetched() {
+    let (_tmp, root, repos) = repo();
+    git(&root, &["checkout", "-qb", "feature"]);
+    write(&root, "a.txt", "1\n2\nA\n4\n5\n6\n7\n8\n9\n10\n");
+    let old = commit(&root, "f1");
+    write(&root, "d.txt", TEN);
+    write(&root, "d.txt", "1\n2\nD\n4\n5\n6\n7\n8\n9\n10\n");
+    let new = commit(&root, "f2");
+    let before = computes_for(&root);
+    capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(computes_for(&root), before + 1);
+    capture_since_diff(&repos, &root, "main", &old, &new).await.unwrap();
+    assert_eq!(computes_for(&root), before + 1, "a cache hit runs no git");
+    // An old head that cannot be fetched is asked for once, then backed off.
+    let gone = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    let attempts = fetch_attempts_for(&root);
+    for _ in 0..3 {
+        let error = capture_since_diff(&repos, &root, "main", gone, &new).await.unwrap_err();
+        assert!(matches!(error, SinceError::OldUnavailable(_)));
+    }
+    assert_eq!(fetch_attempts_for(&root), attempts + 1);
 }

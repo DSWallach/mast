@@ -26,6 +26,35 @@ use crate::repos::Repos;
 /// Prefix of the RPC error when the old head cannot be found or fetched.
 pub const OLD_UNAVAILABLE: &str = "old-head-unavailable";
 const CACHE_ENTRIES: usize = 8;
+/// How long a commit that could not be fetched is not asked for again.
+const FETCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn counters() -> &'static Mutex<std::collections::HashMap<String, (u64, u64)>> {
+    static COUNTERS: OnceLock<Mutex<std::collections::HashMap<String, (u64, u64)>>> = OnceLock::new();
+    COUNTERS.get_or_init(Default::default)
+}
+
+fn bump(root: &Path, computes: u64, fetches: u64) {
+    let mut counters = counters().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = counters.entry(root.display().to_string()).or_default();
+    entry.0 += computes;
+    entry.1 += fetches;
+}
+
+/// Range diffs computed (cache misses) for this repository since startup; tests assert hits compute nothing.
+pub fn computes_for(root: &Path) -> u64 {
+    counters().lock().unwrap_or_else(|p| p.into_inner()).get(&root.display().to_string()).map_or(0, |c| c.0)
+}
+
+/// Network fetches attempted for missing commits in this repository since startup.
+pub fn fetch_attempts_for(root: &Path) -> u64 {
+    counters().lock().unwrap_or_else(|p| p.into_inner()).get(&root.display().to_string()).map_or(0, |c| c.1)
+}
+
+fn failed_fetches() -> &'static Mutex<std::collections::HashMap<(String, String), std::time::Instant>> {
+    static FAILED: OnceLock<Mutex<std::collections::HashMap<(String, String), std::time::Instant>>> = OnceLock::new();
+    FAILED.get_or_init(Default::default)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinceError {
@@ -62,11 +91,28 @@ async fn ensure_commit(root: &Path, sha: &str) -> bool {
     if has_commit(root, sha).await {
         return true;
     }
+    let key = (root.display().to_string(), sha.to_owned());
+    let recently_failed = failed_fetches()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .is_some_and(|at| at.elapsed() < FETCH_BACKOFF);
+    if recently_failed {
+        return false;
+    }
+    bump(root, 0, 1);
     let (repo, wanted) = (root.to_path_buf(), sha.to_owned());
     let fetched = tokio::task::spawn_blocking(move || crate::diff_targets::fetch_commit(&repo, &wanted))
         .await
         .is_ok_and(|result| result.is_ok());
-    fetched && has_commit(root, sha).await
+    let present = fetched && has_commit(root, sha).await;
+    let mut failed = failed_fetches().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if present {
+        failed.remove(&key);
+    } else {
+        failed.insert(key, std::time::Instant::now());
+    }
+    present
 }
 
 async fn rev(root: &Path, args: &[&str]) -> Result<String, SinceError> {
@@ -79,6 +125,11 @@ async fn rev(root: &Path, args: &[&str]) -> Result<String, SinceError> {
 }
 
 /// Diff `old` to `new` for a PR whose base is `base_ref` (a ref or sha).
+///
+/// A plain `old..new` diff is only right when `old` is an ancestor of `new` and both
+/// share the same merge-base with the base: otherwise (force-push, rebase, or the base
+/// merged into the branch) the base's own changes would drown the author's, so the
+/// interdiff is used.
 pub async fn capture_since_diff(
     repos: &Repos,
     root: &Path,
@@ -89,24 +140,11 @@ pub async fn capture_since_diff(
     if !valid_object_id(old) || !valid_object_id(new) {
         return Err(SinceError::Failed("heads must be full commit ids".into()));
     }
-    if !ensure_commit(root, new).await {
-        return Err(SinceError::Failed(format!("{new} is not available in this repository")));
+    if base_ref.starts_with('-') || base_ref.is_empty() {
+        return Err(SinceError::Failed("invalid base ref".into()));
     }
-    if !ensure_commit(root, old).await {
-        return Err(SinceError::OldUnavailable(old.to_owned()));
-    }
-    let ancestor = capture_git(root, &["merge-base", "--is-ancestor", old, new], 64)
-        .await
-        .is_ok();
-    let (old_base, new_base) = if ancestor {
-        (String::new(), String::new())
-    } else {
-        (
-            rev(root, &["merge-base", base_ref, old]).await?,
-            rev(root, &["merge-base", base_ref, new]).await?,
-        )
-    };
-    let key = format!("{}\0{old}\0{new}\0{old_base}\0{new_base}", root.display());
+    // Answer from the cache before any git runs.
+    let key = format!("{}\0{old}\0{new}\0{base_ref}", root.display());
     if let Some(hit) = cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -116,9 +154,23 @@ pub async fn capture_since_diff(
     {
         return Ok(hit);
     }
-    let snapshot = if ancestor {
+    if !ensure_commit(root, new).await {
+        return Err(SinceError::Failed(format!("{new} is not available in this repository")));
+    }
+    if !ensure_commit(root, old).await {
+        return Err(SinceError::OldUnavailable(old.to_owned()));
+    }
+    bump(root, 1, 0);
+    let ancestor = capture_git(root, &["merge-base", "--is-ancestor", old, new], 64)
+        .await
+        .is_ok();
+    let old_base = rev(root, &["merge-base", "--end-of-options", base_ref, old]).await;
+    let new_base = rev(root, &["merge-base", "--end-of-options", base_ref, new]).await;
+    let same_base = matches!((&old_base, &new_base), (Ok(a), Ok(b)) if a == b);
+    let snapshot = if ancestor && same_base {
         capture_revision_pair_diff(repos, root, old, new).await.map_err(failed)?
     } else {
+        let (old_base, new_base) = (old_base?, new_base?);
         let before = capture_revision_pair_diff(repos, root, &old_base, old).await.map_err(failed)?;
         let after = capture_revision_pair_diff(repos, root, &new_base, new).await.map_err(failed)?;
         interdiff(&before, after)
@@ -144,8 +196,7 @@ fn split_patch(patch: &str) -> Vec<FileChunk<'_>> {
         .windows(2)
         .map(|w| {
             let chunk = &patch[w[0]..w[1]];
-            let first_line = chunk.lines().next().unwrap_or_default();
-            let path = first_line.rsplit_once(" b/").map_or(first_line, |(_, p)| p).to_owned();
+            let path = chunk_path(chunk);
             let mut hunk_starts: Vec<usize> = chunk
                 .match_indices("@@ ")
                 .map(|(i, _)| i)
@@ -160,6 +211,66 @@ fn split_patch(patch: &str) -> Vec<FileChunk<'_>> {
             }
         })
         .collect()
+}
+
+/// Undo git's C-style quoting of a path (`"a\\tb"`, octal escapes for non-ASCII bytes).
+fn unquote(raw: &str) -> String {
+    let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else {
+        return raw.to_owned();
+    };
+    let bytes = inner.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match bytes[i] {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'0'..=b'7' => {
+                let end = (i + 3).min(bytes.len());
+                let digits = &inner[i..end];
+                let take = digits.bytes().take_while(|b| (b'0'..=b'7').contains(b)).count();
+                out.push(u8::from_str_radix(&digits[..take], 8).unwrap_or(b'?'));
+                i += take - 1;
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The file's new path from the chunk's own header lines (which carry the quoting git
+/// applies), not by splitting `diff --git a/x b/y`, which is ambiguous for spaces.
+fn chunk_path(chunk: &str) -> String {
+    let header_end = chunk.find("\n@@ ").unwrap_or(chunk.len());
+    let mut fallback = None;
+    for line in chunk[..header_end].lines() {
+        if let Some(path) = line.strip_prefix("rename to ") {
+            return unquote(path);
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            if path != "/dev/null" {
+                let path = unquote(path);
+                return path.strip_prefix("b/").unwrap_or(&path).to_owned();
+            }
+        } else if let Some(path) = line.strip_prefix("--- ") {
+            if path != "/dev/null" {
+                let path = unquote(path);
+                fallback = Some(path.strip_prefix("a/").unwrap_or(&path).to_owned());
+            }
+        }
+    }
+    fallback.unwrap_or_else(|| {
+        let first = chunk.lines().next().unwrap_or_default();
+        unquote(first.rsplit_once(" b/").map_or(first, |(_, p)| p))
+    })
 }
 
 /// Identity of a hunk's changed lines under a path (line numbers and context ignored).
@@ -213,7 +324,11 @@ fn interdiff(before: &DiffSnapshot, mut after: DiffSnapshot) -> DiffSnapshot {
         counts.insert(file.path, (adds, dels));
     }
     if patch.len() > MAX_PATCH_BYTES {
-        let boundary = patch[..MAX_PATCH_BYTES].rfind('\n').unwrap_or(0);
+        let mut cut = MAX_PATCH_BYTES;
+        while !patch.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let boundary = patch[..cut].rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
         patch.push_str("\n# Comet diff truncated\n");
         after.truncated = true;
@@ -256,5 +371,19 @@ mod tests {
         let moved = "@@ -90,2 +90,2 @@\n other ctx\n-a\n+b\n";
         assert_eq!(hunk_key("f", files[0].hunks[0]), hunk_key("f", moved));
         assert_ne!(hunk_key("f", files[0].hunks[0]), hunk_key("g", moved));
+    }
+
+    #[test]
+    fn quoted_and_spaced_paths_are_parsed_from_the_headers() {
+        assert_eq!(unquote("\"a\\tb\\\"c\""), "a\tb\"c");
+        assert_eq!(unquote("\"caf\\303\\251.txt\""), "caf\u{e9}.txt");
+        let spaced = "diff --git a/my file.txt b/my file.txt\n--- a/my file.txt\n+++ b/my file.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(split_patch(spaced)[0].path, "my file.txt");
+        let quoted = "diff --git \"a/t\\tb\" \"b/t\\tb\"\n--- \"a/t\\tb\"\n+++ \"b/t\\tb\"\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(split_patch(quoted)[0].path, "t\tb");
+        let rename = "diff --git a/x b/y\nsimilarity index 90%\nrename from x\nrename to y\n";
+        assert_eq!(split_patch(rename)[0].path, "y");
+        let deleted = "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+        assert_eq!(split_patch(deleted)[0].path, "gone");
     }
 }
