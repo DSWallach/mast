@@ -121,6 +121,11 @@ async fn symbol_index_tracks_workspace_changes() {
     let initial_matches = client.call(methods::QUERY_WORKSPACE_SYMBOLS, params("answer")).await.unwrap();
     assert_eq!(initial_matches["matches"][0]["symbol"]["name"], "answer");
     assert_eq!(initial_matches["truncated"], false);
+    let exact = client.call(methods::QUERY_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "query":"symbol_1", "limit":200, "exactName":true, "kinds":["function"], "sourcePath":"many.rs"})).await.unwrap();
+    assert_eq!(exact["exactName"], true);
+    let matches = exact["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["symbol"]["name"], "symbol_1");
     let bounded = client.call(methods::QUERY_WORKSPACE_SYMBOLS, serde_json::json!({"chatId":"chat-symbols", "query":"", "limit":10000})).await.unwrap();
     assert_eq!(bounded["matches"].as_array().unwrap().len(), 200);
     assert_eq!(bounded["truncated"], true);
