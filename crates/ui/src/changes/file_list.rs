@@ -580,7 +580,7 @@ impl Changes {
         window.focus(&self.file_tree_focus, cx);
         cx.notify();
     }
-    fn file_tree_key(&self) -> String {
+    pub(super) fn file_tree_key(&self) -> String {
         let owner = self.owner.as_ref().map(|owner| {
             (
                 &owner.chat_id,

@@ -116,6 +116,12 @@ mod tests {
             assert!(crate::settings::current(cx).changes_scope_map);
         });
         let first = changes.update(vcx, |changes, cx| {
+            let tree_key = changes.file_tree_key();
+            changes
+                .file_tree_collapsed
+                .entry(tree_key)
+                .or_default()
+                .insert("group/".into());
             let parsed = changes.parsed.as_mut().unwrap();
             parsed.key = "grouped".into();
             for index in 0..500 {
@@ -144,7 +150,10 @@ mod tests {
             .center();
         vcx.simulate_click(more, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
-        changes.read_with(vcx, |changes, _| assert!(!changes.scope_map_selected));
+        changes.read_with(vcx, |changes, _| {
+            assert!(!changes.scope_map_selected);
+            assert!(!changes.file_tree_collapsed[&changes.file_tree_key()].contains("group/"));
+        });
         assert!(vcx.debug_bounds("changes-folder-group/").is_some());
     }
 
