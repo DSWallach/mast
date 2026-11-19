@@ -186,6 +186,8 @@ pub struct AgentTokens {
     admin: crate::admin::AdminGrants,
     /// The user-designated personal assistant chat (device-local; RPC-written only).
     personal_assistant: crate::personal_assistant::PersonalAssistantStore,
+    /// Per manager chat: whether the turn in flight owes a status revision.
+    manager_status: crate::manager_status::StatusTracker,
 }
 
 impl AgentTokens {
@@ -200,6 +202,10 @@ impl AgentTokens {
 
     pub fn personal_assistant(&self) -> &crate::personal_assistant::PersonalAssistantStore {
         &self.personal_assistant
+    }
+
+    pub fn manager_status(&self) -> &crate::manager_status::StatusTracker {
+        &self.manager_status
     }
 
     /// Mint a token for one Run. Valid until the returned lease drops or
@@ -876,7 +882,8 @@ impl AgentToolsService {
     }
 
     /// The artifact service and the caller it acts for.
-    /// `briefing_read`: read-only; the scope is the caller's Space.
+    /// `briefing_read`: read-only. Scheduled results are scoped to the
+    /// caller's Space; `kind: manager-status` to the project the caller works in.
     fn briefing_read(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
         let (service, caller) = self.artifact_call(context)?;
         let task = arguments
@@ -885,22 +892,57 @@ impl AgentToolsService {
             .map(str::trim)
             .filter(|task| !task.is_empty());
         let index_only = arguments.get("index").and_then(Value::as_bool).unwrap_or(false);
-        let scope = crate::briefing::SpaceScope(&caller.space_id);
+        let snapshot = self.work_outline.snapshot(&caller.space_id);
+        let kind = match arguments.get("kind").and_then(Value::as_str).map(str::trim) {
+            None | Some("") | Some("scheduled-results") => crate::briefing::BriefingKind::ScheduledResults,
+            Some(mast_proto::MANAGER_STATUS_KIND) => crate::briefing::BriefingKind::ManagerStatus,
+            Some(other) => {
+                return Err(AgentToolError::invalid(format!(
+                    "kind must be scheduled-results or manager-status, not {other:?}"
+                )));
+            }
+        };
+        let space_scope = crate::briefing::SpaceScope(&caller.space_id);
+        let project_scope;
+        let scope: &dyn crate::briefing::BriefingScope = match kind {
+            crate::briefing::BriefingKind::ScheduledResults => &space_scope,
+            crate::briefing::BriefingKind::ManagerStatus => {
+                let item = caller.work_item_id.as_deref().ok_or_else(|| {
+                    AgentToolError::refused(
+                        AgentToolErrorCode::Unsupported,
+                        "the Manager status is read from a chat that works under a project item",
+                    )
+                })?;
+                project_scope = crate::briefing::ProjectSubtreeScope::new(&caller.space_id, item, |id| {
+                    snapshot
+                        .items
+                        .iter()
+                        .find(|i| i.id == id)
+                        .and_then(|i| i.parent_work_item_id.clone())
+                });
+                &project_scope
+            }
+        };
         let entries = crate::briefing::read(
             &service,
-            &scope,
+            scope,
             &crate::briefing::BriefingQuery {
-                kind: crate::briefing::BriefingKind::ScheduledResults,
+                kind,
                 task,
                 include_content: !index_only,
             },
             &caller.space_id,
         )?;
         let items: Vec<String> = entries.iter().filter_map(|e| e.work_item_id.clone()).collect();
-        let snapshot = self.work_outline.snapshot(&caller.space_id);
+        let need_you = match kind {
+            crate::briefing::BriefingKind::ScheduledResults => {
+                crate::briefing::need_you_count(&snapshot.user_action_requests, &items)
+            }
+            crate::briefing::BriefingKind::ManagerStatus => 0,
+        };
         Ok(json!({
             "briefings": entries.iter().map(crate::briefing::BriefingEntry::to_json).collect::<Vec<_>>(),
-            "needYou": crate::briefing::need_you_count(&snapshot.user_action_requests, &items),
+            "needYou": need_you,
         }))
     }
 
@@ -1065,7 +1107,11 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
-        self.dispatch(&context, &params.tool, &arguments)
+        let result = self.dispatch(&context, &params.tool, &arguments);
+        if result.is_ok() && crate::manager_status::is_state_changing(&params.tool) {
+            self.tokens.manager_status().note_state_change(&context.grant.chat_id);
+        }
+        result
             .map_err(|error| match error {
                 AgentToolError::Refused {
                     code: AgentToolErrorCode::Invalid,

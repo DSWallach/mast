@@ -227,6 +227,11 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
+- **Manager status** (`engine/src/manager_status.rs`): a per-manager-chat turn tracker
+  (`StatusTracker` on `AgentTokens`) records the status artifact's revision at turn start, marks
+  the turn owing a revision when it calls a state-changing agent tool, and at turn end queues one
+  system message if no newer agent revision exists. Published inline by `artifact_publish`
+  (`content`), read through `briefing_read` (`BriefingKind::ManagerStatus`, `ProjectSubtreeScope`).
 - **Harness** (research pending — `docs/internal/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or

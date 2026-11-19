@@ -529,11 +529,12 @@ fn artifact_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: agent_tool_names::ARTIFACT_PUBLISH,
-            description: "Publish every file you wrote that the user should see (plan, diagram, state machine, option comparison) as a planning artifact of your chat's work item. Mast copies it into the work item's artifact folder (<canonical checkout>/.mast/artifacts/<work item>/), records a revision when the content changed, and returns {artifactId, revision, url, storedPath}. Later publishes with the same title and role add revisions to the same artifact. Link it in your message as [title](mast-artifact:<artifactId>), never as a bare path. HTML: write <name>.fragment.html (body content only) and publish it; a sibling <name>.preview.html is copied too. Options: publish the JSON manifest with kind options; its fragments are copied with it. Side by side renders each option at a fixed design width (default 1100 px) and scales it to the column, so set `designWidth` (px) on each manifest entry or at the top level, or `data-mast-design-width` in the fragment.",
+            description: "Publish every file you wrote that the user should see (plan, diagram, state machine, option comparison) as a planning artifact of your chat's work item. Mast copies it into the work item's artifact folder (<canonical checkout>/.mast/artifacts/<work item>/), records a revision when the content changed, and returns {artifactId, revision, url, storedPath}. Later publishes with the same title and role add revisions to the same artifact. Link it in your message as [title](mast-artifact:<artifactId>), never as a bare path. HTML: write <name>.fragment.html (body content only) and publish it; a sibling <name>.preview.html is copied too. Options: publish the JSON manifest with kind options; its fragments are copied with it. Side by side renders each option at a fixed design width (default 1100 px) and scales it to the column, so set `designWidth` (px) on each manifest entry or at the top level, or `data-mast-design-width` in the fragment. A project's Manager, which cannot write files, publishes its Manager status with inline `content` instead of `path`, with title \"Manager status\" and role \"manager-status\"; no one else may use `content`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
+                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder). Not used with `content`." },
+                    "content": { "type": "string", "description": "The whole document as text, instead of a file. Only the project Manager's status record (role manager-status)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
                     "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet", "plan"], "description": "Structured plan JSON uses kind plan; otherwise defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
@@ -542,7 +543,8 @@ fn artifact_catalog() -> Vec<ToolDef> {
                     "addressedComments": { "type": "array", "items": { "type": "string" }, "description": "Comment ids (C-n from artifact_get_plan) this revision addresses; they are marked resolved." },
                     "idempotencyKey": idempotency_key_schema()
                 },
-                "required": ["path", "title", "note", "idempotencyKey"]
+                "required": ["title", "note", "idempotencyKey"],
+                "anyOf": [{ "required": ["path"] }, { "required": ["content"] }]
             }),
         },
         ToolDef {
@@ -557,12 +559,13 @@ fn artifact_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::BRIEFING_READ,
-            description: "Read-only. The latest results artifact (briefing) of one scheduled task, or of every task in your Space, with run times: {briefings: [{task, artifactId, title, revision, runAt (epoch ms), runAtLocal, runId, workItemId, content, contentTruncated, contentAvailable}], needYou}. runAt is when the newest revision was published. needYou counts open Required Actions raised by scheduled tasks. Pass `task` (the task's name, its id, or the results artifact id) for one briefing; omit it for all. Pass `index: true` for run times only, without content. contentAvailable is false when the file lives on another device; open the artifact in Mast instead. Use this instead of read_chat or Notion to see what a briefing found.",
+            description: "Read-only. The latest results artifact (briefing) of one scheduled task, or of every task in your Space, with run times: {briefings: [{task, artifactId, title, revision, runAt (epoch ms), runAtLocal, runId, workItemId, content, contentTruncated, contentAvailable}], needYou}. runAt is when the newest revision was published. needYou counts open Required Actions raised by scheduled tasks. Pass `task` (the task's name, its id, or the results artifact id) for one briefing; omit it for all. Pass `index: true` for run times only, without content. contentAvailable is false when the file lives on another device; open the artifact in Mast instead. Use this instead of read_chat or Notion to see what a briefing found. Pass `kind: \"manager-status\"` to read your project's Manager status record instead (one entry, content is the status document); it only returns the project the calling chat works in.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "Task name, task id, or results artifact id. Omit for every task in the Space." },
-                    "index": { "type": "boolean", "default": false, "description": "Run times only, no content." }
+                    "index": { "type": "boolean", "default": false, "description": "Run times only, no content." },
+                    "kind": { "type": "string", "enum": ["scheduled-results", "manager-status"], "default": "scheduled-results", "description": "manager-status reads the project's Manager status record." }
                 }
             }),
         },

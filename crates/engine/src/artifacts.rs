@@ -411,7 +411,11 @@ impl AgentCaller {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishArgs {
+    #[serde(default)]
     path: String,
+    /// The whole document, instead of a file. Only for the Manager status.
+    #[serde(default)]
+    content: Option<String>,
     title: String,
     #[serde(default)]
     kind: Option<String>,
@@ -2730,8 +2734,14 @@ impl ArtifactsService {
             })?),
             None => None,
         };
-        let source = self.agent_path(caller, &args.path)?;
         let operation_id = publish_operation_id(&caller.chat_id, key);
+        if args.content.is_some()
+            || args.role.as_deref().is_some_and(mast_proto::is_manager_status_role)
+        {
+            let _serial = lock(&self.inner.agent_publish_serial);
+            return self.publish_manager_status(caller, &args, operation_id);
+        }
+        let source = self.agent_path(caller, &args.path)?;
         let _serial = lock(&self.inner.agent_publish_serial);
         self.guard_results_publish(caller, &args, &operation_id)?;
         let reply = self.record(PublishRequest {
@@ -2786,6 +2796,77 @@ impl ArtifactsService {
             "orphanedRowIds": orphaned_row_ids,
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
+        }))
+    }
+
+    /// The Manager status record, published from the chat as inline text: a
+    /// manager cannot write files, so there is no path. Only the current chat
+    /// of a project's Manager may publish, always under the fixed title and
+    /// role, always on the project's own item.
+    fn publish_manager_status(
+        &self,
+        caller: &AgentCaller,
+        args: &PublishArgs,
+        operation_id: String,
+    ) -> Outcome<Value> {
+        let invalid = |message: &str| ArtifactError::invalid(message.to_owned());
+        let Some(content) = args.content.as_deref() else {
+            return Err(invalid(
+                "the Manager status is published as inline `content`, not a file path",
+            ));
+        };
+        if !args.path.trim().is_empty() {
+            return Err(invalid("send either `path` or `content`, not both"));
+        }
+        let role_ok = args.role.as_deref().is_some_and(mast_proto::is_manager_status_role);
+        let title_ok = mast_proto::artifacts::normalize_title(&args.title)
+            == mast_proto::artifacts::normalize_title(mast_proto::MANAGER_STATUS_TITLE);
+        if !(role_ok && title_ok) {
+            return Err(invalid(
+                "inline `content` is only for the Manager status: title \"Manager status\" with role \"manager-status\"",
+            ));
+        }
+        if args.pin_as_plan {
+            return Err(invalid("the Manager status is not the item's plan; publish it without pinAsPlan"));
+        }
+        let Some((space_id, project_item)) =
+            crate::manager_status::managed_project(self.workspace(), &caller.chat_id)
+        else {
+            return Err(invalid("only a project's Manager publishes its Manager status"));
+        };
+        if space_id != caller.space_id {
+            return Err(invalid("the project is in another Space"));
+        }
+        mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
+        let dir = std::env::temp_dir().join(format!(
+            "mast-manager-status-{}",
+            operation_id.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>()
+        ));
+        let source = dir.join("manager-status.md");
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&source, content))
+            .map_err(|e| ArtifactError::invalid(format!("could not stage the status document: {e}")))?;
+        let recorded = self.record(PublishRequest {
+            space_id: caller.space_id.clone(),
+            work_item_id: Some(project_item),
+            chat_id: Some(caller.chat_id.clone()),
+            source,
+            title: mast_proto::MANAGER_STATUS_TITLE.to_owned(),
+            kind: Some(ArtifactKind::Markdown),
+            role: Some(mast_proto::MANAGER_STATUS_ROLE.to_owned()),
+            note: args.note.clone().unwrap_or_default(),
+            pin_as_plan: false,
+            operation_id: Some(operation_id),
+            by: caller.actor(),
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        let reply = recorded?;
+        Ok(json!({
+            "artifactId": reply.artifact_id,
+            "revision": reply.revision,
+            "changed": reply.changed,
+            "url": reply.url,
+            "note": "Manager status recorded. An unchanged document records no new revision.",
         }))
     }
 

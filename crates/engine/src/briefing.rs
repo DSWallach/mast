@@ -31,17 +31,23 @@ const RESULTS_TITLE_PREFIX: &str = "Results: ";
 pub enum BriefingKind {
     /// A scheduled task's results artifact (`scheduled-results:` role).
     ScheduledResults,
+    /// A project's Manager status record (`manager-status` role).
+    ManagerStatus,
 }
 
 impl BriefingKind {
     fn matches(self, role: Option<&str>) -> bool {
         match self {
             Self::ScheduledResults => role.is_some_and(ScheduledRunResults::is_results_role),
+            Self::ManagerStatus => role.is_some_and(mast_proto::is_manager_status_role),
         }
     }
 
     /// Identifies one briefing of this kind across renames and items.
     fn identity(self, artifact: &ArtifactView) -> String {
+        if self == Self::ManagerStatus {
+            return artifact.work_item_id.clone().unwrap_or_else(|| artifact.id.clone());
+        }
         artifact
             .role
             .as_deref()
@@ -68,6 +74,41 @@ pub struct SpaceScope<'a>(pub &'a str);
 impl BriefingScope for SpaceScope<'_> {
     fn permits(&self, source: &BriefingSource<'_>) -> bool {
         source.artifact.space_id == self.0
+    }
+}
+
+/// A chat inside a project reads that project's Manager status and nothing
+/// else: only the status kind, and only on the caller's item or one of its
+/// ancestors. Other projects' records are refused like missing ones.
+pub struct ProjectSubtreeScope {
+    space_id: String,
+    items: Vec<String>,
+}
+
+impl ProjectSubtreeScope {
+    /// `item_id` is the item the caller works under; `parents` maps an item id
+    /// to its parent id.
+    pub fn new(space_id: &str, item_id: &str, parent_of: impl Fn(&str) -> Option<String>) -> Self {
+        let mut items = vec![item_id.to_owned()];
+        while let Some(parent) = parent_of(items.last().expect("never empty")) {
+            if items.contains(&parent) {
+                break;
+            }
+            items.push(parent);
+        }
+        Self { space_id: space_id.to_owned(), items }
+    }
+}
+
+impl BriefingScope for ProjectSubtreeScope {
+    fn permits(&self, source: &BriefingSource<'_>) -> bool {
+        source.kind == BriefingKind::ManagerStatus
+            && source.artifact.space_id == self.space_id
+            && source
+                .artifact
+                .work_item_id
+                .as_ref()
+                .is_some_and(|item| self.items.contains(item))
     }
 }
 
@@ -557,5 +598,69 @@ mod tests {
         ];
         assert_eq!(need_you_count(&requests, &["i1".into()]), 2);
         assert_eq!(need_you_count(&requests, &[]), 0);
+    }
+    fn status(id: &str, item: &str, space: &str, at: i64) -> ArtifactView {
+        let mut a = artifact(id, "unused", "Manager status", space, at);
+        a.role = Some(mast_proto::MANAGER_STATUS_ROLE.into());
+        a.work_item_id = Some(item.into());
+        a
+    }
+
+    #[test]
+    fn manager_status_is_its_own_kind_and_one_per_project() {
+        let found = select(
+            vec![
+                status("old", "proj", "s", 1),
+                status("new", "proj", "s", 2),
+                artifact("r", "t1", "Results: Slack", "s", 9),
+            ],
+            &SpaceScope("s"),
+            BriefingKind::ManagerStatus,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ids(&found), ["new"]);
+        let results = select(
+            vec![status("m", "proj", "s", 1)],
+            &SpaceScope("s"),
+            BriefingKind::ScheduledResults,
+            None,
+        )
+        .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn the_project_scope_admits_the_callers_project_and_refuses_the_rest() {
+        let parent = |item: &str| match item {
+            "worker-item" => Some("proj".to_owned()),
+            "proj" => Some("root".to_owned()),
+            _ => None,
+        };
+        let all = || {
+            vec![
+                status("mine", "proj", "s", 1),
+                status("theirs", "other-proj", "s", 2),
+                status("elsewhere", "proj", "other-space", 3),
+            ]
+        };
+        for caller_item in ["proj", "worker-item"] {
+            let scope = ProjectSubtreeScope::new("s", caller_item, parent);
+            let found = select(all(), &scope, BriefingKind::ManagerStatus, None).unwrap();
+            assert_eq!(ids(&found), ["mine"], "{caller_item}");
+        }
+        let stranger = ProjectSubtreeScope::new("s", "unrelated", parent);
+        assert!(select(all(), &stranger, BriefingKind::ManagerStatus, None).unwrap().is_empty());
+        // The scope never opens scheduled results.
+        let scope = ProjectSubtreeScope::new("s", "proj", parent);
+        let mut results = artifact("a", "t1", "Results: Slack", "s", 1);
+        results.work_item_id = Some("proj".into());
+        assert!(select(vec![results], &scope, BriefingKind::ScheduledResults, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_parent_cycle_ends() {
+        let scope = ProjectSubtreeScope::new("s", "a", |i| Some(if i == "a" { "b" } else { "a" }.to_owned()));
+        assert!(select(vec![status("x", "b", "s", 1)], &scope, BriefingKind::ManagerStatus, None).unwrap().len() == 1);
     }
 }

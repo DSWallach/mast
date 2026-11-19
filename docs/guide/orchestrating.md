@@ -34,6 +34,14 @@ When the chat holds a standing role (a project's manager or the assistant), the 
 
 A role chat can only hand off through a host that moves roles. If the chat's host is older, Mast stops before starting anything and asks you to update that device. A hand-off that is interrupted midway keeps the role on the old chat; hand off again with the same summary and settings to finish it, and no second successor is started. Retrying a hand-off that already finished returns the same successor, even if that successor has since handed off again. Asking again from a reopened dialog or after a restart with the same summary and settings resumes the interrupted hand-off instead of starting another.
 
+## The Manager status record
+
+A project's manager keeps one artifact on the project item, **Manager status**, with a new revision for every update. It is what a replacement manager starts from after a hand-off, and you can open it from the item like any artifact. Its sections are fixed: goals and priorities, active work items and their workers, decisions, open questions, standing preferences, and your last five requests word for word. It begins with an `Updated:` line.
+
+The manager updates it at the end of any turn that changed state. Mast counts a turn as state-changing when the manager created or dispatched a worker or item, changed a status, archived a chat, or raised or resolved a Required Action. Mast records the revision number when each turn starts. When such a turn ends without a newer revision, Mast sends the manager one reminder turn. A checkpoint from an earlier turn never counts for a later one. If the reminder turn also ends without a revision, Mast logs it and does not ask again. A turn that only records a goal or preference you stated, with no worker or status change, is not checked.
+
+The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
+
 ## Archive finished workers
 
 On a big project the workers pile up. A worker is **finished** (`archivable: true` in `list_chats` / `get_chat`, with an `archivableReason`) when it is idle, has no open Required Actions, and any one of these holds: its item is completed; its linked PR is merged or closed; its **Ready to merge** was resolved; or it has been idle for more than 3 days with its item completed or archived.

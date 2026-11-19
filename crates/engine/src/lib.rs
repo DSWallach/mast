@@ -45,6 +45,7 @@ pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
 mod model_catalogs;
+pub mod manager_status;
 pub mod orchestrator_wakes;
 pub mod permission_rules;
 pub mod personal_assistant;
@@ -667,6 +668,7 @@ impl EngineCore {
             .personal_assistant()
             .set_store(data_dir.join("personal-assistant.json"));
         orchestrator_wakes.spawn_watchers();
+        manager_status::spawn_watch(sessions.agent_tokens(), workspace.clone(), doc_host.clone(), sessions.clone());
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
             data_dir.join("cache/pr-merged-wakes.json"), workspace.clone(), orchestrator_wakes.clone(),
         ));

@@ -136,6 +136,25 @@ Scheduled results use `SpaceScope`. Manager sessions add a
 `BriefingKind::ManagerStatus` for its status artifact and a scope that permits
 only artifacts on items inside the manager's project subtree.
 
+`briefing_read {kind: "manager-status"}` reads a project's Manager status record
+(default kind is `scheduled-results`). The scope is `ProjectSubtreeScope`: the
+record on the caller's own item or one of its ancestors, and nothing else. A
+chat in another project gets an empty list, and a chat with no work item is
+refused. The reply has the same shape, with one entry and `needYou: 0`. An unknown
+`kind` is an error.
+
+The Manager status is published with `artifact_publish` and inline `content`
+instead of `path`, because a manager cannot write files. `title` must be
+`Manager status` and `role` `manager-status`; Mast puts it on the project item, so
+every revision, from any chat that held the manager role, adds to one artifact.
+Only the current chat of a project's manager may publish it. Any other caller,
+a file `path` with that role, `pinAsPlan`, or another title or role is refused.
+The document must start with `Updated: <date and time>` and have exactly the
+level-two sections Goals and priorities, Active work items and workers,
+Decisions, Open questions, Standing preferences and Recent user requests, in that
+order. `content` and `kind` are optional fields: a host that predates them
+rejects the call or reads the default kind, and nothing else changes.
+
 A message to the parent chat (and `report_to_parent`) is not a direct send: the
 engine queues a "worker report" wake event (text capped at 4 KB, cut text marked)
 and delivers it in the parent's next "Worker updates:" batch, only while the

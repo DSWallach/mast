@@ -1419,7 +1419,7 @@ pub mod agent_tools {
         ToolUsage {
             tool: tools::ARTIFACT_PUBLISH,
             required: &[
-                p("path", "file you wrote"),
+                p("path", "file you wrote; a project Manager sends `content` instead"),
                 p("title", "human title"),
                 p("note", "one line: what changed"),
                 KEY_CREATE,
@@ -1431,6 +1431,7 @@ pub mod agent_tools {
                 ),
                 p("role", "plan, diagram, state-machine, comparison, or doc"),
                 p("pinAsPlan", "boolean"),
+                p("content", "the whole document as text, for the Manager status only"),
                 p(
                     "addressedComments",
                     "comment ids (C-n from artifact_get_plan) this revision addresses; marked resolved",
@@ -1472,6 +1473,7 @@ pub mod agent_tools {
             optional: &[
                 p("task", "task name, task id or results artifact id; omit for every task in the Space"),
                 p("index", "true for run times only, no content"),
+                p("kind", "scheduled-results (default) or manager-status"),
             ],
             example: r#"{"task": "Slack"}"#,
         },

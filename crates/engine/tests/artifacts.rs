@@ -2790,3 +2790,97 @@ async fn briefing_read_returns_the_latest_results_with_run_times_for_any_chat() 
     assert!(missing.contains("available: Slack"), "{missing}");
     assert!(tool(&rig, "zat_forged", "briefing_read", json!({})).await.is_err());
 }
+
+fn status_document(stamp: &str) -> String {
+    let sections: String = mast_proto::MANAGER_STATUS_SECTIONS
+        .iter()
+        .map(|s| format!("## {s}\nNone\n\n"))
+        .collect();
+    format!("Updated: {stamp}\n\n{sections}")
+}
+
+fn status_args(content: &str, key: &str) -> Value {
+    json!({ "title": "Manager status", "role": "manager-status", "content": content,
+            "note": "update", "idempotencyKey": key })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_publishes_its_status_inline_and_reads_it_back_inside_its_project() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    assert_eq!(first["revision"], 1);
+    let second = publish(&rig, &rig.token, status_args(&status_document("09:05"), "s2")).await;
+    assert_eq!(second["revision"], 2);
+    assert_eq!(second["artifactId"], first["artifactId"]);
+    let row = artifact(&rig, first["artifactId"].as_str().unwrap());
+    assert_eq!(row.work_item_id.as_deref(), Some(rig.item.as_str()));
+    assert_eq!(row.role.as_deref(), Some("manager-status"));
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["revision"], 2);
+    assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:05"));
+
+    // A chat in another project sees nothing; a chat with no item is refused.
+    let other = tool(&rig, &rig.other_token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    assert!(other["briefings"].as_array().unwrap().is_empty());
+    assert!(
+        tool(&rig, &rig.lone_token, "briefing_read", json!({ "kind": "manager-status" }))
+            .await
+            .is_err()
+    );
+    // The default kind never returns the status record.
+    let scheduled = tool(&rig, &rig.token, "briefing_read", json!({})).await.unwrap();
+    assert!(scheduled["briefings"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_status_publishing_is_only_for_the_manager_and_a_valid_document() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let good = status_document("09:00");
+    // Not the manager.
+    let err = tool(&rig, &rig.other_token, "artifact_publish", status_args(&good, "a"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("only a project's Manager"), "{err}");
+    // A reserved role cannot be published from a file, even by the manager.
+    let file = rig.worktree.join("status.md");
+    std::fs::write(&file, &good).unwrap();
+    let by_path = json!({ "path": file.to_string_lossy(), "title": "Manager status",
+                          "role": "manager-status", "note": "n", "idempotencyKey": "b" });
+    assert!(tool(&rig, &rig.token, "artifact_publish", by_path).await.is_err());
+    // Inline content under another title or role.
+    let mut wrong = status_args(&good, "c");
+    wrong["title"] = json!("Plan");
+    assert!(tool(&rig, &rig.token, "artifact_publish", wrong).await.is_err());
+    let mut wrong_role = status_args(&good, "d");
+    wrong_role["role"] = json!("doc");
+    assert!(tool(&rig, &rig.token, "artifact_publish", wrong_role).await.is_err());
+    // Missing sections.
+    let bad = tool(&rig, &rig.token, "artifact_publish", status_args("Updated: now\n## Decisions\n", "e"))
+        .await
+        .unwrap_err();
+    assert!(bad.contains("level-two headings"), "{bad}");
+    // Nothing was recorded by any refusal.
+    assert!(
+        rig.core
+            .workspace
+            .artifacts_of_space(SPACE)
+            .iter()
+            .all(|a| a.role.as_deref() != Some("manager-status"))
+    );
+}
