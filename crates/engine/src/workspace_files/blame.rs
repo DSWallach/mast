@@ -262,9 +262,14 @@ async fn default_branch(root: &Path) -> Option<String> {
     None
 }
 
-/// Cheap fingerprint of the branch refs from file metadata (no spawn): mtimes
-/// of `packed-refs`, `refs/heads` and its first-level subdirectories. A moved
-/// ref rewrites its file or directory entry, so the stamp changes.
+/// Directories walked by [`refs_stamp`].
+const MAX_REF_DIRS: usize = 512;
+
+/// Cheap fingerprint of the branch and remote-tracking refs from file metadata
+/// (no spawn): the mtime of `packed-refs` plus that of every directory under
+/// `refs/heads` and `refs/remotes` (nested branches like `feature/x` included),
+/// bounded to [`MAX_REF_DIRS`] directories. Creating, moving or deleting a ref
+/// rewrites its file in that directory, so the directory's mtime changes.
 pub(super) fn refs_stamp(common_dir: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -276,17 +281,55 @@ pub(super) fn refs_stamp(common_dir: &Path) -> u64 {
             .map_or(0, |d| d.as_nanos())
     };
     mtime(&common_dir.join("packed-refs")).hash(&mut hasher);
-    let heads = common_dir.join("refs/heads");
-    mtime(&heads).hash(&mut hasher);
-    if let Ok(read) = std::fs::read_dir(&heads) {
-        let mut entries: Vec<_> = read.flatten().take(256).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            entry.file_name().hash(&mut hasher);
-            mtime(&entry.path()).hash(&mut hasher);
+    let mut stack = vec![common_dir.join("refs/heads"), common_dir.join("refs/remotes")];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        seen += 1;
+        if seen > MAX_REF_DIRS {
+            break;
+        }
+        mtime(&dir).hash(&mut hasher);
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut children: Vec<_> = read.flatten().collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(child.path());
+            } else {
+                // A file's own mtime catches an in-place rewrite of a ref.
+                child.file_name().hash(&mut hasher);
+                mtime(&child.path()).hash(&mut hasher);
+            }
         }
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod refs_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn the_stamp_changes_for_nested_and_remote_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path();
+        std::fs::create_dir_all(git.join("refs/heads/feature")).unwrap();
+        std::fs::create_dir_all(git.join("refs/remotes/origin")).unwrap();
+        let sha = "a".repeat(40);
+        let base = refs_stamp(git);
+        assert_eq!(base, refs_stamp(git), "stable while nothing moves");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(git.join("refs/heads/feature/x"), &sha).unwrap();
+        let nested = refs_stamp(git);
+        assert_ne!(base, nested, "nested branch ref");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(git.join("refs/remotes/origin/main"), &sha).unwrap();
+        let remote = refs_stamp(git);
+        assert_ne!(nested, remote, "remote-tracking ref");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(git.join("packed-refs"), format!("{sha} refs/heads/p\n")).unwrap();
+        assert_ne!(remote, refs_stamp(git), "packed-refs");
+    }
 }
 
 /// Parse `git blame --porcelain`: header lines `<sha> <orig> <final> [<count>]`

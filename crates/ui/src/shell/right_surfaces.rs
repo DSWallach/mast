@@ -1,6 +1,12 @@
 use super::*;
 
 /// Gaps between attempts to scroll an opened chat to a turn: 0 + these sum to ~15 s.
+enum TurnScroll {
+    Done,
+    Waiting,
+    Abandoned,
+}
+
 const TURN_SCROLL_RETRY_MS: [u64; 8] = [0, 250, 500, 1000, 2000, 3000, 4000, 4000];
 
 impl Shell {
@@ -258,36 +264,46 @@ impl Shell {
         let Some(turn_id) = turn_id else { return };
         self.turn_scroll_task = Some(cx.spawn(async move |this, cx| {
             let mut found = false;
-            for delay_ms in TURN_SCROLL_RETRY_MS {
+            for (attempt, delay_ms) in TURN_SCROLL_RETRY_MS.into_iter().enumerate() {
                 if delay_ms > 0 {
                     cx.background_executor().timer(std::time::Duration::from_millis(delay_ms)).await;
                 }
-                let done = this
+                // Done, still waiting, or the user went elsewhere (stop quietly).
+                let outcome = this
                     .update(cx, |this, cx| {
+                        if attempt > 0 && this.active_chat != chat_id {
+                            return TurnScroll::Abandoned;
+                        }
                         let transcript = this.transcript.clone();
                         transcript.update(cx, |transcript, cx| {
                             if transcript.chat_id() != Some(chat_id.as_str()) {
-                                return false;
+                                return TurnScroll::Waiting;
                             }
                             match transcript.rows().iter().position(|row| row.entry_id.as_ref() == turn_id.as_str()) {
                                 Some(index) => {
                                     transcript.scroll_to_row(index, cx);
-                                    true
+                                    TurnScroll::Done
                                 }
-                                None => false,
+                                None => TurnScroll::Waiting,
                             }
                         })
                     })
-                    .unwrap_or(true);
-                if done {
-                    found = true;
-                    break;
+                    .unwrap_or(TurnScroll::Abandoned);
+                match outcome {
+                    TurnScroll::Done => {
+                        found = true;
+                        break;
+                    }
+                    TurnScroll::Abandoned => return,
+                    TurnScroll::Waiting => {}
                 }
             }
             if !found {
                 let _ = this.update(cx, |this, cx| {
-                    this.sidebar_notice = Some("Couldn't find that turn".into());
-                    cx.notify();
+                    if this.active_chat == chat_id {
+                        this.sidebar_notice = Some("Couldn't find that turn".into());
+                        cx.notify();
+                    }
                 });
             }
         }));
