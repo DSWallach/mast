@@ -967,7 +967,7 @@ impl Shell {
                         let path = row.path.clone();
                         let expected = symbol.clone();
                         cx.background_executor().spawn(async move {
-                            let current = mast_syntax::symbols::extract(&source, &path, 5_000).into_iter().find(|candidate| candidate.name == expected.name && candidate.start_line == expected.start_line)?;
+                            let current = mast_syntax::symbols::extract(&source, &path, 5_000).into_iter().filter(|candidate| candidate.name == expected.name && candidate.kind == expected.kind).min_by_key(|candidate| candidate.start_line.abs_diff(expected.start_line))?;
                             let range = mast_proto::CodeRefRange { start_line: current.start_line, end_line: current.end_line };
                             let snippet = crate::code_ref::snippet(&source, range)?;
                             Some(crate::code_ref::StagedCodeRef { id: uuid::Uuid::new_v4().to_string(), reference: mast_proto::CodeRef { version: 1, location: mast_proto::CodeRefLocation { repo_id: identity.repo_id, worktree_id: Some(identity.checkout_id).filter(|id| !id.is_empty()), repo_root: None, path }, kind: mast_proto::CodeRefKind::Symbol, range: Some(range), symbol: Some(mast_proto::CodeRefSymbol { name: current.name, kind: format!("{:?}", current.kind).to_lowercase() }), at: mast_proto::CodeRefRevision::WorkingTree { working_tree: true, content_hash: crate::code_ref::content_hash(&source) } }, snippet })
@@ -1021,7 +1021,7 @@ impl Shell {
                     "escape" => this.close_workspace_search(window, cx),
                     "enter" => {
                         let index = this.workspace_search.as_ref().map_or(0, |s| s.active);
-                        if event.keystroke.modifiers.alt { this.add_workspace_symbol_to_chat(index, cx); }
+                        if event.keystroke.modifiers.alt && mode == SearchMode::Symbols { this.add_workspace_symbol_to_chat(index, cx); }
                         else { this.select_workspace_result(index, window, cx); }
                     }
                     "up" | "down" => {
