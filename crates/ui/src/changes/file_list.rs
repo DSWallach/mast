@@ -566,9 +566,12 @@ fn file_tree_rows(
 impl Changes {
     pub(super) fn reveal_scope_folder(&mut self, folder: String, file: usize, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.file_tree_key();
+        let folder = if folder.is_empty() {
+            self.parsed.as_ref().and_then(|parsed| parsed.files.get(file)).and_then(|file| file.path.rsplit_once('/')).map(|(folder, _)| folder.to_owned()).unwrap_or_default()
+        } else { folder };
         let target = format!("{}/", folder.trim_end_matches('/'));
         if let Some(collapsed) = self.file_tree_collapsed.get_mut(&key) {
-            collapsed.retain(|path| !target.starts_with(path));
+            collapsed.retain(|path| !target.starts_with(path) && !path.starts_with(&target));
         }
         self.file_filter.update(cx, |input, cx| input.set_text("", cx));
         self.scope_map_selected = false;
@@ -693,10 +696,10 @@ impl Changes {
         let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
         if let Some((path, file)) = self.scope_map_reveal.take() {
             let target = format!("{}/", path.trim_end_matches('/'));
-            let position = tree_rows.iter().position(|row| match row {
-                FileTreeRow::Folder { path, .. } => !target.starts_with("/") && (path == &target || path.starts_with(&target) || target.starts_with(path)),
-                FileTreeRow::File { index, .. } => *index == file,
-            });
+            let position = tree_rows.iter().enumerate().filter_map(|(index, row)| match row {
+                FileTreeRow::Folder { path, .. } if !target.starts_with('/') && (path == &target || path.starts_with(&target) || target.starts_with(path)) => Some((index, path.len())),
+                _ => None,
+            }).max_by_key(|(_, length)| *length).map(|(index, _)| index).or_else(|| tree_rows.iter().position(|row| matches!(row, FileTreeRow::File { index, .. } if *index == file)));
             if let Some(position) = position { self.file_tree_scroll.scroll_to_item(position, gpui::ScrollStrategy::Nearest); }
         }
         let rows_key = tree_key.clone();

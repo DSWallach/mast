@@ -177,7 +177,7 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                     let small = small_folders[index];
                     index += 1;
                     if small {
-                        collect_entries(child, &mut more);
+                        collect_entries(*child, &mut more);
                     }
                     !small
                 });
