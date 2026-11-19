@@ -19,7 +19,7 @@ use mast_proto::{
     derive_id, roles,
 };
 use mast_rpc::methods;
-use serde_json::json;
+use serde_json::{Value, json};
 
 const NOTICE: &str = "Latest briefings: Slack 05:31. Read them with briefing_read.\n\n";
 
@@ -363,9 +363,9 @@ async fn assemble_with_result(rig: &Rig) -> Assembled {
         .await
         .unwrap();
     Assembled {
-        rpc,
+        _rpc: rpc,
         client,
-        publisher,
+        _publisher: publisher,
         artifact_id,
     }
 }
