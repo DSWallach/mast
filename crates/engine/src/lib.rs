@@ -23,6 +23,7 @@ pub mod archivable;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
+pub mod briefing;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;
@@ -847,6 +848,36 @@ impl EngineCore {
         .with_artifacts(self.artifacts.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        {
+            let index_enabled = self.scheduled_tasks.briefing_index_reader();
+            let artifacts = self.artifacts.clone();
+            let workspace = self.workspace.clone();
+            let outline = rpc.work_outline();
+            self.sessions.set_chat_start_notice(Arc::new(move |chat_id: &str| {
+                if !index_enabled() {
+                    return None;
+                }
+                let chat = workspace.chat(chat_id).ok().flatten()?;
+                if chat.is_background_task_run() {
+                    return None;
+                }
+                let space = chat.space_id?;
+                let entries = briefing::read(
+                    &artifacts,
+                    &briefing::SpaceScope(&space),
+                    &briefing::BriefingQuery {
+                        kind: briefing::BriefingKind::ScheduledResults,
+                        task: None,
+                        include_content: false,
+                    },
+                    &space,
+                )
+                .ok()?;
+                let items: Vec<String> = entries.iter().filter_map(|e| e.work_item_id.clone()).collect();
+                let need = briefing::need_you_count(&outline.snapshot(&space).user_action_requests, &items);
+                briefing::index_line(&entries, need, now_ms()).map(|line| briefing::chat_start_notice(&line))
+            }));
+        }
         rpc.work_outline()
             .workflow_pack()
             .set_receipt_dir(self.workflow_pack_receipts.clone());

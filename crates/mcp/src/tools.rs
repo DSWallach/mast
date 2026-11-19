@@ -556,6 +556,17 @@ fn artifact_catalog() -> Vec<ToolDef> {
             input_schema: json!({"type": "object", "properties": {"artifactId": {"type": "string"}}, "required": ["artifactId"]}),
         },
         ToolDef {
+            name: agent_tool_names::BRIEFING_READ,
+            description: "Read-only. The latest results artifact (briefing) of one scheduled task, or of every task in your Space, with run times: {briefings: [{task, artifactId, title, revision, runAt (epoch ms), runAtLocal, runId, workItemId, content, contentTruncated, contentAvailable}], needYou}. runAt is when the newest revision was published. needYou counts open Required Actions raised by scheduled tasks. Pass `task` (the task's name, its id, or the results artifact id) for one briefing; omit it for all. Pass `index: true` for run times only, without content. contentAvailable is false when the file lives on another device; open the artifact in Mast instead. Use this instead of read_chat or Notion to see what a briefing found.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "Task name, task id, or results artifact id. Omit for every task in the Space." },
+                    "index": { "type": "boolean", "default": false, "description": "Run times only, no content." }
+                }
+            }),
+        },
+        ToolDef {
             name: agent_tool_names::ARTIFACT_RENDER_CHECK,
             description: "Render an artifact exactly as Mast shows it (same wrapper, sandbox, and theme) in the Mast window on this device and return screenshots plus errors (console errors, blocked resources, Mermaid parse errors, empty render) and warnings (overflow, content outside the viewport, low contrast, and layout heuristics in layoutWarnings: clipped text, overlapping siblings, narrow text columns, elements wider than their parent, fixed widths wider than the viewport). By default it renders a narrow (800x800) and a wide (1440x900) viewport in the current theme; pass `themes: [\"light\", \"dark\"]` to check both themes (at most 4 images per call; each image comes with a label). Warnings are heuristics: always look at every screenshot. Run it after creating or changing any visual artifact, fix what is wrong, and check again. If it fails with renderUnavailable, say the artifact was not checked.",
             input_schema: json!({

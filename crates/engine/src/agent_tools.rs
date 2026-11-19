@@ -876,6 +876,34 @@ impl AgentToolsService {
     }
 
     /// The artifact service and the caller it acts for.
+    /// `briefing_read`: read-only; the scope is the caller's Space.
+    fn briefing_read(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
+        let (service, caller) = self.artifact_call(context)?;
+        let task = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|task| !task.is_empty());
+        let index_only = arguments.get("index").and_then(Value::as_bool).unwrap_or(false);
+        let scope = crate::briefing::SpaceScope(&caller.space_id);
+        let entries = crate::briefing::read(
+            &service,
+            &scope,
+            &crate::briefing::BriefingQuery {
+                kind: crate::briefing::BriefingKind::ScheduledResults,
+                task,
+                include_content: !index_only,
+            },
+            &caller.space_id,
+        )?;
+        let items: Vec<String> = entries.iter().filter_map(|e| e.work_item_id.clone()).collect();
+        let snapshot = self.work_outline.snapshot(&caller.space_id);
+        Ok(json!({
+            "briefings": entries.iter().map(crate::briefing::BriefingEntry::to_json).collect::<Vec<_>>(),
+            "needYou": crate::briefing::need_you_count(&snapshot.user_action_requests, &items),
+        }))
+    }
+
     fn artifact_call(
         &self,
         context: &CallContext,
@@ -1130,6 +1158,7 @@ impl AgentToolsService {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_get_decisions(&caller, arguments)?)
             }
+            tools::BRIEFING_READ => self.briefing_read(context, arguments),
             tools::ARTIFACT_RENDER_CHECK => {
                 let (service, caller) = self.artifact_call(context)?;
                 Ok(service.agent_render_check(&caller, arguments)?)

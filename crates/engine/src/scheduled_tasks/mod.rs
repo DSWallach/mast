@@ -56,6 +56,16 @@ impl ScheduledTasks {
             identities_checked: std::sync::Mutex::new(None),
         })))
     }
+    /// Whether new interactive chats start with the briefing index line.
+    pub fn briefing_index_enabled(&self) -> bool {
+        self.0.store.briefing_index().unwrap_or(false)
+    }
+    /// The same setting without holding the scheduler (which holds the
+    /// sessions engine), for callbacks the sessions engine itself stores.
+    pub fn briefing_index_reader(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let store = self.0.store.clone();
+        move || store.briefing_index().unwrap_or(false)
+    }
     pub fn start(&self) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -103,6 +113,7 @@ impl ScheduledTasks {
         }
         let mut response = ScheduledTasksSnapshot {
             device_id: self.0.workspace.device_id().into(),
+            briefing_index: self.0.store.briefing_index()?,
             ..Default::default()
         };
         let operation = match &request {
@@ -134,6 +145,10 @@ impl ScheduledTasks {
                 drop(_guard);
                 response.cleanup = Some(self.clean_up_runs(mode).await?);
                 return Ok(response);
+            }
+            ScheduledTasksRequest::SetBriefingIndex { enabled } => {
+                self.0.store.set_briefing_index(enabled)?;
+                response.briefing_index = enabled;
             }
             ScheduledTasksRequest::History { id, before } => {
                 response.runs = self.0.store.runs(Some(&id), before)?;
