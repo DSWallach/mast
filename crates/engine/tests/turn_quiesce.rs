@@ -48,7 +48,7 @@ fn init_quiesce_env() {
 }
 
 fn run_request(prompt: &str) -> RunRequest {
-    RunRequest { scheduled_task: None, approval_rules: false,
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
         prompt: prompt.into(),
         harness: None,
         model: None,

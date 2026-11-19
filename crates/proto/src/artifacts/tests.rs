@@ -502,3 +502,33 @@ fn snapshot_helpers_pick_the_plan_first() {
     assert_eq!(plan.url(), format!("mast-artifact:{}", plan.id));
     assert_eq!(plan.current().unwrap().id, 2);
 }
+
+#[test]
+fn scheduled_results_rank_between_the_plan_and_other_artifacts() {
+    let mut plan = view();
+    plan.pinned_as_plan = true;
+    let mut results = view();
+    results.pinned_as_plan = false;
+    results.id = "b".repeat(32);
+    results.role = Some(crate::ScheduledRunResults::role_for("task"));
+    results.updated_at = 1;
+    let mut newer = view();
+    newer.pinned_as_plan = false;
+    newer.id = "c".repeat(32);
+    newer.updated_at = 99;
+    assert!(!plan.is_scheduled_results() && !newer.is_scheduled_results());
+    assert!(results.is_scheduled_results() && !results.pinned_as_plan);
+    let mut shouted = results.clone();
+    shouted.role = shouted.role.map(|role| format!(" {} ", role.to_uppercase()));
+    assert!(shouted.is_scheduled_results());
+    let snapshot = ArtifactsSnapshot {
+        artifacts: vec![newer.clone(), results.clone(), plan.clone()],
+        ..Default::default()
+    };
+    let order: Vec<_> = snapshot
+        .for_work_item("item-1")
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
+    assert_eq!(order, [plan.id, results.id, newer.id]);
+}

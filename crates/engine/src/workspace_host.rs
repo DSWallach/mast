@@ -1509,6 +1509,91 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.sweep_work_outline_orphans())
     }
 
+    /// Re-home a chat whose Space is gone when its cwd is a worktree whose
+    /// home Space exists: a chat created in a worktree Space while it was
+    /// being folded belongs where the fold sent the rest. Never creates a
+    /// Space, so a Space the user deleted stays deleted. `false` (nothing
+    /// written) for any other chat.
+    pub fn rehome_worktree_chat(&self, chat: &Chat) -> bool {
+        let Some(cwd) = chat.cwd.as_deref() else {
+            return false;
+        };
+        if worktree_home_origin(std::path::Path::new(cwd)).is_none() {
+            return false;
+        }
+        let result = self
+            .read(|doc| doc.read_spaces())
+            .map_err(EngineError::from)
+            .and_then(
+                |spaces| match space_home(&spaces, &self.inner.config.device_id, cwd) {
+                    SpaceHome::Existing(space) => {
+                        Ok(self.mutate(|doc| doc.set_chat_space(&chat.id, &space))?)
+                    }
+                    SpaceHome::New(_) => Ok(false),
+                },
+            );
+        match result {
+            Ok(written) => written,
+            Err(err) => {
+                tracing::warn!(chat = %chat.id, error = %err, "worktree chat re-home failed");
+                false
+            }
+        }
+    }
+
+    /// Fold this device's Spaces that sit on a linked worktree into the Space
+    /// of the checkout the worktree came from ([`space_home`], created when
+    /// none exists): their chats move over and the emptied Space is deleted.
+    /// Spaces that aren't [foldable](RegistryDoc::space_foldable), or are in
+    /// `held` (a scheduled task still launches into them), are left alone.
+    /// Destructive on a stale view (a peer's chats or outline rows may not
+    /// have arrived yet): callers gate on [`Self::registry_synced`].
+    /// Returns how many Spaces were folded.
+    pub fn fold_worktree_spaces(&self, held: &std::collections::HashSet<String>) -> usize {
+        let device_id = &self.inner.config.device_id;
+        let spaces = match self.read(|doc| doc.read_spaces()) {
+            Ok(spaces) => spaces,
+            Err(err) => {
+                tracing::warn!(error = %err, "worktree space fold: space read failed");
+                return 0;
+            }
+        };
+        let mut folded = 0;
+        for space in spaces
+            .iter()
+            .filter(|s| s.device_id == *device_id && !held.contains(&s.id))
+        {
+            if worktree_home_origin(std::path::Path::new(&space.path)).is_none()
+                || !self
+                    .read(|doc| doc.space_foldable(&space.id))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let into = match self.space_for_path(&space.path) {
+                Ok(into) => into,
+                Err(err) => {
+                    tracing::warn!(space = %space.id, error = %err, "worktree space fold: no home space");
+                    continue;
+                }
+            };
+            match self.mutate(|doc| doc.fold_space(&space.id, &into)) {
+                Ok(Some(moved)) => {
+                    tracing::info!(
+                        space = %space.id, path = %space.path, into = %into, chats = moved.len(),
+                        "folded worktree space into its checkout's space"
+                    );
+                    folded += 1;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(space = %space.id, error = %err, "worktree space fold failed");
+                }
+            }
+        }
+        folded
+    }
+
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
 
     pub fn watch_chats(&self) -> watch::Receiver<Vec<Chat>> {
@@ -1620,33 +1705,18 @@ impl WorkspaceHost {
         Ok(())
     }
 
-    /// An own-device space whose path matches, else one at the path's parent
-    /// checkout root, else a freshly created one at that root.
-    ///
-    /// A linked-worktree cwd resolves to the checkout root FIRST: claiming at
-    /// the worktree path itself minted a phantom sidebar space named after the
-    /// worktree folder ("clever-ember") next to the project's real space.
+    /// The own-device Space [`space_home`] picks, created when none fits.
     fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if let Some(space) = spaces
-            .iter()
-            .find(|s| s.device_id == *device_id && s.path == path)
-        {
-            return Ok(space.id.clone());
-        }
-        let root = linked_worktree_root(std::path::Path::new(path));
-        if let Some(root) = root.as_deref()
-            && let Some(space) = spaces
-                .iter()
-                .find(|s| s.device_id == *device_id && s.path == root)
-        {
-            return Ok(space.id.clone());
-        }
+        let path = match space_home(&spaces, device_id, path) {
+            SpaceHome::Existing(id) => return Ok(id),
+            SpaceHome::New(path) => path,
+        };
         let space = Space {
             id: crate::new_id(),
             device_id: device_id.clone(),
-            path: root.unwrap_or_else(|| path.to_string()),
+            path,
             name: None,
             git_detected: false,
             git_checked_at: None,
@@ -1723,7 +1793,7 @@ impl WorkspaceHost {
                             &mast_proto::PrReviewPrompts::neutral(),
                         )?;
                     }
-                    doc.set_chat_space(chat_id, &id);
+                    doc.set_chat_space(chat_id, &id)?;
                     id
                 }
             };
@@ -3062,11 +3132,13 @@ impl WorkspaceHostInner {
     }
 }
 
-/// The parent checkout root of a linked git worktree: `<path>/.git` is a FILE
-/// containing `gitdir: <root>/.git/worktrees/<name>`. `None` for a primary
-/// checkout (`.git` is a directory), a non-repo folder, or any other layout
-/// (bare-repo worktrees have no `<root>` working copy to attribute to). Pure
-/// fs reads — no git subprocess; this runs on the synchronous claim path.
+/// The checkout a linked git worktree was made from: `<path>/.git` is a FILE
+/// containing `gitdir: <git-dir>/worktrees/<name>`. A plain repo's git dir is
+/// `<root>/.git`; a submodule's is `<super>/.git/modules/<name>`, whose
+/// checkout is its `core.worktree` (e.g. `<super>/flagship`). `None` for a
+/// primary checkout (submodule primaries included), a non-repo folder, or any
+/// other layout (bare-repo worktrees have no working copy to attribute to).
+/// Pure fs reads — no git subprocess; this runs on the synchronous claim path.
 pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     let gitfile = path.join(".git");
     if !std::fs::metadata(&gitfile).ok()?.is_file() {
@@ -3083,12 +3155,165 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
         // `../..` hops against the real filesystem.
         target = std::fs::canonicalize(path.join(target)).ok()?;
     }
+    // Git writes `commondir` into every worktree's admin dir; a submodule
+    // whose own path has a `worktrees` segment doesn't have one.
     let worktrees = target.parent()?;
-    let dot_git = worktrees.parent()?;
-    if worktrees.file_name()? != "worktrees" || dot_git.file_name()? != ".git" {
+    if worktrees.file_name()? != "worktrees" || !target.join("commondir").is_file() {
         return None;
     }
-    Some(dot_git.parent()?.to_string_lossy().into_owned())
+    let git_dir = worktrees.parent()?;
+    let root = if git_dir.file_name()? == ".git" {
+        git_dir.parent()?.to_path_buf()
+    } else {
+        submodule_checkout(git_dir)?
+    };
+    Some(root.to_string_lossy().into_owned())
+}
+
+/// The working tree of a submodule git dir (`<super>/.git/modules/<name>`):
+/// its `core.worktree` (git writes it to `config.worktree` once
+/// `extensions.worktreeConfig` is on), else the path the `modules/` nesting
+/// spells out.
+fn submodule_checkout(git_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for file in ["config.worktree", "config"] {
+        if let Ok(config) = std::fs::read_to_string(git_dir.join(file))
+            && let Some(worktree) = core_worktree(&config)
+        {
+            return Some(crate::execution_scope::lexical(&git_dir.join(worktree)));
+        }
+    }
+    let mut names = Vec::new();
+    let mut cursor = git_dir;
+    loop {
+        names.push(cursor.file_name()?);
+        let modules = cursor.parent()?;
+        if modules.file_name()? != "modules" {
+            return None;
+        }
+        let owner = modules.parent()?;
+        if owner.file_name()? == ".git" {
+            let mut checkout = owner.parent()?.to_path_buf();
+            checkout.extend(names.iter().rev());
+            return Some(checkout);
+        }
+        cursor = owner;
+    }
+}
+
+/// `core.worktree` from a git config file's text.
+fn core_worktree(config: &str) -> Option<&str> {
+    let mut in_core = false;
+    for line in config.lines().map(str::trim) {
+        if let Some(section) = line.strip_prefix('[') {
+            in_core = section
+                .trim_end_matches(']')
+                .trim()
+                .eq_ignore_ascii_case("core");
+            continue;
+        }
+        if !in_core {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("worktree")
+        {
+            return Some(value.trim().trim_matches('"'));
+        }
+    }
+    None
+}
+
+/// Where a chat at `path` belongs among this device's Spaces.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpaceHome {
+    Existing(String),
+    /// No Space fits; create one at this path.
+    New(String),
+}
+
+/// A linked worktree belongs to the Space it was started from: the closest
+/// Space at or above the checkout it was made from that also holds the
+/// worktree folder (a flagship worktree under `workspace/.worktrees` belongs
+/// to `workspace`, not `workspace/flagship`), short of a broad root like
+/// HOME; else the checkout's own Space. Never a Space at the worktree path
+/// itself. Any other path, a worktree whose checkout is a broad root
+/// included, belongs to the Space at exactly that path.
+///
+/// Only worktrees compare paths resolved (git writes `gitdir:` with symlinks
+/// resolved, Space paths are stored as entered), and only after an exact
+/// match fails: resolving touches the filesystem of every Space.
+pub(crate) fn space_home(spaces: &[Space], device_id: &str, path: &str) -> SpaceHome {
+    use crate::execution_scope::canonical_lenient;
+    let own: Vec<&Space> = spaces.iter().filter(|s| s.device_id == device_id).collect();
+    let exact = |at: &str| own.iter().find(|s| s.path == at).map(|s| s.id.clone());
+    let Some(origin) = worktree_home_origin(std::path::Path::new(path)) else {
+        return exact(path).map_or_else(|| SpaceHome::New(path.to_string()), SpaceHome::Existing);
+    };
+    let resolved = std::cell::OnceCell::new();
+    let at = |dir: &std::path::Path| {
+        if let Some(id) = dir.to_str().and_then(exact) {
+            return Some(id);
+        }
+        let dir = canonical_lenient(dir);
+        resolved
+            .get_or_init(|| {
+                own.iter()
+                    .map(|s| {
+                        (
+                            s.id.clone(),
+                            canonical_lenient(std::path::Path::new(&s.path)),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .iter()
+            .find(|(_, space)| *space == dir)
+            .map(|(id, _)| id.clone())
+    };
+    let checkout = std::path::Path::new(&origin);
+    let worktree = canonical_lenient(std::path::Path::new(path));
+    checkout
+        .ancestors()
+        .take_while(|dir| !crate::repos::is_broad_workspace_root_resolved(dir))
+        .filter(|dir| worktree.starts_with(canonical_lenient(dir)))
+        .find_map(at)
+        .or_else(|| at(checkout))
+        .map_or(SpaceHome::New(origin), SpaceHome::Existing)
+}
+
+/// [`worktree_origin`], unless the worktree came from a broad root like HOME
+/// (a deleted `~/.claude/worktrees/<name>`): no Space should collect those.
+fn worktree_home_origin(path: &std::path::Path) -> Option<String> {
+    worktree_origin(path).filter(|origin| {
+        !crate::repos::is_broad_workspace_root_resolved(std::path::Path::new(origin))
+    })
+}
+
+/// [`linked_worktree_root`], plus a worktree folder that is already gone:
+/// anything under `.worktrees` (the agent-mode scripts and chat worktrees) or
+/// `.claude/worktrees` (Claude Code) came from the folder holding that. A
+/// deleted worktree under Mast's own worktrees root (`~/.mast/worktrees/
+/// <repoName>/<name>`) is not recognized: its path names only the repo's
+/// folder, not where the repo lives.
+fn worktree_origin(path: &std::path::Path) -> Option<String> {
+    if let Some(root) = linked_worktree_root(path) {
+        return Some(root);
+    }
+    if path.exists() {
+        return None;
+    }
+    let holder = path.ancestors().find_map(|dir| {
+        let name = dir.file_name()?;
+        let parent = dir.parent()?;
+        if name == ".worktrees" {
+            Some(parent)
+        } else if name == "worktrees" && parent.file_name()? == ".claude" {
+            parent.parent()
+        } else {
+            None
+        }
+    })?;
+    Some(holder.to_string_lossy().into_owned())
 }
 
 /// Local live statuses win for this device's chats; every other device's rows come
@@ -4129,7 +4354,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
         let wt = dir.path().join("clever-ember");
-        std::fs::create_dir_all(root.join(".git").join("worktrees").join("clever-ember")).unwrap();
+        let admin = root.join(".git").join("worktrees").join("clever-ember");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(
             wt.join(".git"),
@@ -4161,5 +4388,322 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
+    }
+
+    /// A worktree folder at `wt` whose `.git` file points into
+    /// `<git_dir>/worktrees/<name>`, laid out as `git worktree add` does:
+    /// symlinks resolved in the `gitdir:` line, `commondir` in the admin dir.
+    fn link_worktree(git_dir: &std::path::Path, wt: &std::path::Path) {
+        let name = wt.file_name().unwrap();
+        let admin = git_dir.join("worktrees").join(name);
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::create_dir_all(wt).unwrap();
+        let admin = std::fs::canonicalize(&admin).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    }
+
+    #[test]
+    fn submodule_worktrees_resolve_to_the_submodule_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+        let module = ws.join(".git/modules/flagship");
+        let wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&module, &wt);
+        let expected = ws.join("flagship");
+
+        // `extensions.worktreeConfig` repos keep `core.worktree` here.
+        std::fs::write(
+            module.join("config.worktree"),
+            "[core]\n\tworktree = ../../../flagship\n",
+        )
+        .unwrap();
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(expected.to_str().unwrap())
+        );
+
+        std::fs::remove_file(module.join("config.worktree")).unwrap();
+        std::fs::write(
+            module.join("config"),
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\tworktree = /wrong\n",
+        )
+        .unwrap();
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(expected.to_str().unwrap()),
+            "no core.worktree: the modules/ layout names the checkout"
+        );
+
+        // The submodule's own primary checkout is not a linked worktree.
+        std::fs::create_dir_all(&expected).unwrap();
+        std::fs::write(
+            expected.join(".git"),
+            format!("gitdir: {}\n", module.display()),
+        )
+        .unwrap();
+        assert_eq!(linked_worktree_root(&expected), None);
+    }
+
+    #[test]
+    fn nested_submodule_worktrees_follow_the_modules_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let ws = base.join("workspace");
+        let wt = base.join("wt");
+        link_worktree(&ws.join(".git/modules/a/modules/b"), &wt);
+        assert_eq!(
+            linked_worktree_root(&wt).as_deref(),
+            Some(ws.join("a/b").to_str().unwrap())
+        );
+
+        // A submodule checked out at a path with a `worktrees` segment is a
+        // primary checkout: its git dir has no `commondir`.
+        let primary = ws.join("tools/worktrees/x");
+        let module = ws.join(".git/modules/tools/worktrees/x");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(
+            primary.join(".git"),
+            format!("gitdir: {}\n", module.display()),
+        )
+        .unwrap();
+        assert_eq!(linked_worktree_root(&primary), None);
+    }
+
+    fn space_at(id: &str, device_id: &str, path: &std::path::Path) -> super::Space {
+        super::Space {
+            id: id.into(),
+            device_id: device_id.into(),
+            path: path.to_string_lossy().into_owned(),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: super::Utc::now(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktrees_belong_to_the_closest_space_at_or_above_their_checkout() {
+        use super::{SpaceHome, space_home};
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap().join("real");
+        // Spaces are stored as entered, here through a symlink; git's
+        // `gitdir:` lines name the resolved paths.
+        let alias = dir.path().join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let ws = real.join("workspace");
+        let module_wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&ws.join(".git/modules/flagship"), &module_wt);
+        let mast = real.join("mast");
+        let mast_wt = mast.join(".worktrees/feature");
+        link_worktree(&mast.join(".git"), &mast_wt);
+        let outside_wt = real.parent().unwrap().join("outside/feature");
+        link_worktree(&mast.join(".git"), &outside_wt);
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let existing = |id: &str| SpaceHome::Existing(id.into());
+
+        let mut spaces = vec![
+            space_at("ws", "dev", &alias.join("workspace")),
+            space_at("phantom", "dev", &mast_wt),
+            space_at("peer-mast", "peer", &mast),
+            space_at("root", "dev", std::path::Path::new("/")),
+            space_at("real", "dev", &real),
+        ];
+        // No `flagship` Space: the submodule worktree climbs to `workspace`,
+        // matched through the symlink.
+        assert_eq!(space_home(&spaces, "dev", &s(&module_wt)), existing("ws"));
+        // A Space at the worktree path itself is never the home, another
+        // device's Space at the checkout doesn't count, and the climb stops
+        // at the closest Space holding the worktree.
+        assert_eq!(space_home(&spaces, "dev", &s(&mast_wt)), existing("real"));
+        spaces.retain(|space| space.id != "real");
+        // Never a broad root like `/`, whatever it holds.
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&mast_wt)),
+            SpaceHome::New(s(&mast))
+        );
+        spaces.push(space_at("mast", "dev", &alias.join("mast")));
+        assert_eq!(space_home(&spaces, "dev", &s(&mast_wt)), existing("mast"));
+        // With a `flagship` Space too, a flagship worktree started from
+        // `workspace` stays there; one started inside flagship goes to it.
+        spaces.push(space_at("flagship", "dev", &ws.join("flagship")));
+        assert_eq!(space_home(&spaces, "dev", &s(&module_wt)), existing("ws"));
+        let inner_wt = ws.join("flagship/.claude/worktrees/inner");
+        link_worktree(&ws.join(".git/modules/flagship"), &inner_wt);
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&inner_wt)),
+            existing("flagship")
+        );
+
+        // No Space holds a worktree outside every Space: the checkout's own
+        // Space, never a Space above it.
+        let only_above = vec![space_at("real", "dev", &real)];
+        assert_eq!(
+            space_home(&only_above, "dev", &s(&outside_wt)),
+            SpaceHome::New(s(&mast))
+        );
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&outside_wt)),
+            existing("mast")
+        );
+
+        // A deleted worktree still maps to the folder holding its worktrees.
+        let gone = ws.join(".worktrees/flagship/long-gone");
+        assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
+        let gone = ws.join(".claude/worktrees/long-gone");
+        assert_eq!(space_home(&spaces, "dev", &s(&gone)), existing("ws"));
+        // Anything else is matched exactly, as stored.
+        let stored = alias.join("mast");
+        assert_eq!(space_home(&spaces, "dev", &s(&stored)), existing("mast"));
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&mast)),
+            SpaceHome::New(s(&mast))
+        );
+        let plain = real.join("plain");
+        assert_eq!(
+            space_home(&spaces, "dev", &s(&plain)),
+            SpaceHome::New(s(&plain))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_spaces_fold_into_their_checkout_space() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = base.join("mast");
+        let live_wt = repo.join(".worktrees/live");
+        link_worktree(&repo.join(".git"), &live_wt);
+        let gone_wt = repo.join(".worktrees/gone");
+        let ws = base.join("workspace");
+        let module_wt = ws.join(".worktrees/flagship-x");
+        link_worktree(&ws.join(".git/modules/flagship"), &module_wt);
+        let blocked_wt = repo.join(".worktrees/blocked");
+        link_worktree(&repo.join(".git"), &blocked_wt);
+
+        let store = Arc::new(DocsStore::open(&dir.path().join("store")).unwrap());
+        let mut doc = RegistryDoc::new("test-device");
+        let prompts = mast_proto::PrReviewPrompts::neutral();
+        for (id, path) in [
+            ("repo", repo.as_path()),
+            ("live", live_wt.as_path()),
+            ("gone", gone_wt.as_path()),
+            ("module", module_wt.as_path()),
+            ("blocked", blocked_wt.as_path()),
+        ] {
+            doc.create_space_with_pr_prompts(&space_at(id, "test-device", path), &prompts)
+                .unwrap();
+        }
+        for (chat, space, cwd) in [
+            ("c-live", "live", &live_wt),
+            ("c-gone", "gone", &gone_wt),
+            ("c-module", "module", &module_wt),
+            ("c-blocked", "blocked", &blocked_wt),
+        ] {
+            doc.claim_chat(chat, cwd.to_str(), Some(space), Utc::now());
+        }
+        doc.apply_work_outline_mutation(
+            &mast_proto::work_outline::WorkOutlineMutation::CreateWorkItem(
+                mast_proto::work_outline::CreateWorkItemParams {
+                    space_id: "blocked".into(),
+                    parent_work_item_id: None,
+                    placement: mast_proto::work_outline::WorkOutlinePlacement::Last,
+                    title: "Keeps its Space".into(),
+                    description: None,
+                    status: None,
+                    operation_id: "op-blocked".into(),
+                },
+            ),
+            &mast_proto::work_outline::WorkOutlineActor {
+                kind: mast_proto::work_outline::WorkOutlineActorKind::User,
+                device_id: "test-device".into(),
+                chat_id: None,
+                message_id: None,
+            },
+            1_700_000_000_000,
+        )
+        .unwrap();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test".into(),
+                platform: "macos".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 3);
+        let spaces = host.read(|doc| doc.read_spaces()).unwrap();
+        let module_home = spaces
+            .iter()
+            .find(|s| s.path == ws.join("flagship").to_str().unwrap())
+            .expect("the submodule checkout gets a Space")
+            .id
+            .clone();
+        let mut ids: Vec<&str> = spaces.iter().map(|s| s.id.as_str()).collect();
+        ids.retain(|id| *id != module_home);
+        ids.sort();
+        assert_eq!(ids, ["blocked", "repo"]);
+        let space_of = |chat: &str| host.chat(chat).unwrap().unwrap().space_id.unwrap();
+        assert_eq!(space_of("c-live"), "repo");
+        assert_eq!(space_of("c-gone"), "repo");
+        assert_eq!(space_of("c-module"), module_home);
+        assert_eq!(space_of("c-blocked"), "blocked");
+        assert_eq!(
+            host.chat("c-live").unwrap().unwrap().cwd.as_deref(),
+            live_wt.to_str()
+        );
+
+        // Idempotent, and new chats in the worktree skip the leftover Space.
+        assert_eq!(host.fold_worktree_spaces(&Default::default()), 0);
+        host.claim_chat("c-new", blocked_wt.to_str()).unwrap();
+        assert_eq!(space_of("c-new"), "repo");
+
+        // A worktree chat that lands after its Space was folded is re-homed;
+        // any other orphan is left to the sweep.
+        host.mutate(|doc| {
+            doc.claim_chat("c-late", live_wt.to_str(), Some("live"), Utc::now());
+            doc.claim_chat("c-plain", base.to_str(), Some("live"), Utc::now());
+        });
+        assert!(host.rehome_worktree_chat(&host.chat("c-late").unwrap().unwrap()));
+        assert_eq!(space_of("c-late"), "repo");
+        assert!(!host.rehome_worktree_chat(&host.chat("c-plain").unwrap().unwrap()));
+        assert_eq!(space_of("c-plain"), "live");
+
+        // A worktree whose home Space doesn't exist (the user deleted it) is
+        // left to the sweep rather than bringing a Space back.
+        let other_wt = base.join("other/.worktrees/x");
+        link_worktree(&base.join("other/.git"), &other_wt);
+        host.mutate(|doc| {
+            doc.claim_chat("c-homeless", other_wt.to_str(), Some("live"), Utc::now());
+        });
+        let before = host.read(|doc| doc.read_spaces()).unwrap().len();
+        assert!(!host.rehome_worktree_chat(&host.chat("c-homeless").unwrap().unwrap()));
+        assert_eq!(host.read(|doc| doc.read_spaces()).unwrap().len(), before);
+    }
+
+    #[test]
+    fn worktrees_made_from_a_broad_root_belong_to_no_home_space() {
+        use super::{SpaceHome, space_home};
+        let home = crate::repos::home_dir();
+        let gone = home.join(".claude/worktrees/mast-test-long-gone-worktree");
+        assert!(!gone.exists());
+        let spaces = vec![space_at("home", "dev", &home)];
+        let gone = gone.to_str().unwrap();
+        assert_eq!(
+            space_home(&spaces, "dev", gone),
+            SpaceHome::New(gone.into())
+        );
     }
 }

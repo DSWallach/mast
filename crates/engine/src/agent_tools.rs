@@ -2933,7 +2933,7 @@ fn child_run_request(
     attachments: Vec<String>,
 ) -> RunRequest {
     let config = chat.config.as_ref();
-    RunRequest { scheduled_task: None, approval_rules: config.is_some_and(|c| c.approval_rules),
+    RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: config.is_some_and(|c| c.approval_rules),
         prompt,
         harness: config.map(|c| c.harness),
         model: config.and_then(|c| c.model.clone()),

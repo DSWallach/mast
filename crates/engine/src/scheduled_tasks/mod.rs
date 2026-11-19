@@ -5,6 +5,9 @@ pub mod evaluator;
 mod identity;
 pub(crate) mod import;
 mod lifecycle;
+mod notion;
+pub(crate) use notion::run_prompt;
+pub(crate) mod results;
 mod store;
 use crate::{DocHost, EngineError, SessionsEngine, WorkspaceHost};
 use mast_doc::SessionCommandStatus;
@@ -177,6 +180,10 @@ impl ScheduledTasks {
                 {
                     draft.after_success = task.draft.after_success;
                 }
+                // A client that predates the setting omits it; keep the stored one.
+                if draft.write_to_notion.is_none() && let Some(task) = &old {
+                    draft.write_to_notion = task.draft.write_to_notion;
+                }
                 self.validate(&draft)?;
                 if draft.enabled {
                     self.validate_model(&draft).await?;
@@ -280,6 +287,8 @@ impl ScheduledTasks {
                 draft.enabled = false;
                 draft.config.auto_approve = false;
                 draft.config.approval_rules = true;
+                // A client that predates the setting omits it; imports start off.
+                draft.write_to_notion.get_or_insert(false);
                 self.validate(&draft)?;
                 let id =
                     import::task_id(self.0.store.scope(), &response.device_id, &candidate.source);
@@ -370,6 +379,18 @@ impl ScheduledTasks {
             tracing::info!(runs = written, "reconciled scheduled run identities");
         }
         Ok(written)
+    }
+    /// Spaces this device's tasks launch into, paused tasks included: deleting
+    /// one would fail every later run of its task.
+    pub fn task_space_ids(&self) -> Result<std::collections::HashSet<String>, EngineError> {
+        Ok(self
+            .0
+            .store
+            .tasks()?
+            .into_iter()
+            .filter(|t| !t.deleted && t.device_id == self.0.workspace.device_id())
+            .filter_map(|t| t.draft.space_id)
+            .collect())
     }
     fn find(&self, id: &str) -> Result<ScheduledTask, EngineError> {
         self.0
@@ -546,6 +567,21 @@ impl ScheduledTasks {
                     }
                 }
             }
+            // A completed Background run must have published its results; a
+            // skipped publication fails the run, so it is neither archived
+            // nor left looking successful.
+            if r.state == ScheduledRunState::Completed
+                && let Some(mut results) = r.results.take()
+            {
+                match results::published_revision(&self.0.workspace, &r, &results) {
+                    Ok(revision) => results.revision = Some(revision),
+                    Err(reason) => {
+                        r.state = ScheduledRunState::Failed;
+                        r.detail = Some(reason);
+                    }
+                }
+                r.results = Some(results);
+            }
             if !r.state.active() {
                 r.finished_at = Some(now);
             }
@@ -644,7 +680,7 @@ impl ScheduledTasks {
                 return Ok(());
             }
             let launched = match model_check {
-                Ok(()) => self.launch(&r),
+                Ok(()) => self.launch(&mut r),
                 Err(e) => Err(e),
             };
             match launched {
@@ -666,8 +702,23 @@ impl ScheduledTasks {
             .map_err(fail)??;
         Ok(())
     }
-    fn launch(&self, r: &ScheduledRun) -> Result<(), EngineError> {
+    fn launch(&self, r: &mut ScheduledRun) -> Result<(), EngineError> {
         self.validate(&r.snapshot)?;
+        // A rename since the first run must not start a second artifact.
+        if let (Some(results), Some(space), Some(item)) =
+            (&mut r.results, &r.snapshot.space_id, &r.snapshot.work_item_id)
+        {
+            let resolved = results::resolve(
+                &self.0.workspace,
+                space,
+                item,
+                &r.task_id,
+                &r.snapshot.name,
+            );
+            results.artifact_id = resolved.artifact_id;
+            results.title = resolved.title;
+        }
+        let r = &*r;
         let task = self.find(&r.task_id)?;
         if let Some(source) = task.import_source.as_deref() {
             if !r.snapshot.cutover_confirmed {

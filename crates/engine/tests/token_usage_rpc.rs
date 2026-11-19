@@ -36,6 +36,7 @@ async fn token_usage_queries_filter_agents_and_reject_unknown_devices() {
         auto_approve: false,
         approval_rules: false,
         scheduled_task: None,
+        scheduled_notion_writes: None,
         resume: None,
         fork_from: None,
         attachments: vec![],

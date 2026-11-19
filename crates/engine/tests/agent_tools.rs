@@ -224,7 +224,7 @@ async fn wait_for<F: FnMut() -> bool>(mut predicate: F, what: &str) {
 
 fn run_command(prompt: &str, cwd: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
-        request: RunRequest { scheduled_task: None, approval_rules: false,
+        request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: false,
             prompt: prompt.into(),
             harness: Some(HarnessId::Mock),
             model: None,

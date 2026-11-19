@@ -159,6 +159,10 @@ pub struct RunRequest {
     /// can tell an unattended run apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// The scheduled task's Write to Notion setting, exported as
+    /// `MAST_SCHEDULED_WRITE_TO_NOTION` (`1`/`0`). `None` exports nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_notion_writes: Option<bool>,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Harness-native session to copy into a NEW session (a side chat's

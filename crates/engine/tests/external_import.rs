@@ -181,3 +181,52 @@ async fn transcript_content_lands_in_the_doc_with_live_equivalent_shape() {
     ));
     assert_eq!(entries[3].role, MessageRole::Assistant);
 }
+
+#[tokio::test]
+async fn a_session_run_in_a_worktree_joins_its_checkouts_space() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let core = assemble(EngineProfile::development(
+        dir.path(),
+        "dev-org",
+        "dev-user",
+    ));
+    let base = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let repo = base.join("project");
+    let wt = repo.join(".worktrees/feature");
+    let admin = repo.join(".git/worktrees/feature");
+    std::fs::create_dir_all(&admin).expect("worktree admin dir");
+    std::fs::write(admin.join("commondir"), "../..\n").expect("commondir");
+    std::fs::create_dir_all(&wt).expect("worktree dir");
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect("gitfile");
+    let device = core.workspace.device_id().to_string();
+    core.workspace
+        .create_space("space-project", &device, repo.to_str().unwrap(), None, true)
+        .expect("create the checkout's space");
+
+    let transcript_path = dir.path().join("worktree-session.jsonl");
+    let transcript = synthetic_transcript().replace("/work/project", wt.to_str().unwrap());
+    std::fs::write(&transcript_path, transcript).expect("write transcript");
+    let result = core
+        .external_import
+        .import("imported-wt", "external-session-wt", &transcript_path)
+        .expect("import");
+
+    assert_eq!(result.space_id, "space-project");
+    let chat = core
+        .workspace
+        .chat("imported-wt")
+        .unwrap()
+        .expect("chat row");
+    assert_eq!(chat.cwd.as_deref(), wt.to_str());
+    assert_eq!(chat.space_id.as_deref(), Some("space-project"));
+    assert!(
+        core.workspace
+            .space(&result.space_id)
+            .unwrap()
+            .is_some_and(|space| space.path == repo.to_str().unwrap()),
+        "no Space is created at the worktree path"
+    );
+}
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;

@@ -652,6 +652,18 @@ fn requests_are_ordered_by_priority_then_age() {
         _ => None,
     }).collect();
     assert_eq!(ids, ["earlier", "later", "normal"]);
+    assert!(matches!(view.items.iter().find(|item| matches!(item,
+        Item::Action { action: MenuAction::DismissAllRequests(_), .. })),
+        Some(Item::Action { action: MenuAction::DismissAllRequests(ids), label })
+            if ids == &["earlier", "later", "normal"] && label == "Dismiss all"));
+}
+
+#[test]
+fn empty_requests_do_not_offer_dismiss_all() {
+    let mut view = menu(&snapshot(&[]), None, None);
+    let before = view.clone();
+    insert_requests(&mut view, Vec::new(), now());
+    assert_eq!(view, before);
 }
 
 #[test]

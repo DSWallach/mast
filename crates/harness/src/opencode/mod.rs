@@ -286,12 +286,12 @@ impl OpencodeHarness {
 
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
     /// they boot in the user's home, where global provider config lives.
-    async fn server(&self, cwd: Option<&str>, scheduled_task: Option<&str>) -> Result<Server, HarnessError> {
+    async fn server(&self, cwd: Option<&str>, scheduled: Option<crate::ScheduledEnv<'_>>) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, scheduled_task).await
+        Server::spawn(&exe, cwd, self.startup_timeout, scheduled).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -410,7 +410,7 @@ impl Harness for OpencodeHarness {
         crate::require_read_only_support(self.id(), &request)?;
         crate::require_instruction_support(self.id(), &self.instruction_support(), &request)?;
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.scheduled_task.as_deref()).await?;
+        let server = self.server(cwd.as_deref(), crate::ScheduledEnv::of(&request)).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -555,14 +555,14 @@ impl Server {
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
-        scheduled_task: Option<&str>,
+        scheduled: Option<crate::ScheduledEnv<'_>>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
         })?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut cmd = Command::new(exe);
-        crate::export_scheduled_task(&mut cmd, scheduled_task);
+        crate::export_scheduled_task(&mut cmd, scheduled);
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
