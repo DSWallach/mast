@@ -2819,6 +2819,10 @@ impl SubtreeWalk<'_> {
             if chat.archived && !self.include_archived {
                 continue;
             }
+            // A Manager's first start is hidden until its message is queued.
+            if chat.standing_role_provisional().is_some() {
+                continue;
+            }
             if chats.len() >= MAX_SUBTREE_ITEM_ROWS {
                 omitted += 1;
                 continue;
