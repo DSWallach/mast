@@ -388,7 +388,11 @@ mod tests {
         for _ in 0..20 { cx.update(|cx| { provider.start_watch(cx); other.start_watch(cx); }); }
         cx.run_until_parked();
         assert_eq!(transport.0.load(Ordering::SeqCst), 1);
-        FAILED_WATCHES.with(|failures| failures.borrow_mut().iter_mut().find(|(key, _)| key == &context).unwrap().1 = Instant::now() - Duration::from_secs(61));
+        FAILED_WATCHES.with(|failures| {
+            for (key, failed_at) in failures.borrow_mut().iter_mut() {
+                if *key == context { *failed_at = Instant::now() - Duration::from_secs(61); }
+            }
+        });
         cx.update(|cx| provider.start_watch(cx));
         cx.run_until_parked();
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
