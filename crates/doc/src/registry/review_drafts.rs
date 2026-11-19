@@ -387,7 +387,7 @@ mod tests {
             posted_at: 5,
             comments: vec![SubmitReviewComment {
                 draft_id: "posted".into(), path: "a.rs".into(), line: 2, side: ReviewSide::Right,
-                start_line: None, start_side: None, body: "note".into(),
+                start_line: None, start_side: None, body: "note".into(), line_text: String::new(), start_text: String::new(),
             }],
         };
         assert!(registry.record_posted_review(target, &review).unwrap());
