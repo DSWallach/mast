@@ -111,6 +111,17 @@ pub struct CreateChatForWorkItemParams {
     pub standing_role: Option<crate::StandingRoleKind>,
 }
 
+/// The Chat a role's first launch creates. It is derived from the role, not
+/// from the operation id, so an interrupted first start and a later one with
+/// a different operation id converge on one Chat instead of leaving an
+/// ordinary, unadopted Chat beside the Manager.
+pub fn standing_role_bootstrap_chat_id(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
+    crate::work_outline::derive_id(
+        &format!("standing-role-bootstrap:{}:{scope_item_id}", kind.as_str()),
+        crate::work_outline::roles::CHAT,
+    )
+}
+
 /// Request a successor for an existing coordinator chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

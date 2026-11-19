@@ -545,7 +545,12 @@ impl WorkItemLaunchService {
         check_prompt(&p.initial_prompt)?;
         let _gate = self.gate.lock().await;
         let op = p.operation_id.as_str();
-        let chat_id = derive_id(op, roles::CHAT);
+        // A role's first Chat is the role's own bootstrap Chat, whichever
+        // operation creates it (see `standing_role_bootstrap_chat_id`).
+        let chat_id = match p.standing_role {
+            Some(kind) => mast_proto::standing_role_bootstrap_chat_id(kind, &p.work_item_id),
+            None => derive_id(op, roles::CHAT),
+        };
         let message_id = derive_id(op, roles::MESSAGE);
         let command_id = derive_id(op, roles::COMMAND);
         let inputs_hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
@@ -608,11 +613,13 @@ impl WorkItemLaunchService {
             ));
         }
         // A role launch starts the role's first Chat: only a project can have
-        // a Manager, and a role that already has a different Chat is not
-        // adopted over (two clicks, two windows, or a stale placeholder).
-        // The holder being this operation's own Chat is a retry. The gate
-        // held above serializes launches, so the check stays true until the
-        // adoption below.
+        // a Manager, and a role that already has a Chat is not started again
+        // (two clicks, two windows, or a stale placeholder). The only launch
+        // that may proceed against a held role is a retry of the operation
+        // that started it. The bootstrap Chat is shared by every operation,
+        // so a first start interrupted before adoption is finished by the
+        // next one rather than orphaned. The gate held above serializes
+        // launches, so the check stays true until the adoption below.
         if let Some(kind) = p.standing_role {
             if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
                 return Err(error(
@@ -620,8 +627,12 @@ impl WorkItemLaunchService {
                     "Only a project can have a Manager",
                 ));
             }
-            if let Some(current) = self.workspace.standing_role_chat(kind, &p.work_item_id)
-                && current != chat_id
+            if self
+                .workspace
+                .standing_role_chat(kind, &p.work_item_id)
+                .is_some_and(|current| {
+                    current != chat_id || !self.workspace.ledger_holds(&ledger_launch_key(op))
+                })
             {
                 return Err(conflict(
                     "This project's Manager already has a chat; open it instead",

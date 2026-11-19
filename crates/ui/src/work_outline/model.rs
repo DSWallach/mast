@@ -700,7 +700,18 @@ fn item_node<'s>(
         .is_project
         .then(|| snapshot.standing_role(StandingRoleKind::Manager, &item.id))
         .flatten();
-    let manager_chat_id = manager_role.and_then(|role| role.current_chat_id.clone());
+    // Before the role names a Chat, an interrupted first start may have
+    // left the role's bootstrap Chat under the project: it is the Manager's,
+    // not an ordinary Chat.
+    let manager_chat_id = manager_role
+        .and_then(|role| role.current_chat_id.clone())
+        .or_else(|| {
+            item.is_project
+                .then(|| {
+                    mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item.id)
+                })
+                .filter(|id| chat_nodes.iter().any(|node| matches!(&node.kind, OutlineRowKind::Chat(row) if row.chat.id == *id)))
+        });
     let manager_chat_node = manager_chat_id.as_deref().and_then(|id| {
         let at = chat_nodes.iter().position(|node| {
             matches!(&node.kind, OutlineRowKind::Chat(row) if row.chat.id == id && !row.dangling)
@@ -1329,6 +1340,22 @@ pub(crate) mod tests {
             model.row(&row_key::item("s1", API)).unwrap().compact_chat().is_none(),
             "the Manager chat is never folded into the project row"
         );
+    }
+
+    #[test]
+    fn an_interrupted_first_start_chat_is_the_managers_not_an_ordinary_chat() {
+        let bootstrap = mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, API);
+        let mut snapshot = project_snapshot(None);
+        let mut assignment = snapshot.assignments.iter().find(|a| a.chat_id == CHAT_API).unwrap().clone();
+        assignment.chat_id = bootstrap.clone();
+        snapshot.assignments.push(assignment);
+        let spaces = [ready("s1", "Repo", snapshot)];
+        let mut chats = fixture_chats("s1");
+        chats.push(chat(&bootstrap, Some("s1")));
+        let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
+        let row = model.row(&row_key::manager("s1", API)).unwrap().manager().unwrap();
+        assert_eq!(row.chat_id.as_deref(), Some(bootstrap.as_str()));
+        assert!(model.rows.iter().all(|r| r.chat().is_none_or(|c| c.chat.id != bootstrap)));
     }
 
     #[test]

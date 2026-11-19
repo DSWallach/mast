@@ -2094,3 +2094,60 @@ async fn manager_launch_for_a_plain_item_is_refused_before_anything_is_written()
     assert_eq!(manager_chat(&rig), None);
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_first_message_finishes_an_interrupted_manager_start_without_an_orphan() {
+    for (index, step) in [LaunchStep::Validated, LaunchStep::ChatCreated, LaunchStep::Assigned]
+        .into_iter()
+        .enumerate()
+    {
+        let rig = rig().await;
+        mark_project(&rig).await;
+        let launcher = service(&rig);
+        let bootstrap = mast_proto::standing_role_bootstrap_chat_id(
+            mast_proto::StandingRoleKind::Manager,
+            &rig.item,
+        );
+
+        // First start: interrupted before the role is adopted.
+        let first = manager_params(&rig, &format!("manager-a-{index}"), "first try");
+        launcher.inject_fault(Some(step));
+        assert!(launcher.create_chat_for_work_item(&first).await.is_err());
+        assert_eq!(manager_chat(&rig), None, "{step:?}: not adopted yet");
+
+        // A different first-message operation reuses the reserved chat.
+        let second = manager_params(&rig, &format!("manager-b-{index}"), "second try");
+        let reply = launcher
+            .create_chat_for_work_item(&second)
+            .await
+            .unwrap_or_else(|e| panic!("second start after {step:?}: {e}"));
+        assert_eq!(reply.chat_id, bootstrap, "{step:?}: the reserved chat");
+        wait_for(|| turns_with(&rig, "second try").len() == 1, "the second message").await;
+
+        assert_eq!(chat_count(&rig), 1, "{step:?}: no orphan beside the Manager");
+        assert_eq!(manager_chat(&rig).as_deref(), Some(bootstrap.as_str()));
+        let role = rig
+            .core
+            .workspace
+            .standing_role(mast_proto::StandingRoleKind::Manager, &rig.item)
+            .unwrap();
+        assert_eq!(role.chain, [bootstrap.clone()]);
+        assert_eq!(
+            row_field(&rig, KIND_WORK_ITEM_CHAT_ASSIGNMENTS, &bootstrap, "workItemId"),
+            Some(json!(rig.item))
+        );
+
+        // The first operation's retry cannot start a second chat; the
+        // second message stays the only run.
+        let _ = launcher.create_chat_for_work_item(&first).await;
+        assert_eq!(chat_count(&rig), 1);
+        assert_eq!(turns_with(&rig, "second try").len(), 1);
+        assert_eq!(user_messages(&rig, &bootstrap), 1, "{step:?}: one real message");
+
+        // A third, distinct start is refused as before.
+        let third = manager_params(&rig, &format!("manager-c-{index}"), "third try");
+        let refused = launch(&rig, &third).await.unwrap_err();
+        assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
+        rig.core.shutdown().await;
+    }
+}
