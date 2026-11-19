@@ -844,20 +844,27 @@ impl WorkspaceHost {
         Ok(nonce)
     }
 
-    /// Start a new marker once the old one belongs to a recorded review.
-    pub fn renew_review_nonce(&self, target: &str) -> Result<String, EngineError> {
+    /// Compare-and-set: start a new marker only if the stored one is still `expected`.
+    pub fn renew_review_nonce(&self, target: &str, expected: &str) -> Result<String, EngineError> {
         let candidate = uuid::Uuid::new_v4().to_string();
-        let nonce = self.mutate(|doc| doc.renew_review_nonce(target, &candidate))?;
+        let nonce = self.mutate(|doc| doc.renew_review_nonce(target, expected, &candidate))?;
         self.inner.persist_snapshot()?;
         Ok(nonce)
+    }
+
+    /// Save which drafts are about to be posted under `nonce`, durably, before the POST.
+    pub fn save_review_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), EngineError> {
+        self.mutate(|doc| doc.save_review_attempt(target, nonce, ids))?;
+        self.inner.persist_snapshot()?;
+        Ok(())
     }
 
     pub fn posted_reviews(&self, target: &str) -> Vec<mast_proto::PostedReview> {
         self.read(|doc| doc.posted_reviews(target))
     }
 
-    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, consume_nonce: bool) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.record_posted_review(target, review, consume_nonce))?)
+    pub fn record_posted_review(&self, target: &str, review: &mast_proto::PostedReview, sent_ids: &[String], consume_nonce: bool) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.record_posted_review(target, review, sent_ids, consume_nonce))?)
     }
 
     pub fn put_review_drafts(&self, target: &str, drafts: &[mast_proto::ReviewDraft]) -> Result<bool, EngineError> {
@@ -3770,5 +3777,23 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
+    }
+}
+
+impl crate::pr_dash::SubmitLedger for WorkspaceHost {
+    fn ensure_nonce(&self, target: &str) -> Result<String, String> {
+        self.ensure_review_nonce(target).map_err(|e| e.to_string())
+    }
+    fn nonce_recorded(&self, target: &str, nonce: &str) -> bool {
+        self.posted_reviews(target).iter().any(|r| r.nonce.as_deref() == Some(nonce))
+    }
+    fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String> {
+        self.renew_review_nonce(target, expected).map_err(|e| e.to_string())
+    }
+    fn save_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), String> {
+        self.save_review_attempt(target, nonce, ids).map_err(|e| e.to_string())
+    }
+    fn attempt_ids(&self, target: &str, nonce: &str) -> Option<Vec<String>> {
+        self.read(|doc| doc.review_attempt_ids(target, nonce))
     }
 }

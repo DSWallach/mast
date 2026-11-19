@@ -7,6 +7,20 @@ use mast_proto::{
     SubmitReviewParams, SubmitReviewReply, UnplacedDraft, review_marker,
 };
 
+/// Where the engine keeps a review target's marker nonce and the draft ids of the attempt in
+/// flight. Called only while the per-PR submit lock is held.
+pub trait SubmitLedger: Send + Sync {
+    /// The target's nonce, created and made durable if it has none.
+    fn ensure_nonce(&self, target: &str) -> Result<String, String>;
+    /// Whether a recorded review already belongs to `nonce`.
+    fn nonce_recorded(&self, target: &str, nonce: &str) -> bool;
+    /// Compare-and-set: replace the nonce only if it still equals `expected`; returns the one now in effect.
+    fn renew_nonce(&self, target: &str, expected: &str) -> Result<String, String>;
+    /// Durably save the draft ids about to be posted under `nonce`.
+    fn save_attempt(&self, target: &str, nonce: &str, ids: &[String]) -> Result<(), String>;
+    fn attempt_ids(&self, target: &str, nonce: &str) -> Option<Vec<String>>;
+}
+
 const PAGE: usize = 100;
 const MAX_PAGES: usize = 10;
 const MAX_FILE_PAGES: usize = 30;
@@ -229,7 +243,7 @@ pub(super) async fn prepare(gh: &dyn GhRunner, params: &PrepareReviewParams) -> 
 // Submit
 // ---------------------------------------------------------------------------
 
-fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent: Vec<String>) -> SubmitReviewReply {
+fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent: Vec<String>, exact: bool) -> SubmitReviewReply {
     SubmitReviewReply {
         outcome,
         review_id: review.get("id").and_then(Value::as_u64),
@@ -241,11 +255,12 @@ fn reply(outcome: SubmitReviewOutcome, review: &Value, fallback_url: &str, sent:
             .to_owned(),
         local_record_error: None,
         sent_draft_ids: sent,
+        sent_exact: exact,
     }
 }
 
 fn plain(outcome: SubmitReviewOutcome, url: String) -> SubmitReviewReply {
-    SubmitReviewReply { outcome, review_id: None, url, local_record_error: None, sent_draft_ids: Vec::new() }
+    SubmitReviewReply { outcome, review_id: None, url, local_record_error: None, sent_draft_ids: Vec::new(), sent_exact: false }
 }
 
 fn is_pending_conflict(error: &str) -> bool {
@@ -294,6 +309,7 @@ pub(super) async fn submit(
     gh: &dyn GhRunner,
     params: &SubmitReviewParams,
     nonce: &str,
+    ledger: &dyn SubmitLedger,
 ) -> Result<SubmitReviewReply, String> {
     valid_pr(&params.owner, &params.repo, params.number)?;
     if nonce.trim().is_empty() {
@@ -326,11 +342,16 @@ pub(super) async fn submit(
                 .and_then(Value::as_str)
                 .is_some_and(|body| body.contains(&marker))
             {
-                let sent = match review.get("id").and_then(Value::as_u64) {
-                    Some(id) => already_sent(gh, &base, id, params).await?,
-                    None => Vec::new(),
+                // The ids saved before the POST say what that review carries. A text match is only
+                // the fallback when nothing was saved (an older attempt), never the authority.
+                let (sent, exact) = match ledger.attempt_ids(&params.target, nonce) {
+                    Some(saved) => (saved, true),
+                    None => match review.get("id").and_then(Value::as_u64) {
+                        Some(id) => (already_sent(gh, &base, id, params).await?, false),
+                        None => (Vec::new(), false),
+                    },
                 };
-                return Ok(reply(SubmitReviewOutcome::AlreadyPosted, review, &url, sent));
+                return Ok(reply(SubmitReviewOutcome::AlreadyPosted, review, &url, sent, exact));
             }
             if review.get("state").and_then(Value::as_str) == Some("PENDING") {
                 has_pending = true;
@@ -350,13 +371,19 @@ pub(super) async fn submit(
     if !head.eq_ignore_ascii_case(params.commit_id.trim()) {
         return Err("The pull request has new commits on GitHub. Reopen Submit review to re-check where your comments land.".into());
     }
+    // Durable before the POST: if the response is lost, the marker on GitHub plus these ids
+    // are enough to finish the job, even after a restart.
+    let ids: Vec<String> = params.comments.iter().map(|c| c.draft_id.clone()).collect();
+    ledger
+        .save_attempt(&params.target, nonce, &ids)
+        .map_err(|e| format!("could not save the review attempt: {e}"))?;
     match gh.rest("POST", &format!("{base}/reviews"), Some(&payload(params, nonce))).await {
         Ok(review) => {
             if review.get("id").and_then(Value::as_u64).is_none() {
                 return Err("GitHub accepted the review but returned no review id".into());
             }
             let sent = params.comments.iter().map(|c| c.draft_id.clone()).collect();
-            Ok(reply(SubmitReviewOutcome::Posted, &review, &url, sent))
+            Ok(reply(SubmitReviewOutcome::Posted, &review, &url, sent, true))
         }
         Err(error) if is_pending_conflict(&error) => Ok(plain(SubmitReviewOutcome::PendingConflict, url)),
         Err(error) => Err(error),
@@ -380,19 +407,31 @@ impl PrDash {
         prepare(self.inner.gh.as_ref(), params).await
     }
 
-    /// Post the review (or find the one an earlier attempt already posted), then
-    /// drop the cached threads. At most one submit per PR runs at a time.
-    pub async fn submit_review(&self, params: &SubmitReviewParams, nonce: &str) -> Result<SubmitReviewReply, String> {
+    /// Post the review (or find the one an earlier attempt already posted), then drop the
+    /// cached threads. At most one submit per PR runs at a time, and the nonce is read, checked
+    /// against recorded reviews and renewed (compare-and-set) only while holding that lock.
+    /// Returns the reply and the nonce it ran under.
+    pub async fn submit_review(
+        &self,
+        params: &SubmitReviewParams,
+        ledger: &dyn SubmitLedger,
+    ) -> Result<(SubmitReviewReply, String), String> {
         valid_pr(&params.owner, &params.repo, params.number)?;
         let lock = self.submit_lock(&params.owner, &params.repo, params.number);
         let Ok(_guard) = lock.try_lock_owned() else {
             return Err("Already posting a review to this pull request".into());
         };
-        let reply = submit(self.inner.gh.as_ref(), params, nonce).await;
-        if matches!(&reply, Ok(r) if matches!(r.outcome, SubmitReviewOutcome::Posted | SubmitReviewOutcome::AlreadyPosted)) {
+        let mut nonce = ledger.ensure_nonce(&params.target)?;
+        // A nonce that already belongs to a recorded review must not match that review again,
+        // or the next drafts could never be posted. A check never renews.
+        if !params.check_only && ledger.nonce_recorded(&params.target, &nonce) {
+            nonce = ledger.renew_nonce(&params.target, &nonce)?;
+        }
+        let reply = submit(self.inner.gh.as_ref(), params, &nonce, ledger).await?;
+        if matches!(reply.outcome, SubmitReviewOutcome::Posted | SubmitReviewOutcome::AlreadyPosted) {
             self.invalidate_review_threads(&params.owner, &params.repo, params.number).await;
         }
-        reply
+        Ok((reply, nonce))
     }
 }
 
@@ -402,6 +441,57 @@ mod tests {
     use mast_proto::ReviewEvent;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct LedgerState {
+        nonce: Option<String>,
+        recorded: std::collections::HashSet<String>,
+        attempt: Option<(String, Vec<String>)>,
+        renews: usize,
+    }
+
+    /// In-memory stand-in for the registry; it outlives a "restarted" PrDash like the real one.
+    #[derive(Default)]
+    struct MemLedger(StdMutex<LedgerState>);
+
+    impl MemLedger {
+        fn nonce(&self) -> Option<String> {
+            self.0.lock().unwrap().nonce.clone()
+        }
+        fn renews(&self) -> usize {
+            self.0.lock().unwrap().renews
+        }
+        fn record(&self, nonce: &str) {
+            self.0.lock().unwrap().recorded.insert(nonce.into());
+        }
+    }
+
+    impl SubmitLedger for MemLedger {
+        fn ensure_nonce(&self, _: &str) -> Result<String, String> {
+            Ok(self.0.lock().unwrap().nonce.get_or_insert_with(|| "n0".into()).clone())
+        }
+        fn nonce_recorded(&self, _: &str, nonce: &str) -> bool {
+            self.0.lock().unwrap().recorded.contains(nonce)
+        }
+        fn renew_nonce(&self, _: &str, expected: &str) -> Result<String, String> {
+            let mut state = self.0.lock().unwrap();
+            if state.nonce.as_deref() != Some(expected) {
+                return Ok(state.nonce.clone().unwrap_or_default());
+            }
+            state.renews += 1;
+            let next = format!("n{}", state.renews);
+            state.nonce = Some(next.clone());
+            state.attempt = None;
+            Ok(next)
+        }
+        fn save_attempt(&self, _: &str, nonce: &str, ids: &[String]) -> Result<(), String> {
+            self.0.lock().unwrap().attempt = Some((nonce.into(), ids.to_vec()));
+            Ok(())
+        }
+        fn attempt_ids(&self, _: &str, nonce: &str) -> Option<Vec<String>> {
+            self.0.lock().unwrap().attempt.as_ref().filter(|(n, _)| n == nonce).map(|(_, ids)| ids.clone())
+        }
+    }
 
     #[derive(Clone)]
     enum PostMode {
@@ -584,7 +674,7 @@ mod tests {
     #[tokio::test]
     async fn posts_one_batched_review_pinned_to_the_head_with_marker() {
         let gh = FakeRest::new(PostMode::Ok);
-        let reply = submit(gh.as_ref(), &params(two()), "nonce-1").await.unwrap();
+        let reply = submit(gh.as_ref(), &params(two()), "nonce-1", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::Posted);
         assert_eq!(reply.review_id, Some(991));
         assert_eq!(reply.sent_draft_ids, ["d1", "d2"]);
@@ -608,9 +698,9 @@ mod tests {
         let gh = FakeRest::new(PostMode::Ok);
         let mut unknown = params(two());
         unknown.commit_id.clear();
-        assert!(submit(gh.as_ref(), &unknown, "n").await.unwrap_err().contains("head commit is unknown"));
+        assert!(submit(gh.as_ref(), &unknown, "n", &MemLedger::default()).await.unwrap_err().contains("head commit is unknown"));
         *gh.head.lock().unwrap() = "def456".into();
-        let error = submit(gh.as_ref(), &params(two()), "n").await.unwrap_err();
+        let error = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap_err();
         assert!(error.contains("new commits"));
         assert!(gh.posts().is_empty());
     }
@@ -618,28 +708,73 @@ mod tests {
     #[tokio::test]
     async fn network_error_is_reported() {
         let gh = FakeRest::new(PostMode::Fail("could not run gh: connection reset"));
-        let error = submit(gh.as_ref(), &params(two()), "n").await.unwrap_err();
+        let error = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap_err();
         assert!(error.contains("connection reset"));
     }
 
     #[tokio::test]
-    async fn timeout_then_retry_finds_the_marker_and_does_not_post_again() {
+    async fn lost_response_then_check_reposts_nothing_even_when_the_matcher_misses_a_comment() {
         let gh = FakeRest::new(PostMode::Lost("gh timed out"));
-        assert_eq!(submit(gh.as_ref(), &params(two()), "stable").await.unwrap_err(), "gh timed out");
+        let ledger = MemLedger::default();
+        assert_eq!(submit(gh.as_ref(), &params(two()), "n0", &ledger).await.unwrap_err(), "gh timed out");
         assert_eq!(gh.posts().len(), 1);
-        // The review landed. A later attempt (even after a restart, with the persisted nonce) sends nothing.
+        // The review landed, but GitHub's comment list only shows d1 (d2's text doesn't match).
         *gh.review_comments.lock().unwrap() = vec![
             serde_json::json!({"path": "src/a.rs", "line": 11, "body": "```suggestion\nbody d1\n```"}),
         ];
-        let reply = submit(gh.as_ref(), &params(two()), "stable").await.unwrap();
+        let mut check = params(two());
+        check.check_only = true;
+        let reply = submit(gh.as_ref(), &check, "n0", &ledger).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(reply.review_id, Some(991));
-        assert_eq!(reply.sent_draft_ids, ["d1"], "only drafts the review really carries are reported");
+        assert_eq!(reply.sent_draft_ids, ["d1", "d2"], "the ids saved before the POST decide what was sent");
+        assert!(reply.sent_exact);
+        assert_eq!(gh.gets("/comments"), 0, "the text match is not consulted when ids were saved");
+        // A plain retry sends nothing either.
+        let again = submit(gh.as_ref(), &params(two()), "n0", &ledger).await.unwrap();
+        assert_eq!(again.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(gh.posts().len(), 1);
         // A different nonce is a different review.
         *gh.mode.lock().unwrap() = PostMode::Ok;
-        let other = submit(gh.as_ref(), &params(two()), "fresh").await.unwrap();
-        assert_eq!(other.outcome, SubmitReviewOutcome::Posted);
+        assert_eq!(submit(gh.as_ref(), &params(two()), "fresh", &MemLedger::default()).await.unwrap().outcome, SubmitReviewOutcome::Posted);
+    }
+
+    #[tokio::test]
+    async fn check_only_after_a_partial_record_never_renews_the_nonce() {
+        let gh = FakeRest::new(PostMode::Ok);
+        let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        let ledger = MemLedger::default();
+        ledger.ensure_nonce("t").unwrap();
+        ledger.record("n0"); // a partial match recorded a review under n0 and kept the nonce
+        let mut check = params(two());
+        check.check_only = true;
+        let (reply, nonce) = dash.submit_review(&check, &ledger).await.unwrap();
+        assert_eq!((reply.outcome, nonce.as_str()), (SubmitReviewOutcome::NotFound, "n0"));
+        assert_eq!((ledger.renews(), ledger.nonce().as_deref()), (0, Some("n0")));
+        // A real submit retires the used nonce and posts the rest under a new one.
+        let (reply, nonce) = dash.submit_review(&params(two()), &ledger).await.unwrap();
+        assert_eq!((reply.outcome, nonce.as_str()), (SubmitReviewOutcome::Posted, "n1"));
+        assert_eq!(ledger.renews(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_submits_post_once_and_the_loser_leaves_the_nonce_alone() {
+        let gh = FakeRest::slow(Duration::from_millis(60));
+        let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        let ledger = Arc::new(MemLedger::default());
+        ledger.ensure_nonce("t").unwrap();
+        ledger.record("n0"); // the next submit must renew inside the lock
+        let first = tokio::spawn({
+            let (dash, ledger) = (dash.clone(), ledger.clone());
+            async move { dash.submit_review(&params(two()), ledger.as_ref()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let second = dash.submit_review(&params(two()), ledger.as_ref()).await.unwrap_err();
+        assert!(second.contains("Already posting"));
+        let (reply, nonce) = first.await.unwrap().unwrap();
+        assert_eq!((reply.outcome, nonce.as_str()), (SubmitReviewOutcome::Posted, "n1"));
+        assert_eq!(gh.posts().len(), 1);
+        assert_eq!((ledger.renews(), ledger.nonce().as_deref()), (1, Some("n1")), "one renewal, by the in-flight submit");
     }
 
     fn landed_review(gh: &FakeRest, comments: Vec<Value>) {
@@ -657,7 +792,7 @@ mod tests {
         found.insert(3, serde_json::json!({"path": "src/a.rs", "line": null, "original_line": 11, "body": "```suggestion\nbody d1\n```"}));
         found.push(serde_json::json!({"path": "src/a.rs", "line": 12, "original_line": 12, "body": "```suggestion\nbody d2\n```"}));
         landed_review(&gh, found);
-        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(reply.sent_draft_ids, ["d1", "d2"]);
         assert_eq!(gh.gets("/comments?per_page=100&page=2"), 1);
@@ -668,7 +803,7 @@ mod tests {
         let gh = FakeRest::new(PostMode::Ok);
         landed_review(&gh, vec![]);
         *gh.comments_fail.lock().unwrap() = Some("HTTP 502".into());
-        assert_eq!(submit(gh.as_ref(), &params(two()), "n").await.unwrap_err(), "HTTP 502");
+        assert_eq!(submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap_err(), "HTTP 502");
         assert!(gh.posts().is_empty());
     }
 
@@ -676,7 +811,7 @@ mod tests {
     async fn a_partial_match_reports_only_what_matched() {
         let gh = FakeRest::new(PostMode::Ok);
         landed_review(&gh, vec![serde_json::json!({"path": "src/a.rs", "line": 12, "body": "```suggestion\nbody d2\n```"})]);
-        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.sent_draft_ids, ["d2"], "d1 stays a local draft");
     }
 
@@ -722,10 +857,11 @@ mod tests {
     async fn restart_after_a_lost_response_finds_the_review_with_the_persisted_nonce() {
         let gh = FakeRest::new(PostMode::Lost("gh timed out"));
         let first = PrDash::new(gh.clone(), PrDashConfig::default());
-        assert!(first.submit_review(&params(two()), "persisted").await.is_err());
+        let ledger = MemLedger::default();
+        assert!(first.submit_review(&params(two()), &ledger).await.is_err());
         // A new engine process: no in-memory state, only the nonce the registry kept.
         let restarted = PrDash::new(gh.clone(), PrDashConfig::default());
-        let reply = restarted.submit_review(&params(two()), "persisted").await.unwrap();
+        let (reply, _) = restarted.submit_review(&params(two()), &ledger).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(gh.posts().len(), 1);
     }
@@ -736,9 +872,9 @@ mod tests {
         let mut check = params(vec![]);
         check.check_only = true;
         check.commit_id.clear();
-        assert_eq!(submit(gh.as_ref(), &check, "n").await.unwrap().outcome, SubmitReviewOutcome::NotFound);
+        assert_eq!(submit(gh.as_ref(), &check, "n", &MemLedger::default()).await.unwrap().outcome, SubmitReviewOutcome::NotFound);
         gh.reviews.lock().unwrap().push(serde_json::json!({"id": 4, "state": "COMMENTED", "body": "x <!-- mast-review:n -->"}));
-        assert_eq!(submit(gh.as_ref(), &check, "n").await.unwrap().outcome, SubmitReviewOutcome::AlreadyPosted);
+        assert_eq!(submit(gh.as_ref(), &check, "n", &MemLedger::default()).await.unwrap().outcome, SubmitReviewOutcome::AlreadyPosted);
         assert!(gh.posts().is_empty());
     }
 
@@ -746,7 +882,7 @@ mod tests {
     async fn pending_browser_review_is_detected_before_posting() {
         let gh = FakeRest::new(PostMode::Ok);
         gh.reviews.lock().unwrap().push(serde_json::json!({"id": 7, "state": "PENDING", "body": ""}));
-        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::PendingConflict);
         assert_eq!(reply.url, "https://github.com/o/r/pull/7");
         assert!(gh.posts().is_empty());
@@ -755,7 +891,7 @@ mod tests {
     #[tokio::test]
     async fn pending_rejection_from_github_maps_to_conflict() {
         let gh = FakeRest::new(PostMode::Fail("Unprocessable Entity: User can only have one pending review per pull request (HTTP 422)"));
-        let reply = submit(gh.as_ref(), &params(two()), "n").await.unwrap();
+        let reply = submit(gh.as_ref(), &params(two()), "n", &MemLedger::default()).await.unwrap();
         assert_eq!(reply.outcome, SubmitReviewOutcome::PendingConflict);
     }
 
@@ -764,10 +900,10 @@ mod tests {
         let gh = FakeRest::new(PostMode::Ok);
         let mut empty = params(vec![]);
         empty.body = "  ".into();
-        assert!(submit(gh.as_ref(), &empty, "n").await.is_err());
+        assert!(submit(gh.as_ref(), &empty, "n", &MemLedger::default()).await.is_err());
         let mut bad = params(two());
         bad.owner = "o/../x".into();
-        assert!(submit(gh.as_ref(), &bad, "n").await.is_err());
+        assert!(submit(gh.as_ref(), &bad, "n", &MemLedger::default()).await.is_err());
         assert!(gh.calls.lock().unwrap().is_empty());
     }
 
@@ -776,7 +912,7 @@ mod tests {
         let gh = FakeRest::new(PostMode::Ok);
         let dash = PrDash::new(gh.clone(), PrDashConfig::default());
         dash.review_threads("o", "r", 7).await.unwrap();
-        dash.submit_review(&params(two()), "n").await.unwrap();
+        dash.submit_review(&params(two()), &MemLedger::default()).await.unwrap();
         assert!(!dash.inner.threads.lock().await.contains_key("o/r#7"));
     }
 
@@ -784,17 +920,19 @@ mod tests {
     async fn a_second_submit_while_one_is_in_flight_is_refused() {
         let gh = FakeRest::slow(Duration::from_millis(60));
         let dash = PrDash::new(gh.clone(), PrDashConfig::default());
+        let ledger = Arc::new(MemLedger::default());
         let first = tokio::spawn({
             let dash = dash.clone();
-            async move { dash.submit_review(&params(two()), "n").await }
+            let ledger = ledger.clone();
+            async move { dash.submit_review(&params(two()), ledger.as_ref()).await }
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let second = dash.submit_review(&params(two()), "n").await.unwrap_err();
+        let second = dash.submit_review(&params(two()), ledger.as_ref()).await.unwrap_err();
         assert!(second.contains("Already posting"));
-        assert_eq!(first.await.unwrap().unwrap().outcome, SubmitReviewOutcome::Posted);
+        assert_eq!(first.await.unwrap().unwrap().0.outcome, SubmitReviewOutcome::Posted);
         assert_eq!(gh.posts().len(), 1);
         // Once the first finished the PR is free again; the marker stops a repeat.
-        assert_eq!(dash.submit_review(&params(two()), "n").await.unwrap().outcome, SubmitReviewOutcome::AlreadyPosted);
+        assert_eq!(dash.submit_review(&params(two()), ledger.as_ref()).await.unwrap().0.outcome, SubmitReviewOutcome::AlreadyPosted);
         assert_eq!(gh.gets("/reviews?"), 2);
     }
 

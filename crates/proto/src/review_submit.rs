@@ -137,6 +137,10 @@ pub struct SubmitReviewReply {
     /// post; the ones matched in the existing review after "already posted").
     #[serde(default)]
     pub sent_draft_ids: Vec<String>,
+    /// `sent_draft_ids` is exactly what the review carries (a fresh post, or the ids saved
+    /// before the POST), so the attempt is fully accounted for.
+    #[serde(default)]
+    pub sent_exact: bool,
 }
 
 /// Local record of a review Mast posted, kept per review target.

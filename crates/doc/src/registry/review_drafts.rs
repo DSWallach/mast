@@ -171,15 +171,23 @@ impl RegistryDoc {
         Ok(candidate.to_owned())
     }
 
-    /// Replace the target's nonce (the old one already belongs to a recorded review).
-    pub fn renew_review_nonce(&mut self, target: &str, candidate: &str) -> Result<String, DocError> {
+    /// Compare-and-set: replace the target's nonce with `candidate` only if it still equals
+    /// `expected` (it already belongs to a recorded review). Returns the nonce now in effect,
+    /// which is the stored one when someone else renewed first. Clears the saved attempt.
+    pub fn renew_review_nonce(&mut self, target: &str, expected: &str, candidate: &str) -> Result<String, DocError> {
         if target.trim().is_empty() || candidate.trim().is_empty() {
             return Err(DocError::Schema("review nonce needs a target".into()));
+        }
+        if let Some(current) = self.review_nonce(target)
+            && current != expected
+        {
+            return Ok(current);
         }
         let id = row_id(target);
         self.observe_row(KIND_REVIEW_DRAFTS, &id);
         let mut set = fields([("target", json!(target))]);
         set.insert("nonce".into(), json!(candidate));
+        set.insert("attempt".into(), Value::Null);
         let hlc = self.mint_hlc();
         self.write_ops(vec![RowOp {
             kind: KIND_REVIEW_DRAFTS.into(),
@@ -190,6 +198,43 @@ impl RegistryDoc {
             clocks: None,
         }])?;
         Ok(candidate.to_owned())
+    }
+
+    /// The draft ids of the review being posted under `nonce`, saved before the POST. When the
+    /// marker later turns up on GitHub these, not a text match, say what was sent.
+    pub fn save_review_attempt(&mut self, target: &str, nonce: &str, ids: &[String]) -> Result<(), DocError> {
+        if target.trim().is_empty() || nonce.trim().is_empty() {
+            return Err(DocError::Schema("review attempt needs a target and nonce".into()));
+        }
+        let id = row_id(target);
+        self.observe_row(KIND_REVIEW_DRAFTS, &id);
+        let mut set = fields([("target", json!(target))]);
+        set.insert("attempt".into(), json!(serde_json::to_string(&json!({"nonce": nonce, "ids": ids}))?));
+        let hlc = self.mint_hlc();
+        self.write_ops(vec![RowOp {
+            kind: KIND_REVIEW_DRAFTS.into(),
+            id,
+            op: OpKind::Upsert,
+            set: Some(set),
+            hlc,
+            clocks: None,
+        }])?;
+        Ok(())
+    }
+
+    pub fn review_attempt_ids(&self, target: &str, nonce: &str) -> Option<Vec<String>> {
+        let row = self.overlay_row(KIND_REVIEW_DRAFTS, &row_id(target))?;
+        if row.fields.get("target").and_then(Value::as_str) != Some(target) {
+            return None;
+        }
+        let saved: Value = serde_json::from_str(row.fields.get("attempt")?.as_str()?).ok()?;
+        if saved.get("nonce").and_then(Value::as_str) != Some(nonce) {
+            return None;
+        }
+        saved
+            .get("ids")?
+            .as_array()
+            .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_owned)).collect())
     }
 
     /// Posted reviews recorded for a target, oldest first.
@@ -217,6 +262,7 @@ impl RegistryDoc {
         &mut self,
         target: &str,
         review: &mast_proto::PostedReview,
+        sent_ids: &[String],
         consume_nonce: bool,
     ) -> Result<bool, DocError> {
         if target.trim().is_empty() {
@@ -234,11 +280,12 @@ impl RegistryDoc {
         if removed {
             // A confirmed post consumes the marker nonce; the next review gets a fresh one.
             set.insert("nonce".into(), Value::Null);
+            set.insert("attempt".into(), Value::Null);
         }
-        for comment in &review.comments {
-            if self.review_drafts(target).iter().any(|d| d.id == comment.draft_id) {
+        for draft_id in sent_ids {
+            if self.review_drafts(target).iter().any(|d| &d.id == draft_id) {
                 set.insert(
-                    format!("d:{}", derive_id(&comment.draft_id, "review-draft")),
+                    format!("d:{}", derive_id(draft_id, "review-draft")),
                     Value::Null,
                 );
                 removed = true;
@@ -413,11 +460,11 @@ mod tests {
                 start_line: None, start_side: None, body: "note".into(), line_text: String::new(), start_text: String::new(), context: vec![],
             }],
         };
-        assert!(registry.record_posted_review(target, &review, true).unwrap());
+        assert!(registry.record_posted_review(target, &review, &["posted".to_owned()], true).unwrap());
         assert_eq!(registry.review_drafts(target).iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["kept"]);
         assert_eq!(registry.posted_reviews(target), vec![review.clone()]);
         // Recording it again (a retried submit that found the review) changes nothing.
-        assert!(!registry.record_posted_review(target, &review, true).unwrap());
+        assert!(!registry.record_posted_review(target, &review, &["posted".to_owned()], true).unwrap());
         assert_eq!(registry.posted_reviews(target).len(), 1);
     }
 
@@ -434,15 +481,22 @@ mod tests {
         let review = PostedReview {
             review_id: 3, url: "u".into(), event: ReviewEvent::Comment, body: String::new(), posted_at: 1, comments: vec![], nonce: None,
         };
-        assert!(registry.record_posted_review(target, &review, true).unwrap());
+        assert!(registry.record_posted_review(target, &review, &["posted".to_owned()], true).unwrap());
         assert_eq!(registry.review_nonce(target), None, "confirmed post consumes the nonce");
         assert_eq!(registry.ensure_review_nonce(target, "third").unwrap(), "third");
         // A partial match records the review but keeps the nonce.
         let partial = PostedReview { review_id: 4, ..review.clone() };
-        assert!(registry.record_posted_review(target, &partial, false).unwrap());
+        assert!(registry.record_posted_review(target, &partial, &[], false).unwrap());
         assert_eq!(registry.review_nonce(target).as_deref(), Some("third"));
-        assert_eq!(registry.renew_review_nonce(target, "fourth").unwrap(), "fourth");
+        // Renewal is compare-and-set: a stale `expected` leaves the stored nonce alone.
+        assert_eq!(registry.renew_review_nonce(target, "stale", "x").unwrap(), "third");
+        assert_eq!(registry.review_nonce(target).as_deref(), Some("third"));
+        registry.save_review_attempt(target, "third", &["a".into(), "b".into()]).unwrap();
+        assert_eq!(registry.review_attempt_ids(target, "third"), Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(registry.review_attempt_ids(target, "other"), None);
+        assert_eq!(registry.renew_review_nonce(target, "third", "fourth").unwrap(), "fourth");
         assert_eq!(registry.review_nonce(target).as_deref(), Some("fourth"));
+        assert_eq!(registry.review_attempt_ids(target, "third"), None, "renewal clears the attempt");
     }
 
     #[test]

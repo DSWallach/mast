@@ -32,6 +32,7 @@ use serde_json::Value;
 
 mod review_threads;
 mod review_submit;
+pub use review_submit::SubmitLedger;
 
 /// `classify` as a function pointer so tests can inject a trivial one.
 pub type ClassifyFn = fn(PrDashTab, &PrDashRow) -> (PrDashBucket, Vec<String>);

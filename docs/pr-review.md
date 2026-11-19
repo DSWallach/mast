@@ -78,14 +78,19 @@ block, so it posts as a suggestion.
 - **Retry and restart are safe.** Every review body ends with an invisible
   marker, `<!-- mast-review:<nonce> -->`. The nonce is per review target, saved
   in the registry, and kept until a post is confirmed and recorded, so it
-  survives a lost response and an engine restart (it is saved before the POST).
-  Every submit, the first included, lists the PR's reviews first; if one carries
-  this marker, Mast reads all of that review's comments (every page; a failed
-  read is an error, never "no match"; an outdated comment is matched by its
-  original line), records the review as posted, removes only the drafts it
-  carries, sends nothing, and says **Already posted** with the link. A partial
-  match keeps the unmatched drafts and the nonce is retired by the next submit,
-  which posts them as a new review; only a full match or a fresh post clears it. A `gh` call that times out is killed, not
+  survives a lost response and an engine restart. Just before the POST, Mast also
+  saves the ids of the drafts being sent next to the nonce (durably). Every
+  submit, the first included, lists the PR's reviews first; if one carries this
+  marker, Mast records the review as posted, treats exactly the saved ids as
+  sent (the review's comments are never used to decide that, so a comment GitHub
+  reports differently can't cause a repost), removes those drafts, sends
+  nothing, and says **Already posted** with the link. Only an older attempt with
+  no saved ids falls back to matching comment text (every page, outdated
+  comments by their original line, a failed read is an error); a partial match
+  there keeps the unmatched drafts. A check never renews the nonce. A submit
+  retires a nonce that already belongs to a recorded review and starts a new one,
+  all inside the per-PR lock (compare-and-set), so concurrent submits can't swap
+  the nonce under an in-flight post. A `gh` call that times out is killed, not
   left running.
 - **Unknown result.** If a post ends without a clear answer (timeout, lost
   connection), the dialog says "Result unknown; checking…" and runs the same
