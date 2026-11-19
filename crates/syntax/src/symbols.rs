@@ -207,7 +207,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
         ),
         CSharp => (
             tree_sitter_c_sharp::LANGUAGE.into(),
-            format!("{}\n((field_declaration (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))\n((local_declaration_statement (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))", tree_sitter_c_sharp::TAGS_QUERY),
+            format!("{}\n((field_declaration (modifier) @modifier (variable_declaration (variable_declarator name: (identifier) @name))) @definition.constant (#eq? @modifier \"const\"))", tree_sitter_c_sharp::TAGS_QUERY),
         ),
         Java => (
             tree_sitter_java::LANGUAGE.into(),
@@ -371,6 +371,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
             }
         }
         if let (Some(name), Some((node, mut kind))) = (name, definition) {
+            if kind == SymbolKind::Constant && !is_indexed_constant_scope(node) { continue; }
             let node = definition_extent(node);
             let Ok(value) = name.utf8_text(source.as_bytes()) else {
                 continue;
@@ -400,6 +401,20 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
         }
     }
     symbols.into_values().collect()
+}
+
+/// Exclude local declarations, including nested blocks and function expressions.
+fn is_indexed_constant_scope(mut node: tree_sitter::Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        let kind = parent.kind();
+        let namespace_block = matches!(kind, "statement_block" | "block")
+            && parent.parent().is_some_and(|owner| matches!(owner.kind(), "internal_module" | "module" | "namespace_definition"));
+        if !namespace_block && (matches!(kind, "block" | "statement_block" | "compound_statement" | "do_block" | "if" | "unless" | "for" | "while" | "case" | "if_expression" | "match_expression" | "loop_expression" | "for_expression" | "while_expression" | "if_statement" | "switch_statement" | "for_statement" | "while_statement" | "do_statement" | "try_statement" | "catch_clause" | "closure_expression" | "lambda_expression" | "arrow_function" | "method" | "singleton_method" | "function" | "function_item" | "function_definition" | "function_declaration" | "method_definition" | "method_declaration" | "constructor_declaration" | "constructor_definition" | "init_declaration" | "initializer" | "deinit_declaration") || kind.ends_with("_function")) {
+            return false;
+        }
+        node = parent;
+    }
+    true
 }
 
 fn definition_extent(mut node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
@@ -494,6 +509,40 @@ mod tests {
         for (path, source) in [("a.java", "class C { final int LIMIT = 10; int mutable = 2; }"), ("a.swift", "let LIMIT = 10\nvar mutable = 2"), ("a.rb", "LIMIT = 10\nmutable = 2"), ("a.php", "<?php const LIMIT = 10; $mutable = 2;")] {
             let constants: Vec<_> = extract(source, path, 10).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
             assert_eq!(constants, ["LIMIT"], "{path}");
+        }
+    }
+
+    #[test]
+    fn constants_exclude_function_local_declarations() {
+        let cases = [
+            ("a.rs", "const GLOBAL: i32 = 1; fn f() { const LOCAL: i32 = 2; }"),
+            ("a.js", "const GLOBAL = 1; function f() { const LOCAL = 2; }"),
+            ("a.ts", "const GLOBAL: number = 1; function f() { const LOCAL = 2; }"),
+            ("a.go", "package p\nconst GLOBAL = 1\nfunc f() { const LOCAL = 2 }"),
+            ("a.c", "const int GLOBAL = 1; void f() { const int LOCAL = 2; }"),
+            ("a.cpp", "const int GLOBAL = 1; void f() { const int LOCAL = 2; }"),
+            ("a.cs", "class C { const int GLOBAL = 1; void F() { const int LOCAL = 2; } }"),
+            ("a.java", "class C { final int GLOBAL = 1; void f() { final int LOCAL = 2; } }"),
+            ("a.swift", "let GLOBAL = 1\nfunc f() { let LOCAL = 2 }"),
+            ("a.rb", "GLOBAL = 1\ndef f\n LOCAL = 2\nend"),
+            ("a.php", "<?php const GLOBAL = 1; function f() { const LOCAL = 2; }"),
+        ];
+        for (path, source) in cases {
+            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["GLOBAL"], "{path}");
+        }
+    }
+
+    #[test]
+    fn constant_members_and_namespaces_remain_indexed() {
+        for (path, source) in [
+            ("a.rs", "struct C; impl C { const MEMBER: i32 = 1; fn f() { const LOCAL: i32 = 2; } }"),
+            ("a.ts", "namespace N { export const MEMBER = 1; function f() { const LOCAL = 2; } }"),
+            ("a.cs", "class C { const int MEMBER = 1; void F() { const int LOCAL = 2; } }"),
+            ("a.swift", "struct C { let MEMBER = 1; func f() { let LOCAL = 2 } }"),
+        ] {
+            let constants: Vec<_> = extract(source, path, 100).into_iter().filter(|symbol| symbol.kind == SymbolKind::Constant).map(|symbol| symbol.name).collect();
+            assert_eq!(constants, ["MEMBER"], "{path}");
         }
     }
 
