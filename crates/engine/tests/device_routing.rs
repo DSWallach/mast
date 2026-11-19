@@ -151,6 +151,15 @@ impl Harness for InstantHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// A Manager's role instructions are always delivered, so a role hand-off
+    /// to this host needs a harness that can take them.
+    fn instruction_support(&self) -> mast_harness::InstructionSupport {
+        mast_harness::InstructionSupport::Supported {
+            channel: mast_harness::InstructionChannel::Test,
+            replace_strategy: mast_harness::InstructionReplaceStrategy::RespawnResume,
+            max_bytes: 64 * 1024,
+        }
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
