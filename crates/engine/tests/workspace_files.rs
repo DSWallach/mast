@@ -77,6 +77,8 @@ async fn file_history_handles_merge_commits() {
     assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "topic edit"));
     assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "initial"));
     assert!(commits.iter().all(|entry| entry["path"] == "src/lib.rs"));
+    assert!(commits.iter().all(|entry| matches!(entry["commit"]["subject"].as_str(), Some("merge topic" | "topic edit" | "initial"))));
+    assert!(commits.iter().all(|entry| entry["commit"]["sha"].as_str().is_some_and(|sha| sha.len() == 40)));
 }
 
 async fn init_repo(path: &Path) {
