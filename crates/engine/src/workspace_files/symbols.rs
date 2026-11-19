@@ -177,7 +177,9 @@ fn search_snapshot(index: &SymbolIndex, query: &str, limit: usize, generation: &
             if visited % 128 == 0 && generation.load(Ordering::Acquire) != expected { return None; }
             // A release-114 client does not know the newer constant kind.
             // New clients request the kinds they understand explicitly.
-            if kinds.is_none() && !exact_name && symbol.kind == mast_syntax::symbols::SymbolKind::Constant { continue; }
+            if kinds.is_none() && !exact_name && !matches!(symbol.kind,
+                mast_syntax::symbols::SymbolKind::Function | mast_syntax::symbols::SymbolKind::Method |
+                mast_syntax::symbols::SymbolKind::Type | mast_syntax::symbols::SymbolKind::Test) { continue; }
             if kinds.is_some_and(|kinds| !kinds.contains(&symbol.kind)) { continue; }
             let score = if exact_name {
                 if symbol.name != query { continue; }
