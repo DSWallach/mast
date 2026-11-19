@@ -849,12 +849,12 @@ impl EngineCore {
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         {
-            let tasks = self.scheduled_tasks.clone();
+            let index_enabled = self.scheduled_tasks.briefing_index_reader();
             let artifacts = self.artifacts.clone();
             let workspace = self.workspace.clone();
             let outline = rpc.work_outline();
             self.sessions.set_chat_start_notice(Arc::new(move |chat_id: &str| {
-                if !tasks.briefing_index_enabled() {
+                if !index_enabled() {
                     return None;
                 }
                 let chat = workspace.chat(chat_id).ok().flatten()?;

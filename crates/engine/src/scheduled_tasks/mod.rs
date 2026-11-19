@@ -60,6 +60,12 @@ impl ScheduledTasks {
     pub fn briefing_index_enabled(&self) -> bool {
         self.0.store.briefing_index().unwrap_or(false)
     }
+    /// The same setting without holding the scheduler (which holds the
+    /// sessions engine), for callbacks the sessions engine itself stores.
+    pub fn briefing_index_reader(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let store = self.0.store.clone();
+        move || store.briefing_index().unwrap_or(false)
+    }
     pub fn start(&self) {
         let this = self.clone();
         tokio::spawn(async move {

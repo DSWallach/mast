@@ -232,6 +232,7 @@ mod tests {
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",
                     "scheduled-task-notion-writes-v1",
+                    "briefing-read-v1",
                     "scheduled-run-cleanup-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",
