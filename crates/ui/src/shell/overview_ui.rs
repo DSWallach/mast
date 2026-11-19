@@ -74,8 +74,12 @@ impl Shell {
         (div().w(px(0.0)).flex_none().into_any_element(), floating)
     }
 
+    pub(super) fn sidebar_shows_overview(&self) -> bool {
+        self.settings.sidebar_overview || self.settings.ui_layout == crate::ui_style::UiLayout::Compact
+    }
+
     pub(crate) fn overview_navigation_visible(&self) -> bool {
-        self.settings.sidebar_overview
+        self.sidebar_shows_overview()
             && !self.settings.sidebar_collapsed
             && !(self.sidebar_is_overlay() && self.overview_overlay_dismissed)
             && !matches!(self.route, Route::Settings(_))
@@ -339,6 +343,65 @@ pub(super) mod tests {
         shell.read_with(vcx, |shell, cx| {
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
+        });
+    }
+
+    #[gpui::test]
+    fn required_action_opens_chat_in_another_space(cx: &mut TestAppContext) {
+        use crate::work_outline::required_actions::fixture::request;
+        use crate::work_outline::store::{WorkOutlineLoad, fixture_ids::UI, fixture_snapshot};
+
+        let (_dir, shell, vcx) = setup(cx);
+        let overview = shell.update(vcx, |shell, cx| {
+            shell.settings.space_filter = Some("source".into());
+            shell.state.update(cx, |state, cx| {
+                state.spaces = ["source", "destination"]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": "local", "path": format!("/work/{id}"),
+                            "createdAt": "2026-11-01T00:00:00Z"
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.chats[0].space_id = Some("source".into());
+                state.selected_space = Some("source".into());
+                let mut origin = state.chats[0].clone();
+                origin.id = "origin".into();
+                origin.space_id = Some("destination".into());
+                state.chats.push(origin);
+                cx.notify();
+            });
+            shell.ensure_overview_page(cx)
+        });
+        overview.update(vcx, |overview, cx| {
+            let mut snapshot = fixture_snapshot("destination");
+            snapshot.user_action_requests.push(request(
+                "decision", "destination", UI, "origin", "Answer the questions in chat",
+            ));
+            overview.set_outline_loads(
+                [("destination".into(), WorkOutlineLoad::Ready(snapshot.into()))].into(),
+                cx,
+            );
+            overview.open_required_action("decision".into(), cx);
+        });
+        redraw_assistant(vcx);
+        let open = vcx
+            .debug_bounds("required-actions-open-decision")
+            .expect("the global Required Actions list includes the other Space")
+            .center();
+        vcx.simulate_click(open, gpui::Modifiers::default());
+        redraw_assistant(vcx);
+        shell.read_with(vcx, |shell, cx| {
+            assert_eq!(shell.route, Route::Chat);
+            let state = shell.state.read(cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("origin"));
+            assert_eq!(state.selected_space.as_deref(), Some("destination"));
+            assert_eq!(shell.settings.space_filter.as_deref(), Some("source"));
+        });
+        overview.read_with(vcx, |overview, _| {
+            assert!(overview.required_actions_panel().is_none());
         });
     }
 
@@ -703,6 +766,32 @@ pub(super) mod tests {
             assert_eq!(custom[0].session_ids, vec!["chat"]);
         });
         assert!(vcx.debug_bounds("sidebar-session-lists").is_none());
+    }
+
+    #[gpui::test]
+    fn compact_layout_shows_overview_and_survives_shell_saves(cx: &mut TestAppContext) {
+        let (_dir, shell, vcx) = setup(cx);
+        shell.update(vcx, |shell, _| {
+            shell.settings.sidebar_overview = false;
+        });
+        vcx.update(|window, cx| {
+            crate::ui_style::init_with_layout(crate::ui_style::UiStyleId::Default, crate::ui_style::UiLayout::Minimal, cx);
+            assert!(crate::ui_style::set_layout(crate::ui_style::UiLayout::Compact, window, cx));
+        });
+        shell.update(vcx, |shell, cx| {
+            shell.schedule_save(cx);
+            assert_eq!(shell.settings.ui_layout, crate::ui_style::UiLayout::Compact);
+            assert!(shell.sidebar_shows_overview());
+            assert!(!shell.settings.sidebar_overview);
+            assert_eq!(settings::current(cx).ui_layout, crate::ui_style::UiLayout::Compact);
+        });
+        vcx.update(|window, cx| {
+            assert!(crate::ui_style::set_layout(crate::ui_style::UiLayout::Minimal, window, cx));
+        });
+        shell.update(vcx, |shell, cx| {
+            shell.schedule_save(cx);
+            assert!(!shell.sidebar_shows_overview());
+        });
     }
 
     #[gpui::test]

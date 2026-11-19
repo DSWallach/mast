@@ -12,6 +12,7 @@ impl Overview {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
+        let compact = self.in_sidebar && theme.ui_style.layout == crate::ui_style::UiLayout::Compact;
         self.ensure_prefs_loaded(cx);
         if std::mem::take(&mut self.outline_focus_pending)
             && self.view_mode == OverviewMode::Outline
@@ -79,20 +80,21 @@ impl Overview {
                         };
                         el.child(
                             crate::components::overview_attention_filter(
-                                "overview-filter-needs-interaction", color, active,
+                                "overview-filter-needs-interaction",
+                                color,
+                                active,
                             )
-                                .child(SharedString::from(label))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.attention_filter = if this.attention_filter
-                                        == AttentionFilter::NeedsInteraction
-                                    {
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::NeedsInteraction {
                                         AttentionFilter::All
                                     } else {
                                         AttentionFilter::NeedsInteraction
                                     };
-                                    this.rows_dirty = true;
-                                    cx.notify();
-                                })),
+                                this.rows_dirty = true;
+                                cx.notify();
+                            })),
                         )
                     },
                 )
@@ -108,19 +110,21 @@ impl Overview {
                         let label = format!("{} stalled", self.stalled_count);
                         el.child(
                             crate::components::overview_attention_filter(
-                                "overview-filter-stalled", color, active,
+                                "overview-filter-stalled",
+                                color,
+                                active,
                             )
-                                .child(SharedString::from(label))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.attention_filter =
-                                        if this.attention_filter == AttentionFilter::Stalled {
-                                            AttentionFilter::All
-                                        } else {
-                                            AttentionFilter::Stalled
-                                        };
-                                    this.rows_dirty = true;
-                                    cx.notify();
-                                })),
+                            .child(SharedString::from(label))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.attention_filter =
+                                    if this.attention_filter == AttentionFilter::Stalled {
+                                        AttentionFilter::All
+                                    } else {
+                                        AttentionFilter::Stalled
+                                    };
+                                this.rows_dirty = true;
+                                cx.notify();
+                            })),
                         )
                     },
                 )
@@ -211,9 +215,15 @@ impl Overview {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(if compact { 4.0 } else { 8.0 }))
             .px(px(if self.in_sidebar { 8.0 } else { 16.0 }))
-            .py(px(if self.in_sidebar { 8.0 } else { 12.0 }))
+            .py(px(if compact {
+                4.0
+            } else if self.in_sidebar {
+                8.0
+            } else {
+                12.0
+            }))
             .child(title_row)
             .child(top_sessions)
             .child(toolbar);

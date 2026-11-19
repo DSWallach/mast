@@ -119,7 +119,7 @@ fn close_active_window(cx: &mut App) {
                         return;
                     }
                     if shell.prepare_window_close(cx) {
-                        window.remove_window();
+                        crate::close_main_window(window, cx);
                     }
                 })
                 .ok();
