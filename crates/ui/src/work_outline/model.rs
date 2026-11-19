@@ -380,24 +380,12 @@ pub(crate) fn flatten(
 
     // chat id -> item id, per Space, from each ready snapshot.
     let mut associated: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
-    // First-start Chats of projects whose Manager does not hold them yet.
-    let mut unadopted_bootstrap: HashSet<String> = HashSet::new();
     for space in spaces {
         if let Some(snapshot) = ready_snapshot(&space.load) {
             let map = associated.entry(space.id.as_str()).or_default();
             for item in &snapshot.items {
                 for chat_id in &item.chat_ids {
                     map.insert(chat_id.as_str(), item.id.as_str());
-                }
-                if item.is_project {
-                    let bootstrap =
-                        mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item.id);
-                    let held = snapshot
-                        .standing_role(StandingRoleKind::Manager, &item.id)
-                        .and_then(|role| role.current_chat_id.as_deref());
-                    if held != Some(bootstrap.as_str()) {
-                        unadopted_bootstrap.insert(bootstrap);
-                    }
                 }
             }
             // A role's chat belongs to the role's scope item, wherever an
@@ -413,11 +401,6 @@ pub(crate) fn flatten(
 
     let mut by_home: HashMap<String, Vec<&OutlineChat>> = HashMap::new();
     for chat in chats.iter().filter(|chat| chat.visible) {
-        // A partial first start is the Start row's business until its first
-        // message is queued and the role adopts the Chat.
-        if unadopted_bootstrap.contains(&chat.id) {
-            continue;
-        }
         if let Some(home) = chat_home(
             chat,
             &chat_by_id,
@@ -1354,23 +1337,6 @@ pub(crate) mod tests {
             model.row(&row_key::item("s1", API)).unwrap().compact_chat().is_none(),
             "the Manager chat is never folded into the project row"
         );
-    }
-
-    #[test]
-    fn an_unadopted_first_start_chat_stays_hidden_and_the_row_stays_a_start() {
-        let bootstrap = mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, API);
-        let mut snapshot = project_snapshot(None);
-        let mut assignment = snapshot.assignments.iter().find(|a| a.chat_id == CHAT_API).unwrap().clone();
-        assignment.chat_id = bootstrap.clone();
-        snapshot.assignments.push(assignment);
-        snapshot.items.iter_mut().find(|i| i.id == API).unwrap().chat_ids.push(bootstrap.clone());
-        let spaces = [ready("s1", "Repo", snapshot)];
-        let mut chats = fixture_chats("s1");
-        chats.push(chat(&bootstrap, Some("s1")));
-        let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
-        let row = model.row(&row_key::manager("s1", API)).unwrap().manager().unwrap();
-        assert_eq!(row.chat_id, None, "the row still offers Start Manager");
-        assert!(model.row(&row_key::chat(&bootstrap)).is_none(), "no ordinary chat row either");
     }
 
     #[test]

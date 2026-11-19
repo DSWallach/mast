@@ -2851,8 +2851,26 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, new_id(), payload, transfers)
             .map(|(id, _)| id)
+    }
+
+    /// A standing role's first-start chat takes no message but its own launch's
+    /// (which queues through `queue_command_with_id`): until the role adopts it
+    /// the chat is hidden, and a message sent to it would run where no one can
+    /// see the answer.
+    fn refuse_unstarted_role_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let provisional = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.standing_role_provisional().is_some());
+        if provisional {
+            return Err(EngineError::Other(
+                "this Manager has not started yet; start it from the project's Manager row".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Queue a command with a stable client-supplied identity, so a lost
@@ -2864,6 +2882,7 @@ impl DocHost {
         if command_id.is_empty() || command_id.len() > 64 {
             return Err(EngineError::Other("invalid command id".into()));
         }
+        self.refuse_unstarted_role_chat(chat_id)?;
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, transfers)
             .map(|(id, _)| id)
     }
@@ -2889,6 +2908,46 @@ impl DocHost {
         }
         self.queue_command_inner(chat_id, command_id.to_owned(), payload, Vec::new())
             .map(|(_, appended)| appended)
+    }
+
+    /// Whether the chat has a queued or applied first-turn command (a Run).
+    pub fn has_run_command(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        Ok(handle.doc.read_commands()?.iter().any(|c| {
+            matches!(
+                c.payload,
+                SessionCommandPayload::Run { .. } | SessionCommandPayload::RunWithInstructions { .. }
+            )
+        }))
+    }
+
+    /// Persist the chat's session doc now and report whether it reached
+    /// disk, unlike the debounced save, which logs failures and retries. A
+    /// caller that must not act on a queued command until it survives a
+    /// restart (a standing role's first message) calls this first.
+    pub fn persist_chat_now(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        if let Some(persistence) = &handle.persistence {
+            let generation = persistence.generation();
+            persistence.flush_sync();
+            return if persistence.has_saved(generation) {
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "the chat could not be saved to disk".into(),
+                ))
+            };
+        }
+        let bytes = handle
+            .doc
+            .export_snapshot()
+            .map_err(|e| EngineError::Other(format!("snapshot export failed: {e}")))?;
+        self.inner
+            .store
+            .save_snapshot(&handle.chat_id, &bytes)
+            .map_err(|e| EngineError::Other(format!("snapshot save failed: {e}")))?;
+        handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// The latest command attempt carrying the user message `message_id`
@@ -3152,6 +3211,7 @@ impl DocHost {
         message_id: Option<&str>,
     ) -> Result<String, EngineError> {
         if from_user {
+            self.refuse_unstarted_role_chat(chat_id)?;
             // User first: a wake still waiting in the queue is pulled back
             // (its events return to the held batch) so it can never run
             // ahead of this message, and a running event turn is
