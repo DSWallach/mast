@@ -6,7 +6,7 @@
 //! Steps are plain JSON objects with an `op`; items created earlier in the
 //! batch are addressed as `"$<ref>"` (the step's `ref`). See `STEP_OPS`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mast_proto::agent_tools::{self, tools};
 use mast_proto::work_outline::{derive_id, roles};
@@ -655,11 +655,21 @@ fn expand(steps: &[Value], snapshot: &WorkOutlineSnapshot) -> Result<Vec<Map<Str
 impl AgentToolsService {
     /// `work_outline_admin`.
     pub(super) fn admin(&self, context: &CallContext, arguments: &Value) -> Result<Value, AgentToolError> {
-        let Some(space) = context.admin_space.clone() else {
-            return Err(forbidden(
-                "This chat is not an admin chat (or its grant expired or was revoked). Only the \
-                 user can grant admin, from the chat's menu: \"Grant admin for this Space…\"",
-            ));
+        // An admin grant (the whole Space) outranks a manager's project.
+        let (space, manager_root) = match (&context.admin_space, &context.manager_scope) {
+            (Some(space), _) => (space.clone(), None),
+            (None, Some(root)) => (context.grant.space_id.clone(), Some(root.clone())),
+            (None, None) => {
+                return Err(forbidden(
+                    "This chat is not an admin chat (or its grant expired or was revoked) and \
+                     does not hold a project manager role. Only the user can grant admin, from \
+                     the chat's menu: \"Grant admin for this Space…\"",
+                ));
+            }
+        };
+        let who = || match manager_root {
+            Some(_) => crate::admin::manager_attribution(&context.chat_title),
+            None => crate::admin::attribution(&context.chat_title),
         };
         let admin = self.tokens.admin();
         let snapshot = self.work_outline.snapshot(&space);
@@ -686,18 +696,23 @@ impl AgentToolsService {
                 })
             }
             let mut count = 0usize;
-            let roots: Vec<Value> = snapshot
-                .root_work_item_ids
-                .iter()
-                .map(|id| walk(&snapshot, id, depth, &mut count))
-                .collect();
+            let roots: Vec<Value> = match &manager_root {
+                Some(root) => vec![walk(&snapshot, root, depth, &mut count)],
+                None => snapshot
+                    .root_work_item_ids
+                    .iter()
+                    .map(|id| walk(&snapshot, id, depth, &mut count))
+                    .collect(),
+            };
+            let in_scope = |item: &str| manager_root.as_deref().is_none_or(|root| snapshot.is_within(root, item));
             return Ok(json!({
                 "spaceId": space,
                 "roots": roots,
-                "openRequests": snapshot.user_action_requests.iter().filter(|r| r.is_open() && !r.deduped)
+                "openRequests": snapshot.user_action_requests.iter().filter(|r| r.is_open() && !r.deduped && in_scope(&r.work_item_id))
                     .take(100).map(|r| json!({"id": r.id, "workItemId": r.work_item_id, "text": r.text, "chatId": r.chat_id}))
                     .collect::<Vec<_>>(),
-                "proposals": snapshot.instruction_proposals.iter().filter(|p| p.status == mast_proto::InstructionProposalStatus::Pending)
+                // Proposals are the user's to judge; a manager does not see them.
+                "proposals": snapshot.instruction_proposals.iter().filter(|p| manager_root.is_none() && p.status == mast_proto::InstructionProposalStatus::Pending)
                     .take(100).map(|p| json!({"id": p.id, "text": p.text, "action": p.action}))
                     .collect::<Vec<_>>(),
             }));
@@ -714,6 +729,9 @@ impl AgentToolsService {
         if actions.len() > MAX_STEPS {
             return Err(invalid(format!("at most {MAX_STEPS} steps per call (got {})", actions.len())));
         }
+        if let Some(root) = &manager_root {
+            check_manager_scope(&snapshot, root, &actions)?;
+        }
         let key = non_empty(arguments.get("idempotencyKey").and_then(Value::as_str).map(str::to_owned))
             .ok_or_else(|| invalid("idempotencyKey is required for work_outline_admin"))?;
         let steps_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&actions).unwrap_or_default()));
@@ -723,7 +741,7 @@ impl AgentToolsService {
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut preview = Vec::new();
         for (i, step) in actions.iter().enumerate() {
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true, who: crate::admin::attribution(&context.chat_title) };
+            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: true, who: who() };
             let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
             if let Some(name) = built.creates_ref {
                 refs.insert(name.clone(), format!("${name}"));
@@ -789,15 +807,19 @@ impl AgentToolsService {
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
         for (i, step) in actions.iter().enumerate() {
-            if admin.live(&context.grant.chat_id).is_none_or(|g| g.space_id != space) {
+            let still_allowed = match &manager_root {
+                Some(root) => self.manager_scope_now(&context.grant.chat_id).as_ref() == Some(root),
+                None => admin.live(&context.grant.chat_id).is_some_and(|g| g.space_id == space),
+            };
+            if !still_allowed {
                 return Err(forbidden(format!(
-                    "admin was revoked or expired after {i} of {} steps; those are in the audit log",
+                    "admin or the manager role was revoked, expired or handed off after {i} of {} steps; those are in the audit log",
                     actions.len()
                 )));
             }
-            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false, who: crate::admin::attribution(&context.chat_title) };
+            let ctx = Ctx { snapshot: &snapshot, space_id: &space, refs: refs.clone(), dry: false, who: who() };
             let built = build(&ctx, step, &op_for(i)).map_err(|e| step_error(i, e))?;
-            let reply = self.apply(context, &built.mutation).map_err(|e| {
+            let reply = self.apply_scoped(context, &built.mutation, Some(&space)).map_err(|e| {
                 invalid(format!(
                     "step {i} ({}) failed after {i} applied: {}",
                     built.summary,
@@ -822,7 +844,7 @@ impl AgentToolsService {
             "applied": results.len(),
             "results": results,
             "turnId": turn_id,
-            "attribution": crate::admin::attribution(&context.chat_title),
+            "attribution": who(),
             "note": "Recorded in the outline's Recent Changes; the user can undo this whole turn.",
         }))
     }
@@ -847,8 +869,12 @@ impl AgentToolsService {
         let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}", &steps_hash[..16]);
         let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}", &steps_hash[..24]));
         let request_text = format!(
-            "Approve bulk change: {count} outline changes by admin chat {}",
-            context.chat_title
+            "Approve bulk change: {count} outline changes {}",
+            if context.admin_space.is_some() {
+                crate::admin::attribution(&context.chat_title)
+            } else {
+                crate::admin::manager_attribution(&context.chat_title)
+            }
         );
         let reply = self.apply(
             context,
@@ -908,6 +934,94 @@ impl AgentToolsService {
         }
         Ok(reply)
     }
+}
+
+/// A project manager's steps may only name items inside its project, and may
+/// not move, archive or re-flag the project item itself. Every id a step
+/// names is checked against the outline as it is now; `$ref` items are
+/// inside because the create that made them was checked.
+fn check_manager_scope(snap: &WorkOutlineSnapshot, root: &str, actions: &[Map<String, Value>]) -> Result<(), AgentToolError> {
+    let mut created: HashSet<String> = HashSet::new();
+    let outside = |what: &str| forbidden(format!("{what} is outside your project; a project manager can only change items and chats inside its own project"));
+    for (i, step) in actions.iter().enumerate() {
+        let at = |e: AgentToolError| step_error(i, e);
+        let inside = |raw: Option<&str>, strict: bool, what: &str| -> Result<(), AgentToolError> {
+            let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+                return Err(at(invalid(format!("{what} is required"))));
+            };
+            if let Some(name) = raw.strip_prefix('$') {
+                return if created.contains(name) { Ok(()) } else { Err(at(invalid(format!("unknown ref ${name}")))) };
+            }
+            let id = resolve_id(raw, snap.items.iter().map(|item| item.id.as_str()), "work item").map_err(at)?;
+            if snap.item(&id).is_some() && snap.is_within(root, &id) && !(strict && id == root) {
+                Ok(())
+            } else if strict && id == root {
+                Err(at(forbidden("the project item itself cannot be moved, archived or re-flagged by its manager")))
+            } else {
+                Err(at(outside(&format!("item {id}"))))
+            }
+        };
+        let get = |key: &str| step.get(key).and_then(Value::as_str);
+        match get("op").unwrap_or_default() {
+            "create" => {
+                inside(get("parentId"), false, "parentId")?;
+                if let Some(name) = get("ref") {
+                    created.insert(name.to_owned());
+                }
+            }
+            "rename" | "describe" | "status" | "template_set" | "template_apply" => inside(get("itemId"), false, "itemId")?,
+            "move" => {
+                inside(get("itemId"), true, "itemId")?;
+                inside(get("parentId"), false, "parentId")?;
+                if let Some(position) = step.get("position").and_then(Value::as_object) {
+                    for key in ["before", "after"] {
+                        if let Some(sibling) = position.get(key) {
+                            inside(sibling.as_str(), false, key)?;
+                        }
+                    }
+                }
+            }
+            "archive" | "restore" | "project" | "convert_to_project" => {
+                inside(get("itemId"), true, "itemId")?;
+                if let Some(dest) = get("destinationId") {
+                    inside(Some(dest), false, "destinationId")?;
+                }
+            }
+            "destination" => {
+                inside(get("itemId"), false, "itemId")?;
+                if let Some(dest) = get("destinationId") {
+                    inside(Some(dest), false, "destinationId")?;
+                }
+            }
+            "assign_chat" => {
+                inside(get("itemId"), false, "itemId")?;
+                let chat = get("chatId").unwrap_or_default().trim();
+                let in_project = snap.assignments.iter().any(|a| {
+                    a.chat_id == chat && a.work_item_id.as_deref().is_some_and(|item| snap.is_within(root, item))
+                });
+                if !in_project {
+                    return Err(at(outside(&format!("chat {chat}"))));
+                }
+            }
+            "instruction_add" => inside(get("itemId"), false, "itemId")?,
+            "instruction_edit" | "instruction_remove" => {
+                let id = resolve_id(get("instructionId").unwrap_or_default(), snap.instructions.iter().map(|i| i.id.as_str()), "instruction").map_err(at)?;
+                let item = snap.instructions.iter().find(|i| i.id == id).and_then(|i| i.work_item_id.as_deref());
+                inside(item, false, "the instruction's item")?;
+            }
+            "resolve_request" => {
+                let id = resolve_id(get("requestId").unwrap_or_default(), snap.user_action_requests.iter().map(|r| r.id.as_str()), "request").map_err(at)?;
+                let item = snap.user_action_requests.iter().find(|r| r.id == id).map(|r| r.work_item_id.as_str());
+                inside(item, false, "the request's item")?;
+            }
+            other => {
+                return Err(at(forbidden(format!(
+                    "step {other:?} is not available to a project manager (instruction proposals are the user's to judge)"
+                ))));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn step_error(i: usize, e: AgentToolError) -> AgentToolError {

@@ -62,6 +62,34 @@ the original tools to the token's Chat, project, and device:
 | `list_projects`, `list_devices` | Only the token's project / device. |
 | `whoami`, `list_harnesses`, `list_models` | Unscoped (this device's capabilities). |
 
+### Project manager grant
+
+The chat that holds a project's **manager** role (the standing role record,
+`role: manager`, scope item = the project) gets a standing grant over that
+project's subtree. It has no expiry and belongs to the role, not the chat, so it
+moves to the successor on hand-off and ends for the predecessor at the same
+moment. The engine re-derives it from the synced role record on every
+`AgentAuthenticate` and `AgentToolCall`, exactly as it does the personal
+assistant flag and admin grants, and `AgentOrigin.managerScopeItemId` carries
+the project item. A chat with no role, a superseded predecessor, a chat holding
+the `assistant` role, and a manager whose scope item is archived or missing
+have no grant.
+
+| Tool | With the grant |
+| --- | --- |
+| `read_chat`, `send_message`, `wait_for_turn`, `interrupt_chat`, `respond_to_input`, `get_chat`, `list_chats` | Every chat assigned to an item inside the project, however it was started (including by hand), plus every chat that held a role scoped inside the project (its own archived predecessors), never itself. Archived chats only for `read_chat`, `get_chat`, `list_chats` and `archive_chat`. Chats of any other project or Space are refused as if they did not exist. |
+| `archive_chat` | The same chats, with the usual finished-worker check (`force` with a reason otherwise). |
+| `work_outline_admin` | Steps on items and chats inside the project only. A step that names an item outside the subtree, creates or moves at the Space root, adds a Space-wide instruction, assigns a chat that is not already in the project, or moves, archives or re-flags the project item itself is refused before anything runs. No instruction-proposal steps, and `read` shows only the subtree. Over 10 changes still opens the "Approve bulk change" Required Action and needs the user's approval (the confirm token is per chat, so a successor asks again). Attributed "by project manager <title>", never as the user. |
+
+The workflow-pack tools stay admin-only. Every other tool is unchanged.
+
+Mixed versions: the field is optional on the wire. An engine that predates the
+grant sends none, and a client that predates it ignores it, so the grant is
+simply absent there and a manager is refused its project's chats (never
+widened). The engine advertises `project-manager-grant-v1`; place a manager
+only on a host that lists it. The chat tools learn the project's chats from
+`chat_project_scope_chats` (`managerChatIds`, empty for everyone else).
+
 Without a token (a human running `mast mcp` in a terminal) the original tools
 work unattributed and unscoped. Contract:
 `docs/plans/work-outline/m0-contract.md`, "Milestone 4 agent tool discoveries".

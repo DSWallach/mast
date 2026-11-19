@@ -297,3 +297,9 @@ impl AdminGrants {
 pub fn attribution(chat_title: &str) -> String {
     format!("by admin chat {chat_title} (granted by Mikey)")
 }
+
+/// "project manager <title>": how a manager's outline changes are
+/// attributed. It is an agent acting on standing authority, never the user.
+pub fn manager_attribution(chat_title: &str) -> String {
+    format!("by project manager {chat_title}")
+}

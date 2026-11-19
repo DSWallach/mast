@@ -5026,3 +5026,155 @@ async fn assistant_management_edits_tasks_and_reruns_with_revision_and_replay_ch
     assert_eq!(history["runs"].as_array().unwrap().len(), 1);
     assert_eq!(history["runs"][0]["snapshot"]["prompt"], "Updated prompt");
 }
+
+const HAND_CHAT: &str = "chat-hand-started";
+const OUTSIDE_CHAT: &str = "chat-other-project";
+
+/// CHAT holds the manager role of the project; HAND_CHAT was started by hand
+/// on a ticket inside it and OUTSIDE_CHAT on a ticket of the other project.
+async fn manager_rig() -> (Rig, ProjectRig) {
+    use mast_proto::StandingRoleKind;
+    let rig = rig().await;
+    let p = project_rig(&rig).await;
+    assign_chat(&rig, "mg-manager", CHAT, &p.planning).await;
+    for (chat, item) in [(HAND_CHAT, &p.ticket), (OUTSIDE_CHAT, &p.other_tickets)] {
+        rig.client
+            .call(
+                methods::MUTATE,
+                json!({ "op": "createChat", "chatId": chat, "spaceId": SPACE, "deviceId": rig.core.device_id }),
+            )
+            .await
+            .unwrap();
+        assign_chat(&rig, &format!("mg-{chat}"), chat, item).await;
+    }
+    rig.core.workspace.adopt_standing_role(StandingRoleKind::Manager, &p.project, CHAT, &[]).unwrap();
+    (rig, p)
+}
+
+fn mint_token(rig: &Rig, chat: &str) -> (mast_engine::agent_tools::AgentTokenLease, String) {
+    let lease = rig.core.sessions.agent_tokens().mint(chat, "run-1", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    (lease, token)
+}
+
+fn ids(value: &Value) -> Vec<String> {
+    value.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_reaches_the_chats_of_its_project_and_no_others() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    assert_eq!(auth_origin(&rig, &token).await["managerScopeItemId"], p.project.as_str());
+
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    let managed = ids(&scope["managerChatIds"]);
+    assert!(managed.contains(&HAND_CHAT.to_owned()), "{managed:?}");
+    assert!(!managed.contains(&OUTSIDE_CHAT.to_owned()) && !managed.contains(&CHAT.to_owned()), "{managed:?}");
+
+    let info = tool(&rig, &token, "chat_archive_info", json!({})).await.unwrap();
+    assert!(info["chats"].get(HAND_CHAT).is_some() && info["chats"].get(OUTSIDE_CHAT).is_none(), "{info}");
+    let refused = tool(&rig, &token, "chat_archive", json!({ "chatId": OUTSIDE_CHAT })).await.unwrap_err();
+    assert!(refused.contains("can only archive"), "{refused}");
+    // In scope: the finished-worker check applies, not the scope refusal.
+    match tool(&rig, &token, "chat_archive", json!({ "chatId": HAND_CHAT })).await {
+        Ok(_) => {}
+        Err(e) => assert!(e.contains("not archived:"), "{e}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_with_no_manager_role_gets_no_project_reach() {
+    let (rig, _p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, OTHER_CHAT);
+    assert!(auth_origin(&rig, &token).await.get("managerScopeItemId").is_none());
+    let scope = tool(&rig, &token, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&scope["managerChatIds"]).is_empty());
+    let err = admin(&rig, &token, json!({ "read": true })).await.unwrap_err();
+    assert!(err.contains("does not hold a project manager role"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_edits_only_its_projects_outline() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let step = |op: Value| json!({ "idempotencyKey": format!("mg-{}", op), "steps": [op] });
+
+    admin(&rig, &token, step(json!({ "op": "rename", "itemId": p.ticket, "title": "Renamed" }))).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "Renamed");
+    // A ref created inside the project is inside.
+    admin(&rig, &token, json!({ "idempotencyKey": "mg-create", "steps": [
+        { "op": "create", "parentId": p.project, "title": "New", "ref": "n" },
+        { "op": "rename", "itemId": "$n", "title": "New 2" },
+    ]})).await.unwrap();
+
+    for (what, op) in [
+        ("rename outside", json!({ "op": "rename", "itemId": p.other_tickets, "title": "X" })),
+        ("rename root item", json!({ "op": "rename", "itemId": p.bystander, "title": "X" })),
+        ("create at the root", json!({ "op": "create", "title": "X" })),
+        ("create elsewhere", json!({ "op": "create", "parentId": p.other, "title": "X" })),
+        ("move out", json!({ "op": "move", "itemId": p.ticket, "parentId": p.other })),
+        ("move to the root", json!({ "op": "move", "itemId": p.ticket, "parentId": null })),
+        ("archive the project", json!({ "op": "archive", "itemId": p.project })),
+        ("space-wide instruction", json!({ "op": "instruction_add", "itemId": null, "text": "x" })),
+        ("steal a chat", json!({ "op": "assign_chat", "chatId": OUTSIDE_CHAT, "itemId": p.ticket })),
+        ("accept a proposal", json!({ "op": "proposal_accept", "proposalId": "abcdef123" })),
+    ] {
+        let err = admin(&rig, &token, step(op)).await.unwrap_err();
+        assert!(!err.is_empty(), "{what}");
+    }
+    assert_eq!(title_of(&rig, &p.other_tickets), "Other tickets");
+    assert_eq!(title_of(&rig, &p.bystander), "Bystander");
+    assert!(snapshot(&rig).item(&p.ticket).unwrap().archived_at.is_none());
+    let err = admin(&rig, &token, step(json!({ "op": "rename", "itemId": p.other_tickets, "title": "X" }))).await.unwrap_err();
+    assert!(err.contains("outside your project"), "{err}");
+
+    let view = admin(&rig, &token, json!({ "read": true })).await.unwrap();
+    assert_eq!(view["roots"].as_array().unwrap().len(), 1);
+    assert_eq!(view["roots"][0]["id"], p.project.as_str());
+    assert!(!view.to_string().contains("Bystander"), "{view}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managers_bulk_change_still_needs_the_users_approval() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let steps: Vec<Value> = (0..11)
+        .map(|i| json!({ "op": "rename", "itemId": p.ticket, "title": format!("Bulk {i}") }))
+        .collect();
+    let reply = admin(&rig, &token, json!({ "idempotencyKey": "mg-bulk", "steps": steps })).await.unwrap();
+    assert_eq!(reply["needsApproval"], true, "{reply}");
+    assert_eq!(title_of(&rig, &p.ticket), "Ticket 1");
+    assert!(snapshot(&rig).user_action_requests.iter().any(|r| r.text.contains("by project manager")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manager_grant_moves_to_the_successor_and_leaves_the_predecessor() {
+    let (rig, p) = manager_rig().await;
+    let (_old_lease, old) = mint_token(&rig, CHAT);
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": CHAT, "summary": "Continue", "operationId": "mg-handoff" }))
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    let (_new_lease, new) = mint_token(&rig, &successor);
+
+    // The predecessor keeps its (still valid) token but not the reach.
+    assert!(auth_origin(&rig, &old).await.get("managerScopeItemId").is_none());
+    let err = admin(&rig, &old, json!({ "read": true })).await.unwrap_err();
+    assert!(err.contains("does not hold a project manager role"), "{err}");
+    let old_scope = tool(&rig, &old, "chat_project_scope_chats", json!({})).await.unwrap();
+    assert!(ids(&old_scope["managerChatIds"]).is_empty());
+
+    assert_eq!(auth_origin(&rig, &new).await["managerScopeItemId"], p.project.as_str());
+    let new_scope = tool(&rig, &new, "chat_project_scope_chats", json!({})).await.unwrap();
+    let managed = ids(&new_scope["managerChatIds"]);
+    assert!(managed.contains(&HAND_CHAT.to_owned()));
+    // The archived predecessor stays reachable through its role's chain.
+    assert!(managed.contains(&CHAT.to_owned()), "{managed:?}");
+    admin(&rig, &new, json!({ "idempotencyKey": "mg-after", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "After hand-off" }
+    ]})).await.unwrap();
+    assert_eq!(title_of(&rig, &p.ticket), "After hand-off");
+}

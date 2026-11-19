@@ -783,6 +783,15 @@ impl WorkspaceHost {
         self.read(|doc| doc.standing_role_chat(role, scope_item_id))
     }
 
+    pub fn standing_roles(&self) -> Vec<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_roles())
+    }
+
+    /// The role `chat_id` holds right now; a superseded chat holds none.
+    pub fn standing_role_of_chat(&self, chat_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role_of_chat(chat_id))
+    }
+
     pub fn adopt_standing_role(
         &self,
         role: mast_proto::StandingRoleKind,

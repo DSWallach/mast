@@ -130,6 +130,9 @@ impl AgentToolsService {
             scope.extend(chats.iter().map(|c| c.id.clone()));
             scope.remove(&context.grant.chat_id);
         }
+        // A project manager also reaches every chat of its project; it
+        // still passes the finished-worker check or force-with-reason.
+        scope.extend(self.manager_scope_chats(context));
         (chats, scope)
     }
 

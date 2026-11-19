@@ -214,12 +214,12 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "interrupt_chat",
-            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat).",
+            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat; a project manager chat: any chat in its project).",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question an agent in a chat you created is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
+            description: "Answer a question an agent in a chat you created (or, for a project manager chat, any chat in its project) is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -434,7 +434,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ADMIN,
-            description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
+            description: "ADMIN CHATS AND PROJECT MANAGER CHATS ONLY (the user grants admin per chat and Space, with an expiry; a project manager holds this for its project with no expiry; refused otherwise). A project manager is limited to items and chats inside its own project: it cannot create at, move out of, or touch anything beyond the project subtree, cannot move, archive or re-flag the project item itself, and has no instruction-proposal steps. Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1101,6 +1101,7 @@ impl Tools {
             "runId": origin.map(|o| o.run_id.clone()),
             "adminSpaceId": origin.and_then(|o| o.admin_space_id.clone()),
             "personalAssistant": origin.is_some_and(|o| o.personal_assistant),
+            "managerScopeItemId": origin.and_then(|o| o.manager_scope_item_id.clone()),
             "managementTools": if origin.is_some_and(|o| o.personal_assistant) {
                 json!([mast_proto::mast_management::TOOL])
             } else {
@@ -1124,7 +1125,10 @@ impl Tools {
                  create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
                  need an idempotency key. Admin chats (user-granted, per Space, expiring) \
-                 also reach every chat and item of their Space; see adminSpaceId. The \
+                 also reach every chat and item of their Space; see adminSpaceId. The chat \
+                 holding a project's manager role (see managerScopeItemId; no expiry, it \
+                 moves with the role on hand-off) reaches every chat and item inside that \
+                 project, and no other project. The \
                  personal assistant chat (user-designated; see personalAssistant) reaches \
                  every chat in every Space with every chat tool, and create_chat works \
                  in any Space or on any device, still never wider than this chat's sandbox. \
@@ -1218,7 +1222,10 @@ impl Tools {
             } else {
                 Default::default()
             };
-            chats.retain(|c| reachable(origin, c, true, true) || scope.contains_key(&c.id));
+            let managed = self.manager_chat_ids(origin).await;
+            chats.retain(|c| {
+                reachable(origin, c, true, true) || scope.contains_key(&c.id) || managed.contains(&c.id)
+            });
         }
         if let Some(project) = args.project.as_deref() {
             let space = self.zeron.resolve_space(project).await?;
@@ -2122,13 +2129,21 @@ impl Tools {
         } else {
             Vec::new()
         };
+        // A project manager's reach: every chat inside its project, for every
+        // tool. Archived ones only where that is the point (reading, listing,
+        // archiving and un-archiving).
+        let managed = self.manager_chat_ids(origin).await;
+        let managed_archived_ok = matches!(reach, Reach::ReadScope | Reach::SelfOrChild | Reach::ArchiveScope);
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
                 if matches!(reach, Reach::CommunicationScope | Reach::MessageScope) && c.id == origin.chat_id {
                     return false;
                 }
-                reachable(origin, c, allow_self, admin_ok)
+                (c.id != origin.chat_id
+                    && managed.contains(&c.id)
+                    && (managed_archived_ok || !c.archived))
+                    || reachable(origin, c, allow_self, admin_ok)
                     || (reach == Reach::ArchiveScope && admin_reaches(origin, c))
                     || (!c.archived
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
@@ -2163,6 +2178,21 @@ impl Tools {
         })
     }
 
+    /// The chats of the project the caller manages right now, from the
+    /// engine (empty for anyone else, and when the engine predates the
+    /// grant). The engine re-derives it from the role record on every call.
+    async fn manager_chat_ids(&self, origin: &AgentOrigin) -> Vec<String> {
+        if origin.manager_scope_item_id.is_none() {
+            return Vec::new();
+        }
+        self.zeron
+            .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value(v["managerChatIds"].clone()).ok())
+            .unwrap_or_default()
+    }
+
     /// Prefix the sender's identity when this server speaks for a chat, so
     /// the receiving agent (and the human reading that transcript) can tell
     /// an agent-to-agent message from a typed one.
@@ -2187,6 +2217,8 @@ impl Tools {
             " (the user's personal assistant chat; this is not the user's own message)"
         } else if origin.is_some_and(|o| o.admin_space_id.is_some()) {
             " (an admin chat, granted by Mikey; this is not Mikey's own message)"
+        } else if origin.is_some_and(|o| o.manager_scope_item_id.is_some()) {
+            " (the project's manager chat; this is not the user's own message)"
         } else {
             ""
         };
@@ -2489,6 +2521,8 @@ mod tests {
     const ADMIN_TOKEN: &str = "tok-admin";
     /// Chat beta designated as the personal assistant.
     const ASSISTANT_TOKEN: &str = "tok-assistant";
+    /// Chat beta holding a project manager role over item-project.
+    const MANAGER_TOKEN: &str = "tok-manager";
 
     /// A fixed little workspace: one device, one project, two chats with a
     /// two-message transcript, and one live agent token (`tok-beta`, minted
@@ -2514,6 +2548,8 @@ mod tests {
         /// Chats the engine says sit inside the agent's project scope.
         project_chats: Vec<&'static str>,
         handoff_sources: Vec<&'static str>,
+        /// Chats the engine says a manager token's project holds.
+        manager_chats: Vec<&'static str>,
         /// The engine's finished-worker verdicts for the agent's archive scope.
         archive_info: Vec<(&'static str, Value)>,
         pending_questions: Option<Value>,
@@ -2627,7 +2663,7 @@ mod tests {
                                       |n| format!("HEAD{}TAIL", "x".repeat(n))) }] }
                 ]})),
                 agent_tools::AUTHENTICATE_METHOD => {
-                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN, MANAGER_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2639,13 +2675,16 @@ mod tests {
                     if params["token"] == ADMIN_TOKEN {
                         origin["adminSpaceId"] = json!("space-1");
                     }
+                    if params["token"] == MANAGER_TOKEN {
+                        origin["managerScopeItemId"] = json!("item-project");
+                    }
                     if params["token"] == ASSISTANT_TOKEN {
                         origin["personalAssistant"] = json!(true);
                     }
                     RpcReply::Value(origin)
                 }
                 agent_tools::TOOL_CALL_METHOD => {
-                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
+                    if ![BETA_TOKEN, ADMIN_TOKEN, ASSISTANT_TOKEN, MANAGER_TOKEN].contains(&params["token"].as_str().unwrap_or_default()) {
                         return Err(RpcError::Failed(
                             "agent-tools/unauthenticated: unknown token".into(),
                         ));
@@ -2673,7 +2712,10 @@ mod tests {
                         }));
                     }
                     if params["tool"] == agent_tool_names::PROJECT_SCOPE_CHATS {
-                        return Ok(RpcReply::Value(json!({ "chatIds": self.project_chats, "handoffSourceChatIds": self.handoff_sources })));
+                        return Ok(RpcReply::Value(json!({
+                            "chatIds": self.project_chats, "handoffSourceChatIds": self.handoff_sources,
+                            "managerChatIds": if params["token"] == MANAGER_TOKEN { json!(self.manager_chats) } else { json!([]) },
+                        })));
                     }
                     if params["tool"] == agent_tool_names::CHAT_ARCHIVE_INFO {
                         let ids = params["arguments"]["chatIds"].as_array().cloned().unwrap_or_default();
@@ -3431,6 +3473,58 @@ mod tests {
         let error = tools(world.clone(), Some(BETA_TOKEN)).call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"q", "labels":["Yes"]}]})).await.unwrap_err();
         assert!(error.contains("agents can only reach"), "{error}");
         assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_project_manager_reaches_its_projects_chats_and_no_others() {
+        let world = Arc::new(World { manager_chats: vec!["chat-hand-4"], ..World::default() });
+        for (id, space) in [("chat-hand-4", "space-1"), ("chat-other-5", "space-1"), ("chat-nova-3", "space-2")] {
+            world.created.lock().unwrap().push(json!({
+                "id": id, "deviceId": "dev-local", "title": id,
+                "archived": false, "spaceId": space, "createdAt": "2026-09-03T00:00:00Z"
+            }));
+        }
+        let manager = tools(world.clone(), Some(MANAGER_TOKEN));
+        let plain = tools(world.clone(), Some(BETA_TOKEN));
+        let calls = [
+            ("read_chat", json!({})),
+            ("send_message", json!({ "text": "hi" })),
+            ("wait_for_turn", json!({ "timeout_secs": 1 })),
+            ("interrupt_chat", json!({})),
+            ("archive_chat", json!({})),
+        ];
+        for (name, extra) in calls.iter().cloned() {
+            let mut args = extra;
+            args["chat"] = json!("chat-hand-4");
+            assert!(manager.call(name, args.clone()).await.is_ok(), "manager {name}");
+            assert!(plain.call(name, args).await.is_err(), "plain {name}");
+            for outside in ["chat-other-5", "chat-nova-3"] {
+                let mut args = calls.iter().find(|(n, _)| *n == name).unwrap().1.clone();
+                args["chat"] = json!(outside);
+                assert!(manager.call(name, args).await.is_err(), "manager {name} {outside}");
+            }
+        }
+        // It cannot target itself, and sees only its project in list_chats.
+        assert!(manager.call("interrupt_chat", json!({ "chat": "chat-beta-2" })).await.is_err());
+        let listed = manager.call("list_chats", json!({})).await.unwrap();
+        let ids: Vec<&str> = listed["chats"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
+        assert!(ids.contains(&"chat-hand-4"), "{ids:?}");
+        assert!(!ids.contains(&"chat-other-5") && !ids.contains(&"chat-nova-3"), "{ids:?}");
+        let sent = world.writes_of(methods::QUEUE_COMMAND);
+        assert!(sent.iter().any(|w| w.to_string().contains("manager chat")), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn an_engine_without_the_manager_grant_gives_a_manager_token_no_reach() {
+        // The engine names no managed chats (it predates the grant), so the
+        // origin flag alone reaches nothing.
+        let world = Arc::new(World::default());
+        world.created.lock().unwrap().push(json!({
+            "id": "chat-hand-4", "deviceId": "dev-local", "title": "hand",
+            "archived": false, "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z"
+        }));
+        let manager = tools(world, Some(MANAGER_TOKEN));
+        assert!(manager.call("send_message", json!({ "chat": "chat-hand-4", "text": "hi" })).await.is_err());
     }
 
     #[tokio::test]
