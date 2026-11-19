@@ -1533,16 +1533,6 @@ impl RegistryDoc {
         Ok((workers, false))
     }
 
-    /// Attach a formerly folderless chat without rewriting its other fields.
-    pub fn set_chat_space(&mut self, chat_id: &str, space_id: &str) {
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("spaceId", json!(space_id))]),
-        );
-    }
-
     pub fn rename_chat(&mut self, chat_id: &str, title: &str) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);

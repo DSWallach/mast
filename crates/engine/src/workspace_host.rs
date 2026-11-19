@@ -1713,7 +1713,7 @@ impl WorkspaceHost {
                             &mast_proto::PrReviewPrompts::neutral(),
                         )?;
                     }
-                    doc.set_chat_space(chat_id, &id);
+                    doc.set_chat_space(chat_id, &id)?;
                     id
                 }
             };
