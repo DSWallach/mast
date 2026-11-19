@@ -7,6 +7,8 @@ use std::{collections::BTreeSet, ops::Range, path::Path, sync::atomic::AtomicUsi
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+pub mod symbols;
+
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_SPANS: usize = 200_000;
 
