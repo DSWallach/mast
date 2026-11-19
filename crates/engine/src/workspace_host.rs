@@ -1645,7 +1645,9 @@ impl WorkspaceHost {
             let chat = doc
                 .chat(chat_id)?
                 .ok_or_else(|| EngineError::Other("Chat not found".into()))?;
-            if chat.archived {
+            // A role's predecessor is archived by its own rotation; a retry of
+            // that hand-off only needs the item it already has.
+            if chat.archived && !chat.is_standing_role_predecessor() {
                 return Err(EngineError::Other(
                     "An archived chat cannot start new work".into(),
                 ));
