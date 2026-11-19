@@ -5316,14 +5316,14 @@ async fn the_guard_rechecks_chat_assignments_and_the_effect_budget_under_the_loc
     }
     let err = outline
         .mutate_guarded(&archive("g2-grew", &p.tickets), &actor, Some(SPACE),
-            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], max_effects: 10, ..guard.clone() }))
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], budget: Some(mast_engine::admin::BatchBudget::new(10)), ..guard.clone() }))
         .unwrap_err();
     assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
     // A budget that covers it passes.
     outline
         .mutate_guarded(&archive("g2-ok", &p.tickets), &actor, Some(SPACE),
-            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], max_effects: 13, ..guard }))
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], budget: Some(mast_engine::admin::BatchBudget::new(13)), ..guard }))
         .unwrap();
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
 }
@@ -5347,4 +5347,83 @@ async fn an_explicit_admin_grant_wins_over_the_manager_role_everywhere() {
         { "op": "rename", "itemId": p.other_tickets, "title": "Admin renamed" }
     ]})).await.unwrap();
     assert_eq!(title_of(&rig, &p.other_tickets), "Admin renamed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_batch_budget_is_debited_under_the_lock_across_steps_and_retries() {
+    use mast_engine::admin::BatchBudget;
+    use mast_engine::work_outline::ManagerGuard;
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let mut kids = Vec::new();
+    for i in 0..4 {
+        kids.push(create_item(&rig, &format!("bb-kid-{i}"), &format!("Budget kid {i}"), Some(&p.tickets)).await);
+    }
+    let budget = BatchBudget::new(3);
+    let step = |op: &str, kid: &str| {
+        let guard = ManagerGuard {
+            chat_id: CHAT.into(),
+            root: p.project.clone(),
+            effects: vec![("archive".into(), kid.to_owned())],
+            budget: Some(budget.clone()),
+            ..Default::default()
+        };
+        let mutation = WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+            work_item_id: kid.to_owned(),
+            descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: op.to_owned(),
+        });
+        outline.mutate_guarded(&mutation, &actor, Some(SPACE), Some(&guard))
+    };
+    // Each committed step debits what it affected; the fourth would pass 3.
+    for (i, kid) in kids.iter().take(3).enumerate() {
+        step(&format!("bb-op-{i}"), kid).unwrap();
+    }
+    assert_eq!(budget.remaining(), 0);
+    let err = step("bb-op-3", &kids[3]).unwrap_err();
+    assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
+    assert!(snapshot(&rig).item(&kids[3]).unwrap().archived_at.is_none());
+    // A retry replays the committed step without charging it again.
+    step("bb-op-0", &kids[0]).unwrap();
+    assert_eq!(budget.remaining(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_whose_preview_grew_gets_its_own_approval_and_the_old_token_cannot_authorize_it() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("ap-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let first = admin(&rig, &token, json!({ "idempotencyKey": "ap-grow", "steps": steps })).await.unwrap();
+    assert_eq!(first["needsApproval"], true, "{first}");
+    assert_eq!(first["count"], 12);
+    // The tree grows, then the same steps are previewed again.
+    for i in 0..2 {
+        create_item(&rig, &format!("ap-more-{i}"), &format!("More {i}"), Some(&p.tickets)).await;
+    }
+    let second = admin(&rig, &token, json!({ "idempotencyKey": "ap-grow", "steps": steps })).await.unwrap();
+    assert_eq!(second["needsApproval"], true, "{second}");
+    assert_eq!(second["count"], 14);
+    assert_ne!(first["requestId"], second["requestId"], "a changed preview is a new request");
+    // The earlier token cannot authorize the larger batch.
+    let stale = admin(&rig, &token, json!({
+        "idempotencyKey": "ap-grow", "steps": steps, "confirmToken": first["confirmToken"]
+    })).await.unwrap_err();
+    assert!(stale.contains("more items than the user was shown"), "{stale}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_effects_counts_a_plain_create_as_one_and_an_archive_as_its_subtree() {
+    use mast_engine::work_outline::step_effects;
+    let (rig, p) = manager_rig().await;
+    // With no template on the parent a create is one item.
+    let snap = snapshot(&rig);
+    assert_eq!(step_effects(&snap, "create", &p.tickets), 1);
+    assert_eq!(step_effects(&snap, "rename", &p.ticket), 1);
+    assert_eq!(step_effects(&snap, "archive", &p.tickets), 2);
 }

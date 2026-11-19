@@ -1123,15 +1123,20 @@ impl WorkspaceHost {
         let now = Utc::now().timestamp_millis();
         let synced = self.registry_synced();
         self.mutate(|doc| {
-            if let (Some(guard), Some(space)) = (guard, admin_space) {
-                guard.verify(doc, space, synced)?;
-            }
+            let charge = match (guard, admin_space) {
+                (Some(guard), Some(space)) => guard.verify(doc, space, synced)?,
+                _ => 0,
+            };
             let request_item = guard.and_then(|g| g.request_item.as_deref());
             let reply = doc.with_manager_request_item(request_item, |doc| {
                 doc.with_admin_scope(admin_space, |doc| {
                     doc.apply_work_outline_mutation(mutation, actor, now)
                 })
             })?;
+            // Committed under this same lock: charge the batch what it affected.
+            if let Some(guard) = guard {
+                guard.debit(charge);
+            }
             lock(&self.inner.pending_ledger_marks).extend(ledger_keys.iter().cloned());
             Ok(reply)
         })

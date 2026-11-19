@@ -219,10 +219,12 @@ pub struct ManagerGuard {
     pub chats: Vec<String>,
     /// The one item (the project) a bulk approval request may be raised on.
     pub request_item: Option<String>,
-    /// `(op, item)` of cascading steps, re-counted against the current tree.
+    /// `(op, item)` of the step: re-counted against the current tree under the
+    /// lock (a create counts the template it expands under its parent).
     pub effects: Vec<(String, String)>,
-    /// The most items one of those steps may now affect.
-    pub max_effects: usize,
+    /// The batch's shared budget: the step is refused if it would affect more
+    /// than what is left, and its effects are debited once it commits.
+    pub budget: Option<std::sync::Arc<crate::admin::BatchBudget>>,
 }
 
 /// Items one step affects against `snapshot`: an archive or restore covers the
@@ -239,6 +241,11 @@ pub fn step_effects(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> 
     }
     match op {
         "archive" | "restore" => subtree(snapshot, item_id, 0),
+        // A new child under a container template expands the template under it.
+        "create" => snapshot
+            .item(item_id)
+            .and_then(|parent| parent.container_template.as_ref())
+            .map_or(1, |template| template.root.node_count()),
         "template_apply" => {
             let Some(item) = snapshot.item(item_id) else { return 1 };
             match &item.container_template {
@@ -261,7 +268,7 @@ impl ManagerGuard {
         doc: &mast_doc::RegistryDoc,
         space_id: &str,
         synced: bool,
-    ) -> Result<(), WorkOutlineError> {
+    ) -> Result<usize, WorkOutlineError> {
         let holds = doc.standing_role_of_chat(&self.chat_id).is_some_and(|role| {
             role.role == mast_proto::StandingRoleKind::Manager && role.scope_item_id == self.root
         });
@@ -297,8 +304,9 @@ impl ManagerGuard {
                 "a chat is no longer assigned inside the managed project; nothing was changed",
             ));
         }
-        // The step may affect no more items than were approved or allowed.
-        if self.effects.iter().any(|(op, item)| step_effects(&snapshot, op, item) > self.max_effects) {
+        // The step may affect no more items than the batch has left.
+        let charge: usize = self.effects.iter().map(|(op, item)| step_effects(&snapshot, op, item)).sum();
+        if self.budget.as_ref().is_some_and(|budget| charge > budget.remaining()) {
             return Err(WorkOutlineError::unauthorized(
                 "the change now affects more items than were approved; ask again. Nothing was changed",
             ));
@@ -308,7 +316,14 @@ impl ManagerGuard {
         {
             return Err(WorkOutlineError::unauthorized("approval requests belong on the managed project item"));
         }
-        Ok(())
+        Ok(charge)
+    }
+
+    /// Debit what a committed step affected from the batch budget.
+    pub fn debit(&self, charge: usize) {
+        if let Some(budget) = &self.budget {
+            budget.debit(charge);
+        }
     }
 }
 

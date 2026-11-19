@@ -802,7 +802,13 @@ impl AgentToolsService {
         let turn_id = context.grant.run_id.clone();
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
-        let mut spent = 0usize;
+        // One budget per batch, shared by its steps and any retry of it.
+        let budget = manager_root.as_ref().map(|_| {
+            admin.batch_budget(
+                &format!("{}:{key}:{}", context.grant.chat_id, &steps_hash[..16]),
+                approved_weight.unwrap_or(ADMIN_BULK_THRESHOLD),
+            )
+        });
         for (i, step) in actions.iter().enumerate() {
             let still_allowed = match &manager_root {
                 Some(root) => self.manager_scope_now(&context.grant.chat_id).as_ref() == Some(root),
@@ -828,10 +834,9 @@ impl AgentToolsService {
                     }
                 }
                 let op = step.get("op").and_then(Value::as_str).unwrap_or_default();
-                let effects = match (matches!(op, "archive" | "restore" | "template_apply"), manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw))) {
-                    (true, Some(item)) => vec![(op.to_owned(), item)],
-                    _ => Vec::new(),
-                };
+                // Every step is charged: its first target is what it acts on
+                // (the parent, for a create).
+                let effects = vec![(op.to_owned(), manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw)).unwrap_or_default())];
                 crate::work_outline::ManagerGuard {
                     chat_id: context.grant.chat_id.clone(),
                     root: root.clone(),
@@ -839,11 +844,10 @@ impl AgentToolsService {
                     strict,
                     chats: manager_targets[i].chats.clone(),
                     effects,
-                    max_effects: approved_weight.unwrap_or(ADMIN_BULK_THRESHOLD).saturating_sub(spent),
+                    budget: budget.clone(),
                     ..Default::default()
                 }
             });
-            spent += step_weights[i];
             let reply = self.apply_scoped(context, &built.mutation, Some(&space), guard.as_ref()).map_err(|e| {
                 invalid(format!(
                     "step {i} ({}) failed after {i} applied: {}",
@@ -905,8 +909,10 @@ impl AgentToolsService {
         } else {
             String::new()
         };
-        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}{holder}", &steps_hash[..16]);
-        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}", &steps_hash[..24]));
+        let dedupe = format!("{ADMIN_BULK_DEDUPE_PREFIX}{}-w{count}{holder}", &steps_hash[..16]);
+        // The request's identity covers the count it shows: a preview that grew
+        // gets its own request, never a replay of (or conflict with) the old one.
+        let op = agent_tools::operation_id(&context.grant.chat_id, &format!("bulk-approval:{}:{count}", &steps_hash[..24]));
         let request_text = format!(
             "Approve bulk change: {count} outline changes {}",
             if context.admin_space.is_some() {
@@ -1098,10 +1104,13 @@ fn check_manager_scope(snap: &WorkOutlineSnapshot, root: &str, actions: &[Map<St
 /// write-time budget (see `crate::work_outline::step_effects`). Ids are
 /// resolved the way execution resolves them (a unique prefix counts).
 fn step_weight(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> usize {
-    let Some(raw) = action.get("itemId").and_then(Value::as_str) else { return 1 };
+    let op = action.get("op").and_then(Value::as_str).unwrap_or_default();
+    // A create acts on its parent (a template there expands under the new item).
+    let key = if op == "create" { "parentId" } else { "itemId" };
+    let Some(raw) = action.get(key).and_then(Value::as_str) else { return 1 };
     let id = resolve_id(raw, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
         .unwrap_or_else(|_| raw.trim().to_owned());
-    crate::work_outline::step_effects(snapshot, action.get("op").and_then(Value::as_str).unwrap_or_default(), &id)
+    crate::work_outline::step_effects(snapshot, op, &id)
 }
 
 fn step_error(i: usize, e: AgentToolError) -> AgentToolError {

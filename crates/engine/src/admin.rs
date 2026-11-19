@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use mast_proto::{
@@ -38,12 +38,40 @@ struct Approval {
     used: bool,
 }
 
+/// The effect budget of one `work_outline_admin` batch (a manager's call and
+/// its retries share one). The registry writer debits it under its own lock,
+/// so cumulative effects across steps can never exceed what was approved.
+#[derive(Debug)]
+pub struct BatchBudget {
+    remaining: Mutex<usize>,
+}
+
+impl BatchBudget {
+    pub fn new(total: usize) -> Arc<Self> {
+        Arc::new(Self { remaining: Mutex::new(total) })
+    }
+
+    pub fn remaining(&self) -> usize {
+        *lock(&self.remaining)
+    }
+
+    pub fn debit(&self, n: usize) {
+        let mut remaining = lock(&self.remaining);
+        *remaining = remaining.saturating_sub(n);
+    }
+}
+
+/// Batch budgets kept (oldest dropped first).
+const MAX_BATCH_BUDGETS: usize = 512;
+
 #[derive(Default)]
 struct State {
     grants: HashMap<String, AdminGrant>,
     store: Option<PathBuf>,
     audit: Vec<TurnRecord>,
     approvals: HashMap<String, Approval>,
+    budgets: HashMap<String, Arc<BatchBudget>>,
+    budget_order: std::collections::VecDeque<String>,
 }
 
 #[derive(Default)]
@@ -235,6 +263,27 @@ impl AdminGrants {
                 .rev()
                 .collect(),
         )
+    }
+
+    // ---- batch budgets ---------------------------------------------------------
+
+    /// The budget for batch `key` (the chat, its idempotency key and the
+    /// steps): created with `total` on first use, so a retry resumes what the
+    /// first attempt left instead of starting over.
+    pub fn batch_budget(&self, key: &str, total: usize) -> Arc<BatchBudget> {
+        let mut state = lock(&self.state);
+        if let Some(budget) = state.budgets.get(key) {
+            return budget.clone();
+        }
+        let budget = BatchBudget::new(total);
+        state.budgets.insert(key.to_owned(), budget.clone());
+        state.budget_order.push_back(key.to_owned());
+        while state.budget_order.len() > MAX_BATCH_BUDGETS {
+            if let Some(oldest) = state.budget_order.pop_front() {
+                state.budgets.remove(&oldest);
+            }
+        }
+        budget
     }
 
     // ---- bulk approvals --------------------------------------------------------
