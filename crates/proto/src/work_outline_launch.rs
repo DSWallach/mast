@@ -117,12 +117,25 @@ pub struct CreateChatForWorkItemParams {
 /// partial first start never shows as an ordinary session.
 pub const STANDING_ROLE_PROVISIONAL_PREFIX: &str = "provisional:";
 
-/// The provisional marker of the first-start Chats of `kind` for
-/// `scope_item_id`: `provisional:<role id>`.
+/// The provisional marker's role part for `kind` and `scope_item_id`:
+/// `provisional:<role id>`. A Chat's marker is this tag followed by `|` and the
+/// operation that created it, so recovery knows which command is its launch's.
 pub fn standing_role_provisional_tag(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
     format!(
         "{STANDING_ROLE_PROVISIONAL_PREFIX}{}",
         crate::standing_role_id(kind, scope_item_id)
+    )
+}
+
+/// The marker a first-start Chat created by `operation_id` carries.
+pub fn standing_role_provisional_marker(
+    kind: crate::StandingRoleKind,
+    scope_item_id: &str,
+    operation_id: &str,
+) -> String {
+    format!(
+        "{}|{operation_id}",
+        standing_role_provisional_tag(kind, scope_item_id)
     )
 }
 
@@ -135,10 +148,20 @@ impl crate::Chat {
             .filter(|marker| marker.starts_with(STANDING_ROLE_PROVISIONAL_PREFIX))
     }
 
+    /// The operation that created this provisional Chat, whose derived command
+    /// is the only message the Chat may take before it is adopted.
+    pub fn standing_role_provisional_operation(&self) -> Option<&str> {
+        self.standing_role_provisional()?
+            .split_once('|')
+            .map(|(_, operation)| operation)
+    }
+
     /// Whether this Chat is a not-yet-adopted first start of exactly this role.
     pub fn is_provisional_for(&self, kind: crate::StandingRoleKind, scope_item_id: &str) -> bool {
-        self.standing_role_provisional()
-            == Some(standing_role_provisional_tag(kind, scope_item_id).as_str())
+        let tag = standing_role_provisional_tag(kind, scope_item_id);
+        self.standing_role_provisional().is_some_and(|marker| {
+            marker == tag || marker.strip_prefix(tag.as_str()).is_some_and(|rest| rest.starts_with('|'))
+        })
     }
 }
 
@@ -236,6 +259,14 @@ mod tests {
         assert!(chat.is_standing_role_predecessor(), "hidden like a superseded chat");
         assert!(chat.is_provisional_for(Manager, "item-1"));
         assert!(!chat.is_provisional_for(Manager, "item-2"));
+        // The marker carries the creating operation, and an item whose id
+        // extends another's is not confused with it.
+        chat.standing_role_successor =
+            Some(standing_role_provisional_marker(Manager, "item-1", "op-a"));
+        assert!(chat.is_provisional_for(Manager, "item-1"));
+        assert_eq!(chat.standing_role_provisional_operation(), Some("op-a"));
+        assert!(!chat.is_provisional_for(Manager, "item"));
+        assert!(!chat.is_provisional_for(Manager, "item-10"));
         chat.standing_role_successor = Some("successor-chat".into());
         assert!(chat.standing_role_provisional().is_none());
     }
