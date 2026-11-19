@@ -46,8 +46,7 @@ impl Folder {
     }
 }
 
-/// Group the smallest files in each folder once the diff exceeds the limit.
-/// Folders remain separate even when there are more folders than the limit.
+/// Group small files and folders within a bounded number of drawn tiles.
 pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
     let count = root.count();
     let mut result = Vec::new();
@@ -104,7 +103,13 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         }
         return result;
     }
-    fn visit(folder: &Folder, bounds: Rect, grouped: bool, total: usize, result: &mut Vec<Tile>) {
+    fn collect_entries<'a>(folder: &'a Folder, entries: &mut Vec<&'a Entry>) {
+        entries.extend(&folder.files);
+        for child in &folder.folders {
+            collect_entries(child, entries);
+        }
+    }
+    fn visit(folder: &Folder, bounds: Rect, budget: usize, result: &mut Vec<Tile>) {
         enum Item<'a> {
             File(&'a Entry),
             More(Vec<&'a Entry>),
@@ -112,19 +117,29 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         }
         let mut files: Vec<_> = folder.files.iter().collect();
         files.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.id.cmp(&b.id)));
-        let keep = if grouped {
-            (299 * folder.files.len() / total).max(1).min(files.len())
-        } else {
-            files.len()
-        };
-        let mut visible = files[..keep].to_vec();
-        let mut more = files[keep..].to_vec();
+        let mut visible = files;
+        let mut more = Vec::new();
+        let mut folders: Vec<_> = folder.folders.iter().collect();
+        folders.sort_by(|a, b| b.weight().cmp(&a.weight()).then(a.path.cmp(&b.path)));
+        while visible.len() + folders.len() * 2 + usize::from(!more.is_empty()) > budget {
+            if folders.last().is_some_and(|child| {
+                visible
+                    .last()
+                    .is_none_or(|file| child.weight() <= file.weight.max(1))
+            }) {
+                collect_entries(folders.pop().unwrap(), &mut more);
+            } else if let Some(file) = visible.pop() {
+                more.push(file);
+            } else {
+                break;
+            }
+        }
         let (items, rects) = loop {
             let mut items: Vec<_> = visible.iter().copied().map(Item::File).collect();
             if !more.is_empty() {
                 items.push(Item::More(more.clone()));
             }
-            items.extend(folder.folders.iter().map(Item::Folder));
+            items.extend(folders.iter().copied().map(Item::Folder));
             let weights: Vec<_> = items
                 .iter()
                 .map(|item| match item {
@@ -138,7 +153,12 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                 .iter()
                 .map(|rect| rect.width < MIN_TILE || rect.height < MIN_TILE)
                 .collect();
-            if too_small.iter().any(|small| *small) {
+            let folder_offset = visible.len() + usize::from(!more.is_empty());
+            let small_folders: Vec<_> = rects[folder_offset..]
+                .iter()
+                .map(|rect| rect.width < MIN_TILE || rect.height < MIN_TILE * 2.0)
+                .collect();
+            if too_small.iter().any(|small| *small) || small_folders.iter().any(|small| *small) {
                 let mut index = 0;
                 visible.retain(|file| {
                     let small = too_small[index];
@@ -148,17 +168,32 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                     }
                     !small
                 });
+                let mut index = 0;
+                folders.retain(|child| {
+                    let small = small_folders[index];
+                    index += 1;
+                    if small {
+                        collect_entries(child, &mut more);
+                    }
+                    !small
+                });
             } else if !more.is_empty()
-                && !visible.is_empty()
+                && (!visible.is_empty() || !folders.is_empty())
                 && rects
                     .get(visible.len())
                     .is_some_and(|rect| rect.width < MIN_TILE || rect.height < MIN_TILE)
             {
-                more.push(visible.pop().unwrap());
+                if let Some(file) = visible.pop() {
+                    more.push(file);
+                } else {
+                    collect_entries(folders.pop().unwrap(), &mut more);
+                }
             } else {
                 break (items, rects);
             }
         };
+        let mut remaining_folders = folders.len();
+        let mut extra = budget.saturating_sub(items.len() + remaining_folders);
         for (item, rect) in items.into_iter().zip(rects) {
             match item {
                 Item::File(file) => result.push(Tile {
@@ -174,11 +209,14 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                         kind: TileKind::Folder(child.path.clone()),
                         bounds: rect,
                     });
-                    let header = if rect.height >= 40.0 && rect.width >= 80.0 {
+                    let header = if rect.height >= 50.0 && rect.width >= 80.0 {
                         18.0
                     } else {
                         0.0
                     };
+                    let share = extra / remaining_folders;
+                    extra -= share;
+                    remaining_folders -= 1;
                     visit(
                         child,
                         Rect {
@@ -186,15 +224,14 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
                             height: (rect.height - header).max(0.0),
                             ..rect
                         },
-                        grouped,
-                        total,
+                        1 + share,
                         result,
                     );
                 }
             }
         }
     }
-    visit(root, bounds, count > 300, count, &mut result);
+    visit(root, bounds, 300, &mut result);
     result
 }
 
@@ -393,6 +430,38 @@ mod tests {
                 ..Default::default()
             },
         );
+        assert!(
+            tiles
+                .iter()
+                .any(|tile| matches!(tile.kind, TileKind::More(_)))
+        );
+        assert!(
+            tiles.iter().all(|tile| tile.bounds.width >= MIN_TILE - 0.01
+                && tile.bounds.height >= MIN_TILE - 0.01)
+        );
+    }
+
+    #[test]
+    fn many_folders_stay_within_tile_budget() {
+        let root = Folder {
+            folders: (0..1000)
+                .map(|id| Folder {
+                    path: format!("folder-{id}"),
+                    files: vec![Entry { id, weight: 1 }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let tiles = layout(
+            &root,
+            Rect {
+                width: 1000.0,
+                height: 800.0,
+                ..Default::default()
+            },
+        );
+        assert!(tiles.len() <= 300, "{} tiles", tiles.len());
         assert!(
             tiles
                 .iter()
