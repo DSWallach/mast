@@ -1812,6 +1812,7 @@ impl AppState {
         self.chats
             .iter()
             .filter(|c| !c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| !c.is_standing_role_predecessor())
     }
 
     pub(crate) fn restore_composer_target(
@@ -6259,6 +6260,26 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_provisional_manager_chat_is_in_no_session_list() {
+        let mut state = AppState::new();
+        let mut provisional = chat("provisional", 1, None);
+        provisional.standing_role_successor = Some("provisional:manager:project".into());
+        state.apply_chats(vec![chat("ordinary", 0, None), provisional]);
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["ordinary"]);
+        let overview: Vec<&str> = state
+            .overview_chats(Utc::now())
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(overview, ["ordinary"]);
+        assert!(
+            state.chats.iter().any(|c| c.id == "provisional"),
+            "still known by id, so its assignment never reads as missing"
+        );
     }
 
     #[test]

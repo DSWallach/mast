@@ -257,7 +257,8 @@ pub(crate) fn team(input: &TeamInput<'_>) -> TeamFacts {
         .unwrap_or_default();
     let mut workers = Vec::new();
     for chat in input.chats {
-        if chat.id == input.chat_id {
+        // A Manager's first start is hidden until its message is queued.
+        if chat.id == input.chat_id || chat.standing_role_provisional().is_some() {
             continue;
         }
         let item_id = input

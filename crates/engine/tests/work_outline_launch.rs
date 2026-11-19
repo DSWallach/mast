@@ -2190,8 +2190,13 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
     let a = manager_params(&rig, "manager-rst-a", "queued before the restart");
     assert!(launcher.create_chat_for_work_item(&a).await.is_err());
     let first = provisional_chats(&rig).remove(0).id;
+    let b = manager_params(&rig, "manager-rst-b", "after the restart");
     rig.core.workspace.flush();
-    rig.core.shutdown().await;
+    // Drop the first engine so its data-dir lock is released, as a restart does.
+    let old_core = rig.core;
+    old_core.shutdown().await;
+    drop(old_core);
+    drop(launcher);
 
     let harnesses = HarnessRegistry::new();
     harnesses.register(Arc::new(rig.mock.clone()));
@@ -2204,7 +2209,6 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
         core.sessions.clone(),
         ExecutionScopeService::new(core.workspace.clone(), core.repos.clone()),
     );
-    let b = manager_params(&rig, "manager-rst-b", "after the restart");
     let refused = launcher.create_chat_for_work_item(&b).await.unwrap_err();
     assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
     assert_eq!(
