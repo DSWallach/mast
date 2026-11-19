@@ -5299,7 +5299,7 @@ async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
 /// the intended project, starts from that project's existing record, and is
 /// checked once the successor holds the role.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role() {
+async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_late() {
     let (rig, item) = role_rig("status-successor").await;
     plant_stamped_status(&rig, "status-successor-doc", &item, 4).await;
     let successor = "successor-chat";
@@ -5322,7 +5322,10 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role() {
         .await
         .unwrap();
     drop(lease);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Nothing expires the reservation, so a rotation long after the turn ended
+    // (here, dozens of re-checks later) is still honored.
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0, "the successor holds nothing yet");
 
     rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
@@ -5333,14 +5336,15 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role() {
     rig.harness.release.notify_one();
 }
 
-/// A hand-off that never completes leaves its successor a non-holder: its
-/// turn is dropped when the wait ends, and a late rotation sends nothing for
-/// it. The old holder is never reminded for the successor's turn either.
+/// A hand-off that never completes leaves its successor a non-holder: the
+/// obligation is kept while the reservation stands, and nothing is sent to a
+/// chat that does not hold the role. When the successor is gone the obligation
+/// ends with it, and a later rotation sends nothing for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_handoff_never_nudges_a_non_holder() {
     let (rig, item) = role_rig("status-failed-handoff").await;
     let tokens = rig.core.sessions.agent_tokens();
-    tokens.manager_status().set_adoption_wait(Duration::from_millis(300));
+    tokens.manager_status().set_recheck_interval(Duration::from_millis(40));
     let successor = "failed-successor";
     rig.core
         .workspace
@@ -5354,15 +5358,20 @@ async fn a_failed_handoff_never_nudges_a_non_holder() {
         .await
         .unwrap();
     drop(lease);
-    // The hand-off never rotates. Once the wait is over the turn is forgotten.
-    wait_for(|| tokens.manager_status().pending(successor) == 0, "the held turn to be dropped").await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // The hand-off never rotates: the reservation stands, nothing is sent.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
+    assert_eq!(
+        rig.core.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item).as_deref(),
+        Some(CHAT),
+        "the old manager still holds the role"
+    );
 
-    // A rotation after the wait finds nothing to remind about.
-    rig.core.workspace.rotate_standing_role_for_chat(CHAT, successor).unwrap();
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // The successor is deleted: that is a confirmed failure, the obligation ends.
+    assert!(rig.core.workspace.delete_chat(successor).unwrap());
+    wait_for(|| tokens.manager_status().pending(successor) == 0, "the obligation to end").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 0);
     assert_eq!(nudges(&rig), 0);
 }

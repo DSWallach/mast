@@ -13,10 +13,13 @@
 //! A Manager's chat holds the role only after its first turn is queued: a first
 //! start carries a provisional marker, and a hand-off's successor is named in
 //! the role's reserved hand-off. Either way the project is known before the
-//! role is, and a turn that ends first is held until the chat holds the role.
-//! If the marker or reservation goes away without the chat ever holding it (a
-//! failed or replaced hand-off), or the wait runs out, the turn is dropped and
-//! nothing is sent: only the chat that holds the role is ever reminded.
+//! role is, and a turn that ends first is held for as long as that marker or
+//! reservation stays valid: nothing expires a reservation, so neither does the
+//! obligation. It is checked once the chat holds the role, and dropped, with
+//! nothing sent, when the reservation is replaced or cleared, the role moves to
+//! another chat, or the chat is gone or archived. Only the chat that holds the
+//! role is ever reminded. The watcher re-checks on chat changes and on a slow
+//! timer, never in a tight loop.
 //!
 //! Locks: the grants map, the tracker's state and the probe are never held
 //! while the probe reads the workspace, and a token is minted and dropped from
@@ -24,7 +27,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mast_proto::artifacts::ArtifactView;
 use mast_proto::{
@@ -80,11 +83,14 @@ pub struct RunBasis {
 
 pub type RunProbe = Arc<dyn Fn(&str) -> RunBasis + Send + Sync>;
 
-/// How long a turn that ended before its chat held the role waits for that.
-/// Adoption normally follows the first queued turn within moments; this only
-/// bounds a reservation or marker that never resolves, so a delayed but valid
-/// adoption is not cut off early.
-const DEFAULT_ADOPTION_WAIT: Duration = Duration::from_secs(10 * 60);
+/// How often held turns are re-checked when no chat change wakes the watcher.
+/// Adoption normally follows within moments and wakes it through the chat
+/// change; this is only the net under changes that touch the role alone.
+const DEFAULT_RECHECK: Duration = Duration::from_secs(30);
+
+/// Most turns held for one chat that does not hold the role yet. A chat runs a
+/// handful of turns before it is adopted; the oldest go first beyond this.
+const MAX_HELD_PER_CHAT: usize = 16;
 
 struct Run {
     run_id: String,
@@ -102,7 +108,6 @@ pub struct EndedRun {
     pub end_revision: u32,
     pub project: (String, String),
     pub ask: bool,
-    at: Instant,
 }
 
 #[derive(Default)]
@@ -118,7 +123,7 @@ pub struct StatusTracker {
     state: Mutex<State>,
     probe: Mutex<Option<RunProbe>>,
     wake: Arc<Notify>,
-    adoption_wait: Mutex<Option<Duration>>,
+    recheck: Mutex<Option<Duration>>,
 }
 
 impl StatusTracker {
@@ -128,16 +133,16 @@ impl StatusTracker {
         *self.probe.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 
-    /// Override how long a turn waits for its chat to hold the role (tests).
-    pub fn set_adoption_wait(&self, wait: Duration) {
-        *self.adoption_wait.lock().unwrap_or_else(|e| e.into_inner()) = Some(wait);
+    /// Override how often held turns are re-checked on the timer (tests).
+    pub fn set_recheck_interval(&self, interval: Duration) {
+        *self.recheck.lock().unwrap_or_else(|e| e.into_inner()) = Some(interval);
     }
 
-    fn adoption_wait(&self) -> Duration {
-        self.adoption_wait
+    fn recheck_interval(&self) -> Duration {
+        self.recheck
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .unwrap_or(DEFAULT_ADOPTION_WAIT)
+            .unwrap_or(DEFAULT_RECHECK)
     }
 
     fn basis(&self, chat_id: &str) -> Option<RunBasis> {
@@ -212,7 +217,6 @@ impl StatusTracker {
                 end_revision: end_revision.max(run.baseline),
                 project: run.project,
                 ask: run.ask,
-                at: Instant::now(),
             });
         }
     }
@@ -237,7 +241,14 @@ impl StatusTracker {
     }
 
     fn hold(&self, ended: EndedRun) {
-        self.state().ended.push(ended);
+        let mut state = self.state();
+        state.ended.push(ended.clone());
+        let held = state.ended.iter().filter(|e| e.chat_id == ended.chat_id).count();
+        if held > MAX_HELD_PER_CHAT
+            && let Some(oldest) = state.ended.iter().position(|e| e.chat_id == ended.chat_id)
+        {
+            state.ended.remove(oldest);
+        }
     }
 
     /// Record the outcome of a turn's check.
@@ -348,12 +359,11 @@ fn check(workspace: &WorkspaceHost, ended: &EndedRun) -> Check {
             published: published_between(artifact.as_ref(), ended.baseline, ended.end_revision),
         };
     }
-    let provisional = workspace
-        .chat(&ended.chat_id)
-        .ok()
-        .flatten()
-        .is_some_and(|chat| chat.is_provisional_for(StandingRoleKind::Manager, item));
-    let pending = provisional
+    // A chat that is gone or archived will never hold the role.
+    let Some(chat) = workspace.chat(&ended.chat_id).ok().flatten().filter(|chat| !chat.archived) else {
+        return Check::Drop;
+    };
+    let pending = chat.is_provisional_for(StandingRoleKind::Manager, item)
         || workspace
             .standing_role_awaiting(&ended.chat_id, StandingRoleKind::Manager)
             .is_some_and(|role| role.scope_item_id == *item);
@@ -383,9 +393,11 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
         .set_probe(Arc::new(move |chat_id| run_basis(&probe_workspace, chat_id)));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
+    let chat_changes = workspace.watch_chats();
     let handle = tokio::spawn(async move {
         let tracker = tokens.manager_status();
         let wake = tracker.waker();
+        let mut chats = chat_changes;
         loop {
             let mut waiting = false;
             for ended in tracker.take_ended() {
@@ -395,10 +407,8 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
                 let published = match check(&workspace, &ended) {
                     Check::Drop => continue,
                     Check::Wait => {
-                        if ended.at.elapsed() < tracker.adoption_wait() {
-                            waiting = true;
-                            tracker.hold(ended);
-                        }
+                        waiting = true;
+                        tracker.hold(ended);
                         continue;
                     }
                     Check::Ready { published } => published,
@@ -424,9 +434,10 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
                     Verdict::Published => {}
                 }
             }
+            let recheck = tracker.recheck_interval();
             let retry = async {
                 if waiting {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    tokio::time::sleep(recheck).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
@@ -434,6 +445,7 @@ pub fn spawn_watch(tokens: Arc<AgentTokens>, workspace: WorkspaceHost, doc_host:
             tokio::select! {
                 _ = stop.cancelled() => return,
                 _ = wake.notified() => {}
+                changed = chats.changed() => if changed.is_err() { return },
                 _ = retry => {}
             }
         }
