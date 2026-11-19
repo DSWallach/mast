@@ -67,6 +67,7 @@ use crate::repos::{CheckoutIdentity, Repos};
 use crate::workspace_host::WorkspaceHost;
 
 mod git_status;
+pub mod since;
 
 /// Hard cap on the unified patch (plus untracked hunks) — "Partial snapshot".
 pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
@@ -3344,7 +3345,7 @@ pub async fn capture_range_diff(
 
 /// Snapshot of the changes from commit-ish `base` to commit-ish `sha` (shared
 /// by the per-commit and range captures).
-async fn capture_revision_pair_diff(
+pub(crate) async fn capture_revision_pair_diff(
     repos: &Repos,
     root: &Path,
     base: &str,
