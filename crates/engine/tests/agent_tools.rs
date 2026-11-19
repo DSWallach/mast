@@ -5659,11 +5659,9 @@ async fn a_first_turn_that_ends_before_adoption_is_checked_once_adopted() {
     tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "p1" }))
         .await
         .unwrap();
-    assert_eq!(
-        tokens.manager_status().current_run(first),
-        Some((2, (SPACE.to_owned(), item.clone()))),
-        "the provisional chat's project and the existing revision"
-    );
+    // The call had no turn behind it: it is its own turn, placed in the project
+    // from the provisional marker, and owed outright because the chat holds nothing.
+    assert_eq!(tokens.manager_status().pending(first), 1, "the change is held for adoption");
     // The turn ends before the chat is adopted.
     drop(lease);
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -5699,11 +5697,9 @@ async fn a_successors_first_turn_owes_a_status_once_it_holds_the_role_however_la
     tool(&rig, lease.token(), "work_outline_create_child", json!({ "title": "Worker", "idempotencyKey": "h1" }))
         .await
         .unwrap();
-    assert_eq!(
-        tokens.manager_status().current_run(successor),
-        Some((4, (SPACE.to_owned(), item.clone()))),
-        "the reserved hand-off places the turn in the project, from its record"
-    );
+    // The call had no turn behind it: the reserved hand-off places it in the
+    // project, and it is held for the successor because the chat holds nothing yet.
+    assert_eq!(tokens.manager_status().pending(successor), 1, "the change is held for adoption");
     drop(lease);
     // Nothing expires the reservation, so a rotation long after the turn ended
     // (here, dozens of re-checks later) is still honored.
@@ -6133,11 +6129,11 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
     assert!(rig.core.sessions.steer(CHAT, "lost", None).await.is_err());
     wait_for(|| warm.received.lock().unwrap().iter().any(|m| m == "lost"), "the harness to have been shown it").await;
     assert!(tokens.manager_status().current_turn(CHAT) > before, "its number is spent");
-    // Whatever the run did with that prompt, let it settle.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    if status_is(mast_proto::SessionStatus::Working) {
-        feed_done();
-    }
+    // The harness was shown the prompt, and confirms it with a steering
+    // boundary, which is what turns the session active; then it settles. Both
+    // steps wait on the harness's own events, not on time.
+    wait_for(|| status_is(mast_proto::SessionStatus::Working), "the harness to confirm the prompt").await;
+    feed_done();
     wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the run to settle").await;
     let spent = tokens.manager_status().current_turn(CHAT);
 
@@ -6151,6 +6147,31 @@ async fn a_document_error_after_the_mailbox_accepted_a_prompt_leaves_no_stale_re
         .unwrap();
     feed_done();
     wait_for(|| reminders() == 1, "the reminder for the turn after the error").await;
+}
+
+/// A warm run keeps its token while parked. A change made with it between turns
+/// belongs to no turn, yet it is still a change the status must follow: it owes,
+/// and the reminder is steered into the parked run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_made_on_a_parked_runs_token_between_turns_still_owes_a_status() {
+    let warm = Arc::new(Warm::default());
+    let harness = GatedHarness { warm: Some(warm.clone()), ..Default::default() };
+    let (rig, _item) = role_rig_in(rig_with_harness(harness).await, "status-idle-token").await;
+    let (feed_done, reminders) = warm_fixture(&warm);
+    let status_is = |want: mast_proto::SessionStatus| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(want);
+
+    rig.core.doc_host.queue_command(CHAT, run_command("turn one", &rig.space_path)).unwrap();
+    wait_for(|| rig.harness.spawns.lock().unwrap().len() == 1 && status_is(mast_proto::SessionStatus::Working), "turn one").await;
+    feed_done();
+    wait_for(|| status_is(mast_proto::SessionStatus::Idle), "the park").await;
+    assert_eq!(reminders(), 0);
+
+    // No turn is running, yet the parked run's token creates a work item.
+    let token = run_token(&rig, 0);
+    tool(&rig, &token, "work_outline_create_child", json!({ "title": "Between turns", "idempotencyKey": "it1" }))
+        .await
+        .unwrap();
+    wait_for(|| reminders() == 1, "the reminder for the change made between turns").await;
 }
 
 /// Adoption can land before anyone has looked at the turns that ended without

@@ -440,9 +440,6 @@ impl SessionsEngine {
         self.inner.agent_tokens.clone()
     }
 
-    /// Override how injected `zeron mcp` servers reach this engine (`None`
-    /// turns agent tools off). Default: this executable's `mcp` subcommand
-    /// on `MAST_IPC_PORT`.
     /// Make the next user-message write for `chat_id`, after a prompt has been
     /// accepted into a run's mailbox, fail. For tests of that error path.
     #[doc(hidden)]
@@ -450,6 +447,9 @@ impl SessionsEngine {
         lock(&self.inner.fail_next_user_write).insert(chat_id.to_owned());
     }
 
+    /// Override how injected `zeron mcp` servers reach this engine (`None`
+    /// turns agent tools off). Default: this executable's `mcp` subcommand
+    /// on `MAST_IPC_PORT`.
     pub fn set_agent_tools_launch(&self, launch: Option<AgentToolsLaunch>) {
         *lock(&self.inner.agent_tools_launch) = launch;
     }
@@ -2179,6 +2179,14 @@ impl Inner {
         completed_turn: Option<String>,
     ) {
         let now = Utc::now();
+        // A turn that is about to settle has its closing state read here, before
+        // the settled status is published: once Idle is visible the next turn can
+        // start and publish, and the revision at the end of this one must not
+        // include what that turn does. (No lock is held: the read is the
+        // tracker's probe, which reads the workspace.)
+        if matches!(status, SessionStatus::Idle | SessionStatus::Errored) {
+            self.agent_tokens.manager_status().capture_boundary(chat_id);
+        }
         let turn_boundary: Option<(bool, u64, Option<String>)>;
         let session = {
             let mut statuses = lock(&self.statuses);

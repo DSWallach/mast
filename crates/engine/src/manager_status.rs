@@ -148,6 +148,9 @@ pub struct EndedRun {
 struct Numbered {
     seq: u64,
     source: Option<String>,
+    /// A reminder steered into this turn while its start was unreported. Kept
+    /// apart from `source`, which is the message that started the turn.
+    joined: Option<String>,
     /// The session has taken the number (it reserved it before the prompt was
     /// shown to the agent; it is consumed when the status turns active).
     consumed: bool,
@@ -201,6 +204,10 @@ struct State {
     /// with its actual end revision, until every such call has settled, however
     /// many turns have ended since.
     closed_turns: HashMap<(String, u64), ClosedTurn>,
+    /// The state of a turn that is about to settle, read just before its settled
+    /// status was published, so that whoever closes the turn, and whenever,
+    /// uses the revision as it was at the session's boundary.
+    boundary: HashMap<String, (u64, RunBasis)>,
     /// Chats confirmed deleted. A late report about one creates nothing.
     gone: HashSet<String>,
     gone_order: VecDeque<String>,
@@ -280,6 +287,7 @@ impl StatusTracker {
         state.pending.entry(chat_id.to_owned()).or_default().push_back(Numbered {
             seq,
             source: source.map(str::to_owned),
+            joined: None,
             consumed: false,
         });
     }
@@ -329,7 +337,7 @@ impl StatusTracker {
             .pending
             .entry(chat_id.to_owned())
             .or_default()
-            .push_back(Numbered { seq, source: None, consumed: true });
+            .push_back(Numbered { seq, source: None, joined: None, consumed: true });
         (seq, None)
     }
 
@@ -367,30 +375,134 @@ impl StatusTracker {
     /// A state-changing call is being admitted: it is placed in its turn, which
     /// is returned, and counted as running until it settles, so that turn's
     /// record is kept for as long as the call can still complete.
+    ///
+    /// A call made while the chat has no turn at all, such as a warm run's
+    /// token used between turns, is a change nobody's turn covers. For a chat
+    /// that manages (or is about to manage) a project it gets a turn of its
+    /// own, numbered now and already over, with the record as it is now, so a
+    /// successful call still owes the status. For any other chat nothing
+    /// changes.
     pub fn admit_call(&self, chat_id: &str) -> u64 {
+        let idle = |state: &State| {
+            state.turns.get(chat_id).is_none() && state.pending.get(chat_id).is_none_or(|q| q.is_empty())
+        };
+        let probe_needed = {
+            let state = self.state();
+            !state.gone.contains(chat_id) && idle(&state)
+        };
+        let basis = if probe_needed { self.basis(chat_id) } else { None };
         let mut state = self.state();
+        if state.gone.contains(chat_id) {
+            return Self::live_turn(&state, chat_id);
+        }
+        if idle(&state)
+            && let Some(RunBasis { project: Some(project), revision, holds }) = basis
+        {
+            let seq = state.seq.entry(chat_id.to_owned()).or_default();
+            *seq += 1;
+            let seq = *seq;
+            let closed = state.closed.entry(chat_id.to_owned()).or_default();
+            *closed = (*closed).max(seq);
+            state.inflight.insert((chat_id.to_owned(), seq), 1);
+            state.closed_turns.insert(
+                (chat_id.to_owned(), seq),
+                ClosedTurn { baseline: revision, end_revision: revision, project, ask: false, forced: !holds },
+            );
+            return seq;
+        }
         let turn = Self::live_turn(&state, chat_id);
-        if turn > 0 && !state.gone.contains(chat_id) {
+        if turn > 0 {
             *state.inflight.entry((chat_id.to_owned(), turn)).or_default() += 1;
         }
         turn
     }
 
     /// The call admitted into `turn` has finished. When it succeeded the turn
-    /// owes a revision, whatever has happened to the turn since. The turn's
-    /// record is released once its last call has settled.
+    /// owes a revision, whatever has happened to the turn since: it is settled
+    /// against the turn as it stands, open or already closed, and the call's
+    /// count is released, in one step under one lock, so the turn cannot end
+    /// between the two. The turn's record is released once its last call has
+    /// settled.
     pub fn complete_call(&self, chat_id: &str, run_id: &str, turn: u64, succeeded: bool) {
-        if succeeded {
-            self.note_state_change(chat_id, run_id, turn);
-        }
-        let mut state = self.state();
-        let key = (chat_id.to_owned(), turn);
-        if let Some(count) = state.inflight.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                state.inflight.remove(&key);
-                state.closed_turns.remove(&key);
+        let basis = if succeeded { self.basis(chat_id) } else { None };
+        {
+            let mut state = self.state();
+            if succeeded && !state.gone.contains(chat_id) {
+                Self::settle_success(&mut state, chat_id, run_id, turn, basis);
             }
+            let key = (chat_id.to_owned(), turn);
+            if let Some(count) = state.inflight.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    state.inflight.remove(&key);
+                    state.closed_turns.remove(&key);
+                }
+            }
+        }
+        self.wake.notify_one();
+    }
+
+    /// A state-changing call completed successfully in `turn` (outside any
+    /// admission accounting: the same settlement, for callers that have none).
+    pub fn note_state_change(&self, chat_id: &str, run_id: &str, turn: u64) {
+        let basis = self.basis(chat_id);
+        let mut state = self.state();
+        if !state.gone.contains(chat_id) {
+            Self::settle_success(&mut state, chat_id, run_id, turn, basis);
+        }
+    }
+
+    /// Settle a successful call against its turn, as the turn is right now:
+    /// open, the turn owes; closed, its kept record is settled as the turn
+    /// ended; numbered and waiting for its start report, the turn is opened;
+    /// otherwise (the number was released, or the turn is long over with
+    /// nothing to settle against) nothing is opened or resurrected.
+    fn settle_success(state: &mut State, chat_id: &str, run_id: &str, turn: u64, basis: Option<RunBasis>) {
+        let open = state.turns.get(chat_id).map(|t| t.seq);
+        let closed = state.closed.get(chat_id).copied().unwrap_or(0);
+        match open {
+            Some(open) if turn == 0 || open == turn => {}
+            _ if turn > 0 && turn <= closed => {
+                // The turn ended before this call completed: it owes after all,
+                // judged on the revisions as they were when the turn ended.
+                if let Some(record) = state.closed_turns.remove(&(chat_id.to_owned(), turn)) {
+                    let ended = EndedRun {
+                        chat_id: chat_id.to_owned(),
+                        baseline: record.baseline,
+                        end_revision: record.end_revision,
+                        project: record.project,
+                        ask: record.ask,
+                        forced: record.forced,
+                    };
+                    if ended.forced {
+                        Self::absorb(state, ended);
+                    } else {
+                        state.ended.push(ended);
+                    }
+                }
+                return;
+            }
+            Some(open) if open > turn => return,
+            _ if turn == 0 => {
+                // No session numbering at all behind the call: it opens a turn.
+                Self::begin_locked(state, chat_id, 0, None, basis);
+            }
+            _ => {
+                // Only a number still waiting for its start report may be opened.
+                let waiting = state
+                    .pending
+                    .get(chat_id)
+                    .and_then(|q| q.iter().find(|n| n.seq == turn))
+                    .map(|n| n.source.clone());
+                let Some(source) = waiting else {
+                    return;
+                };
+                Self::begin_locked(state, chat_id, turn, source.as_deref(), basis);
+            }
+        }
+        if let Some(open) = state.turns.get_mut(chat_id).filter(|t| turn == 0 || t.seq == turn) {
+            open.run_id = Some(run_id.to_owned());
+            open.owed = true;
         }
     }
 
@@ -415,25 +527,30 @@ impl StatusTracker {
     pub fn begin(&self, chat_id: &str, seq: u64, source: Option<&str>) {
         let basis = self.basis(chat_id);
         let mut state = self.state();
+        Self::begin_locked(&mut state, chat_id, seq, source, basis);
+    }
+
+    fn begin_locked(state: &mut State, chat_id: &str, seq: u64, source: Option<&str>, basis: Option<RunBasis>) {
         if state.gone.contains(chat_id) {
             return;
         }
         // The number's start is being reported: it no longer needs its record.
         // A number still only reserved stays, for the session to take: a tool
         // call that lands first opens the turn but does not use the number up.
-        let recorded = state
+        let (recorded, joined) = state
             .pending
             .get_mut(chat_id)
             .and_then(|q| q.iter().position(|n| n.seq == seq).map(|at| (q, at)))
-            .and_then(|(q, at)| {
+            .map(|(q, at)| {
                 if q[at].consumed {
-                    q.remove(at).and_then(|n| n.source)
+                    let n = q.remove(at).expect("position is in range");
+                    (n.source, n.joined)
                 } else {
-                    q[at].source.clone()
+                    (q[at].source.clone(), q[at].joined.clone())
                 }
-            });
+            })
+            .unwrap_or((None, None));
         let source = source.map(str::to_owned).or(recorded);
-        let source = source.as_deref();
         if seq > 0 && seq <= state.closed.get(chat_id).copied().unwrap_or(0) {
             return;
         }
@@ -441,13 +558,15 @@ impl StatusTracker {
             if seq > 0 && open.seq >= seq {
                 return;
             }
-            Self::finish(&mut state, chat_id, basis.as_ref());
+            Self::finish(state, chat_id, basis.as_ref());
         }
         let Some(RunBasis { project: Some(project), revision, .. }) = basis else {
             return;
         };
-        let claims = source.is_some()
-            && state.asked.get(chat_id).is_some_and(|ask| source == Some(ask.message_id.as_str()));
+        let reminder = state.asked.get(chat_id).map(|ask| ask.message_id.clone());
+        let claims = reminder
+            .as_deref()
+            .is_some_and(|id| source.as_deref() == Some(id) || joined.as_deref() == Some(id));
         let (baseline, owed, ask) = if claims {
             let ask = state.asked.get_mut(chat_id).expect("checked above");
             ask.running = true;
@@ -460,70 +579,6 @@ impl StatusTracker {
             chat_id.to_owned(),
             Turn { seq, run_id: None, baseline, project, owed, ask },
         );
-    }
-
-    /// A state-changing tool call completed successfully. It belongs to `turn`,
-    /// the turn it was admitted in, whatever has happened since. When that
-    /// turn's start has not been reported yet this opens it, and the late
-    /// report finds it open. When that turn already ended, the call is settled
-    /// against it all the same: the turn owes a revision after all.
-    pub fn note_state_change(&self, chat_id: &str, run_id: &str, turn: u64) {
-        enum Step {
-            Owe,
-            Open(Option<String>),
-            Late,
-        }
-        let step = {
-            let state = self.state();
-            if state.gone.contains(chat_id) {
-                return;
-            }
-            let open = state.turns.get(chat_id).map(|t| t.seq);
-            let closed = state.closed.get(chat_id).copied().unwrap_or(0);
-            match open {
-                Some(open) if turn == 0 || open == turn => Step::Owe,
-                _ if turn > 0 && turn <= closed => Step::Late,
-                Some(open) if open > turn => return,
-                _ => Step::Open(
-                    state
-                        .pending
-                        .get(chat_id)
-                        .and_then(|q| q.iter().find(|n| n.seq == turn))
-                        .and_then(|n| n.source.clone()),
-                ),
-            }
-        };
-        match step {
-            Step::Owe => {}
-            Step::Open(source) => self.begin(chat_id, turn, source.as_deref()),
-            Step::Late => {
-                // The turn ended before this call completed: it owes after all,
-                // judged on the revisions as they were when the turn ended.
-                let mut state = self.state();
-                if let Some(closed) = state.closed_turns.remove(&(chat_id.to_owned(), turn)) {
-                    let ended = EndedRun {
-                        chat_id: chat_id.to_owned(),
-                        baseline: closed.baseline,
-                        end_revision: closed.end_revision,
-                        project: closed.project,
-                        ask: closed.ask,
-                        forced: closed.forced,
-                    };
-                    if ended.forced {
-                        Self::absorb(&mut state, ended);
-                    } else {
-                        state.ended.push(ended);
-                    }
-                    drop(state);
-                    self.wake.notify_one();
-                }
-                return;
-            }
-        }
-        if let Some(open) = self.state().turns.get_mut(chat_id).filter(|t| turn == 0 || t.seq == turn) {
-            open.run_id = Some(run_id.to_owned());
-            open.owed = true;
-        }
     }
 
     /// A prompt carrying queued message `source` was accepted into a turn
@@ -553,16 +608,33 @@ impl StatusTracker {
             }
             return;
         }
-        // Numbered, not reported: bind the message to the newest such turn.
+        // Numbered, not reported: bind the message to the newest such turn, apart
+        // from the message that started it. The start report claims it.
         if let Some(numbered) = state
             .pending
             .get_mut(chat_id)
             .and_then(|q| q.iter_mut().filter(|n| n.consumed).max_by_key(|n| n.seq))
-            && numbered.source.is_none()
         {
-            numbered.source = Some(source.to_owned());
+            numbered.joined = Some(source.to_owned());
             let ask = state.asked.get_mut(chat_id).expect("checked above");
             ask.dispatching = false;
+        }
+    }
+
+    /// The session is about to publish a settled status for the chat: read the
+    /// open turn's closing state now, before a later turn can be started or can
+    /// publish, and hold it for whoever closes the turn.
+    pub fn capture_boundary(&self, chat_id: &str) {
+        let open = self.state().turns.get(chat_id).map(|t| t.seq);
+        let Some(seq) = open else {
+            return;
+        };
+        let Some(basis) = self.basis(chat_id) else {
+            return;
+        };
+        let mut state = self.state();
+        if state.turns.get(chat_id).is_some_and(|t| t.seq == seq) {
+            state.boundary.insert(chat_id.to_owned(), (seq, basis));
         }
     }
 
@@ -603,6 +675,13 @@ impl StatusTracker {
         let Some(turn) = state.turns.remove(chat_id) else {
             return;
         };
+        // The state read at the session's own boundary, when there is one for
+        // this turn, wins over a later read.
+        let captured = match state.boundary.remove(chat_id) {
+            Some((seq, captured)) if seq == turn.seq => Some(captured),
+            _ => None,
+        };
+        let basis = captured.as_ref().or(basis);
         let end_revision = basis.map_or(turn.baseline, |b| b.revision).max(turn.baseline);
         let forced = basis.is_some_and(|b| !b.holds);
         if !turn.owed {
@@ -843,6 +922,7 @@ impl StatusTracker {
         state.ended.retain(|e| e.chat_id != chat_id);
         state.inflight.retain(|(chat, _), _| chat != chat_id);
         state.closed_turns.retain(|(chat, _), _| chat != chat_id);
+        state.boundary.remove(chat_id);
         if state.gone.insert(chat_id.to_owned()) {
             state.gone_order.push_back(chat_id.to_owned());
         }
@@ -1880,5 +1960,122 @@ mod tests {
         // A chat that turns out to exist after all is a chat again.
         t.unforget_chat("gone");
         assert!(t.start_turn("gone") > 0);
+    }
+    #[test]
+    fn a_turn_ending_and_a_call_completing_in_either_order_or_at_once_always_owe_exactly_once() {
+        // Completion first, then the end.
+        let (t, _s) = tracker(true, 1);
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        let call = t.admit_call("m");
+        t.complete_call("m", "tok", call, true);
+        t.end("m", a);
+        assert_eq!(t.take_ended().len(), 1);
+        assert!(t.state().inflight.is_empty() && t.state().closed_turns.is_empty());
+        // The end first, then completion.
+        let (t, _s) = tracker(true, 1);
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        let call = t.admit_call("m");
+        t.end("m", a);
+        t.complete_call("m", "tok", call, true);
+        assert_eq!(t.take_ended().len(), 1);
+        assert!(t.state().inflight.is_empty() && t.state().closed_turns.is_empty());
+        // Raced from two threads, many times: never dropped, never doubled.
+        for round in 0..400 {
+            let (t, _s) = tracker(true, 1);
+            let a = t.next_turn("m").0;
+            t.begin("m", a, None);
+            let call = t.admit_call("m");
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    t.complete_call("m", "tok", call, true);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    t.end("m", a);
+                });
+            });
+            assert_eq!(t.take_ended().len(), 1, "round {round}: the call's turn owes once");
+            assert!(t.state().inflight.is_empty() && t.state().closed_turns.is_empty(), "round {round}");
+        }
+    }
+
+    #[test]
+    fn a_turns_end_revision_is_the_one_read_at_the_session_boundary_even_if_the_next_turn_closes_it() {
+        let (t, shared) = tracker(true, 1);
+        let a = t.next_turn("m").0;
+        t.begin("m", a, None);
+        note(&t, "m", "tok");
+        // The session is about to publish Idle: A's closing state is read now.
+        t.capture_boundary("m");
+        // Idle is published; before the end report, turn B starts and publishes
+        // revision 2, and B's start report closes A.
+        set_revision(&shared, 2);
+        let b = t.next_turn("m").0;
+        t.begin("m", b, None);
+        let ended = t.take_ended().remove(0);
+        assert_eq!((ended.baseline, ended.end_revision), (1, 1), "A ends at the boundary, not at B's start");
+        // A's own late end report finds nothing more to close.
+        t.end("m", a);
+        assert!(t.turn_open("m"));
+        assert!(matches!(published(&t, &ended, &[2]), Verdict::Nudge { baseline: 1, .. }));
+    }
+
+    #[test]
+    fn a_reminder_joining_a_numbered_turn_that_has_a_source_is_still_claimed() {
+        let (t, _s, _row, id) = reminded(3);
+        // The turn was started by a user prompt, so its number carries a source.
+        t.reserve_turn("m", Some("user-prompt"));
+        let (b, source) = t.next_turn("m");
+        assert_eq!(source.as_deref(), Some("user-prompt"));
+        // The reminder is steered into it before its start is reported.
+        t.joined_active("m", &id);
+        t.begin("m", b, source.as_deref());
+        t.finish_turn("m");
+        let ended = t.take_ended().remove(0);
+        assert!(ended.ask, "the turn took the reminder as well as its own prompt");
+        assert_eq!(ended.baseline, 3);
+    }
+
+    #[test]
+    fn a_successful_call_on_a_released_delivery_opens_nothing() {
+        let (t, _s) = tracker(true, 0);
+        t.start_turn("m");
+        t.finish_turn("m");
+        t.reserve_turn("m", Some("lost-delivery"));
+        let call = t.admit_call("m");
+        t.release_turn("m", "lost-delivery"); // the delivery's cleanup ran
+        t.complete_call("m", "tok", call, true); // but the call succeeded
+        assert!(!t.turn_open("m"), "the released number is not resurrected as a turn");
+        assert!(t.state().inflight.is_empty());
+    }
+
+    #[test]
+    fn a_change_made_on_an_idle_token_owes_a_status_and_changes_nothing_for_other_chats() {
+        // A manager chat with no turn at all: its own turn, judged as of now.
+        let (t, _s) = tracker(true, 4);
+        let call = t.admit_call("m");
+        assert!(call > 0);
+        t.complete_call("m", "tok", call, true);
+        let owed = t.take_ended().remove(0);
+        assert_eq!((owed.baseline, owed.end_revision), (4, 4));
+        assert!(matches!(published(&t, &owed, &[]), Verdict::Nudge { baseline: 4, .. }));
+        // A failed change owes nothing, and leaves nothing behind.
+        let call = t.admit_call("m");
+        t.complete_call("m", "tok", call, false);
+        assert!(t.take_ended().is_empty());
+        assert!(t.state().inflight.is_empty() && t.state().closed_turns.is_empty());
+        // A chat that does not manage anything is untouched.
+        let (t, _s) = tracker(false, 4);
+        let call = t.admit_call("worker");
+        t.complete_call("worker", "tok", call, true);
+        assert!(t.take_ended().is_empty() && !t.turn_open("worker"));
+        // A change in a turn that is running is that turn's, not an idle one.
+        let (t, _s) = tracker(true, 4);
+        let a = t.start_turn("m");
+        assert_eq!(t.admit_call("m"), a);
     }
 }
