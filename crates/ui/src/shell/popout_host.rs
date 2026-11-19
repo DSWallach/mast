@@ -55,7 +55,7 @@ impl Shell {
                 // hookup goes with the tab.
                 drop(_events);
                 (
-                    PopoutSurface::Subagent(SubagentPopout { doc_id, transcript, fetch: _fetch }),
+                    PopoutSurface::Subagent(SubagentPopout { doc_id, transcript, _fetch }),
                     title,
                 )
             }

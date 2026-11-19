@@ -23,6 +23,11 @@ Press `?` in the outline for the live list, which also shows keys you have rebou
 | `⌥⇧⌘O` | Search workspace symbols |
 | `⇧⌘F` | Search text in workspace files |
 | `⇧⌘R` | Reload browser page |
+| `⌥⌘N` | Open the active side-panel tab in its own window |
+
+## In a pop-out window
+
+A pop-out handles `⌘S` (save) and `⌘W` (close the window; a file with unsaved edits asks first). Other app shortcuts act on the main window.
 
 ## In a code file
 

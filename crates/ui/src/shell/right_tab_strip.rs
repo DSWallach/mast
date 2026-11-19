@@ -373,6 +373,7 @@ impl Shell {
                                     menu.child(
                                         popover::menu_row(&theme, false, "right-tab-popout")
                                             .id("right-tab-popout-row")
+                                            .debug_selector(|| "right-tab-popout-row".into())
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.close_right_tab_menu(cx);
                                                 this.pop_out_surface(surface, cx);
@@ -389,6 +390,7 @@ impl Shell {
                                     menu.child(
                                         popover::menu_row(&theme, false, "right-tab-close")
                                             .id("right-tab-close-row")
+                                            .debug_selector(|| "right-tab-close-row".into())
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.close_right_tab_menu(cx);
                                                 this.close_right_surface(surface, window, cx);

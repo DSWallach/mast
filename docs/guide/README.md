@@ -5,6 +5,7 @@
 - [Orchestrating and hand-off](orchestrating.md)
 - [Review a change](review.md)
 - [Navigate code](code-navigation.md)
+- [Pop-out windows](popout-windows.md)
 - [Needs you](needs-you.md)
 - [Blueprints and child templates](templates.md)
 - [Friction and menu bar](friction-and-status.md)

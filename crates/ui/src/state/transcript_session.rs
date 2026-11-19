@@ -176,6 +176,12 @@ impl AppState {
         self.sub_watch_tasks.insert(doc_id, task);
     }
 
+    /// Tests: how many subagent doc watches are live.
+    #[cfg(test)]
+    pub(crate) fn subagent_watch_count(&self) -> usize {
+        self.sub_watch_tasks.len()
+    }
+
     /// Tab closed: drop the watch task (cancels the engine-side watch and
     /// unpins the doc from the engine LRU) and the rows.
     pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {

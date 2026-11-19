@@ -3702,6 +3702,9 @@ impl Shell {
 mod right_tab_mouse_regressions;
 
 #[cfg(test)]
+mod popout_tests;
+
+#[cfg(test)]
 mod shortcut_focus_regressions;
 
 #[cfg(feature = "snapshot")]

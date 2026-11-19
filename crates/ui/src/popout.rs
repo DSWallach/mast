@@ -37,7 +37,7 @@ pub(crate) struct SubagentPopout {
     pub(crate) doc_id: String,
     pub(crate) transcript: Entity<Transcript>,
     /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    pub(crate) fetch: Option<Task<()>>,
+    pub(crate) _fetch: Option<Task<()>>,
 }
 
 /// What a pop-out shows. Each variant is the same entity the right pane held.
@@ -438,7 +438,8 @@ pub(crate) fn prepare_quit(cx: &mut App) -> bool {
     ready
 }
 
-/// Pop-outs currently open (tests, and "is anything left" checks).
+/// Pop-outs currently open.
+#[cfg(test)]
 pub(crate) fn open_count(cx: &App) -> usize {
     cx.windows().into_iter().filter(|window| window.downcast::<PopoutWindow>().is_some()).count()
 }
