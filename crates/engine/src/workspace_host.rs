@@ -812,6 +812,22 @@ impl WorkspaceHost {
         })?)
     }
 
+    pub fn commit_provenance(&self, sha: &str) -> Option<mast_proto::CommitProvenance> {
+        self.read(|doc| doc.commit_provenance(sha))
+    }
+
+    pub fn put_commit_provenance(
+        &self,
+        record: &mast_proto::CommitProvenance,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.put_commit_provenance(record))?)
+    }
+
+    pub fn prune_commit_provenance(&self) -> usize {
+        self.mutate(|doc| -> Result<usize, mast_doc::DocError> { Ok(doc.prune_commit_provenance()) })
+            .unwrap_or(0)
+    }
+
     pub fn diff_review_state(&self, target: &str) -> Result<Option<mast_proto::DiffReviewState>, EngineError> {
         Ok(self.read(|doc| doc.diff_review_state(target)))
     }
