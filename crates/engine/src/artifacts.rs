@@ -3009,10 +3009,9 @@ impl ArtifactsService {
             return Err(invalid("the project is in another Space"));
         }
         mast_proto::validate_manager_status(content).map_err(ArtifactError::invalid)?;
-        let dir = std::env::temp_dir().join(format!(
-            "mast-manager-status-{}",
-            operation_id.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>()
-        ));
+        // Unique per call: processes sharing a temp folder and an operation id
+        // must not stage into, or delete, each other's directory.
+        let dir = std::env::temp_dir().join(format!("mast-manager-status-{}", crate::new_id()));
         let source = dir.join("manager-status.md");
         std::fs::create_dir_all(&dir)
             .and_then(|()| std::fs::write(&source, content))
@@ -3037,6 +3036,7 @@ impl ArtifactsService {
             "revision": reply.revision,
             "changed": reply.changed,
             "url": reply.url,
+            "storedPath": reply.stored_path,
             "note": "Manager status recorded. An unchanged document records no new revision.",
         }))
     }
