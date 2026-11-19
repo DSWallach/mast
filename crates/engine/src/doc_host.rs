@@ -3086,7 +3086,16 @@ impl DocHost {
             SessionCommandPayload::Run {
                 request,
                 message_id,
-            } => match self.selected_instruction_revision(chat_id) {
+            } => match self
+                // A Manager that predates its role gains it with this new
+                // submission; queued or explicitly pinned messages are left alone.
+                .sessions()
+                .and_then(|sessions| {
+                    let harness = self.harness_for_request(chat_id, &request);
+                    self.upgrade_manager_role(&sessions, chat_id, &message_id, harness)
+                })
+                .or_else(|| self.selected_instruction_revision(chat_id))
+            {
                 Some(instructions) => SessionCommandPayload::RunWithInstructions {
                     request,
                     message_id,
@@ -3265,7 +3274,16 @@ impl DocHost {
         // Capture at queue time (acceptance 10): the row is delivered with the
         // revision the Chat had selected when the user queued it, even if a
         // newer one is applied before it drains.
-        let instructions = self.selected_instruction_revision(chat_id);
+        // A new user send to a Manager that predates its role gains the role
+        // here too; rows already queued keep the pin they were queued with.
+        let upgraded = if from_user {
+            self.sessions().and_then(|sessions| {
+                self.upgrade_manager_role(&sessions, chat_id, &id, self.harness_for(chat_id))
+            })
+        } else {
+            None
+        };
+        let instructions = upgraded.or_else(|| self.selected_instruction_revision(chat_id));
         // A pinned row needs a host that can deliver it (an older host would
         // ignore the pin and run the row without instructions).
         if instructions.is_some() {
@@ -5539,6 +5557,105 @@ impl DocHost {
     /// Execute a Run (plain or instruction-bearing): attachments, worktree,
     /// claim, config backfill, canonical user message, dispatch. `pinned` is
     /// the command's instruction pin plus the context-reset confirmation.
+    /// Add a Manager's role to a chat that predates it: the next plain send
+    /// of a Manager chat whose selected revision lacks the role gets a new
+    /// revision of that selection plus the role, applied at this message's
+    /// turn boundary. It is built from the chat's own selected revision, so
+    /// instructions edited since stay unapplied drift. The replacement then
+    /// runs through the ordinary delivery path, which keeps a queued turn's
+    /// own pin, resumes a Claude session and asks before a Codex context
+    /// reset; a kept session is never asked again. Any failure leaves the
+    /// send as it was.
+    fn upgrade_manager_role(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        message_id: &str,
+        harness: HarnessId,
+    ) -> Option<InstructionRevisionPin> {
+        use mast_doc::work_outline::instructions::ManagerRoleUpgrade;
+        use mast_proto::{
+            ApplyInstructionRevisionParams, CreateInstructionRevisionParams,
+            InstructionApplicationReason, InstructionTurnBoundary, WorkOutlineActor,
+            WorkOutlineActorKind, WorkOutlineMutation, derive_id, roles,
+        };
+        let workspace = self.workspace()?;
+        if crate::work_outline::writes_disabled()
+            || sessions.turn_instruction_pin(chat_id, message_id).is_some()
+        {
+            return None;
+        }
+        let ManagerRoleUpgrade::Needed {
+            work_item_id,
+            base_revision_id,
+        } = workspace.manager_role_upgrade(chat_id)
+        else {
+            return None;
+        };
+        if !matches!(
+            sessions.instruction_support(harness),
+            Ok(mast_harness::InstructionSupport::Supported { .. })
+        ) {
+            return None;
+        }
+        let actor = WorkOutlineActor {
+            kind: WorkOutlineActorKind::User,
+            device_id: self.inner.config.device_id.clone(),
+            chat_id: None,
+            message_id: None,
+        };
+        let base = base_revision_id.as_deref().unwrap_or("none");
+        let base_revision_id = base_revision_id.clone();
+        let revision_op = derive_id(&format!("manager role upgrade {chat_id} {base}"), roles::REVISION);
+        let apply_op = derive_id(
+            &format!("manager role apply {chat_id} {base} {message_id}"),
+            roles::APPLICATION,
+        );
+        let upgraded = (|| {
+            let revision_id = workspace
+                .work_outline_mutate(
+                    &WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+                        work_item_id,
+                        operation_id: revision_op,
+                        role: Some(mast_proto::StandingRoleKind::Manager),
+                        // No selection stays empty: the project's newer text
+                        // is unapplied drift, not part of this upgrade.
+                        base_revision_id: Some(base_revision_id.unwrap_or_default()),
+                    }),
+                    &actor,
+                    &[],
+                )
+                .and_then(|reply| reply.into_revision_id())?;
+            workspace.work_outline_mutate(
+                &WorkOutlineMutation::ApplyInstructionRevision(ApplyInstructionRevisionParams {
+                    chat_id: chat_id.to_owned(),
+                    revision_id: revision_id.clone(),
+                    reason: InstructionApplicationReason::Explicit,
+                    turn_boundary: Some(InstructionTurnBoundary {
+                        message_id: Some(message_id.to_owned()),
+                    }),
+                    operation_id: apply_op,
+                }),
+                &actor,
+                &[],
+            )?;
+            Ok::<_, mast_proto::WorkOutlineError>(revision_id)
+        })();
+        match upgraded {
+            Ok(revision_id) => {
+                let revision = workspace.instruction_revision(&revision_id)?;
+                Some(InstructionRevisionPin {
+                    revision_id,
+                    revision_hash: revision.body.hash,
+                })
+            }
+            Err(error) => {
+                tracing::warn!(chat_id, %error.message, "could not add the Manager role to its chat");
+                None
+            }
+        }
+    }
+
     async fn execute_run(
         &self,
         sessions: &SessionsEngine,
@@ -5552,15 +5669,7 @@ impl DocHost {
         let mut request = request;
         // A sender never supplies the envelope; the host resolves it below.
         request.instructions = None;
-        // A Manager coordinates and never edits or builds. Enforced at the
-        // launch, whatever the chat's stored config says, so the harness
-        // itself refuses file-writing and shell tools.
-        if self
-            .workspace()
-            .is_some_and(|workspace| workspace.chat_is_manager(chat_id))
-        {
-            request.restrict_to_read_only();
-        }
+        self.restrict_manager_request(chat_id, &mut request);
         // Queued-attachment refs (`pending://`) resolve to this
         // host's absolute paths before anything persists or
         // dispatches — the drain already gated on the bytes being
@@ -5588,6 +5697,14 @@ impl DocHost {
         // the session's previous one (a replacement at the Turn boundary).
         // Only a re-execution of a message that already dispatched keeps its
         // own Turn pin.
+        let upgrade_pin = match pinned {
+            None => {
+                let harness = self.harness_for_request(chat_id, &request);
+                self.upgrade_manager_role(sessions, chat_id, message_id, harness)
+            }
+            Some(_) => None,
+        };
+        let pinned = pinned.or(upgrade_pin.as_ref().map(|pin| (pin, false)));
         let pinned = match pinned {
             Some((pin, confirmed)) => {
                 match instruction_delivery::resolve_pin(self.instruction_registry().as_deref(), pin)
@@ -6091,6 +6208,20 @@ impl DocHost {
         })
     }
 
+    /// A Manager coordinates and never edits or builds. Applied to the run
+    /// request wherever one is built or dispatched (first send, queue drain,
+    /// retry, session revival, steer fallback), whatever the chat's stored
+    /// config says, so the harness itself refuses file-writing and shell
+    /// tools. Idempotent.
+    fn restrict_manager_request(&self, chat_id: &str, request: &mut mast_proto::RunRequest) {
+        if self
+            .workspace()
+            .is_some_and(|workspace| workspace.chat_is_manager(chat_id))
+        {
+            request.restrict_to_read_only();
+        }
+    }
+
     /// Every fresh harness dispatch crosses this boundary, including
     /// steer/input fallbacks and crash recovery. Capture immediately before
     /// dispatch so the conversation records the checkout the harness will
@@ -6121,6 +6252,7 @@ impl DocHost {
         &self, sessions: &SessionsEngine, chat_id: &str, harness: HarnessId,
         mut request: mast_proto::RunRequest, message_id: String, error_entry_id: String,
     ) -> Result<String, EngineError> {
+        self.restrict_manager_request(chat_id, &mut request);
         if let Some(validated) = self.validate_bound_dispatch(chat_id).await? {
             pin_bound_request(chat_id, &validated, &mut request)?;
         }
@@ -6140,9 +6272,10 @@ impl DocHost {
         sessions: &SessionsEngine,
         chat_id: &str,
         harness: HarnessId,
-        request: mast_proto::RunRequest,
+        mut request: mast_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        self.restrict_manager_request(chat_id, &mut request);
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)

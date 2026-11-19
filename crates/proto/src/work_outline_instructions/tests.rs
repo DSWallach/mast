@@ -1124,6 +1124,7 @@ fn instruction_mutation_wire_names_are_pinned() {
                 work_item_id: "w".into(),
                 operation_id: "op".into(),
                 role: None,
+                base_revision_id: None,
             }),
             json!({"op":"createInstructionRevision","workItemId":"w","operationId":"op"}),
         ),

@@ -1637,6 +1637,11 @@ impl Tools {
                             "workItemId": item,
                             "prompt": prompt,
                             "config": config,
+                            // The config above is always filled in; these say
+                            // whether the caller chose, so a Manager's worker
+                            // default can tell omitted from explicit.
+                            "harnessOmitted": args.harness.as_deref().is_none_or(|h| h.trim().is_empty()),
+                            "modelOmitted": args.model.as_deref().is_none_or(|m| m.trim().is_empty()),
                         }),
                     )
                     .await?;
@@ -1646,6 +1651,22 @@ impl Tools {
                 Some(reply)
             }
             _ => None,
+        };
+        // The engine may have resolved a different harness or model than the
+        // local defaults above (a Manager's worker default): report and keep
+        // what the chat actually runs on.
+        let (harness, model, reasoning, config) = match launched
+            .as_ref()
+            .and_then(|r| r.get("config"))
+            .and_then(|c| serde_json::from_value::<ChatConfig>(c.clone()).ok())
+        {
+            Some(resolved) => (
+                resolved.harness,
+                resolved.model.clone(),
+                resolved.reasoning,
+                resolved,
+            ),
+            None => (harness, model, reasoning, config),
         };
         let cwd = match launched
             .as_ref()
@@ -2790,19 +2811,29 @@ mod tests {
                         let key = params["arguments"]["idempotencyKey"].as_str().unwrap();
                         let operation = agent_tools::operation_id("chat-beta-2", key);
                         let chat_id = mast_proto::derive_id(&operation, mast_proto::roles::CHAT);
+                        // A Manager's engine swaps in its worker default when the
+                        // caller named neither harness nor model.
+                        let mut config = params["arguments"]["config"].clone();
+                        if params["arguments"]["harnessOmitted"] == true
+                            && params["arguments"]["modelOmitted"] == true
+                        {
+                            config["harness"] = json!("claude-code");
+                            config["model"] = json!("claude-sonnet-5-5");
+                        }
                         let mut created = self.created.lock().unwrap();
                         if !created.iter().any(|c| c["id"] == chat_id) {
                             created.push(json!({
                                 "id": chat_id, "deviceId": "dev-local", "archived": false,
                                 "spaceId": "space-1", "parentChatId": "chat-beta-2",
-                                "config": params["arguments"]["config"],
+                                "config": config.clone(),
                                 "cwd": "/repo/comet/.worktrees/item",
                                 "createdAt": "2026-09-03T00:00:00Z"
                             }));
                         }
                         return Ok(RpcReply::Value(json!({
                             "chatId": chat_id, "messageId": "m-1", "commandId": "cmd-launch",
-                            "executionRoot": "/repo/comet/.worktrees/item", "state": "queued"
+                            "executionRoot": "/repo/comet/.worktrees/item", "state": "queued",
+                            "config": config
                         })));
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-agent", "queued": true }))
@@ -3993,6 +4024,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("own chat"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn create_chat_reports_the_model_the_engine_resolved_for_omitted_and_explicit_selections() {
+        let world = Arc::new(World {
+            destination: Some("item-tickets"),
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Some(BETA_TOKEN));
+        // Omitted: the engine resolves the project's worker default (Sonnet),
+        // not the local Mast default (Opus) this server filled in first.
+        let omitted = tools
+            .call("create_chat", json!({ "idempotencyKey": "m1", "prompt": "do it", "title": "T1" }))
+            .await
+            .unwrap();
+        assert_eq!(omitted["model"], "claude-sonnet-5-5");
+        assert_eq!(omitted["harness"], "claude-code");
+        // Explicit: what the caller named is kept and reported.
+        let explicit = tools
+            .call(
+                "create_chat",
+                json!({ "idempotencyKey": "m2", "prompt": "do it", "title": "T2", "model": "opus" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(explicit["model"], "opus");
+
+        // The launch said which fields the caller left out, and the chat that
+        // was actually created carries the resolved config.
+        let launches = world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT);
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0]["arguments"]["modelOmitted"], true);
+        assert_eq!(launches[0]["arguments"]["harnessOmitted"], true);
+        assert_eq!(launches[1]["arguments"]["modelOmitted"], false);
+        let created = world.created.lock().unwrap();
+        let model_of = |id: &Value| {
+            created
+                .iter()
+                .find(|c| c["id"] == *id)
+                .map(|c| c["config"]["model"].clone())
+        };
+        assert_eq!(model_of(&omitted["chatId"]), Some(json!("claude-sonnet-5-5")));
+        assert_eq!(model_of(&explicit["chatId"]), Some(json!("opus")));
     }
 
     #[tokio::test]

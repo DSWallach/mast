@@ -610,6 +610,8 @@ pub struct RecordedInstructionRun {
     pub instructions: Option<mast_proto::InstructionDelivery>,
     /// The working directory the run was spawned in.
     pub cwd: String,
+    /// The sandbox the run was dispatched with.
+    pub sandbox: mast_proto::SandboxLevel,
 }
 
 /// One Turn (the run's first prompt or a later mailbox prompt) and the
@@ -745,6 +747,7 @@ impl Harness for InstructionMockHarness {
                 session_id: session_id.clone(),
                 instructions: request.instructions.clone(),
                 cwd: request.cwd.clone(),
+                sandbox: request.sandbox,
             });
             (state.runs.len() - 1, session_id)
         };

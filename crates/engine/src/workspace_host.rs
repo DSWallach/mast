@@ -787,6 +787,13 @@ impl WorkspaceHost {
         self.read(|doc| doc.standing_role(role, scope_item_id))
     }
 
+    pub fn manager_role_upgrade(
+        &self,
+        chat_id: &str,
+    ) -> mast_doc::work_outline::instructions::ManagerRoleUpgrade {
+        self.read(|doc| doc.manager_role_upgrade(chat_id))
+    }
+
     pub fn chat_is_manager(&self, chat_id: &str) -> bool {
         self.read(|doc| doc.chat_is_manager(chat_id))
     }

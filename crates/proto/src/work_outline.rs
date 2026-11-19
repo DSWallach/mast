@@ -1437,6 +1437,12 @@ pub struct CreateInstructionRevisionParams {
     /// its built-in role instructions ahead of the item's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<crate::StandingRoleKind>,
+    /// Snapshot this revision's entries (plus the role's) instead of the
+    /// item's current effective instructions; an empty id snapshots none, for
+    /// a Chat that had no selected revision. Adds a missing role to a Chat's
+    /// selection without adopting unrelated drift. Needs `role`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<String>,
 }
 
 /// `applyInstructionRevision`: select a revision for a Chat (an immutable

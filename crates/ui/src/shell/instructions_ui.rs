@@ -752,6 +752,7 @@ impl Shell {
                 work_item_id: item_id,
                 operation_id: revision_op,
                 role,
+                base_revision_id: None,
             });
         cx.notify();
         let chat_id = chat_id.to_owned();

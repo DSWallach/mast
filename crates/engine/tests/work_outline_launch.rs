@@ -2446,3 +2446,228 @@ async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rej
     assert_eq!(stray_commands[0].status, SessionCommandStatus::Rejected);
     rig.core.shutdown().await;
 }
+
+
+// ---------------------------------------------------------------------------
+// Manager 6: a Manager that predates its role instructions
+// ---------------------------------------------------------------------------
+
+async fn add_item_instruction(rig: &Rig, op: &str, text: &str) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItemInstruction", "spaceId": SPACE,
+                    "scope": { "type": "workItem", "workItemId": rig.item },
+                    "text": text, "operationId": op }),
+        )
+        .await
+        .unwrap();
+}
+
+/// An ordinary chat on the project (it predates Manager role instructions)
+/// that the Manager role then adopts.
+async fn pre_upgrade_manager(rig: &Rig, op: &str) -> String {
+    mark_project(rig).await;
+    let old = launch(rig, &params(rig, op, "start")).await.unwrap();
+    settle(rig, &old.chat_id).await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, &old.chat_id, &[])
+        .unwrap();
+    old.chat_id
+}
+
+/// The Execution Session the Turn for `prompt` reached.
+fn follow_up_run(rig: &Rig, prompt: &str) -> mast_harness::mock::RecordedInstructionRun {
+    let turn = rig
+        .mock
+        .turns()
+        .into_iter()
+        .rev()
+        .find(|turn| turn.prompt.contains(prompt))
+        .unwrap_or_else(|| panic!("no turn for {prompt}"));
+    rig.mock.runs()[turn.run_index].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_manager_gets_its_role_on_the_next_send_keeping_its_selected_instructions() {
+    let rig = rig().await;
+    let chat = pre_upgrade_manager(&rig, "op-old-manager").await;
+    // Instructions added after the chat's revision was selected are drift.
+    add_item_instruction(&rig, "op-newer-rule", "Newer project rule.").await;
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "follow up", &cwd);
+    wait_for(
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("follow up")),
+        "the follow-up run",
+    )
+    .await;
+
+    let run = follow_up_run(&rig, "follow up");
+    let envelope = run.instructions.expect("instructions delivered").envelope.rendered;
+    assert!(envelope.contains("You are this project's Manager"), "{envelope}");
+    assert!(envelope.contains("Run the tests first."), "the selected rule is kept: {envelope}");
+    assert!(!envelope.contains("Newer project rule."), "unapplied drift is not adopted: {envelope}");
+    // Read-only whatever the request and the stored config said.
+    assert_eq!(run.sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_manager_with_no_selection_keeps_it_empty_and_adds_only_the_role() {
+    let rig = rig_with(InstructionMockHarness::default(), false).await;
+    let chat = pre_upgrade_manager(&rig, "op-empty-manager").await;
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_none());
+    add_item_instruction(&rig, "op-added-later", "Added after the Manager started.").await;
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "follow up", &cwd);
+    wait_for(
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("follow up")),
+        "the follow-up run",
+    )
+    .await;
+
+    let run = follow_up_run(&rig, "follow up");
+    let envelope = run.instructions.expect("instructions delivered").envelope.rendered;
+    assert!(envelope.contains("You are this project's Manager"), "{envelope}");
+    assert!(!envelope.contains("Added after the Manager started."), "{envelope}");
+    assert!(rig.core.workspace.selected_instruction_revision(&chat).is_some());
+    assert_eq!(run.sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_chats_are_not_given_the_role_or_restricted() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let chat = launch(&rig, &params(&rig, "op-ordinary", "start")).await.unwrap().chat_id;
+    settle(&rig, &chat).await;
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    queue_run(&rig, &chat, "follow up", &cwd);
+    wait_for(
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("follow up")),
+        "the follow-up run",
+    )
+    .await;
+    let run = follow_up_run(&rig, "follow up");
+    let envelope = run.instructions.map(|d| d.envelope.rendered).unwrap_or_default();
+    assert!(!envelope.contains("Manager"), "{envelope}");
+    assert_eq!(run.sandbox, SandboxLevel::WorkspaceWrite);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicitly_pinned_message_to_an_existing_manager_keeps_its_pin() {
+    let rig = rig().await;
+    let chat = pre_upgrade_manager(&rig, "op-pinned-manager").await;
+    let legacy = rig
+        .core
+        .workspace
+        .selected_instruction_revision(&chat)
+        .expect("the chat's launch selected a revision");
+    let cwd = rig.repo.to_string_lossy().into_owned();
+    rig.core
+        .doc_host
+        .queue_command(
+            &chat,
+            SessionCommandPayload::RunWithInstructions {
+                request: run_request("pinned follow up", &cwd),
+                message_id: "msg-pinned".into(),
+                instructions: legacy.clone(),
+                context_reset_confirmed: false,
+            },
+        )
+        .expect("queue pinned run");
+    wait_for(
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("pinned follow up")),
+        "the pinned turn",
+    )
+    .await;
+    let run = follow_up_run(&rig, "pinned follow up");
+    let envelope = run.instructions.expect("instructions delivered").envelope;
+    assert_eq!(envelope.revision_id, legacy.revision_id, "the explicit pin is honored");
+    assert!(!envelope.rendered.contains("You are this project's Manager"));
+    // Read-only still applies; only instructions follow the pin.
+    assert_eq!(run.sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_composer_send_to_an_existing_manager_gains_the_role_and_queued_pins_stay() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    // A turn is running, so later sends queue behind it.
+    let chat = launch(&rig, &params(&rig, "op-busy-manager", "start [hold]"))
+        .await
+        .unwrap()
+        .chat_id;
+    wait_for(|| rig.core.sessions.turn_in_flight(&chat), "the held turn").await;
+    // Queued before the role exists: pinned to the chat's legacy selection.
+    rig.core.doc_host.queue_message(&chat, "first queued", Vec::new()).unwrap();
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, &chat, &[])
+        .unwrap();
+    add_item_instruction(&rig, "op-busy-newer", "Newer project rule.").await;
+    // Submitted after: a new send, so it gains the role.
+    rig.core.doc_host.queue_message(&chat, "second queued", Vec::new()).unwrap();
+    rig.mock.release();
+    wait_for(
+        || rig.mock.turns().iter().any(|turn| turn.prompt.contains("second queued")),
+        "the second queued turn",
+    )
+    .await;
+
+    let first = follow_up_run(&rig, "first queued")
+        .instructions
+        .map(|d| d.envelope.rendered)
+        .unwrap_or_default();
+    assert!(!first.contains("You are this project's Manager"), "the queued pin stays: {first}");
+    let second_run = follow_up_run(&rig, "second queued");
+    let second = second_run.instructions.expect("instructions delivered").envelope.rendered;
+    assert!(second.contains("You are this project's Manager"), "{second}");
+    assert!(second.contains("Run the tests first."), "{second}");
+    assert!(!second.contains("Newer project rule."), "{second}");
+    assert_eq!(second_run.sandbox, SandboxLevel::ReadOnly);
+    rig.core.shutdown().await;
+}
+
+async fn overflow_the_manager_envelope(rig: &Rig) {
+    // Within the effective-instruction budget alone, over it with the role added.
+    add_item_instruction(rig, "op-big-1", &"a".repeat(6_000)).await;
+    add_item_instruction(rig, "op-big-2", &"b".repeat(2_950)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_start_whose_stacked_envelope_overflows_is_refused_before_anything_is_written() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    overflow_the_manager_envelope(&rig).await;
+    let chats_before = chat_count(&rig);
+    let error = launch(&rig, &manager_params(&rig, "manager-overflow", "Plan"))
+        .await
+        .expect_err("the role plus the project's instructions do not fit");
+    assert_eq!(error.code, WorkOutlineErrorCode::LimitExceeded, "{error:?}");
+    assert_eq!(chat_count(&rig), chats_before, "nothing was created");
+    assert!(manager_chat(&rig).is_none());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_start_retry_reuses_its_stored_revision_when_later_project_text_overflows() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::RevisionApplied));
+    let p = manager_params(&rig, "manager-reuse", "Plan");
+    assert!(launcher.create_chat_for_work_item(&p).await.is_err());
+    // Project text added after the revision was stored would overflow a fresh one.
+    overflow_the_manager_envelope(&rig).await;
+    launcher.inject_fault(None);
+    let reply = launcher
+        .create_chat_for_work_item(&p)
+        .await
+        .expect("the retry reuses the immutable revision it already wrote");
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
+}

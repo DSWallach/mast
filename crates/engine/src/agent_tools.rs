@@ -597,6 +597,12 @@ struct LaunchChildArgs {
     prompt: String,
     #[serde(default)]
     config: Option<mast_proto::ChatConfig>,
+    /// The MCP layer always fills `config` in; these say the caller named no
+    /// harness or model, so a Manager's worker default can apply.
+    #[serde(default)]
+    harness_omitted: bool,
+    #[serde(default)]
+    model_omitted: bool,
 }
 
 /// Most items one `work_outline_read_subtree` call returns.
@@ -628,14 +634,18 @@ fn effective_rank(level: SandboxLevel, auto_approve: bool) -> u8 {
 }
 
 /// The config of a worker a Manager starts: the project's worker default
-/// model fills in whatever the Manager left unsaid. An explicit model (the
-/// user asked for one) is kept. With no config at all the worker takes the
-/// default harness and model, capped at the Manager's own stored sandbox and
-/// never Auto, so it passes [`check_child_config`].
+/// fills in what the Manager left unsaid. A caller that named neither harness
+/// nor model gets the default harness and model; one that named only the
+/// harness gets the default model when it is the default harness. An explicit
+/// model is always kept. With no config at all the worker takes the default
+/// harness and model, capped at the Manager's own stored sandbox and never
+/// Auto, so it passes [`check_child_config`].
 fn manager_worker_config(
     caller: Option<&mast_proto::ChatConfig>,
     role: &mast_proto::StandingRole,
     config: Option<mast_proto::ChatConfig>,
+    harness_omitted: bool,
+    model_omitted: bool,
 ) -> Option<mast_proto::ChatConfig> {
     let default = role
         .worker_model
@@ -645,10 +655,14 @@ fn manager_worker_config(
         serde_json::from_value(Value::String(default.harness.clone())).ok();
     match config {
         Some(mut config) => {
-            if config.model.as_deref().is_none_or(|m| m.trim().is_empty())
-                && default_harness == Some(config.harness)
-            {
-                config.model = default.model;
+            let model_empty = config.model.as_deref().is_none_or(|m| m.trim().is_empty());
+            if let Some(harness) = default_harness {
+                if harness_omitted && model_omitted {
+                    config.harness = harness;
+                    config.model = default.model;
+                } else if (model_omitted || model_empty) && config.harness == harness {
+                    config.model = default.model;
+                }
             }
             Some(config)
         }
@@ -2791,7 +2805,13 @@ impl AgentToolsService {
             .standing_role_of_chat(&context.grant.chat_id)
             .filter(|role| role.role == mast_proto::StandingRoleKind::Manager)
         {
-            Some(role) => manager_worker_config(caller.config.as_ref(), &role, args.config),
+            Some(role) => manager_worker_config(
+                caller.config.as_ref(),
+                &role,
+                args.config,
+                args.harness_omitted,
+                args.model_omitted,
+            ),
             None => args.config,
         };
         if let Some(config) = &config {
@@ -3206,7 +3226,7 @@ mod tests {
     fn a_manager_workers_default_to_sonnet_and_stay_within_the_managers_cap() {
         let mut caller = worker_config(Some("claude-opus-5-5"));
         caller.sandbox = SandboxLevel::ReadOnly;
-        let config = manager_worker_config(Some(&caller), &manager_role(None), None).unwrap();
+        let config = manager_worker_config(Some(&caller), &manager_role(None), None, true, true).unwrap();
         assert_eq!(config.harness, mast_proto::HarnessId::ClaudeCode);
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-5-5"));
         assert!(!config.auto_approve);
@@ -3219,11 +3239,29 @@ mod tests {
             harness: "claude-code".into(),
             model: Some("claude-haiku-4-5-20251001".into()),
         }));
-        let filled = manager_worker_config(None, &role, Some(worker_config(None))).unwrap();
+        let filled = manager_worker_config(None, &role, Some(worker_config(None)), false, false).unwrap();
         assert_eq!(filled.model.as_deref(), Some("claude-haiku-4-5-20251001"));
         let explicit =
-            manager_worker_config(None, &role, Some(worker_config(Some("claude-opus-5-5")))).unwrap();
+            manager_worker_config(None, &role, Some(worker_config(Some("claude-opus-5-5"))), false, false).unwrap();
         assert_eq!(explicit.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_public_create_chat_that_omits_the_model_gets_the_worker_default_but_an_explicit_one_wins() {
+        // The MCP layer fills in the Mast default model whatever the caller said.
+        let role = manager_role(None);
+        let filled = worker_config(Some("claude-opus-5-5"));
+        let omitted = manager_worker_config(None, &role, Some(filled.clone()), true, true).unwrap();
+        assert_eq!(omitted.model.as_deref(), Some("claude-sonnet-5-5"));
+        let explicit = manager_worker_config(None, &role, Some(filled.clone()), true, false).unwrap();
+        assert_eq!(explicit.model.as_deref(), Some("claude-opus-5-5"));
+        // A named harness other than the default keeps its filled-in model.
+        let mut other = filled;
+        other.harness = mast_proto::HarnessId::Codex;
+        other.model = Some("gpt-codex".into());
+        let kept = manager_worker_config(None, &role, Some(other), false, true).unwrap();
+        assert_eq!(kept.harness, mast_proto::HarnessId::Codex);
+        assert_eq!(kept.model.as_deref(), Some("gpt-codex"));
     }
 
     #[test]

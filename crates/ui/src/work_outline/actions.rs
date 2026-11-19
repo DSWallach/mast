@@ -976,6 +976,7 @@ mod tests {
                 work_item_id: "w1".into(),
                 operation_id: "op-r".into(),
                 role: None,
+                base_revision_id: None,
             },
         ))
         .unwrap();

@@ -93,6 +93,10 @@ pub mod capabilities {
     /// without it never grants that reach, so a manager placed there would
     /// be refused its own project's chats.
     pub const PROJECT_MANAGER_GRANT_V1: &str = "project-manager-grant-v1";
+    /// The host gives a project's Manager its role instructions and holds
+    /// every run of it read-only. A Manager is started or handed off only on
+    /// hosts that advertise it: an older host would run it with neither.
+    pub const MANAGER_ROLE_V1: &str = "manager-role-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -133,6 +137,7 @@ pub mod capabilities {
         CHAT_HANDOFF_PREFERENCES_V1,
         STANDING_ROLE_HANDOFF_V1,
         PROJECT_MANAGER_GRANT_V1,
+        MANAGER_ROLE_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -265,7 +270,8 @@ mod tests {
                     "chat-handoff-v1",
                     "chat-handoff-preferences-v1",
                     "standing-role-handoff-v1",
-                    "project-manager-grant-v1"
+                    "project-manager-grant-v1",
+                    "manager-role-v1"
                 ],
             })
         );

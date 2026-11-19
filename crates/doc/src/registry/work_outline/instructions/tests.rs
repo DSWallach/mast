@@ -184,6 +184,7 @@ fn revise(doc: &mut RegistryDoc, op: &str, work_item: &str) -> Outcome<String> {
             work_item_id: work_item.into(),
             operation_id: op.into(),
             role: None,
+            base_revision_id: None,
         }),
     )
     .map(|reply| reply.revision_id.unwrap())
@@ -1473,6 +1474,7 @@ fn revise_as(
             work_item_id: work_item.into(),
             operation_id: op.into(),
             role,
+            base_revision_id: None,
         }),
     )
     .map(|reply| reply.revision_id.unwrap())
@@ -1540,4 +1542,142 @@ fn a_provisional_manager_start_is_a_manager_before_its_role_adopts_it() {
     assert!(!doc.chat_is_manager("other"));
     doc.upsert_chat(&space_chat("plain", Some(SPACE))).unwrap();
     assert!(!doc.chat_is_manager("plain"));
+}
+
+// ── Manager role upgrade of an existing chat ────────────────────────────────
+
+fn revise_with_base(
+    doc: &mut RegistryDoc,
+    op: &str,
+    work_item: &str,
+    base: Option<&str>,
+) -> Outcome<String> {
+    apply(
+        doc,
+        WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+            work_item_id: work_item.into(),
+            operation_id: op.into(),
+            role: Some(mast_proto::StandingRoleKind::Manager),
+            base_revision_id: base.map(str::to_owned),
+        }),
+    )
+    .map(|reply| reply.revision_id.unwrap())
+}
+
+/// A project `a` whose Manager chat `mgr` held the role before role
+/// instructions existed, plus the ordinary `chat-1` on a child of `a`.
+fn existing_manager() -> (RegistryDoc, String) {
+    let (mut doc, a, _b, _c) = three_levels();
+    make_project(&mut doc, "op-proj", &a);
+    doc.upsert_chat(&space_chat("mgr", Some(SPACE))).unwrap();
+    assign(&mut doc, "as-mgr", "mgr", &a);
+    doc.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &a, "mgr", &[])
+        .unwrap();
+    (doc, a)
+}
+
+fn revision_texts(doc: &RegistryDoc, revision: &str) -> Vec<String> {
+    doc.instruction_revision(revision)
+        .unwrap()
+        .body
+        .entries
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect()
+}
+
+#[test]
+fn upgrading_a_selected_revision_adds_the_role_and_leaves_newer_text_as_drift() {
+    let (mut doc, a) = existing_manager();
+    instruct(&mut doc, "i-old", Some(&a), "old rule");
+    let old = revise(&mut doc, "rev-old", &a).unwrap();
+    apply_revision(&mut doc, "app-old", "mgr", &old).unwrap();
+    instruct(&mut doc, "i-new", Some(&a), "new rule");
+
+    let ManagerRoleUpgrade::Needed { work_item_id, base_revision_id } =
+        doc.manager_role_upgrade("mgr")
+    else {
+        panic!("the selected revision has no role");
+    };
+    assert_eq!((work_item_id.as_str(), base_revision_id.as_deref()), (a.as_str(), Some(old.as_str())));
+
+    let upgraded = revise_with_base(&mut doc, "rev-up", &a, Some(&old)).unwrap();
+    let texts = revision_texts(&doc, &upgraded);
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].contains("Manager"));
+    assert_eq!(texts[1], "old rule", "the project's newer text is not adopted");
+    apply_revision(&mut doc, "app-up", "mgr", &upgraded).unwrap();
+
+    assert_eq!(doc.manager_role_upgrade("mgr"), ManagerRoleUpgrade::NotNeeded);
+    assert!(state(&snap(&doc), "mgr").drift, "the new rule is still unapplied drift");
+}
+
+#[test]
+fn upgrading_an_empty_historical_selection_stays_empty_while_new_text_is_drift() {
+    let (mut doc, a) = existing_manager();
+    // The Manager started when the project had no instructions: no selection.
+    assert_eq!(doc.selected_instruction_revision("mgr"), None);
+    instruct(&mut doc, "i-later", Some(&a), "added afterwards");
+
+    let ManagerRoleUpgrade::Needed { base_revision_id, .. } = doc.manager_role_upgrade("mgr") else {
+        panic!("a Manager with no selection needs the role");
+    };
+    assert_eq!(base_revision_id, None);
+    let upgraded = revise_with_base(&mut doc, "rev-up", &a, Some("")).unwrap();
+    let texts = revision_texts(&doc, &upgraded);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].contains("Manager"));
+    apply_revision(&mut doc, "app-up", "mgr", &upgraded).unwrap();
+
+    assert_eq!(doc.manager_role_upgrade("mgr"), ManagerRoleUpgrade::NotNeeded);
+    assert!(state(&snap(&doc), "mgr").drift, "the later text is still unapplied drift");
+}
+
+#[test]
+fn only_a_kept_session_over_the_role_revision_declines_the_role_and_ordinary_chats_are_never_upgraded() {
+    let (mut doc, a) = existing_manager();
+    instruct(&mut doc, "i1", Some(&a), "rule");
+    let old = revise(&mut doc, "rev-old", &a).unwrap();
+    let old_hash = doc.instruction_revision(&old).unwrap().body.hash;
+    apply_revision(&mut doc, "app-old", "mgr", &old).unwrap();
+    doc.report_execution_session("mgr", &report(Some(&old), &old_hash), NOW).unwrap();
+    instruct(&mut doc, "i2", Some(&a), "second rule");
+    let newer = revise(&mut doc, "rev-new", &a).unwrap();
+    apply_revision(&mut doc, "app-new", "mgr", &newer).unwrap();
+
+    // The user kept the running session over unrelated project drift. That is
+    // not a decision about the role, so it is still offered, on what the
+    // session actually received.
+    keep(&mut doc, "keep-1", "mgr").unwrap();
+    let ManagerRoleUpgrade::Needed { base_revision_id, .. } = doc.manager_role_upgrade("mgr") else {
+        panic!("an earlier keep over unrelated drift does not decline the role");
+    };
+    assert_eq!(base_revision_id.as_deref(), Some(old.as_str()));
+
+    // The role revision is applied and the user keeps the session again: now
+    // it is a decision on the role, and it is not asked a third time.
+    let upgraded = revise_with_base(&mut doc, "rev-up", &a, base_revision_id.as_deref()).unwrap();
+    apply_revision(&mut doc, "app-up", "mgr", &upgraded).unwrap();
+    assert_eq!(doc.manager_role_upgrade("mgr"), ManagerRoleUpgrade::NotNeeded);
+    keep(&mut doc, "keep-2", "mgr").unwrap();
+    assert_eq!(doc.manager_role_upgrade("mgr"), ManagerRoleUpgrade::NotNeeded);
+
+    // An ordinary chat, even on the project's item, is never a Manager.
+    assert_eq!(doc.manager_role_upgrade("chat-1"), ManagerRoleUpgrade::NotNeeded);
+    doc.upsert_chat(&space_chat("plain", Some(SPACE))).unwrap();
+    assign(&mut doc, "as-plain", "plain", &a);
+    assert_eq!(doc.manager_role_upgrade("plain"), ManagerRoleUpgrade::NotNeeded);
+    // A base revision without a role is refused.
+    assert!(
+        apply(
+            &mut doc,
+            WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+                work_item_id: a.clone(),
+                operation_id: "bad".into(),
+                role: None,
+                base_revision_id: Some(old),
+            }),
+        )
+        .is_err()
+    );
 }

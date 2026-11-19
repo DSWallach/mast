@@ -1750,6 +1750,15 @@ impl EngineRpc {
                     capability: mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1.into(),
                 }));
             }
+            // An older owner would run a Manager unrestricted and without its role.
+            if p.standing_role == Some(mast_proto::StandingRoleKind::Manager)
+                && !device.supports(mast_proto::capabilities::MANAGER_ROLE_V1)
+            {
+                return Err(blocked(ExecutionValidationError::HostUnsupported {
+                    device_id: owner,
+                    capability: mast_proto::capabilities::MANAGER_ROLE_V1.into(),
+                }));
+            }
             let mut forwarded = p.clone();
             forwarded.target_device_id = Some(owner.clone());
             let params = serde_json::to_value(&forwarded)
@@ -1921,7 +1930,8 @@ impl EngineRpc {
         let mut handoff_intent = None;
         if method == methods::HAND_OFF_ORCHESTRATOR {
             use mast_proto::capabilities::{
-                CHAT_HANDOFF_PREFERENCES_V1, CHAT_HANDOFF_V1, STANDING_ROLE_HANDOFF_V1,
+                CHAT_HANDOFF_PREFERENCES_V1, CHAT_HANDOFF_V1, MANAGER_ROLE_V1,
+                STANDING_ROLE_HANDOFF_V1,
             };
             let device = self
                 .workspace
@@ -1952,6 +1962,12 @@ impl EngineRpc {
             if self.workspace.chat_in_standing_role(chat_id) && !supports(STANDING_ROLE_HANDOFF_V1) {
                 return Err(RpcError::Failed(format!(
                     "Update Mast on {} and reconnect to hand off this manager or assistant chat.",
+                    self.device_label(target)
+                )));
+            }
+            if self.workspace.chat_is_manager(chat_id) && !supports(MANAGER_ROLE_V1) {
+                return Err(RpcError::Failed(format!(
+                    "Update Mast on {} and reconnect to hand off this manager chat.",
                     self.device_label(target)
                 )));
             }
@@ -3878,8 +3894,22 @@ impl RpcService for EngineRpc {
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
                                 .and_then(|reply| {
-                                    serde_json::to_value(reply)
-                                        .map_err(|e| RpcError::Failed(e.to_string()))
+                                    // The config the chat actually runs on: a Manager's
+                                    // worker default may differ from what the caller sent.
+                                    let config = self
+                                        .workspace
+                                        .chat(&reply.chat_id)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|chat| chat.config);
+                                    let mut value = serde_json::to_value(reply)
+                                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                                    if let (Some(config), Some(object)) = (config, value.as_object_mut())
+                                        && let Ok(config) = serde_json::to_value(config)
+                                    {
+                                        object.insert("config".into(), config);
+                                    }
+                                    Ok(value)
                                 }),
                             Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
                             Err(e) => Err(RpcError::Failed(e.to_string())),

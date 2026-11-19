@@ -214,6 +214,7 @@ fn scheduled_item_payload(
                 work_item_id: work_item_id.to_owned(),
                 operation_id: run.id.clone(),
                 role: None,
+                base_revision_id: None,
             }),
             &actor,
             &[],
@@ -733,10 +734,10 @@ impl WorkItemLaunchService {
                 .standing_role_of_chat(chat)
                 .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Manager)
         };
-        let is_manager = match self
+        let existing_revision = self
             .workspace
-            .instruction_revision(&derive_id(op, roles::REVISION))
-        {
+            .instruction_revision(&derive_id(op, roles::REVISION));
+        let is_manager = match &existing_revision {
             // A revision this operation already wrote fixes the decision,
             // however far the role has moved since.
             Some(revision) => revision
@@ -778,6 +779,34 @@ impl WorkItemLaunchService {
         }
         if deliver_instructions {
             self.require_instruction_support(harness)?;
+        }
+        // A Manager's stacked envelope (role plus the project's instructions)
+        // must fit the revision budget and the harness before anything is
+        // written or any worker moves.
+        // A retry keeps the immutable revision its operation already wrote,
+        // so project instructions edited since cannot block recovery after
+        // workers moved.
+        if manager_role.is_some() && existing_revision.is_none() {
+            let role = self
+                .workspace
+                .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id);
+            let entries = mast_proto::stack_manager_role_entry(
+                snapshot
+                    .effective_instructions(&p.work_item_id)
+                    .revision_entries(),
+                role.as_ref(),
+            );
+            let body = mast_proto::build_revision_body(entries)?;
+            let envelope = mast_proto::InstructionEnvelope::from_revision("preflight", &body)
+                .map_err(|err| error(WorkOutlineErrorCode::Invalid, err.to_string()))?;
+            let support = self.sessions.instruction_support(harness).map_err(|err| {
+                error(
+                    WorkOutlineErrorCode::Capability,
+                    format!("The harness cannot be used on this device: {err}"),
+                )
+            })?;
+            crate::instruction_delivery::check_support(harness, &support, &envelope)
+                .map_err(|message| error(WorkOutlineErrorCode::Capability, message))?;
         }
 
         self.claim_inputs(op, &inputs_hash)?;
@@ -912,6 +941,7 @@ impl WorkItemLaunchService {
                         work_item_id: p.work_item_id.clone(),
                         operation_id: op.to_owned(),
                         role: manager_role,
+                        base_revision_id: None,
                     },
                 ))?
                 .into_revision_id()?;
