@@ -243,6 +243,9 @@ enum ChatOrigin {
     Parent(String),
     Scheduled(mast_proto::ScheduledChat),
     ArchivedExternal(mast_proto::ScheduledChat),
+    /// A standing role's first-start chat: born hidden under this provisional
+    /// marker (see `mast_proto::standing_role_provisional_tag`).
+    Provisional(String),
 }
 
 impl WorkspaceHost {
@@ -808,6 +811,60 @@ impl WorkspaceHost {
             return Err("a role can only be adopted on the chat's own host".into());
         }
         self.mutate(|doc| doc.adopt_standing_role(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Adopt the role's provisional first-start chat and clear its marker in
+    /// one registry batch (see `RegistryDoc::activate_standing_role_chat`).
+    pub fn activate_standing_role_chat(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[mast_proto::StandingRoleModel],
+    ) -> Result<mast_proto::StandingRole, String> {
+        let host = self.read(|doc| doc.chat(chat_id)).map_err(|e| e.to_string())?
+            .ok_or("chat does not exist")?.device_id;
+        if host != self.device_id() {
+            return Err("a role can only be adopted on the chat's own host".into());
+        }
+        self.mutate(|doc| doc.activate_standing_role_chat(role, scope_item_id, chat_id, fallback_chain))
+    }
+
+    /// Unadopted first-start chats of this role, oldest first.
+    pub fn provisional_role_chats(
+        &self,
+        role: mast_proto::StandingRoleKind,
+        scope_item_id: &str,
+    ) -> Vec<Chat> {
+        let mut chats: Vec<Chat> = self
+            .read_chats()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|chat| !chat.archived && chat.is_provisional_for(role, scope_item_id))
+            .collect();
+        chats.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        chats
+    }
+
+    /// Create the hidden first-start chat of a standing role. It carries the
+    /// provisional marker from the moment it exists, so no surface that hides
+    /// superseded role chats ever lists it.
+    pub(crate) fn create_provisional_role_chat(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: Option<ChatConfig>,
+        cwd: String,
+        tag: String,
+    ) -> Result<(), EngineError> {
+        self.create_chat_with_origin(
+            chat_id,
+            Some(space_id),
+            None,
+            config,
+            Some(cwd),
+            Some(ChatOrigin::Provisional(tag)),
+        )
     }
 
     /// Whether `chat_id` holds, or was superseded in, a standing role. Hand-offs
@@ -2092,6 +2149,10 @@ impl WorkspaceHost {
             }
         };
         let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
+        let provisional = match &origin {
+            Some(ChatOrigin::Provisional(tag)) => Some(tag.clone()),
+            _ => None,
+        };
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
             Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
@@ -2128,7 +2189,7 @@ impl WorkspaceHost {
                     .as_ref()
                     .map(|task| task.task_name.clone()),
                 scheduled_task_info,
-                standing_role_successor: None,
+                standing_role_successor: provisional.clone(),
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id,
@@ -2771,6 +2832,14 @@ impl WorkspaceHost {
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
     pub fn flush(&self) {
         self.inner.save_snapshot();
+    }
+
+    /// Persist the registry snapshot now and report whether it reached disk,
+    /// unlike [`Self::flush`], which logs a failure and moves on. A caller
+    /// that must not queue work until the rows it depends on survive a restart
+    /// (a standing role's first message) calls this first.
+    pub fn persist_registry_now(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot()
     }
 
     /// Persist scheduled follow-up registry writes before acknowledging their

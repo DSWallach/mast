@@ -286,6 +286,26 @@ pub fn scheduled_task_editor_fixture(cx: &mut App) -> Entity<impl Render + use<>
     cx.new(|_| ScrolledEditorFixture(page))
 }
 
+/// Offline Scheduled tasks list on a current device, with the briefing index switch on.
+pub fn scheduled_tasks_briefing_index_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        state.devices.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "local", "name": "This Mac", "platform": "macos",
+                "capabilities": [
+                    mast_proto::capabilities::SCHEDULED_TASK_WORK_ITEM_V1,
+                    mast_proto::capabilities::SCHEDULED_TASK_OUTPUT_V1,
+                    mast_proto::capabilities::BRIEFING_READ_V1,
+                ],
+            }))
+            .unwrap(),
+        );
+        state
+    });
+    cx.new(|cx| crate::scheduled_tasks::ScheduledTasksPage::offline_list_fixture(state, cx))
+}
+
 /// The editor taller than the preview window, shifted up so its lower controls show.
 struct ScrolledEditorFixture(Entity<crate::scheduled_tasks::ScheduledTasksPage>);
 impl Render for ScrolledEditorFixture {

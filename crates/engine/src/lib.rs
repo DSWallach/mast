@@ -23,6 +23,7 @@ pub mod archivable;
 pub mod artifact_questions;
 pub mod artifacts;
 pub mod auth;
+pub mod briefing;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_links;
@@ -655,6 +656,7 @@ impl EngineCore {
                 artifacts.note_assistant_text(chat_id, text);
             }));
         }
+        artifacts.spawn_backfill_run_stamps();
         artifacts.spawn_watch_loop();
         artifact_questions::ArtifactQuestionSync::new(artifacts.clone()).spawn_loop();
         sessions
@@ -847,6 +849,39 @@ impl EngineCore {
         .with_artifacts(self.artifacts.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        {
+            // Everything captured here is a plain reader: the sessions engine
+            // stores this callback, so nothing in it may lead back to sessions.
+            let index_enabled = self.scheduled_tasks.briefing_index_reader();
+            let task_names = self.scheduled_tasks.task_names_reader();
+            let artifacts = self.artifacts.clone();
+            let workspace = self.workspace.clone();
+            let text = Arc::new(move |chat_id: &str| {
+                let chat = workspace.chat(chat_id).ok().flatten()?;
+                if chat.is_background_task_run() {
+                    return None;
+                }
+                let space = chat.space_id?;
+                let scope = briefing::SpaceScope(&space);
+                let tasks = task_names();
+                let entries = briefing::read(
+                    &artifacts,
+                    &scope,
+                    &briefing::BriefingQuery::new(briefing::BriefingKind::ScheduledResults)
+                        .index_only(true)
+                        .tasks(&tasks),
+                    &space,
+                )
+                .ok()?;
+                let outline = mast_doc::materialize_work_outline(&space, &workspace.work_outline_inputs(&space));
+                let need = briefing::need_you_in_space(&outline.user_action_requests, &scope, &space);
+                briefing::index_line(&entries, need, now_ms()).map(|line| briefing::chat_start_notice(&line))
+            });
+            self.sessions.set_chat_start_notice(sessions::ChatStartNotice {
+                enabled: Arc::new(index_enabled),
+                text,
+            });
+        }
         rpc.work_outline()
             .workflow_pack()
             .set_receipt_dir(self.workflow_pack_receipts.clone());

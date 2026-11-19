@@ -1018,6 +1018,8 @@ impl EngineRpc {
     /// Share the engine's artifact service (render broker, watcher cache)
     /// with this RPC surface and its agent tools.
     pub fn with_scheduled_tasks(mut self, service: crate::scheduled_tasks::ScheduledTasks) -> Self {
+        self.agent_tools
+            .set_scheduled_task_names(std::sync::Arc::new(service.task_names_reader()));
         self.scheduled_tasks = Some(service);
         self
     }
@@ -1739,6 +1741,15 @@ impl EngineRpc {
                     capability: mast_proto::capabilities::WORK_OUTLINE_LAUNCH_V1.into(),
                 }));
             }
+            // An older owner would drop `standingRole` and start a plain Chat.
+            if p.standing_role.is_some()
+                && !device.supports(mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1)
+            {
+                return Err(blocked(ExecutionValidationError::HostUnsupported {
+                    device_id: owner,
+                    capability: mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1.into(),
+                }));
+            }
             let mut forwarded = p.clone();
             forwarded.target_device_id = Some(owner.clone());
             let params = serde_json::to_value(&forwarded)
@@ -2215,6 +2226,31 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
+                // Results a Background run published before stamps existed keep
+                // their provenance only if it is recorded before the chat goes.
+                // Only such a chat can have published one, so every other
+                // delete skips the scan; the scan runs off the async worker, and
+                // a stamp that cannot be written refuses the delete for a retry.
+                let publishes_results = self
+                    .workspace
+                    .chat(&chat_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|chat| chat.scheduled_task_info)
+                    .is_some_and(|info| info.output == mast_proto::ScheduledTaskOutput::Background);
+                if publishes_results {
+                    let artifacts = self.artifacts.clone();
+                    let chat = chat_id.clone();
+                    tokio::task::spawn_blocking(move || artifacts.stamp_chat_publications(&chat))
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .map_err(|e| {
+                            RpcError::Failed(format!(
+                                "the results this chat published could not be recorded, so it was not deleted: {}",
+                                e.message
+                            ))
+                        })?;
+                }
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
                 if let Some(usage) = self.sessions.token_usage() { usage.request_delete_chat(&chat_id); }
@@ -3860,6 +3896,7 @@ impl RpcService for EngineRpc {
                     parent_chat_id: None,
                     target_device_id: None,
                     account_id: None,
+                    standing_role: None,
                 };
                 let reply = self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &p.chat_id)
                     .await.map_err(|e| RpcError::Failed(e.to_wire_message()))?;

@@ -34,7 +34,7 @@ mod undo;
 use super::hints::{HintKey, WithHint};
 use super::instructions::{self, OutlineChange};
 use super::model::{
-    self, ChatRow, ItemRow, NoticeTone, OutlineChat, OutlineModel, OutlineOptions, OutlineRow,
+    self, ChatRow, ItemRow, ManagerRow, NoticeTone, OutlineChat, OutlineModel, OutlineOptions, OutlineRow,
     OutlineRowKind, OutlineSpace, row_key,
 };
 use super::nav::{self, NavCommand};
@@ -163,6 +163,8 @@ pub(crate) enum OutlineEvent {
     OpenSpaceRoot { space_id: String },
     /// Start a Chat in the work item (Milestone 3).
     StartChat { space_id: String, item_id: String },
+    /// Open Start Chat for a project's Manager (the placeholder row).
+    StartManager { space_id: String, item_id: String },
     /// Review proposed instructions (Milestone 4); `item_id` empty = the
     /// Space root.
     OpenProposals { space_id: String, item_id: String },
@@ -386,6 +388,7 @@ fn row_kind_name(kind: &OutlineRowKind) -> &'static str {
     match kind {
         OutlineRowKind::Space { .. } => "space",
         OutlineRowKind::Item(_) => "item",
+        OutlineRowKind::Manager(_) => "manager",
         OutlineRowKind::Chat(_) => "chat",
         OutlineRowKind::Unassociated { .. } => "unassociated",
         OutlineRowKind::Notice { .. } => "notice",
@@ -1107,6 +1110,16 @@ impl OutlineView {
             OutlineRowKind::Chat(_) => {
                 self.show_notice("This chat no longer exists on any device", cx)
             }
+            // The role, not a chat id, is what the row addresses: follow its
+            // current Chat, or start the Manager when it has none yet.
+            OutlineRowKind::Manager(ManagerRow {
+                chat_id: Some(chat_id),
+                ..
+            }) => cx.emit(OutlineEvent::OpenChat(chat_id.clone())),
+            OutlineRowKind::Manager(manager) => cx.emit(OutlineEvent::StartManager {
+                space_id: manager.space_id.clone(),
+                item_id: manager.item_id.clone(),
+            }),
             OutlineRowKind::Space { .. } | OutlineRowKind::Unassociated { .. } => {
                 if row.has_children {
                     let collapse = !row.collapsed;
@@ -3098,6 +3111,7 @@ impl OutlineView {
                 })
                 .child(SharedString::from(text.clone()))
                 .into_any_element(),
+            OutlineRowKind::Manager(manager) => self.manager_body(&key, manager, theme),
             OutlineRowKind::Item(item) if self.sidebar && !renaming => {
                 self.quiet_item_body(&key, item, theme, cx)
             }
@@ -3388,11 +3402,16 @@ impl OutlineView {
                 }
                 let opens_details = event.click_count() >= 2 || this.sidebar;
                 if opens_details {
+                    let sidebar_chat = open_row
+                        .open_chat()
+                        .filter(|chat| !chat.dangling)
+                        .map(|chat| chat.chat.id.clone())
+                        .or_else(|| open_row.manager().and_then(|m| m.chat_id.clone()));
                     if this.sidebar
                         && event.click_count() < 2
-                        && let Some(chat) = open_row.open_chat().filter(|chat| !chat.dangling)
+                        && let Some(chat_id) = sidebar_chat
                     {
-                        cx.emit(OutlineEvent::OpenChatFromClick(chat.chat.id.clone()));
+                        cx.emit(OutlineEvent::OpenChatFromClick(chat_id));
                     } else {
                         this.open_row(&open_row, cx);
                     }
