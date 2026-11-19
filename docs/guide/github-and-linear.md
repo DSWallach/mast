@@ -19,7 +19,7 @@ PR rows end in small icons: author, needs you, your review, CI, and the PR itsel
 
 ## Linear
 
-1. **Settings → Linear**: paste a personal API key and click **Save**. It goes in your Mac's Keychain.
+1. **Settings → Linear**: paste a personal API key and click **Save** (stored in your Mac's Keychain; on Linux, set `LINEAR_API_KEY` in your environment instead).
 2. Open the project's Space details and switch on **Linear**.
 3. Press `⌥⌘L` to open the Inbox column. It lists your issues and projects.
 4. Add the ones you want: **Create** on an issue makes an item "ENG-123 · title", or drag an issue onto an item. Nothing is added automatically unless you set a linked Linear item (below).

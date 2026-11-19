@@ -7,7 +7,7 @@
 
 Run a team of coding agents from one outline of your work.
 
-Mast is a native macOS app for running Claude Code and Codex (plus a few other agents) in chats, and for keeping those chats organised around the work they belong to. Your sessions stay on your machine. There is no Mast account.
+Mast is a native desktop app (macOS and Linux) for running Claude Code and Codex (plus a few other agents) in chats, and for keeping those chats organised around the work they belong to. Your sessions stay on your machine. There is no Mast account.
 
 ## Why use it
 
@@ -28,14 +28,27 @@ You already run several agent chats at once. Mast gives them a place to live, so
 
 ## Install
 
-Mast runs on macOS and is built and updated from source. Device sync is disabled by default.
+Mast runs on macOS and Linux and is built and updated from source. Device sync is disabled by default.
 
 You need:
 
-- macOS with the Xcode command line tools (`xcode-select --install`).
 - Rust through [rustup](https://rustup.rs). `rust-toolchain.toml` pins the version.
 - At least one agent CLI, signed in: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) or Codex (`codex`).
 - Optional: [`gh`](https://cli.github.com), signed in with `gh auth login`, for the PR page and PR sync.
+- Platform build dependencies:
+  - **macOS:** Xcode command line tools (`xcode-select --install`).
+  - **Linux:** a C/C++ compiler, `pkg-config`, and development libraries for XCB/XKB, Fontconfig, FreeType, WebKitGTK 4.1, and JSON-GLib:
+    - Ubuntu / Debian:
+
+      ```bash
+      sudo apt install build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+      ```
+
+    - Fedora:
+
+      ```bash
+      sudo dnf install gcc gcc-c++ pkgconf-pkg-config libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel fontconfig-devel freetype-devel webkit2gtk4.1-devel json-glib-devel
+      ```
 
 ```bash
 git clone https://github.com/Pluto8195/mast.git
@@ -46,6 +59,8 @@ cargo build --profile installed -p mast   # optimised build, about 3 minutes the
 Run `target/installed/mast doctor` from the checkout for a prerequisite checklist and suggested fixes (`--json` emits machine-readable results).
 
 The binary is `target/installed/mast`.
+
+### macOS
 
 To get a normal app you can keep in `/Applications`, build the bundle and disk image. Packaging also needs Python 3, pip and the `dmgbuild` Python package. It builds the release profile separately, so the first packaging run compiles again:
 
@@ -63,7 +78,28 @@ scripts/run-macos-dev.sh
 
 It builds a debug binary and opens `Mast Dev.app` with its own data folder (`~/.mast-dev`, or an existing `~/.zeron-dev`), bundle id and engine port. Set `MAST_DEV_DATA_DIR` or `MAST_DEV_IPC_PORT` to change them.
 
+### Linux
+
+To install the binary into `~/.local/bin/mast` along with its icons and desktop launcher entry (`~/.local/share/applications/mast.desktop`), run:
+
+```bash
+scripts/install-linux-app.sh
+```
+
+You can also pass a different binary path (for example `scripts/install-linux-app.sh target/release/mast`), or run `target/installed/mast` directly. At runtime, the desktop UI uses Vulkan (or an OpenGL fallback) and the side browser needs your distribution's WebKitGTK 4.1 and JSON-GLib runtime packages; see [docs/reference/linux-browser.md](docs/reference/linux-browser.md).
+
+To try a debug build without touching your `~/.mast` data or a running instance, point `MAST_DATA_DIR` and `MAST_IPC_PORT` at a separate profile:
+
+```bash
+cargo build -p mast
+MAST_DATA_DIR=~/.mast-dev MAST_IPC_PORT=49777 target/debug/mast
+```
+
+To run the engine in the background without the UI, `mast daemon install` (or `target/installed/mast daemon install`) installs and starts a `systemd --user` service running `mast headless`.
+
 ## Updating
+
+### macOS
 
 Pull and rebuild, then package again and replace the app:
 
@@ -74,16 +110,28 @@ scripts/package-macos.sh
 
 Quit Mast, copy the new `target/package/Mast.app` over the one in `/Applications`, and open it. Your data stays in `~/.mast`.
 
+### Linux
+
+Pull, rebuild, and reinstall the binary:
+
+```bash
+git pull
+cargo build --profile installed -p mast
+scripts/install-linux-app.sh
+```
+
+Quit and reopen Mast. Your data stays in `~/.mast`.
+
 ### Sharing a build instead
 
-If someone can't build from source, run `scripts/package-macos.sh` on your Mac and send them the DMG. It only runs on Macs with the same architecture as yours (Apple silicon or Intel). The app is ad-hoc signed, so on first launch they right-click Mast and choose **Open**. If macOS still blocks it, run `xattr -dr com.apple.quarantine /Applications/Mast.app`. Notarised builds are not available yet.
+On macOS, if someone can't build from source, run `scripts/package-macos.sh` on your Mac and send them the DMG. It only runs on Macs with the same architecture as yours (Apple silicon or Intel). The app is ad-hoc signed, so on first launch they right-click Mast and choose **Open**. If macOS still blocks it, run `xattr -dr com.apple.quarantine /Applications/Mast.app`. Notarised builds are not available yet.
 
 ## First run
 
 1. Open Mast. Add a Space with `⇧⌘N`, or **New Space…** in the Space picker, and choose your repo folder.
 2. Sign in to an agent CLI, or add an account for the Space (see [accounts](docs/guide/accounts.md)). If Mast detects a signed-out account when starting a chat, it offers **Sign in…** and **Start anyway**.
 3. Press `⌘N`, choose a model, and send a message. Or open the Outline with `⇧⌘L`, create an item with `⇧⌘I`, and start a chat in it with `⌘↩`.
-4. Optional: for Linear, paste a personal API key in **Settings → Linear**, then switch on **Linear** in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
+4. Optional: for Linear, paste a personal API key in **Settings → Linear** on macOS (or set `LINEAR_API_KEY` in your environment on Linux), then switch on **Linear** in Space details. See [GitHub and Linear](docs/guide/github-and-linear.md).
 
 [Getting started](docs/guide/getting-started.md) walks through this with a first chat.
 

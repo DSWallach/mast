@@ -4,7 +4,7 @@ This gets you from a fresh install to a first chat running inside a work item.
 
 ## Install
 
-Follow the install steps in the [README](../../README.md). For a source build you need Rust and the Xcode command line tools. Install an agent CLI (Claude Code or Codex) and sign in before using it. The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
+Follow the install steps in the [README](../../README.md). For a source build you need Rust and your platform's build dependencies (the Xcode command line tools on macOS, or a C/C++ compiler, `pkg-config`, and the display, font, and WebKitGTK development packages on Linux). Install an agent CLI (Claude Code or Codex) and sign in before using it. The GitHub CLI (`gh`), signed in with `gh auth login`, is optional for PR features.
 
 After building, run `target/installed/mast doctor` from the checkout to check your tools, sign-ins, storage and engine. Each warning or error includes a suggested fix; use `--json` for machine-readable output.
 
