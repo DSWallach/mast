@@ -91,13 +91,15 @@ impl WorkspaceFiles {
             &[
                 "log",
                 "--follow",
+                "-m",
+                "--first-parent",
                 "--max-count=101",
                 "--no-color",
                 "--no-decorate",
                 "--no-show-signature",
                 "--name-status",
                 "-z",
-                "--format=%x00%H%x00%P%x00%<(200,trunc)%s%x00%<(120,trunc)%an%x00%aI%x00",
+                "--format=%x1e%H%x00%P%x00%<(200,trunc)%s%x00%<(120,trunc)%an%x00%aI%x00",
                 &revision,
                 "--",
                 &path,
@@ -224,29 +226,25 @@ async fn run_git(root: &Path, args: &[&str]) -> Result<String, WorkspaceFilesErr
 }
 
 fn parse_log(output: &str) -> Vec<FileHistoryEntry> {
-    let fields: Vec<_> = output.split('\0').collect();
-    let mut index = 0;
     let mut commits = Vec::new();
-    while index + 6 < fields.len() {
-        if !fields[index].is_empty() || !valid_sha(fields[index + 1]) {
-            index += 1;
-            continue;
-        }
-        let sha = fields[index + 1].to_owned();
-        let parents = fields[index + 2]
+    for record in output.split('\x1e').skip(1) {
+        let fields: Vec<_> = record.split('\0').collect();
+        if fields.len() < 7 || !valid_sha(fields[0]) { continue; }
+        let sha = fields[0].to_owned();
+        let parents = fields[1]
             .split_ascii_whitespace()
             .filter(|parent| valid_sha(parent))
             .map(str::to_owned)
             .collect();
-        let subject = fields[index + 3].trim_end().chars().take(200).collect();
-        let author = fields[index + 4].trim_end().chars().take(120).collect();
-        let date = fields[index + 5].chars().take(80).collect();
-        index += 6;
+        let subject = fields[2].trim_end().chars().take(200).collect();
+        let author = fields[3].trim_end().chars().take(120).collect();
+        let date = fields[4].chars().take(80).collect();
+        let mut index = 5;
         while index < fields.len() && fields[index].is_empty() {
             index += 1;
         }
         if index + 1 >= fields.len() {
-            break;
+            continue;
         }
         let status = fields[index].trim_start_matches(['\r', '\n']);
         index += 1;

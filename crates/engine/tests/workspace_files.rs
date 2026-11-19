@@ -54,6 +54,31 @@ async fn file_history_follows_renames_and_opens_the_historical_diff() {
     assert!(diff.as_str().unwrap().contains("+pub fn answer"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_history_handles_merge_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    git(&repo, &["checkout", "-b", "topic"]).await;
+    std::fs::write(repo.join("src/lib.rs"), "pub fn topic() {}\n").unwrap();
+    git(&repo, &["add", "src/lib.rs"]).await;
+    git(&repo, &["commit", "-m", "topic edit"]).await;
+    git(&repo, &["checkout", "main"]).await;
+    std::fs::write(repo.join("other.txt"), "main\n").unwrap();
+    git(&repo, &["add", "other.txt"]).await;
+    git(&repo, &["commit", "-m", "main edit"]).await;
+    git(&repo, &["merge", "--no-ff", "topic", "-m", "merge topic"]).await;
+    let core = assemble(&temp.path().join("data"), "device-merge-history");
+    core.workspace.create_space("space-merge", &core.device_id, &repo.to_string_lossy(), None, true).unwrap();
+    core.workspace.create_chat("chat-merge", Some("space-merge"), None, None, None).unwrap();
+    let client = mast_rpc::memory_client(core.rpc_service());
+    let history = client.call(methods::LIST_WORKSPACE_FILE_HISTORY, serde_json::json!({"chatId":"chat-merge", "path":"src/lib.rs"})).await.unwrap();
+    let commits = history["commits"].as_array().unwrap();
+    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "merge topic"));
+    assert!(commits.iter().any(|entry| entry["commit"]["subject"] == "initial"));
+    assert!(commits.iter().all(|entry| entry["path"] == "src/lib.rs"));
+}
+
 async fn init_repo(path: &Path) {
     std::fs::create_dir_all(path.join("src/nested")).expect("repo tree");
     git(path, &["init", "-b", "main"]).await;
