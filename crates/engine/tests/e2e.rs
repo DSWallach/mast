@@ -501,13 +501,18 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         SessionCommandPayload::Interrupt {},
     );
 
+    // The run task stamps the entry as it settles; the command is marked
+    // Applied only after the interrupt handler observes that settlement, so
+    // the stamp can be visible first. Wait for both.
     wait_for(
         || {
             entries(&core)
                 .iter()
                 .any(|e| e.status == Some(MessageStatus::Aborted))
+                && command_status(&core, "cmd-int-1")
+                    == Some((SessionCommandStatus::Applied, None))
         },
-        "aborted stamp",
+        "aborted stamp and applied interrupt command",
     )
     .await;
 

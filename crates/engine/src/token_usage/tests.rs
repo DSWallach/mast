@@ -597,6 +597,17 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
             Some(dir.path().display().to_string()),
         )
         .unwrap();
+    // The chat list is published asynchronously and only on change. Deleting
+    // before the creation is published would net out to no change and leave
+    // the follower to its 30 s fallback tick, so wait for the row to be seen.
+    let chats = core.workspace.watch_chats();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !chats.borrow().iter().any(|c| c.id == "remote-deleted") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     let usage = core.sessions.token_usage().unwrap();
     usage.begin("remote-deleted", "r", &request(), "Conversation");
     usage.observe(
@@ -606,7 +617,7 @@ async fn registry_deletion_is_reconciled_and_ledger_failure_cannot_skip_doc_purg
     // This is the same registry tombstone the host receives through sync,
     // without executing the host's DeleteChat RPC.
     core.workspace.delete_chat("remote-deleted").unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if usage.snapshot(&Default::default()).unwrap().total == 0 {
                 break;
