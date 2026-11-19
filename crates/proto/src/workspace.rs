@@ -235,7 +235,8 @@ mod tests {
                     "pr-review-sync-v1",
                     "artifacts-v1",
                     "side-chat-v1",
-                    "chat-handoff-v1"
+                    "chat-handoff-v1",
+                    "standing-role-handoff-v1"
                 ],
             })
         );
