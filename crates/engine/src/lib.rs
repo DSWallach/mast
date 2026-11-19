@@ -81,6 +81,7 @@ pub mod typesafe;
 pub mod uploads;
 pub mod work_outline;
 pub mod work_outline_launch;
+pub mod work_queue;
 pub mod work_outline_pr_links;
 pub mod workflow_pack;
 pub mod workflow_pack_service;
@@ -227,6 +228,7 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
+    work_queue_cancel: tokio_util::sync::CancellationToken,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -678,6 +680,21 @@ impl EngineCore {
             data_dir,
         )?;
         orchestrator_wakes.spawn_watchers();
+        let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        work_queue::WorkQueueDispatcher::new(
+            workspace.clone(),
+            work_outline_launch::WorkItemLaunchService::new(
+                workspace.clone(),
+                doc_host.clone(),
+                sessions.clone(),
+                doc_host
+                    .execution_scope()
+                    .cloned()
+                    .unwrap_or_else(|| execution_scope::ExecutionScopeService::new(workspace.clone(), repos.clone())),
+            ),
+            orchestrator_wakes.clone(),
+        )
+        .spawn_watcher(work_queue_cancel.clone());
         // Automatic Manager status reminders are disabled until their delivery
         // can be fenced against role handoff and older hosts.
         pr_ticket_cache.set_merged_wakes(pr_merged_wakes::PrMergedWakes::new(
@@ -716,6 +733,7 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
+            work_queue_cancel,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -934,6 +952,7 @@ impl EngineCore {
         // recovered work while the engine is being torn down.
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
+        self.work_queue_cancel.cancel();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();

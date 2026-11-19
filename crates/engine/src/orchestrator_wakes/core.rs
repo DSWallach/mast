@@ -72,6 +72,10 @@ impl Batch {
         );
         for event in &self.events {
             out.push_str("\n- ");
+            if event.kind == WakeEventKind::QueueReady {
+                out.push_str(&event.summary);
+                continue;
+            }
             out.push_str(&label(&event.worker_chat_id));
             let short: String = event.worker_chat_id.chars().take(12).collect();
             let marker = format!("chat {short}");

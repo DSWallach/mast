@@ -420,6 +420,15 @@ pub struct WorkItemView {
     /// project go (`workItems.workerDestinationId`), e.g. its "Tickets" child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_destination_id: Option<String>,
+    /// Project work queue: the item's sort key in its project's queue
+    /// (`workItems.queueOrderKey`). Set = queued. The queue is the project's
+    /// queued items ordered by `(queueOrderKey, id)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_order_key: Option<String>,
+    /// Project work queue: the user paused Manager auto-start for this
+    /// project (`workItems.queuePaused`). Absent = auto-start is on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queue_paused: bool,
     /// Project templates: the template this project was created from or last
     /// reviewed against (`workItems.templateId`); it may be dangling (deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1264,6 +1273,37 @@ pub struct MoveWorkItemParams {
     pub operation_id: String,
 }
 
+/// What `setQueuePosition` does to an item's place in its project's queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum QueueChange {
+    /// Queue the item (or move it when already queued).
+    Place { placement: WorkOutlinePlacement },
+    /// Take the item out of the queue.
+    Remove,
+}
+
+/// `setQueuePosition`: add, move or remove one item in the work queue of the
+/// project that contains it. A `before`/`after` anchor must be queued in the
+/// same project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetQueuePositionParams {
+    pub work_item_id: String,
+    pub change: QueueChange,
+    pub operation_id: String,
+}
+
+/// `setQueuePaused`: pause or resume Manager auto-start for a project's queue
+/// (users and admin chats only). A running worker is never interrupted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetQueuePausedParams {
+    pub work_item_id: String,
+    pub paused: bool,
+    pub operation_id: String,
+}
+
 /// `archiveWorkItem`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1543,6 +1583,8 @@ pub enum WorkOutlineMutation {
     CreateWorkItem(CreateWorkItemParams),
     UpdateWorkItem(UpdateWorkItemParams),
     MoveWorkItem(MoveWorkItemParams),
+    SetQueuePosition(SetQueuePositionParams),
+    SetQueuePaused(SetQueuePausedParams),
     ArchiveWorkItem(ArchiveWorkItemParams),
     RestoreWorkItem(RestoreWorkItemParams),
     AssignChatToWorkItem(AssignChatToWorkItemParams),
@@ -1594,6 +1636,8 @@ impl WorkOutlineMutation {
             Self::CreateWorkItem(p) => &p.operation_id,
             Self::UpdateWorkItem(p) => &p.operation_id,
             Self::MoveWorkItem(p) => &p.operation_id,
+            Self::SetQueuePosition(p) => &p.operation_id,
+            Self::SetQueuePaused(p) => &p.operation_id,
             Self::ArchiveWorkItem(p) => &p.operation_id,
             Self::RestoreWorkItem(p) => &p.operation_id,
             Self::AssignChatToWorkItem(p) => &p.operation_id,
@@ -1638,6 +1682,8 @@ impl WorkOutlineMutation {
             Self::CreateWorkItem(_) => "createWorkItem",
             Self::UpdateWorkItem(_) => "updateWorkItem",
             Self::MoveWorkItem(_) => "moveWorkItem",
+            Self::SetQueuePosition(_) => "setQueuePosition",
+            Self::SetQueuePaused(_) => "setQueuePaused",
             Self::ArchiveWorkItem(_) => "archiveWorkItem",
             Self::RestoreWorkItem(_) => "restoreWorkItem",
             Self::AssignChatToWorkItem(_) => "assignChatToWorkItem",
@@ -2278,6 +2324,8 @@ mod tests {
                 external_sync_state: None,
                 is_project: false,
                 worker_destination_id: None,
+                queue_order_key: None,
+                queue_paused: false,
                 template_id: None,
                 template_revision: None,
                 container_template: None,

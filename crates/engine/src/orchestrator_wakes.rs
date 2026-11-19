@@ -1440,6 +1440,32 @@ impl OrchestratorWakes {
     /// delivered in the next "Worker updates:" batch under the usual
     /// idle / user-first rules. Parent only, same Space, and only when this
     /// device hosts the parent (only the host delivers).
+    /// Tell a project's Manager that a queued item is ready (project work
+    /// queue). Only the device hosting the Manager delivers; the usual batching
+    /// and user-first rules apply. Returns whether the event was held.
+    pub async fn note_queue_ready(&self, manager: &str, item_id: &str, summary: &str) -> bool {
+        if !self.hosted_here(manager) {
+            return false;
+        }
+        let now = self.now();
+        let held = {
+            let mut state = lock(&self.inner.state);
+            let event = make_event(
+                &mut state,
+                manager,
+                WakeEventKind::QueueReady,
+                format!("queue:{item_id}"),
+                summary,
+                now,
+            );
+            state.core.record(manager, event, now)
+        };
+        if held {
+            self.after_ingest(HashSet::from([manager.to_owned()])).await;
+        }
+        held
+    }
+
     pub async fn report_to_parent(
         &self,
         from: &str,
@@ -1831,6 +1857,7 @@ fn kind_tag(kind: WakeEventKind) -> &'static str {
         WakeEventKind::AwaitingInput => "input",
         WakeEventKind::ToolCallsFailed => "tool-fail",
         WakeEventKind::AutoContinueStopped => "auto-continue-stopped",
+        WakeEventKind::QueueReady => "queue",
     }
 }
 

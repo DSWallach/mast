@@ -172,6 +172,10 @@ pub(crate) struct DecodedItem {
     pub is_project: bool,
     /// `workerDestinationId` (project templates).
     pub worker_destination_id: Option<String>,
+    /// `queueOrderKey` (project work queue).
+    pub queue_order_key: Option<String>,
+    /// `queuePaused` (project work queue auto-start).
+    pub queue_paused: bool,
     /// `templateId` / `templateRevision` (project templates).
     pub template_id: Option<String>,
     pub template_revision: Option<u32>,
@@ -241,6 +245,8 @@ pub(crate) fn decode_item(row: &RegistryRow) -> Result<DecodedItem, WorkOutlineR
             .and_then(Value::as_bool)
             .unwrap_or(false),
         worker_destination_id: str_field(row, "workerDestinationId").filter(|id| !id.is_empty()),
+        queue_order_key: str_field(row, "queueOrderKey").filter(|key| !key.is_empty()),
+        queue_paused: row.fields.get("queuePaused").and_then(Value::as_bool).unwrap_or(false),
         template_id: str_field(row, "templateId").filter(|id| !id.is_empty()),
         template_revision: row
             .fields
@@ -686,6 +692,8 @@ pub(crate) fn bare_view(
         external_sync_state: None,
         is_project: false,
         worker_destination_id: None,
+        queue_order_key: None,
+        queue_paused: false,
         template_id: None,
         template_revision: None,
         container_template: None,
@@ -949,6 +957,8 @@ pub fn materialize_work_outline(space_id: &str, inputs: &WorkOutlineInputs) -> W
             external_sync_state: item.external_sync_state.clone(),
             is_project: item.is_project,
             worker_destination_id: item.worker_destination_id.clone(),
+            queue_order_key: item.queue_order_key.clone(),
+            queue_paused: item.queue_paused,
             template_id: item.template_id.clone(),
             template_revision: item.template_revision,
             container_template: item.container_template.clone(),
