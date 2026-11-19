@@ -2359,3 +2359,30 @@ async fn a_worktree_space_a_task_launches_into_is_never_folded() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn briefing_index_is_off_until_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::development(dir.path(), "org", "user"),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    assert!(!core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().briefing_index);
+    assert!(!core.scheduled_tasks.briefing_index_enabled());
+    let on = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetBriefingIndex { enabled: true })
+        .await
+        .unwrap();
+    assert!(on.briefing_index && core.scheduled_tasks.briefing_index_enabled());
+    assert!(core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap().briefing_index);
+    let off = core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetBriefingIndex { enabled: false })
+        .await
+        .unwrap();
+    assert!(!off.briefing_index && !core.scheduled_tasks.briefing_index_enabled());
+}

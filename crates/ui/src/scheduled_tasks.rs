@@ -140,6 +140,30 @@ impl ScheduledTasksPage {
         page.error = None;
         page
     }
+    /// Offline task list with the briefing index switch on, for the preview renderer.
+    pub(crate) fn offline_list_fixture(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.target = Some("local".into());
+        let task: ScheduledTask = serde_json::from_value(serde_json::json!({
+            "id": "slack", "revision": 1, "deviceId": "local",
+            "draft": {
+                "name": "Slack", "prompt": "Summarize Slack.", "cwd": "/tmp", "spaceId": null,
+                "config": {"harness": "claude-code", "sandbox": "workspace-write"},
+                "schedule": {"type": "cron", "expression": "30 5 * * 1-5", "timezone": "America/New_York"},
+                "graceMinutes": 0, "enabled": true
+            },
+            "createdAt": 0, "updatedAt": 0, "nextDue": null
+        }))
+        .unwrap();
+        page.snapshot = ScheduledTasksSnapshot {
+            device_id: "local".into(),
+            tasks: vec![task],
+            briefing_index: true,
+            ..Default::default()
+        };
+        page.error = None;
+        page
+    }
     pub fn show_task(&mut self, id: String, device: Option<String>, cx: &mut Context<Self>) {
         if let Some(device) = device {
             if self.target.as_ref() != Some(&device) {
@@ -216,6 +240,14 @@ impl ScheduledTasksPage {
             self.state
                 .read(cx)
                 .device_supports(device, capabilities::SCHEDULED_TASK_NOTION_WRITES_V1)
+        })
+    }
+
+    fn briefing_index_supported(&self, cx: &gpui::App) -> bool {
+        self.target.as_deref().is_some_and(|device| {
+            self.state
+                .read(cx)
+                .device_supports(device, capabilities::BRIEFING_READ_V1)
         })
     }
 
@@ -1608,6 +1640,20 @@ impl Render for ScheduledTasksPage {
                         .on_click(cx.listener(|p, _, _, cx| {
                             p.call(ScheduledTasksRequest::Cleanup { mode: ScheduledRunCleanupMode::Preview }, cx);
                         })),
+                );
+            }
+            if self.briefing_index_supported(cx) {
+                let enabled = self.snapshot.briefing_index;
+                content = content.child(
+                    popover::btn_ghost(
+                        &theme,
+                        if enabled { "Briefing index in new chats: On" } else { "Briefing index in new chats: Off" },
+                        "tasks-briefing-index",
+                    )
+                    .id("tasks-briefing-index")
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        p.call(ScheduledTasksRequest::SetBriefingIndex { enabled: !enabled }, cx);
+                    })),
                 );
             }
             if let Some(cleanup) = self.cleanup.clone() {

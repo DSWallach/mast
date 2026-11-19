@@ -55,6 +55,10 @@ pub mod capabilities {
     /// The host stores a scheduled task's `writeToNotion` setting and passes it
     /// to runs through the prompt and `MAST_SCHEDULED_WRITE_TO_NOTION`.
     pub const SCHEDULED_TASK_NOTION_WRITES_V1: &str = "scheduled-task-notion-writes-v1";
+    /// The host serves `briefing_read`, stores the `briefingIndex` setting and
+    /// handles the `setBriefingIndex` scheduled-tasks request. Clients offer the
+    /// switch only for hosts that advertise it.
+    pub const BRIEFING_READ_V1: &str = "briefing-read-v1";
     /// The host previews and applies scheduled-run chat cleanup.
     pub const SCHEDULED_RUN_CLEANUP_V1: &str = "scheduled-run-cleanup-v1";
     /// The host serves the Linear RPCs (`LinearStatus` …) and understands the
@@ -110,6 +114,7 @@ pub mod capabilities {
         SCHEDULED_TASK_OUTPUT_V1,
         SCHEDULED_TASK_AFTER_SUCCESS_V1,
         SCHEDULED_TASK_NOTION_WRITES_V1,
+        BRIEFING_READ_V1,
         SCHEDULED_RUN_CLEANUP_V1,
         TOKEN_USAGE_V1,
         TOKEN_USAGE_INSIGHTS_V1,
@@ -240,6 +245,7 @@ mod tests {
                     "scheduled-task-output-v1",
                     "scheduled-task-after-success-v1",
                     "scheduled-task-notion-writes-v1",
+                    "briefing-read-v1",
                     "scheduled-run-cleanup-v1",
                     "token-usage-v1",
                     "token-usage-insights-v1",

@@ -107,7 +107,9 @@ impl RegistryDoc {
 
     /// Create or update one artifact row. Revisions are sorted newest first,
     /// capped at `MAX_REVISIONS`, and trimmed further (oldest first) until
-    /// the op fits the size budget. A tombstoned id is never revived.
+    /// the op fits the size budget. The newest revision stamped by a Background
+    /// scheduled run (`scheduled_task`) is kept past both limits, one slot over
+    /// the cap if need be. A tombstoned id is never revived.
     /// Returns the row as written.
     pub fn put_artifact(&mut self, view: &ArtifactView) -> Result<ArtifactView, DocError> {
         let state = self.row_state(KIND_ARTIFACTS, &view.id);
@@ -120,7 +122,20 @@ impl RegistryDoc {
         let mut view = view.clone();
         view.revisions.sort_by(|a, b| b.id.cmp(&a.id));
         view.revisions.dedup_by_key(|r| r.id);
+        // The newest revision a Background scheduled run published is the one
+        // briefings read, so no trim below may evict it.
+        let protected = view
+            .revisions
+            .iter()
+            .find(|r| r.scheduled_task.is_some())
+            .cloned();
         view.revisions.truncate(artifact_limits::MAX_REVISIONS);
+        if let Some(protected) = &protected
+            && !view.revisions.iter().any(|r| r.id == protected.id)
+        {
+            view.revisions.push(protected.clone());
+        }
+        let protected = protected.map(|r| r.id);
         let update = state == RowState::Live;
         self.observe_row(KIND_ARTIFACTS, &view.id);
         let hlc = self.next_hlc();
@@ -142,10 +157,16 @@ impl RegistryDoc {
                     self.write_ops(vec![op])?;
                     return Ok(view);
                 }
-                // Keep at least the current revision.
-                Err(error) if view.revisions.len() <= 1 => return Err(error),
-                Err(_) => {
-                    view.revisions.pop();
+                // Keep the current revision and the protected one: drop the
+                // oldest of the rest.
+                Err(error) => {
+                    let Some(oldest) = (1..view.revisions.len())
+                        .rev()
+                        .find(|&i| Some(view.revisions[i].id) != protected)
+                    else {
+                        return Err(error);
+                    };
+                    view.revisions.remove(oldest);
                 }
             }
         }
@@ -450,6 +471,43 @@ mod tests {
         let stored = doc.artifact("a1").unwrap();
         assert_eq!(stored.revisions.len(), written.revisions.len());
         assert_eq!(stored.created_at, 1);
+    }
+
+    fn stamped(mut view: ArtifactView, id: u32) -> ArtifactView {
+        view.revisions
+            .iter_mut()
+            .find(|r| r.id == id)
+            .unwrap()
+            .scheduled_task = Some("task-key".into());
+        view
+    }
+
+    #[test]
+    fn the_newest_stamped_revision_survives_the_count_cap() {
+        let mut doc = RegistryDoc::new("dev-1");
+        let mut small = view("a1", "item-1", 60);
+        for revision in &mut small.revisions {
+            revision.note = String::new();
+        }
+        let written = doc.put_artifact(&stamped(small, 3)).unwrap();
+        assert_eq!(written.revisions.len(), artifact_limits::MAX_REVISIONS + 1);
+        assert_eq!(written.revisions[0].id, 60);
+        assert_eq!(written.revisions.last().unwrap().id, 3);
+        assert!(doc.artifact("a1").unwrap().revisions.iter().any(|r| r.id == 3));
+    }
+
+    #[test]
+    fn the_newest_stamped_revision_survives_the_op_budget() {
+        let mut doc = RegistryDoc::new("dev-1");
+        // 200-char notes do not fit the budget, so the oldest revisions go; the
+        // stamped one is the oldest and must stay.
+        let mut big = view("a1", "item-1", 80);
+        big.origin_path = None;
+        let written = doc.put_artifact(&stamped(big, 1)).unwrap();
+        assert!(written.revisions.len() < artifact_limits::MAX_REVISIONS);
+        assert_eq!(written.revisions[0].id, 80);
+        assert_eq!(written.revisions.last().unwrap().id, 1, "{:?}", written.revisions.iter().map(|r| r.id).collect::<Vec<_>>());
+        assert!(doc.artifact("a1").unwrap().revisions.iter().any(|r| r.id == 1));
     }
 
     #[test]
