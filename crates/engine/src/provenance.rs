@@ -450,15 +450,95 @@ const MAX_TIPS: usize = 10_000;
 /// Most ref files read when snapshotting tips.
 const MAX_TIP_FILES: usize = 10_000;
 
+/// Resolve a worktree git dir to the repository's common dir.
+pub(crate) fn common_dir_of(git_dir: &Path) -> PathBuf {
+    std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|rel| git_dir.join(rel.trim()))
+        .and_then(|path| path.canonicalize().ok())
+        .unwrap_or_else(|| git_dir.to_path_buf())
+}
+
+/// Directories walked by [`refs_stamp`].
+const MAX_REF_DIRS: usize = 512;
+
+/// Cheap fingerprint of the branch and remote-tracking refs from file metadata
+/// (no spawn, no ref contents): `packed-refs` mtime and size plus the mtime of
+/// every directory under `refs/heads` and `refs/remotes` (nested branches like
+/// `feature/x` included) and of each loose ref file, bounded to
+/// [`MAX_REF_DIRS`] directories. Creating, moving or deleting a ref rewrites
+/// its file in that directory, so the stamp changes. `common_dir` is the
+/// repository's common git dir.
+pub(crate) fn refs_stamp(common_dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mtime = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    let packed = common_dir.join("packed-refs");
+    mtime(&packed).hash(&mut hasher);
+    std::fs::metadata(&packed).map_or(0, |m| m.len()).hash(&mut hasher);
+    let mut stack = vec![common_dir.join("refs/heads"), common_dir.join("refs/remotes")];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        seen += 1;
+        if seen > MAX_REF_DIRS {
+            break;
+        }
+        mtime(&dir).hash(&mut hasher);
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut children: Vec<_> = read.flatten().collect();
+        children.sort_by_key(|e| e.file_name());
+        for child in children {
+            if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(child.path());
+            } else {
+                child.file_name().hash(&mut hasher);
+                mtime(&child.path()).hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// Ref tips cached under [`refs_stamp`]: re-read only when the stamp changes,
+/// so same-HEAD captures (every agent save) cost a handful of stats.
+pub(crate) struct TipsCache {
+    stamp: u64,
+    tips: Arc<Vec<String>>,
+    /// How many times the refs were actually read (tests).
+    pub(crate) reads: u64,
+}
+
+impl TipsCache {
+    /// The tips in `slot` if still current, else re-read and cache them.
+    pub(crate) fn refresh(slot: &mut Option<TipsCache>, git_dir: &Path) -> Arc<Vec<String>> {
+        let stamp = refs_stamp(&common_dir_of(git_dir));
+        if let Some(cache) = slot.as_ref()
+            && cache.stamp == stamp
+        {
+            return cache.tips.clone();
+        }
+        let reads = slot.as_ref().map_or(0, |cache| cache.reads) + 1;
+        let tips = Arc::new(read_ref_tips(git_dir));
+        *slot = Some(TipsCache { stamp, tips: tips.clone(), reads });
+        tips
+    }
+
+    pub(crate) fn current(slot: &Option<TipsCache>) -> Option<Arc<Vec<String>>> {
+        slot.as_ref().map(|cache| cache.tips.clone())
+    }
+}
+
 /// Tips of every branch and remote-tracking ref of the repository whose git
 /// dir is `git_dir`, read from the files (packed-refs plus loose refs): no
 /// spawn. Bounded; symbolic refs and unreadable files are skipped.
 pub(crate) fn read_ref_tips(git_dir: &Path) -> Vec<String> {
-    let common = std::fs::read_to_string(git_dir.join("commondir"))
-        .ok()
-        .map(|rel| git_dir.join(rel.trim()))
-        .and_then(|path| path.canonicalize().ok())
-        .unwrap_or_else(|| git_dir.to_path_buf());
+    let common = common_dir_of(git_dir);
     let mut tips: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {
         for line in packed.lines().take(MAX_TIP_FILES) {
@@ -952,5 +1032,51 @@ mod tests {
         let tips = read_ref_tips(&f.repo.join(".git"));
         assert!(tips.contains(&main), "nested/remote tip");
         assert!(tips.contains(&second), "packed and loose tip");
+    }
+
+    #[tokio::test]
+    async fn same_head_captures_with_unchanged_refs_do_not_reread_them() {
+        let f = fixture();
+        let git_dir = f.repo.join(".git");
+        let mut slot: Option<TipsCache> = None;
+        let first = TipsCache::refresh(&mut slot, &git_dir);
+        for _ in 0..50 {
+            // Fifty agent saves: files change, refs do not.
+            std::fs::write(f.repo.join("work.txt"), "edit\n").unwrap();
+            let again = TipsCache::refresh(&mut slot, &git_dir);
+            assert!(Arc::ptr_eq(&first, &again));
+        }
+        assert_eq!(slot.as_ref().unwrap().reads, 1, "refs read once");
+        // A ref change re-reads exactly once.
+        std::thread::sleep(Duration::from_millis(20));
+        git(&f.repo, &["branch", "new-branch", "HEAD"]);
+        let after = TipsCache::refresh(&mut slot, &git_dir);
+        assert_eq!(slot.as_ref().unwrap().reads, 2);
+        assert!(after.contains(&head(&f.repo)));
+        TipsCache::refresh(&mut slot, &git_dir);
+        assert_eq!(slot.as_ref().unwrap().reads, 2);
+        assert!(TipsCache::current(&slot).is_some());
+    }
+
+    #[test]
+    fn the_refs_stamp_changes_for_nested_remote_and_packed_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path();
+        std::fs::create_dir_all(git.join("refs/heads/feature")).unwrap();
+        std::fs::create_dir_all(git.join("refs/remotes/origin")).unwrap();
+        let sha = "a".repeat(40);
+        let base = refs_stamp(git);
+        assert_eq!(base, refs_stamp(git), "stable while nothing moves");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(git.join("refs/heads/feature/x"), &sha).unwrap();
+        let nested = refs_stamp(git);
+        assert_ne!(base, nested, "nested branch ref");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(git.join("refs/remotes/origin/main"), &sha).unwrap();
+        let remote = refs_stamp(git);
+        assert_ne!(nested, remote, "remote-tracking ref");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(git.join("packed-refs"), format!("{sha} refs/heads/p\n")).unwrap();
+        assert_ne!(remote, refs_stamp(git), "packed-refs");
     }
 }

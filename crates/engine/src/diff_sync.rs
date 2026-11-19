@@ -215,7 +215,7 @@ struct CheckoutEntry {
     last_head: Mutex<Option<(String, i64)>>,
     /// Branch and remote-tracking ref tips as of the last capture of this
     /// (bound) checkout; the "before" picture for the next HEAD move.
-    last_tips: Mutex<Option<Vec<String>>>,
+    last_tips: Mutex<Option<crate::provenance::TipsCache>>,
 }
 
 /// Kick channel into an entry's sync task that also counts sends, so
@@ -1919,17 +1919,19 @@ fn note_head(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>, head: Optio
             drop(last);
             // Same HEAD: refresh the tips snapshot for the next move.
             if is_bound_target(inner, entry) && lock(&inner.head_move_listener).is_some() {
-                *lock(&entry.last_tips) = Some(crate::provenance::read_ref_tips(&entry.identity.git_dir));
+                crate::provenance::TipsCache::refresh(&mut lock(&entry.last_tips), &entry.identity.git_dir);
             }
             return;
         }
         *last = Some((head.to_owned(), now));
         previous
     };
-    let prior_tips = lock(&entry.last_tips).take().unwrap_or_default();
+    let prior_tips = crate::provenance::TipsCache::current(&lock(&entry.last_tips))
+        .map(|tips| (*tips).clone())
+        .unwrap_or_default();
     let bound = is_bound_target(inner, entry);
     if bound && lock(&inner.head_move_listener).is_some() {
-        *lock(&entry.last_tips) = Some(crate::provenance::read_ref_tips(&entry.identity.git_dir));
+        crate::provenance::TipsCache::refresh(&mut lock(&entry.last_tips), &entry.identity.git_dir);
     }
     let Some((old, since_ms)) = previous else { return };
     let Some(listener) = lock(&inner.head_move_listener).clone() else { return };
