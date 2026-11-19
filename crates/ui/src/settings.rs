@@ -646,6 +646,7 @@ pub struct UiSettings {
     pub composer_send_behavior: ComposerSendBehavior,
     pub sidebar_width: f32,
     pub changes_file_list_width: f32,
+    pub changes_scope_map: bool,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
@@ -837,6 +838,7 @@ impl Default for UiSettings {
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             changes_file_list_width: 240.0,
+            changes_scope_map: false,
             sidebar_collapsed: false,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,

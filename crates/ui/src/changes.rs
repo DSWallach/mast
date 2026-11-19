@@ -1299,6 +1299,7 @@ pub struct Changes {
     file_tree_focus: FocusHandle,
     file_tree_focused_path: Option<String>,
     file_list_width: f32,
+    scope_map_selected: bool,
     file_list_resize_anchor: Option<(f32, f32)>,
     file_list_resize_hover: bool,
     diff_focus: FocusHandle,
@@ -1322,6 +1323,7 @@ pub struct Changes {
     review_walkthrough: bool,
     scope_map_risks: HashMap<String, String>,
     scope_map_data: scope_map::data::Cache,
+    scope_map_view: scope_map::view::State,
     walkthrough_target: Option<mast_proto::ReviewTarget>,
     review_tour: bool,
     review_task: Option<Task<()>>,
@@ -1610,6 +1612,7 @@ impl Changes {
             file_tree_focus: cx.focus_handle(),
             file_tree_focused_path: None,
             file_list_width: settings.changes_file_list_width,
+            scope_map_selected: settings.changes_scope_map,
             file_list_resize_anchor: None,
             file_list_resize_hover: false,
             diff_focus: cx.focus_handle(),
@@ -1633,6 +1636,7 @@ impl Changes {
             review_walkthrough: false,
             scope_map_risks: HashMap::new(),
             scope_map_data: scope_map::data::Cache::default(),
+            scope_map_view: scope_map::view::State::default(),
             walkthrough_target: None,
             review_tour: false,
             review_task: None,
@@ -1982,6 +1986,7 @@ impl Changes {
                     layout: Arc::new(layout),
                 });
                 changes.refresh_scope_map_data();
+                changes.reset_scope_map_layout();
                 changes.rebuild_draft_index(cx);
                 changes.ensure_review_state(cx);
                 changes.refresh_thread_rows(cx);
@@ -2195,7 +2200,7 @@ impl Render for Changes {
                                             cx.notify();
                                         }
                                     }))
-                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, window, cx)))
+                                    .children((!self.review_tour).then(|| self.render_scope_sidebar(&theme, window, cx)))
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)

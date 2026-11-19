@@ -1,5 +1,6 @@
 pub(super) mod data;
 mod layout;
+pub(super) mod view;
 
 use super::Changes;
 

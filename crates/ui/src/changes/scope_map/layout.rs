@@ -82,7 +82,7 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         let mut files: Vec<_> = folder.files.iter().collect();
         files.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.id.cmp(&b.id)));
         let keep = if grouped {
-            (300 * folder.files.len() / total).max(1).min(files.len())
+            (299 * folder.files.len() / total).max(1).min(files.len())
         } else {
             files.len()
         };
@@ -305,7 +305,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(more.len(), 700);
+        assert_eq!(more.len(), 701);
         assert!(more.contains(&0));
         assert!(
             tiles
