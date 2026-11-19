@@ -401,6 +401,7 @@ mod tests {
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
         let state = cx.new(|_| crate::state::AppState::new());
         let surface = cx.new(|cx| super::super::FilesSurface::new(state.clone(), "chat".into(), false, 1000, 13.0, false, false, cx));
+        state.update(cx, |state, _| state.selected_chat = Some("other".into()));
         let reference = crate::code_ref::StagedCodeRef {
             id: String::new(),
             reference: mast_proto::CodeRef {
@@ -419,11 +420,22 @@ mod tests {
             surface.add_pinned_reference_to_chat(cx);
         });
         state.read_with(cx, |state, _| {
-            let staged = state.code_refs("chat");
+            assert!(state.code_refs("chat").is_empty());
+            let staged = state.code_refs("other");
             assert_eq!(staged.len(), 2);
             assert_ne!(staged[0].id, staged[1].id);
             assert!(staged.iter().all(|item| item.reference == reference.reference && item.snippet == reference.snippet));
         });
+    }
+
+    #[gpui::test]
+    fn adding_without_selected_chat_reports_error(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
+        let state = cx.new(|_| crate::state::AppState::new());
+        let surface = cx.new(|cx| super::super::FilesSurface::new(state.clone(), "chat".into(), false, 1000, 13.0, false, false, cx));
+        surface.update(cx, |surface, cx| surface.add_selected_code_to_chat(cx));
+        surface.read_with(cx, |surface, _| assert_eq!(surface.code_ref_status.as_deref(), Some("Open a chat to add code to it.")));
+        state.read_with(cx, |state, _| assert!(state.code_refs("chat").is_empty()));
     }
 
     #[test]

@@ -257,8 +257,8 @@ impl Render for FilesSurface {
             .on_action(cx.listener(|this, _: &code_find::Open, window, cx| this.open_code_find(window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Next, window, cx| this.move_code_find(true, window, cx)))
             .on_action(cx.listener(|this, _: &code_find::Previous, window, cx| this.move_code_find(false, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, _, cx| {
-                if this.has_code_selection(cx) { this.add_selected_code_to_chat(cx); }
+            .on_action(cx.listener(|this, _: &crate::shell::AddCodeToChat, window, cx| {
+                if this.editor_is_focused(window, cx) && this.has_code_selection(cx) { this.add_selected_code_to_chat(cx); }
             }))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
