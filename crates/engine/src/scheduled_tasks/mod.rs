@@ -62,9 +62,11 @@ impl ScheduledTasks {
     }
     /// The same setting without holding the scheduler (which holds the
     /// sessions engine), for callbacks the sessions engine itself stores.
-    /// `(task id, current name)` of every live task, read without holding the
+    /// Every live task's id, current name and Space, read without holding the
     /// scheduler, for the same kind of callback.
-    pub fn task_names_reader(&self) -> impl Fn() -> Vec<(String, String)> + Send + Sync + 'static {
+    pub fn task_names_reader(
+        &self,
+    ) -> impl Fn() -> Vec<crate::briefing::TaskAlias> + Send + Sync + 'static {
         let store = self.0.store.clone();
         move || {
             store
@@ -73,7 +75,11 @@ impl ScheduledTasks {
                     tasks
                         .into_iter()
                         .filter(|task| !task.deleted)
-                        .map(|task| (task.id, task.draft.name))
+                        .map(|task| crate::briefing::TaskAlias {
+                            id: task.id,
+                            name: task.draft.name,
+                            space_id: task.draft.space_id,
+                        })
                         .collect()
                 })
                 .unwrap_or_default()

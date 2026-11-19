@@ -1181,6 +1181,7 @@ impl ArtifactsService {
                     by: request.by.clone(),
                     size_bytes: bytes.len() as u64,
                     op: request.operation_id.clone(),
+                    scheduled_task: self.run_stamp(&request.by),
                 },
             );
             if manifest.is_some() {
@@ -1278,6 +1279,7 @@ impl ArtifactsService {
                     },
                     size_bytes: bytes.len() as u64,
                     op: None,
+                    scheduled_task: None,
                 },
             );
             view.current_revision = next;
@@ -1431,6 +1433,24 @@ impl ArtifactsService {
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
                 .map_err(|e| io_error("read snapshot of", Path::new(&artifact.stored_path), e))
         })
+    }
+
+    /// The task key to stamp on a revision published by a Background scheduled
+    /// run; `None` for any other writer.
+    fn run_stamp(&self, by: &WorkOutlineActor) -> Option<String> {
+        if by.kind != WorkOutlineActorKind::Agent {
+            return None;
+        }
+        let info = self
+            .workspace()
+            .chat(by.chat_id.as_deref()?)
+            .ok()
+            .flatten()?
+            .scheduled_task_info
+            .filter(|info| info.output == mast_proto::ScheduledTaskOutput::Background)?;
+        mast_proto::ScheduledRunResults::key_of_role(&mast_proto::ScheduledRunResults::role_for(
+            &info.task_id,
+        ))
     }
 
     /// The bytes of the newest revision exactly as recorded: its stored

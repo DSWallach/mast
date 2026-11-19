@@ -2,6 +2,7 @@
 //! in the transcript, never ahead of a leading slash command, and not again
 //! on later turns.
 
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,8 +15,11 @@ use mast_engine::{EngineCore, HarnessRegistry};
 use mast_harness::{Harness, HarnessError, RunControls};
 use mast_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    ScheduledChat, ScheduledRunResults, ScheduledTaskOutput, ScheduledTasksRequest, SteeringMode,
+    derive_id, roles,
 };
+use mast_rpc::methods;
+use serde_json::json;
 
 const NOTICE: &str = "Latest briefings: Slack 05:31. Read them with briefing_read.\n\n";
 
@@ -211,7 +215,10 @@ fn transcript_user_texts(rig: &Rig, chat: &str) -> Vec<String> {
 fn install_notice(rig: &Rig) {
     rig.core
         .sessions
-        .set_chat_start_notice(Arc::new(|_chat: &str| Some(NOTICE.to_owned())));
+        .set_chat_start_notice(mast_engine::sessions::ChatStartNotice {
+            enabled: Arc::new(|| true),
+            text: Arc::new(|_chat: &str| Some(NOTICE.to_owned())),
+        });
 }
 
 #[tokio::test]
@@ -263,5 +270,122 @@ async fn the_wired_notice_stays_off_until_the_setting_is_on() {
     run(&rig, "chat-d", "hello", "msg-1");
     let prompts = wait_for_prompts(&rig, 1).await;
     assert_eq!(prompts[0], "hello");
+    rig.core.shutdown().await;
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    assert!(
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success(),
+        "git {args:?}"
+    );
+}
+
+/// The assembled engine, the setting on, and a genuine result published by a
+/// Background run: a normal chat gets the index, a Background run and a side
+/// chat do not, and the transcript never shows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assembled_index_reaches_a_normal_chat_but_not_background_runs_or_side_chats() {
+    let rig = rig(&["chat-n", "chat-bg", "run-pub"]);
+    let root = std::path::PathBuf::from(&rig.cwd);
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "t@example.com"]);
+    git(&root, &["config", "user.name", "t"]);
+    std::fs::write(root.join("README.md"), "readme\n").unwrap();
+    git(&root, &["add", "README.md"]);
+    git(&root, &["commit", "-q", "-m", "root"]);
+
+    let rpc = rig.core.rpc_service();
+    let client = mast_rpc::memory_client(rpc.clone());
+    client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "createWorkItem", "spaceId": "space-bd", "title": "Results",
+                    "operationId": "op-item" }),
+        )
+        .await
+        .unwrap();
+    let item = derive_id("op-item", roles::ITEM);
+    client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "assignChatToWorkItem", "chatId": "run-pub", "workItemId": item,
+                    "operationId": "assign-pub" }),
+        )
+        .await
+        .unwrap();
+    for (chat, task) in [("run-pub", "task-slack"), ("chat-bg", "task-other")] {
+        rig.core
+            .workspace
+            .set_chat_scheduled_task_info(
+                chat,
+                &ScheduledChat {
+                    task_id: task.into(),
+                    task_name: task.into(),
+                    run_id: chat.into(),
+                    output: ScheduledTaskOutput::Background,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let lease =
+        rig.core
+            .sessions
+            .agent_tokens()
+            .mint("run-pub", "run-x", "space-bd", &rig.core.device_id);
+    std::fs::write(root.join("slack.md"), "Run: r1\n# Slack\nall quiet\n").unwrap();
+    client
+        .call(
+            mast_proto::agent_tools::TOOL_CALL_METHOD,
+            json!({ "token": lease.token(), "tool": "artifact_publish", "arguments": {
+                "path": root.join("slack.md").to_string_lossy(), "title": "Results: Slack",
+                "role": ScheduledRunResults::role_for("task-slack"), "note": "run",
+                "idempotencyKey": "scheduled-run-r1" } }),
+        )
+        .await
+        .unwrap();
+    rig.core
+        .scheduled_tasks
+        .request(ScheduledTasksRequest::SetBriefingIndex { enabled: true })
+        .await
+        .unwrap();
+
+    run(&rig, "chat-n", "hello", "m1");
+    let prompts = wait_for_prompts(&rig, 1).await;
+    assert!(
+        prompts[0].starts_with("Latest briefings: Slack "),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        prompts[0].contains("briefing_read") && prompts[0].ends_with("hello"),
+        "{}",
+        prompts[0]
+    );
+    assert_eq!(transcript_user_texts(&rig, "chat-n"), ["hello"]);
+    wait_for_turns(&rig, "chat-n", 1).await;
+
+    run(&rig, "chat-bg", "hello", "m2");
+    let prompts = wait_for_prompts(&rig, 2).await;
+    assert_eq!(prompts[1], "hello", "a Background run gets no index");
+
+    rig.core
+        .workspace
+        .create_side_chat("chat-side", "chat-n")
+        .unwrap();
+    run(&rig, "chat-side", "aside", "m3");
+    let prompts = wait_for_prompts(&rig, 3).await;
+    assert!(
+        !prompts[2].contains("Latest briefings:"),
+        "a side chat gets no index: {}",
+        prompts[2]
+    );
+    drop(lease);
+    drop(rpc);
     rig.core.shutdown().await;
 }

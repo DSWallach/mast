@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use chrono::{Local, TimeZone};
-use mast_proto::artifacts::{ArtifactError, ArtifactView};
+use mast_proto::artifacts::{ArtifactError, ArtifactRevision, ArtifactView};
 use mast_proto::{ScheduledRunResults, UserActionRequestView, WorkOutlineActorKind};
 use serde_json::{Value, json};
 
@@ -51,42 +51,57 @@ impl BriefingKind {
             .unwrap_or_else(|| artifact.id.clone())
     }
 
-    /// Whether the newest revision was written by whoever may write this kind.
-    /// An artifact that fails is treated as absent.
-    fn trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> bool {
+    /// The newest revision written by whoever may write this kind, if any. An
+    /// artifact with none is treated as absent, and a later edit by anyone
+    /// else never hides the last genuine revision.
+    fn newest_trusted(self, workspace: &WorkspaceHost, artifact: &ArtifactView) -> Option<u32> {
         match self {
-            Self::ScheduledResults => run_provenance(workspace, artifact),
+            Self::ScheduledResults => artifact
+                .revisions
+                .iter()
+                .find(|revision| run_provenance(workspace, artifact, revision))
+                .map(|revision| revision.id),
         }
     }
 }
 
-/// A scheduled results artifact is genuine only when its newest revision was
-/// published by a Background run of the task its role names. A chat that
-/// merely used the role never qualifies.
-pub fn run_provenance(workspace: &WorkspaceHost, artifact: &ArtifactView) -> bool {
-    let Some(revision) = artifact.current() else {
-        return false;
-    };
+/// A scheduled results revision is genuine only when a Background run of the
+/// task its role names published it. The publication carries that identity
+/// (`scheduled_task`), so it holds after the publishing chat is deleted. A
+/// revision recorded before the stamp existed is verified through its chat
+/// while that chat remains. A chat that merely used the role never qualifies.
+pub fn run_provenance(
+    workspace: &WorkspaceHost,
+    artifact: &ArtifactView,
+    revision: &ArtifactRevision,
+) -> bool {
     if revision.by.kind != WorkOutlineActorKind::Agent {
         return false;
     }
-    let Some(chat_id) = revision.by.chat_id.as_deref() else {
+    let Some(key) = artifact
+        .role
+        .as_deref()
+        .map(ScheduledRunResults::normalize_role)
+        .and_then(|role| ScheduledRunResults::key_of_role(&role))
+    else {
         return false;
     };
-    let Some(info) = workspace
-        .chat(chat_id)
-        .ok()
-        .flatten()
+    if let Some(stamp) = &revision.scheduled_task {
+        return *stamp == key;
+    }
+    let Some(info) = revision
+        .by
+        .chat_id
+        .as_deref()
+        .and_then(|chat_id| workspace.chat(chat_id).ok().flatten())
         .and_then(|chat| chat.scheduled_task_info)
     else {
         return false;
     };
     info.output == mast_proto::ScheduledTaskOutput::Background
-        && artifact
-            .role
+        && ScheduledRunResults::key_of_role(&ScheduledRunResults::role_for(&info.task_id))
             .as_deref()
-            .map(ScheduledRunResults::normalize_role)
-            == Some(ScheduledRunResults::role_for(&info.task_id))
+            == Some(key.as_str())
 }
 
 /// A candidate offered to a [`BriefingScope`].
@@ -101,10 +116,10 @@ pub trait BriefingScope {
     fn permits(&self, source: &BriefingSource<'_>) -> bool;
 
     /// Whether Required Actions on this work item may be counted for the
-    /// caller. A narrower scope (a project subtree) overrides it.
-    fn permits_work_item(&self, _space_id: &str, _work_item_id: &str) -> bool {
-        true
-    }
+    /// caller. Required, with no default: a scope narrower than a Space (a
+    /// project subtree) must decide for itself, so it can never count another
+    /// project's actions by accident.
+    fn permits_work_item(&self, space_id: &str, work_item_id: &str) -> bool;
 }
 
 /// Everything in one Space, which is what scheduled results are shared across.
@@ -120,15 +135,24 @@ impl BriefingScope for SpaceScope<'_> {
     }
 }
 
+/// A scheduled task on this device: its stable id, current name and Space.
+/// Names apply only to briefings in the task's own Space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAlias {
+    pub id: String,
+    pub name: String,
+    pub space_id: Option<String>,
+}
+
 pub struct BriefingQuery<'a> {
     pub kind: BriefingKind,
     /// A task name, task id or artifact id; `None` selects every briefing.
     pub task: Option<&'a str>,
     pub include_content: bool,
-    /// `(task id, current name)` of the device's scheduled tasks. A briefing
-    /// keeps the title it was first published under, so this is how the
-    /// current name, and the task's identity, are resolved.
-    pub tasks: &'a [(String, String)],
+    /// The device's scheduled tasks. A briefing keeps the title it was first
+    /// published under, so this is how the current name, and the task's
+    /// identity, are resolved.
+    pub tasks: &'a [TaskAlias],
 }
 
 impl<'a> BriefingQuery<'a> {
@@ -151,7 +175,7 @@ impl<'a> BriefingQuery<'a> {
         self
     }
 
-    pub fn tasks(mut self, tasks: &'a [(String, String)]) -> Self {
+    pub fn tasks(mut self, tasks: &'a [TaskAlias]) -> Self {
         self.tasks = tasks;
         self
     }
@@ -198,22 +222,20 @@ impl BriefingEntry {
     }
 }
 
-fn task_of<'a>(
-    tasks: &'a [(String, String)],
-    artifact: &ArtifactView,
-) -> Option<&'a (String, String)> {
+fn task_of<'a>(tasks: &'a [TaskAlias], artifact: &ArtifactView) -> Option<&'a TaskAlias> {
     let role = artifact
         .role
         .as_deref()
         .map(ScheduledRunResults::normalize_role)?;
-    tasks
-        .iter()
-        .find(|(id, _)| ScheduledRunResults::role_for(id) == role)
+    tasks.iter().find(|task| {
+        task.space_id.as_deref() == Some(artifact.space_id.as_str())
+            && ScheduledRunResults::role_for(&task.id) == role
+    })
 }
 
-fn task_name(artifact: &ArtifactView, tasks: &[(String, String)]) -> String {
+fn task_name(artifact: &ArtifactView, tasks: &[TaskAlias]) -> String {
     task_of(tasks, artifact)
-        .map(|(_, name)| name.clone())
+        .map(|task| task.name.clone())
         .unwrap_or_else(|| {
             artifact
                 .title
@@ -224,7 +246,7 @@ fn task_name(artifact: &ArtifactView, tasks: &[(String, String)]) -> String {
         })
 }
 
-fn matches_task(artifact: &ArtifactView, wanted: &str, tasks: &[(String, String)]) -> bool {
+fn matches_task(artifact: &ArtifactView, wanted: &str, tasks: &[TaskAlias]) -> bool {
     let wanted = wanted.trim();
     artifact.id.eq_ignore_ascii_case(wanted)
         || artifact.role.as_deref().is_some_and(|role| {
@@ -242,13 +264,14 @@ fn matches_task(artifact: &ArtifactView, wanted: &str, tasks: &[(String, String)
 
 /// The briefings `scope` permits and `trusted` accepts, one per identity (the
 /// newest wins when a task's artifact exists on more than one item), newest
-/// first. A named task that matches nothing permitted is `not_found`, listing
+/// first. `trusted` names an artifact's newest genuine revision; each result
+/// is pinned to it, so its revision, time and content are that revision's. A named task that matches nothing permitted is `not_found`, listing
 /// what is available.
 pub fn select(
     artifacts: Vec<ArtifactView>,
     scope: &dyn BriefingScope,
     query: &BriefingQuery<'_>,
-    trusted: &dyn Fn(&ArtifactView) -> bool,
+    trusted: &dyn Fn(&ArtifactView) -> Option<u32>,
 ) -> Result<Vec<ArtifactView>, ArtifactError> {
     let kind = query.kind;
     let permitted: Vec<ArtifactView> = artifacts
@@ -256,7 +279,10 @@ pub fn select(
         .filter(|a| a.archived_at.is_none() && a.current().is_some())
         .filter(|a| kind.matches(a.role.as_deref()))
         .filter(|a| scope.permits(&BriefingSource { kind, artifact: a }))
-        .filter(|a| trusted(a))
+        .filter_map(|a| {
+            let revision = trusted(&a)?;
+            Some(pinned_to(a, revision))
+        })
         .collect();
     let at = |a: &ArtifactView| a.current().map_or(0, |r| r.at);
     let mut newest: HashMap<String, ArtifactView> = HashMap::new();
@@ -292,8 +318,16 @@ pub fn select(
     Ok(found)
 }
 
+/// The artifact as of `revision`: later revisions are dropped, so `current()`
+/// and `current_revision` are that revision.
+fn pinned_to(mut artifact: ArtifactView, revision: u32) -> ArtifactView {
+    artifact.revisions.retain(|r| r.id <= revision);
+    artifact.current_revision = revision;
+    artifact
+}
+
 /// The latest briefings a caller may read, with content unless the query asks
-/// for run times only. Content is the newest revision's recorded bytes, read
+/// for run times only. Content is the newest genuine revision's recorded bytes, read
 /// after the scope accepted the candidate, and only when the file is on this
 /// device.
 pub fn read(
@@ -308,7 +342,7 @@ pub fn read(
         workspace.artifacts_of_space(space_id),
         scope,
         query,
-        &|artifact| kind.trusted(workspace, artifact),
+        &|artifact| kind.newest_trusted(workspace, artifact),
     )?;
     let limit = if selected.len() == 1 {
         SINGLE_CONTENT_LIMIT
@@ -339,7 +373,7 @@ pub fn read(
             let task = task_of(query.tasks, &artifact);
             BriefingEntry {
                 task: task_name(&artifact, query.tasks),
-                task_id: task.map(|(id, _)| id.clone()),
+                task_id: task.map(|task| task.id.clone()),
                 task_key: artifact
                     .role
                     .as_deref()
@@ -409,27 +443,31 @@ pub fn need_you_in_space(
 }
 
 /// The open Required Actions of just these briefings' tasks, found by stable
-/// task identity, so another task sharing the item is never counted.
+/// task identity, so another task sharing the item is never counted. A failed
+/// run's action is keyed by the task id, which hashes to the same identity the
+/// results role carries, so it is found without the local schedule.
 pub fn need_you_for(
     requests: &[UserActionRequestView],
     scope: &dyn BriefingScope,
     space_id: &str,
     entries: &[BriefingEntry],
 ) -> usize {
-    let needs: Vec<String> = entries
+    let keys: Vec<&str> = entries
         .iter()
         .filter_map(|e| e.task_key.as_deref())
-        .map(ScheduledRunResults::need_prefix_for_key)
         .collect();
-    let failed: Vec<String> = entries
+    let needs: Vec<String> = keys
         .iter()
-        .filter_map(|e| e.task_id.as_deref())
-        .map(|id| format!("{}{id}", ScheduledRunResults::FAILED_DEDUPE_PREFIX))
+        .map(|key| ScheduledRunResults::need_prefix_for_key(key))
         .collect();
+    let failed_task_key = |key: &str| {
+        let task_id = key.strip_prefix(ScheduledRunResults::FAILED_DEDUPE_PREFIX)?;
+        ScheduledRunResults::key_of_role(&ScheduledRunResults::role_for(task_id))
+    };
     open_scheduled(requests, scope, space_id)
         .filter(|(_, key)| {
             needs.iter().any(|prefix| key.starts_with(prefix.as_str()))
-                || failed.iter().any(|failed| *key == failed.as_str())
+                || failed_task_key(key).is_some_and(|task| keys.contains(&task.as_str()))
         })
         .count()
 }
@@ -509,6 +547,17 @@ mod tests {
         fn permits(&self, source: &BriefingSource<'_>) -> bool {
             source.artifact.work_item_id.as_deref() == Some(self.0)
         }
+        fn permits_work_item(&self, _space_id: &str, work_item_id: &str) -> bool {
+            work_item_id == self.0
+        }
+    }
+
+    fn alias(id: &str, name: &str, space: &str) -> TaskAlias {
+        TaskAlias {
+            id: id.into(),
+            name: name.into(),
+            space_id: Some(space.into()),
+        }
     }
 
     fn query(task: Option<&str>) -> BriefingQuery<'_> {
@@ -520,7 +569,7 @@ mod tests {
         scope: &dyn BriefingScope,
         query: &BriefingQuery<'_>,
     ) -> Result<Vec<ArtifactView>, ArtifactError> {
-        select(artifacts, scope, query, &|_| true)
+        select(artifacts, scope, query, &|a| a.current().map(|r| r.id))
     }
 
     fn ids(found: &[ArtifactView]) -> Vec<&str> {
@@ -560,7 +609,7 @@ mod tests {
 
     #[test]
     fn a_renamed_task_is_found_and_shown_under_its_current_name() {
-        let tasks = vec![("t1".to_string(), "Slack digest".to_string())];
+        let tasks = vec![alias("t1", "Slack digest", "s")];
         let all = || vec![artifact("a", "t1", "Results: Slack", "s", 100)];
         for wanted in ["Slack digest", "slack", "t1"] {
             let q = query(Some(wanted)).tasks(&tasks);
@@ -572,6 +621,33 @@ mod tests {
         }
         assert_eq!(task_name(&all()[0], &tasks), "Slack digest");
         assert_eq!(task_name(&all()[0], &[]), "Slack");
+    }
+
+    #[test]
+    fn a_task_name_never_applies_across_spaces() {
+        // The task moved to another Space and was renamed: its new name must not
+        // surface through the artifact it left behind.
+        let tasks = vec![alias("t1", "Moved and renamed", "elsewhere")];
+        let artifact = artifact("a", "t1", "Results: Slack", "s", 100);
+        assert_eq!(task_name(&artifact, &tasks), "Slack");
+        let q = query(Some("Moved and renamed")).tasks(&tasks);
+        assert!(pick(vec![artifact], &SpaceScope("s"), &q).is_err());
+    }
+
+    #[test]
+    fn the_newest_genuine_revision_is_returned_even_after_a_later_edit() {
+        let mut view = artifact("a", "t1", "Results: Slack", "s", 10);
+        view.current_revision = 3;
+        view.revisions = [(3, 30), (2, 20), (1, 10)]
+            .map(|(id, at)| ArtifactRevision {
+                id,
+                at,
+                ..Default::default()
+            })
+            .to_vec();
+        let found = select(vec![view], &SpaceScope("s"), &query(None), &|_| Some(2)).unwrap();
+        assert_eq!(found[0].current_revision, 2);
+        assert_eq!(found[0].current().map(|r| r.at), Some(20));
     }
 
     #[test]
@@ -630,7 +706,7 @@ mod tests {
         let real = artifact("real", "t1", "Results: Slack", "s", 1);
         let fake = artifact("fake", "t1", "Results: Slack", "s", 99);
         let found = select(vec![real, fake], &SpaceScope("s"), &query(None), &|a| {
-            a.id != "fake"
+            (a.id != "fake").then_some(1)
         })
         .unwrap();
         assert_eq!(ids(&found), ["real"]);
@@ -638,7 +714,7 @@ mod tests {
             vec![artifact("fake", "t1", "Results: Slack", "s", 99)],
             &SpaceScope("s"),
             &query(Some("Slack")),
-            &|_| false,
+            &|_| None,
         )
         .unwrap_err();
         assert!(
@@ -778,7 +854,9 @@ mod tests {
     #[test]
     fn the_space_total_counts_failures_and_tasks_that_never_published() {
         assert_eq!(need_you_in_space(&requests(), &SpaceScope("s"), "s"), 5);
-        assert_eq!(need_you_in_space(&requests(), &Only("nobody"), "s"), 5);
+        // A scope narrower than the Space counts only its own items.
+        assert_eq!(need_you_in_space(&requests(), &Only("nobody"), "s"), 0);
+        assert_eq!(need_you_in_space(&requests(), &Only("shared"), "s"), 3);
     }
 
     #[test]
@@ -793,11 +871,18 @@ mod tests {
             need_you_for(&requests(), &SpaceScope("s"), "s", &[slack.clone()]),
             3
         );
-        let mut unknown = slack;
+        // Without the local schedule the failure is still found, by identity.
+        let mut unknown = slack.clone();
         unknown.task_id = None;
         assert_eq!(
             need_you_for(&requests(), &SpaceScope("s"), "s", &[unknown]),
-            2
+            3
+        );
+        let mut keyless = slack;
+        keyless.task_key = None;
+        assert_eq!(
+            need_you_for(&requests(), &SpaceScope("s"), "s", &[keyless]),
+            0
         );
     }
 }

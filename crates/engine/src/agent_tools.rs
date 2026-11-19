@@ -178,8 +178,8 @@ fn token_key(token: &str) -> TokenKey {
 /// driver is alive (generous: a renewal lands every heartbeat).
 pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Reads `(task id, current name)` of the device's scheduled tasks.
-pub type ScheduledTaskNames = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+/// Reads the device's scheduled tasks (id, current name, Space).
+pub type ScheduledTaskNames = Arc<dyn Fn() -> Vec<crate::briefing::TaskAlias> + Send + Sync>;
 
 /// The engine's live per-Run tokens (one registry per engine).
 #[derive(Default)]

@@ -123,26 +123,35 @@ only, no content). It replies `{briefings: [{task, taskId, artifactId, title,
 revision, runAt, runAtLocal, runId, workItemId, content, contentTruncated,
 contentAvailable}], needYou}`.
 
-- `task` is the task's current name when this device knows the task, so a
-  renamed task is found under its new name, its old name and its id.
-- `runAt` is when the newest revision was published, in epoch milliseconds, and
-  is the same on every device. `runAtLocal` and the chat-start index show it in
-  the time zone of the device hosting the chat.
-- `content` is the newest revision exactly as recorded, never a later edit of
-  the file. It is capped at 128 KB for one briefing and 32 KB each for several,
+- `task` is the task's current name when this device knows the task and it
+  belongs to the briefing's Space, so a renamed task is found under its new
+  name, its old name and its id. A task's name is never applied to a briefing
+  in another Space.
+- `runAt` is when the newest genuine revision was published, in epoch
+  milliseconds, and is the same on every device. `runAtLocal` and the chat-start
+  index show it in the time zone of the device hosting the chat.
+- `content` is that revision exactly as recorded, never a later edit of the
+  file. It is capped at 128 KB for one briefing and 32 KB each for several,
   with `contentTruncated` set when cut.
-- `contentAvailable` depends on the request. With content, it is true only when
-  the content was read. With `index: true`, it is true when the file is on the
-  device answering, so a follow-up read will succeed. It is false when the file
-  lives on another device; open the artifact in Mast instead.
+- `contentAvailable` depends on the request. With content, true means the
+  content was read; false means it was not read, either because the file lives
+  on another device or because its recorded content could not be read. With
+  `index: true`, it only says the file is on the device answering and promises
+  nothing about a later read, which can still fail. Open the artifact in Mast
+  when content is missing.
 - `needYou` counts open Required Actions from scheduled tasks. For all tasks it
   is every one in the Space, including failed runs and tasks that have yet to
-  publish. For a named task it is only that task's own, found by task identity,
-  so another task sharing the work item is not counted; a failed run is
-  included when the task is named by its id or its current name.
+  publish. For a named task it is only that task's own, found by task identity
+  (the hash in its results role, which a failed run's key also reduces to), so
+  another task sharing the work item is not counted and no local schedule is
+  needed.
 - Only a Background run of the task can have written a result. An ordinary chat
-  cannot publish the reserved `scheduled-results:` role, and a result whose
-  newest revision did not come from such a run is not returned.
+  cannot publish the reserved `scheduled-results:` role. Each revision a
+  Background run publishes is stamped with its task identity, and the newest
+  stamped revision is the one returned, so a later edit by anyone else never
+  hides the last genuine result and deleting the publishing chat does not hide
+  it. Revisions recorded before the stamp existed are verified through their
+  chat while it remains.
 - An unknown task is an error that lists the tasks that do have results. Hosts
   that predate the tool answer `unknown agent tool`.
 
@@ -150,9 +159,11 @@ The lookup is `crates/engine/src/briefing.rs` and is built to be reused. A calle
 builds a `BriefingQuery` for a `BriefingKind` (which artifacts count) and passes a
 `BriefingScope`. Its `permits` runs on every candidate before it is listed or its
 bytes are read, and a candidate it refuses looks the same as one that does not
-exist; `permits_work_item` does the same for Required Action counts. Each kind
-also names who may have written its artifacts (scheduled results use
-`run_provenance`); a candidate that fails is treated as absent. Scheduled results
+exist; `permits_work_item` does the same for Required Action counts and has no
+default, so a scope must decide for itself. Each kind also names who may have
+written its artifacts (scheduled results use `run_provenance`): the lookup is
+pinned to the newest revision that passes, and an artifact with none is treated
+as absent. Scheduled results
 use `SpaceScope`. Manager sessions add a `BriefingKind::ManagerStatus` for its
 status artifact, its own provenance, and a scope that permits only artifacts and
 work items inside the manager's project subtree.
