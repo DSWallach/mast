@@ -17,6 +17,7 @@ pub enum SymbolKind {
     Function,
     Method,
     Type,
+    Constant,
     Test,
 }
 
@@ -170,7 +171,7 @@ fn tags(language: LanguageId) -> Option<(tree_sitter::Language, String)> {
     let (grammar, query) = match language {
         Rust => (
             tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::TAGS_QUERY.to_owned(),
+            format!("{}\n(const_item name: (identifier) @name) @definition.constant", tree_sitter_rust::TAGS_QUERY),
         ),
         JavaScript | Jsx => (
             tree_sitter_javascript::LANGUAGE.into(),
@@ -328,6 +329,7 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
             let kind = match capture_name {
                 "definition.function" => Some(SymbolKind::Function),
                 "definition.method" => Some(SymbolKind::Method),
+                "definition.constant" => Some(SymbolKind::Constant),
                 "definition.class"
                 | "definition.interface"
                 | "definition.type"
@@ -430,6 +432,14 @@ fn is_test(language: LanguageId, node: tree_sitter::Node<'_>, name: &str, source
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_constants_are_indexed() {
+        let symbols = extract("const LIMIT: usize = 10;", "src/lib.rs", 10);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "LIMIT");
+        assert_eq!(symbols[0].kind, SymbolKind::Constant);
+    }
 
     #[test]
     fn skips_minified_source() {
