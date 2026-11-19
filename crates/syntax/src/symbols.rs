@@ -272,7 +272,7 @@ pub fn supports_path(path: &str) -> bool {
 
 /// Extract definitions from one file. The caller owns scheduling and caching.
 pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
-    if source.len() > DEFAULT_MAX_SOURCE_BYTES || max_symbols == 0 {
+    if source.len() > DEFAULT_MAX_SOURCE_BYTES || max_symbols == 0 || source.as_bytes().split(|byte| *byte == b'\n').any(|line| line.len() > 20_000) {
         return Vec::new();
     }
     let Some(language_id) = language_for_path(path) else {
@@ -285,7 +285,11 @@ pub fn extract(source: &str, path: &str, max_symbols: usize) -> Vec<Symbol> {
     if parser.set_language(language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(source, None) else {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    let mut progress = |_: &tree_sitter::ParseState| if std::time::Instant::now() >= deadline { std::ops::ControlFlow::Break(()) } else { std::ops::ControlFlow::Continue(()) };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress);
+    let bytes = source.as_bytes();
+    let Some(tree) = parser.parse_with_options(&mut |offset, _| &bytes[offset..], None, Some(options)) else {
         return Vec::new();
     };
     let names = query.capture_names();
