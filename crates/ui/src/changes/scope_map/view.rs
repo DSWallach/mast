@@ -16,7 +16,7 @@ pub(in crate::changes) struct State {
     revision: String,
     bucket: Option<Bucket>,
     layouts: HashMap<Bucket, Arc<Vec<Tile>>>,
-    progress_key: Option<(String, usize, usize)>,
+    progress_key: Option<(String, u64)>,
     progress: (usize, u64),
     selected_tile: Option<usize>,
     #[cfg(test)]
@@ -41,6 +41,7 @@ mod tests {
         changes.update(vcx, |changes, cx| {
             let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-c\n+d\n";
             let (mut files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            files[1].additions = 9;
             let line = files[0].hunks[0].lines[0].clone();
             files[0].hunks[0].lines.extend(std::iter::repeat_n(line, 100));
             let horizontal = files.iter().map(FileHorizontalState::new).collect();
@@ -66,9 +67,18 @@ mod tests {
             vcx.debug_bounds("scope-map-file-0-viewed-no-risk")
                 .is_some()
         );
-        let tile_bounds = vcx
-            .debug_bounds("scope-map-file-1-unviewed-no-risk")
-            .unwrap();
+        changes.read_with(vcx, |changes, _| {
+            assert_eq!(changes.scope_map_view.progress, (1, 2))
+        });
+        changes.update(vcx, |changes, cx| {
+            changes.toggle_review_hunk(0, 0, cx);
+            changes.toggle_review_hunk(1, 0, cx);
+        });
+        vcx.update(|window, cx| window.draw(cx).clear());
+        changes.read_with(vcx, |changes, _| {
+            assert_eq!(changes.scope_map_view.progress, (1, 10))
+        });
+        let tile_bounds = vcx.debug_bounds("scope-map-file-1-viewed-no-risk").unwrap();
         let tile = tile_bounds.center();
         vcx.simulate_click(tile, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
@@ -413,11 +423,7 @@ impl Changes {
                 .scope_map_risks(&target, head.as_deref())
         });
         let marks = self.review_state.as_ref();
-        let key = (
-            parsed.key.clone(),
-            marks.map_or(0, |s| s.viewed_hunks.len()),
-            marks.map_or(0, |s| s.viewed_files.len()),
-        );
+        let key = (parsed.key.clone(), self.review_state_generation);
         if self.scope_map_view.progress_key.as_ref() != Some(&key) {
             let mut viewed = 0;
             let mut lines = 0;
