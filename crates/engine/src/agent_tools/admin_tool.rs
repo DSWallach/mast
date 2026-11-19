@@ -749,9 +749,25 @@ impl AgentToolsService {
         let grant = admin.live(&context.grant.chat_id);
         let skip_bulk = grant.as_ref().is_some_and(|g| g.skip_bulk_confirmation);
         let weight: usize = sequence.weights.iter().sum();
-        let mut approved_weight: Option<usize> = None;
         let mut claimed_token: Option<String> = None;
-        let bulk = weight > ADMIN_BULK_THRESHOLD && !skip_bulk;
+        // A manager batch that already committed steps must still have its
+        // budget record: without it nothing proves what was spent, so it fails
+        // closed rather than start the allowance over.
+        let known_allowance = manager_root.as_ref().and_then(|_| admin.batch_remaining(&exec_key));
+        if manager_root.is_some()
+            && known_allowance.is_none()
+            && sequence.committed > 0
+            && sequence.committed < actions.len()
+        {
+            return Err(forbidden(
+                "this batch already committed some steps but its budget record is gone, so what it \
+                 spent cannot be proven: start it again under a new idempotencyKey",
+            ));
+        }
+        // What may still run without asking: the batch's remaining allowance
+        // (the default threshold for a new batch), not the threshold each time.
+        let allowance = known_allowance.unwrap_or(ADMIN_BULK_THRESHOLD);
+        let bulk = weight > allowance && !skip_bulk;
         let shown: Vec<&String> = preview.iter().take(PREVIEW_LINES).collect();
 
         let confirm = non_empty(arguments.get("confirmToken").and_then(Value::as_str).map(str::to_owned));
@@ -762,12 +778,11 @@ impl AgentToolsService {
             match confirm {
                 None => return self.open_bulk_approval(context, &exec_key, &sequence.hash, weight, &preview),
                 Some(token) => {
-                    let (request_id, shown_weight, fresh) = admin
-                        .claim_approval(&token, &context.grant.chat_id, &exec_key, &sequence.hash)
+                    // Checks only: nothing is claimed until the user has approved
+                    // and the batch is about to run (not for a dry run).
+                    let (request_id, _, _) = admin
+                        .peek_approval(&token, &context.grant.chat_id, &exec_key, &sequence.hash)
                         .map_err(forbidden)?;
-                    if fresh {
-                        approved_weight = Some(shown_weight);
-                    }
                     let approved = snapshot.user_action_requests.iter().find(|r| r.id == request_id).is_some_and(|r| {
                         !r.is_open()
                             && r.resolution
@@ -796,15 +811,14 @@ impl AgentToolsService {
         let mut refs: HashMap<String, String> = HashMap::new();
         let mut results = Vec::new();
         // One budget per batch, shared by its steps, its retries and restarts.
-        // A fresh approval is for what is left to do, on top of what the
-        // earlier attempts already committed.
-        let budget = manager_root.as_ref().map(|_| {
-            let budget = admin.batch_budget(&exec_key, ADMIN_BULK_THRESHOLD);
-            if let Some(allowance) = approved_weight {
-                budget.allow(allowance);
-            }
-            budget
-        });
+        let budget = manager_root.as_ref().map(|_| admin.batch_budget(&exec_key, ADMIN_BULK_THRESHOLD));
+        // Claim the approval and install what it allows (what is left to do, on
+        // top of what is already spent) as one step.
+        if let Some(token) = &claimed_token {
+            admin
+                .claim_approval(token, &context.grant.chat_id, &exec_key, &sequence.hash, budget.as_deref())
+                .map_err(forbidden)?;
+        }
         for (i, step) in actions.iter().enumerate() {
             let still_allowed = match &manager_root {
                 Some(root) => self.manager_scope_now(&context.grant.chat_id).as_ref() == Some(root),
@@ -832,7 +846,11 @@ impl AgentToolsService {
                 let op = step.get("op").and_then(Value::as_str).unwrap_or_default();
                 // Every step is charged: its first target is what it acts on
                 // (the parent, for a create).
-                let effects = vec![(op.to_owned(), manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw)).unwrap_or_default())];
+                let effects = vec![(
+                    op.to_owned(),
+                    manager_targets[i].items.first().and_then(|(raw, _)| resolve(raw)).unwrap_or_default(),
+                    sequence.digests[i].clone(),
+                )];
                 crate::work_outline::ManagerGuard {
                     chat_id: context.grant.chat_id.clone(),
                     root: root.clone(),
@@ -1001,6 +1019,10 @@ struct Sequence {
     lines: Vec<String>,
     /// Items each step affects at the point it runs (0 = already committed).
     weights: Vec<usize>,
+    /// `step_plan_digest` of each step at the point it runs ("" = committed).
+    digests: Vec<String>,
+    /// Steps an earlier attempt already committed.
+    committed: usize,
     /// Digest of the resolved steps and weights: what the user is shown.
     hash: String,
 }
@@ -1039,7 +1061,8 @@ impl AgentToolsService {
         self.workspace
             .stage(|doc| -> Result<Sequence, AgentToolError> {
                 let mut refs: HashMap<String, String> = HashMap::new();
-                let (mut lines, mut weights, mut canon) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut lines, mut weights, mut digests, mut canon) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                let mut committed = 0usize;
                 for (i, step) in actions.iter().enumerate() {
                     let snapshot = doc.work_outline_snapshot(space, synced);
                     let ctx = Ctx { snapshot: &snapshot, space_id: space, refs: refs.clone(), dry: false, who: who.to_owned() };
@@ -1050,9 +1073,16 @@ impl AgentToolsService {
                             refs.insert(name, id);
                         }
                         weights.push(0);
+                        digests.push(String::new());
+                        committed += 1;
                         continue;
                     }
-                    let weight = step_weight(&snapshot, &with_refs(step, &refs));
+                    let resolved = with_refs(step, &refs);
+                    let weight = step_weight(&snapshot, &resolved);
+                    let digest = match step_target(&snapshot, &resolved) {
+                        (op, Some(id)) => crate::work_outline::step_plan_digest(&snapshot, &op, &id),
+                        _ => String::new(),
+                    };
                     let reply = doc
                         .with_admin_scope(Some(space), |doc| doc.apply_work_outline_mutation(&built.mutation, &actor, now))
                         .map_err(|e| step_error(i, invalid(e.to_wire_message())))?;
@@ -1060,10 +1090,16 @@ impl AgentToolsService {
                         refs.insert(name, id);
                     }
                     weights.push(weight);
-                    canon.push(json!({ "step": i, "mutation": built.mutation, "weight": weight }));
+                    // The plan the user is shown: what is displayed, what runs and
+                    // which items it touches.
+                    canon.push(json!({
+                        "step": i, "mutation": built.mutation, "weight": weight,
+                        "summary": built.summary, "affects": digest,
+                    }));
+                    digests.push(digest);
                 }
                 let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&canon).unwrap_or_default()));
-                Ok(Sequence { lines, weights, hash })
+                Ok(Sequence { lines, weights, digests, committed, hash })
             })
             .map_err(invalid)?
     }
@@ -1176,17 +1212,25 @@ fn check_manager_scope(snap: &WorkOutlineSnapshot, root: &str, actions: &[Map<St
     Ok(all)
 }
 
-/// Items one step really changes, for the bulk threshold and the manager's
-/// write-time budget (see `crate::work_outline::step_effects`). Ids are
-/// resolved the way execution resolves them (a unique prefix counts).
-fn step_weight(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> usize {
-    let op = action.get("op").and_then(Value::as_str).unwrap_or_default();
-    // A create acts on its parent (a template there expands under the new item).
+/// The op a step runs and the item it acts on (a create acts on its parent),
+/// resolved the way execution resolves ids (a unique prefix counts).
+fn step_target(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> (String, Option<String>) {
+    let op = action.get("op").and_then(Value::as_str).unwrap_or_default().to_owned();
     let key = if op == "create" { "parentId" } else { "itemId" };
-    let Some(raw) = action.get(key).and_then(Value::as_str) else { return 1 };
-    let id = resolve_id(raw, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
-        .unwrap_or_else(|_| raw.trim().to_owned());
-    crate::work_outline::step_effects(snapshot, op, &id)
+    let id = action.get(key).and_then(Value::as_str).map(|raw| {
+        resolve_id(raw, snapshot.items.iter().map(|item| item.id.as_str()), "work item")
+            .unwrap_or_else(|_| raw.trim().to_owned())
+    });
+    (op, id)
+}
+
+/// Items one step really changes, for the bulk threshold and the manager's
+/// write-time budget (see `crate::work_outline::step_effects`).
+fn step_weight(snapshot: &WorkOutlineSnapshot, action: &Map<String, Value>) -> usize {
+    match step_target(snapshot, action) {
+        (op, Some(id)) => crate::work_outline::step_effects(snapshot, &op, &id),
+        _ => 1,
+    }
 }
 
 fn step_error(i: usize, e: AgentToolError) -> AgentToolError {

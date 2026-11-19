@@ -219,12 +219,49 @@ pub struct ManagerGuard {
     pub chats: Vec<String>,
     /// The one item (the project) a bulk approval request may be raised on.
     pub request_item: Option<String>,
-    /// `(op, item)` of the step: re-counted against the current tree under the
-    /// lock (a create counts the template it expands under its parent).
-    pub effects: Vec<(String, String)>,
+    /// `(op, item, expected)` of the step: re-counted against the current tree
+    /// under the lock (a create counts the template it expands under its
+    /// parent), and refused if `step_plan_digest` no longer equals `expected`
+    /// (the preview's digest; empty = unchecked).
+    pub effects: Vec<(String, String, String)>,
     /// The batch's shared budget: the step is refused if it would affect more
     /// than what is left, and its effects are debited once it commits.
     pub budget: Option<std::sync::Arc<crate::admin::BatchBudget>>,
+}
+
+/// Digest of what a step will touch: the ids it affects (an archive or restore's
+/// whole subtree, a template apply's children) and how many items that is. The
+/// preview binds the approval to it and the writer re-checks it under its lock,
+/// so the same count over different items does not keep an old approval.
+pub fn step_plan_digest(snapshot: &WorkOutlineSnapshot, op: &str, item_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    fn subtree(snapshot: &WorkOutlineSnapshot, id: &str, depth: usize, out: &mut Vec<String>) {
+        out.push(id.to_owned());
+        if depth > snapshot.items.len() {
+            return;
+        }
+        if let Some(item) = snapshot.item(id) {
+            for child in &item.child_ids {
+                subtree(snapshot, child, depth + 1, out);
+            }
+        }
+    }
+    let mut ids = vec![item_id.to_owned()];
+    match op {
+        "archive" | "restore" => {
+            ids.clear();
+            subtree(snapshot, item_id, 0, &mut ids);
+        }
+        "template_apply" => {
+            if let Some(item) = snapshot.item(item_id) {
+                ids.extend(item.child_ids.iter().cloned());
+            }
+        }
+        _ => {}
+    }
+    ids.sort();
+    let text = format!("{op}|{}|{}", ids.join(","), step_effects(snapshot, op, item_id));
+    format!("{:x}", Sha256::digest(text))
 }
 
 /// Items one step affects against `snapshot`: an archive or restore covers the
@@ -313,12 +350,21 @@ impl ManagerGuard {
         // the batch has left. Reserved before the write (and persisted), so a
         // crash after it can only over-count; the caller refunds if the write
         // does not commit.
-        let charge: usize = self.effects.iter().map(|(op, item)| step_effects(&snapshot, op, item)).sum();
+        if self
+            .effects
+            .iter()
+            .any(|(op, item, expected)| !expected.is_empty() && step_plan_digest(&snapshot, op, item) != *expected)
+        {
+            return Err(WorkOutlineError::unauthorized(
+                "the items this step affects changed since the preview; ask again. Nothing was changed",
+            ));
+        }
+        let charge: usize = self.effects.iter().map(|(op, item, _)| step_effects(&snapshot, op, item)).sum();
         if let Some(budget) = &self.budget
             && !budget.reserve(charge)
         {
             return Err(WorkOutlineError::unauthorized(
-                "the change now affects more items than were approved; ask again. Nothing was changed",
+                "the change affects more items than were approved, or its budget could not be saved; ask again. Nothing was changed",
             ));
         }
         Ok(charge)

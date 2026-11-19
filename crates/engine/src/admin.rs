@@ -51,17 +51,22 @@ struct BudgetBook {
     entries: HashMap<String, (usize, usize)>,
     order: std::collections::VecDeque<String>,
     path: Option<PathBuf>,
+    /// The saved file exists but could not be read: nothing it held can be
+    /// trusted, so no step may reserve until the store is repaired.
+    broken: bool,
 }
 
 impl BudgetBook {
-    fn persist(&self) {
-        if let Some(path) = &self.path {
-            let rows: Vec<(&String, usize, usize)> =
-                self.entries.iter().map(|(k, (t, s))| (k, *t, *s)).collect();
-            if let Ok(bytes) = serde_json::to_vec(&rows) {
-                let _ = std::fs::write(path, bytes);
-            }
-        }
+    /// Write the book (temp file, then rename, so a crash never leaves a
+    /// torn file). `Ok` without a store: the in-memory book is all there is.
+    fn persist(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else { return Ok(()) };
+        let rows: Vec<(&String, usize, usize)> =
+            self.entries.iter().map(|(k, (t, s))| (k, *t, *s)).collect();
+        let bytes = serde_json::to_vec(&rows).map_err(std::io::Error::other)?;
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, bytes)?;
+        std::fs::rename(&temp, path)
     }
 }
 
@@ -94,35 +99,48 @@ impl BatchBudget {
         lock(&self.book).entries.get(&self.key).map_or(0, |(total, spent)| total.saturating_sub(*spent))
     }
 
-    /// Take `n` if that much is left (atomic, persisted before it returns).
+    /// Take `n` if that much is left. Atomic, and written to disk before it
+    /// returns: if the store cannot be written (or was unreadable) it fails
+    /// closed and takes nothing, so a registry write can never outlive its
+    /// charge.
     pub fn reserve(&self, n: usize) -> bool {
         let mut book = lock(&self.book);
+        if book.broken {
+            return false;
+        }
         let Some((total, spent)) = book.entries.get_mut(&self.key) else { return false };
         if n > total.saturating_sub(*spent) {
             return false;
         }
         *spent += n;
-        book.persist();
+        if book.persist().is_err() {
+            if let Some((_, spent)) = book.entries.get_mut(&self.key) {
+                *spent = spent.saturating_sub(n);
+            }
+            return false;
+        }
         true
     }
 
-    /// Give back a reservation whose write did not commit.
+    /// Give back a reservation whose write did not commit. A failed save
+    /// only leaves the stored count higher, which is the safe direction.
     pub fn refund(&self, n: usize) {
         let mut book = lock(&self.book);
         if let Some((_, spent)) = book.entries.get_mut(&self.key) {
             *spent = spent.saturating_sub(n);
         }
-        book.persist();
+        let _ = book.persist();
     }
 
     /// A fresh approval for `allowance` more items: the total becomes what is
-    /// already spent plus that, so earlier committed steps stay counted.
+    /// already spent plus that, so earlier committed steps stay counted. A
+    /// failed save only leaves the stored allowance smaller.
     pub fn allow(&self, allowance: usize) {
         let mut book = lock(&self.book);
         if let Some((total, spent)) = book.entries.get_mut(&self.key) {
             *total = *spent + allowance;
         }
-        book.persist();
+        let _ = book.persist();
     }
 }
 
@@ -172,14 +190,19 @@ impl AdminGrants {
         let budget_path = path.with_file_name("admin-batch-budgets.json");
         {
             let mut book = lock(&self.budgets);
-            if let Ok(bytes) = std::fs::read(&budget_path)
-                && let Ok(saved) = serde_json::from_slice::<Vec<(String, usize, usize)>>(&bytes)
-            {
-                for (key, total, spent) in saved {
-                    if book.entries.insert(key.clone(), (total, spent)).is_none() {
-                        book.order.push_back(key);
+            match std::fs::read(&budget_path) {
+                Ok(bytes) => match serde_json::from_slice::<Vec<(String, usize, usize)>>(&bytes) {
+                    Ok(saved) => {
+                        for (key, total, spent) in saved {
+                            if book.entries.insert(key.clone(), (total, spent)).is_none() {
+                                book.order.push_back(key);
+                            }
+                        }
                     }
-                }
+                    Err(_) => book.broken = true,
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => book.broken = true,
             }
             book.path = Some(budget_path);
         }
@@ -358,9 +381,15 @@ impl AdminGrants {
                     book.entries.remove(&oldest);
                 }
             }
-            book.persist();
+            let _ = book.persist();
         }
         Arc::new(BatchBudget { key: key.to_owned(), book: self.budgets.clone() })
+    }
+
+    /// What batch `key` may still spend, or `None` if no budget is recorded
+    /// for it (new, or forgotten).
+    pub fn batch_remaining(&self, key: &str) -> Option<usize> {
+        lock(&self.budgets).entries.get(key).map(|(total, spent)| total.saturating_sub(*spent))
     }
 
     // ---- bulk approvals --------------------------------------------------------
@@ -388,52 +417,90 @@ impl AdminGrants {
         token
     }
 
-    /// Claim `token` for the execution `exec_key`, atomically. The first
-    /// claim must match the resolved preview the user was shown and returns
-    /// `fresh`; a retry of that same execution resumes it (the preview may
-    /// have moved because its own earlier steps committed). Another
-    /// execution, chat or preview is refused. Returns the Required Action id,
-    /// the count the user was shown and whether the claim is fresh.
-    pub fn claim_approval(
+    /// What `token` would give the execution `exec_key` for the resolved
+    /// preview `preview_hash`, without changing anything: the Required Action
+    /// id, the count the user was shown and whether the claim would be fresh.
+    /// The first claim must match the preview; a retry of the claiming
+    /// execution resumes it (its own earlier steps moved the preview); any
+    /// other chat, execution or preview is refused.
+    fn evaluate(
+        approval: &Approval,
+        now: i64,
+        chat_id: &str,
+        exec_key: &str,
+        preview_hash: &str,
+    ) -> Result<(String, usize, bool), String> {
+        if approval.chat_id != chat_id {
+            return Err("that confirmToken belongs to another chat".into());
+        }
+        if now >= approval.expires_at_ms {
+            return Err("that confirmToken expired: request a new preview".into());
+        }
+        if approval.exec_key != exec_key {
+            return Err("that confirmToken is for another batch: request a new preview".into());
+        }
+        match &approval.claimed_by {
+            Some(claimed) if claimed != exec_key => {
+                Err("that confirmToken was claimed by another batch".into())
+            }
+            Some(_) => Ok((approval.request_id.clone(), approval.weight, false)),
+            None => {
+                if approval.used {
+                    return Err("that confirmToken was already used: request a new preview".into());
+                }
+                if approval.preview_hash != preview_hash {
+                    return Err(
+                        "the preview changed since the user was shown it: request a new preview".into(),
+                    );
+                }
+                Ok((approval.request_id.clone(), approval.weight, true))
+            }
+        }
+    }
+
+    /// [`Self::evaluate`] for a confirmation that may still be refused or only
+    /// previewed (a dry run, an approval the user has not given): it claims
+    /// nothing.
+    pub fn peek_approval(
         &self,
         token: &str,
         chat_id: &str,
         exec_key: &str,
         preview_hash: &str,
     ) -> Result<(String, usize, bool), String> {
-        let mut state = lock(&self.state);
-        let now = self.now_ms();
-        let Some(a) = state.approvals.get_mut(token) else {
+        let state = lock(&self.state);
+        let Some(approval) = state.approvals.get(token) else {
             return Err("unknown confirmToken: request a new preview".into());
         };
-        if a.chat_id != chat_id {
-            return Err("that confirmToken belongs to another chat".into());
-        }
-        if now >= a.expires_at_ms {
-            return Err("that confirmToken expired: request a new preview".into());
-        }
-        if a.exec_key != exec_key {
-            return Err("that confirmToken is for another batch: request a new preview".into());
-        }
-        let claimed = a.claimed_by.clone();
-        match claimed {
-            Some(claimed) if claimed != exec_key => {
-                Err("that confirmToken was claimed by another batch".into())
+        Self::evaluate(approval, self.now_ms(), chat_id, exec_key, preview_hash)
+    }
+
+    /// Claim `token` for the execution `exec_key` as it starts to run. One
+    /// critical section: the claim and, for a fresh one, the batch's allowance
+    /// (what is left to do on top of what is already spent) are installed
+    /// together, so no other execution can slip in between and no claim exists
+    /// without its allowance.
+    pub fn claim_approval(
+        &self,
+        token: &str,
+        chat_id: &str,
+        exec_key: &str,
+        preview_hash: &str,
+        budget: Option<&BatchBudget>,
+    ) -> Result<(String, usize, bool), String> {
+        let mut state = lock(&self.state);
+        let now = self.now_ms();
+        let Some(approval) = state.approvals.get_mut(token) else {
+            return Err("unknown confirmToken: request a new preview".into());
+        };
+        let (request_id, weight, fresh) = Self::evaluate(approval, now, chat_id, exec_key, preview_hash)?;
+        if fresh {
+            approval.claimed_by = Some(exec_key.to_owned());
+            if let Some(budget) = budget {
+                budget.allow(weight);
             }
-            Some(_) => Ok((a.request_id.clone(), a.weight, false)),
-            None => {
-                if a.used {
-                    return Err("that confirmToken was already used: request a new preview".into());
-                }
-                if a.preview_hash != preview_hash {
-                    return Err(
-                        "the preview changed since the user was shown it: request a new preview".into(),
-                    );
-                }
-                a.claimed_by = Some(exec_key.to_owned());
-                Ok((a.request_id.clone(), a.weight, true))
-            }
         }
+        Ok((request_id, weight, fresh))
     }
 
     /// The claimed execution finished: the token authorizes nothing new.

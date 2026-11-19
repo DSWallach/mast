@@ -5319,14 +5319,14 @@ async fn the_guard_rechecks_chat_assignments_and_the_effect_budget_under_the_loc
     }
     let err = outline
         .mutate_guarded(&archive("g2-grew", &p.tickets), &actor, Some(SPACE),
-            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], budget: Some(mast_engine::admin::BatchBudget::new(10)), ..guard.clone() }))
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone(), String::new())], budget: Some(mast_engine::admin::BatchBudget::new(10)), ..guard.clone() }))
         .unwrap_err();
     assert!(err.to_wire_message().contains("more items than were approved"), "{err:?}");
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
     // A budget that covers it passes.
     outline
         .mutate_guarded(&archive("g2-ok", &p.tickets), &actor, Some(SPACE),
-            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone())], budget: Some(mast_engine::admin::BatchBudget::new(13)), ..guard }))
+            Some(&ManagerGuard { effects: vec![("archive".into(), p.tickets.clone(), String::new())], budget: Some(mast_engine::admin::BatchBudget::new(13)), ..guard }))
         .unwrap();
     assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
 }
@@ -5369,7 +5369,7 @@ async fn the_batch_budget_is_debited_under_the_lock_across_steps_and_retries() {
         let guard = ManagerGuard {
             chat_id: CHAT.into(),
             root: p.project.clone(),
-            effects: vec![("archive".into(), kid.to_owned())],
+            effects: vec![("archive".into(), kid.to_owned(), String::new())],
             budget: Some(budget.clone()),
             ..Default::default()
         };
@@ -5465,7 +5465,7 @@ async fn a_create_under_a_container_template_is_charged_its_whole_expansion() {
         chat_id: CHAT.into(),
         root: p.project.clone(),
         inside: vec![p.tickets.clone()],
-        effects: vec![("create".into(), p.tickets.clone())],
+        effects: vec![("create".into(), p.tickets.clone(), String::new())],
         budget: Some(budget.clone()),
         ..Default::default()
     };
@@ -5530,16 +5530,16 @@ fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
     let grants = AdminGrants::default();
     let token = grants.open_approval("chat", "exec-a", "hash-a", "request-1", 12);
     // The same count with a different resolved preview is not what was shown.
-    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b").unwrap_err();
+    let err = grants.claim_approval(&token, "chat", "exec-a", "hash-b", None).unwrap_err();
     assert!(err.contains("preview changed"), "{err}");
     // Another chat or another batch cannot use it.
-    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a").is_err());
-    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a").unwrap_err().contains("another batch"));
+    assert!(grants.claim_approval(&token, "other-chat", "exec-a", "hash-a", None).is_err());
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None).unwrap_err().contains("another batch"));
     // The first claim is fresh; a retry of that batch resumes it even though its
     // own earlier steps moved the preview; no other batch can take it over.
-    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a").unwrap(), ("request-1".into(), 12, true));
-    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved").unwrap(), ("request-1".into(), 12, false));
-    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a").is_err());
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-a", None).unwrap(), ("request-1".into(), 12, true));
+    assert_eq!(grants.claim_approval(&token, "chat", "exec-a", "hash-moved", None).unwrap(), ("request-1".into(), 12, false));
+    assert!(grants.claim_approval(&token, "chat", "exec-b", "hash-a", None).is_err());
 
     // Racing claims from many batches: exactly one gets it.
     let token = grants.open_approval("chat", "exec-0", "hash", "request-2", 11);
@@ -5547,7 +5547,7 @@ fn an_approval_is_claimed_atomically_by_one_batch_for_one_resolved_preview() {
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let (grants, token) = (&grants, &token);
-                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash").is_ok())
+                scope.spawn(move || grants.claim_approval(token, "chat", &format!("exec-{i}"), "hash", None).is_ok())
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
@@ -5600,4 +5600,176 @@ async fn a_distinct_execution_of_the_same_steps_gets_its_own_approval_and_a_comm
     admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
     admin(&rig, &token, json!({ "idempotencyKey": "exec-rename", "steps": rename })).await.unwrap();
     assert_eq!(title_of(&rig, &p.ticket), "Once");
+}
+
+async fn user_approves(rig: &Rig, request_id: &str, operation: &str) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "resolveUserActionRequest", "userActionRequestId": request_id,
+                    "outcome": "approved", "via": "card", "operationId": operation }),
+        )
+        .await
+        .unwrap();
+}
+
+/// The execution key `work_outline_admin` derives for plain (ungrouped) steps.
+fn exec_key_of(chat: &str, key: &str, steps: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let actions: Vec<serde_json::Map<String, Value>> =
+        steps.as_array().unwrap().iter().map(|s| s.as_object().unwrap().clone()).collect();
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&actions).unwrap()));
+    format!("{chat}:{key}:{}", &hash[..16])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_batch_fails_closed_when_its_budget_cannot_be_saved_or_proven() {
+    // The budget cannot be written: the step is refused before it writes.
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let data = std::fs::canonicalize(rig._tmp.path()).unwrap().join("data");
+    std::fs::create_dir_all(data.join("admin-batch-budgets.json")).unwrap();
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "fc-store", "steps": [
+        { "op": "rename", "itemId": p.ticket, "title": "Never written" }
+    ]})).await.unwrap_err();
+    assert!(err.contains("budget could not be saved"), "{err}");
+    assert_eq!(title_of(&rig, &p.ticket), "Ticket 1", "nothing was written");
+
+    // A batch whose earlier steps already committed, with no budget record to
+    // prove what they spent, is not started over.
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    let one = json!([{ "op": "rename", "itemId": p.ticket, "title": "FC one" }]);
+    admin(&rig, &token, json!({ "idempotencyKey": "fc-prefix", "steps": one })).await.unwrap();
+    let both = json!([
+        { "op": "rename", "itemId": p.ticket, "title": "FC one" },
+        { "op": "rename", "itemId": p.tickets, "title": "FC two" },
+    ]);
+    let err = admin(&rig, &token, json!({ "idempotencyKey": "fc-prefix", "steps": both })).await.unwrap_err();
+    assert!(err.contains("budget record is gone"), "{err}");
+    assert_eq!(title_of(&rig, &p.tickets), "Tickets", "the unproven remainder did not run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_needs_fresh_approval_when_the_remaining_work_exceeds_the_remaining_allowance() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    admin(&rig, &token, json!({ "idempotencyKey": "ra-template", "steps": [{
+        "op": "template_set", "itemId": p.tickets,
+        "template": { "root": { "children": [{ "title": "Planning" }, { "title": "Tickets" }] } }
+    }]})).await.unwrap();
+    // Three creates under the template are 9 items: under the default of 10,
+    // but the batch has only 3 left of its allowance after 7 were spent.
+    let steps = json!([
+        { "op": "create", "parentId": p.tickets, "title": "RA one" },
+        { "op": "create", "parentId": p.tickets, "title": "RA two" },
+        { "op": "create", "parentId": p.tickets, "title": "RA three" },
+    ]);
+    let tokens = rig.core.sessions.agent_tokens();
+    let grants = tokens.admin();
+    let exec = exec_key_of(CHAT, "ra-batch", &steps);
+    assert!(grants.batch_budget(&exec, 10).reserve(7));
+    assert_eq!(grants.batch_remaining(&exec), Some(3));
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "ra-batch", "steps": steps })).await.unwrap();
+    assert_eq!(ask["needsApproval"], true, "9 > the 3 that are left: {ask}");
+    assert_eq!(ask["count"], 9);
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "ra-approve").await;
+    let done = admin(&rig, &token, json!({
+        "idempotencyKey": "ra-batch", "steps": steps, "confirmToken": ask["confirmToken"]
+    })).await.unwrap();
+    assert_eq!(done["applied"], 3, "{done}");
+    // The approval was for 9 more on top of the 7 spent, and all of it was used.
+    assert_eq!(grants.batch_remaining(&exec), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_bound_to_what_the_user_was_shown_and_to_the_items_affected() {
+    use mast_engine::work_outline::{ManagerGuard, step_plan_digest};
+    use mast_proto::{ArchiveWorkItemParams, DescendantArchivePolicy, WorkOutlineMutation};
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("pb-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let shown = admin(&rig, &token, json!({ "idempotencyKey": "pb-title", "steps": steps })).await.unwrap();
+    user_approves(&rig, shown["requestId"].as_str().unwrap(), "pb-approve-1").await;
+    // A displayed detail changes (the item's title), though the mutation and the
+    // count do not: the user approved something else.
+    admin(&rig, &token, json!({ "idempotencyKey": "pb-rename", "steps": [
+        { "op": "rename", "itemId": p.tickets, "title": "Renamed since shown" }
+    ]})).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "pb-title", "steps": steps, "confirmToken": shown["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+
+    // The same count over different items: a kid replaced by another.
+    let shown = admin(&rig, &token, json!({ "idempotencyKey": "pb-ids", "steps": steps })).await.unwrap();
+    user_approves(&rig, shown["requestId"].as_str().unwrap(), "pb-approve-2").await;
+    let first_kid = snapshot(&rig).item(&p.tickets).unwrap().child_ids.iter()
+        .find(|id| **id != p.ticket).cloned().unwrap();
+    admin(&rig, &token, json!({ "idempotencyKey": "pb-swap", "steps": [
+        { "op": "archive", "itemId": first_kid },
+        { "op": "create", "parentId": p.tickets, "title": "Replacement" },
+    ]})).await.unwrap();
+    let err = admin(&rig, &token, json!({
+        "idempotencyKey": "pb-ids", "steps": steps, "confirmToken": shown["confirmToken"]
+    })).await.unwrap_err();
+    assert!(err.contains("preview changed"), "{err}");
+
+    // Under the writer's lock the affected items are checked again.
+    let outline = rig.service.work_outline();
+    let actor = outline.agent_actor(CHAT, None);
+    let stale = step_plan_digest(&snapshot(&rig), "archive", &p.tickets);
+    create_item(&rig, "pb-late", "Added after", Some(&p.tickets)).await;
+    let guard = ManagerGuard {
+        chat_id: CHAT.into(),
+        root: p.project.clone(),
+        strict: vec![p.tickets.clone()],
+        effects: vec![("archive".into(), p.tickets.clone(), stale)],
+        budget: Some(mast_engine::admin::BatchBudget::new(100)),
+        ..Default::default()
+    };
+    let archive = WorkOutlineMutation::ArchiveWorkItem(ArchiveWorkItemParams {
+        work_item_id: p.tickets.clone(),
+        descendant_archive_policy: DescendantArchivePolicy::ArchiveDescendants,
+        operation_id: "pb-guard".into(),
+    });
+    let err = outline.mutate_guarded(&archive, &actor, Some(SPACE), Some(&guard)).unwrap_err();
+    assert!(err.to_wire_message().contains("changed since the preview"), "{err:?}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_claimed_only_when_the_approved_batch_runs_with_its_allowance() {
+    let (rig, p) = manager_rig().await;
+    let (_lease, token) = mint_token(&rig, CHAT);
+    for i in 0..10 {
+        create_item(&rig, &format!("cl-kid-{i}"), &format!("Kid {i}"), Some(&p.tickets)).await;
+    }
+    // One archive step that affects 12 items: over the default allowance of 10.
+    let steps = json!([{ "op": "archive", "itemId": p.tickets }]);
+    let ask = admin(&rig, &token, json!({ "idempotencyKey": "cl-batch", "steps": steps })).await.unwrap();
+    let confirm = ask["confirmToken"].clone();
+    let with_token = |extra: Value| {
+        let mut args = json!({ "idempotencyKey": "cl-batch", "steps": steps, "confirmToken": confirm });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    // Before the user approves, trying the token claims nothing.
+    let err = admin(&rig, &token, with_token(json!({}))).await.unwrap_err();
+    assert!(err.contains("not approved"), "{err}");
+    user_approves(&rig, ask["requestId"].as_str().unwrap(), "cl-approve").await;
+    // A dry run validates the approved batch and claims nothing either.
+    let dry = admin(&rig, &token, with_token(json!({ "dryRun": true }))).await.unwrap();
+    assert_eq!(dry["approved"], true, "{dry}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_none());
+    // The real run claims it and installs the allowance in one step, so the
+    // 12-item step is within budget and runs.
+    let done = admin(&rig, &token, with_token(json!({}))).await.unwrap();
+    assert_eq!(done["applied"], 1, "{done}");
+    assert!(snapshot(&rig).item(&p.tickets).unwrap().archived_at.is_some());
 }
