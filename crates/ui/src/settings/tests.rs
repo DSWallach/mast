@@ -1518,10 +1518,17 @@ fn workspace_navigation_shortcuts_persist_and_detect_conflicts() {
     );
     assert_eq!(keymap.get(ShortcutId::GoToLine), "mod-g");
     assert_eq!(keymap.get(ShortcutId::ReplaceFile), "mod-alt-f");
+    assert_eq!(keymap.get(ShortcutId::FileNavigationBack), "ctrl--");
+    assert_eq!(keymap.get(ShortcutId::FileNavigationForward), "ctrl-shift--");
+    keymap.set(ShortcutId::FileNavigationBack, "mod-alt-k".into());
+    keymap.set(ShortcutId::FileNavigationForward, "mod-alt-k".into());
+    assert!(conflicted_shortcuts(&keymap).contains(&ShortcutId::FileNavigationBack));
+    keymap.reset(ShortcutId::FileNavigationForward);
     keymap.set(ShortcutId::QuickOpen, "mod-alt-o".into());
     let restored: KeymapConfig =
         serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
     assert_eq!(restored.get(ShortcutId::QuickOpen), "mod-alt-o");
+    assert_eq!(restored.get(ShortcutId::FileNavigationBack), "mod-alt-k");
     keymap.set(ShortcutId::QuickOpen, "mod-p".into());
     assert!(!conflicted_shortcuts(&keymap).is_empty());
 }
