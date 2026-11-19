@@ -502,6 +502,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ShowOutlineShortcuts
         | ShortcutId::OpenLinear => "Work Outline",
         ShortcutId::OpenTeamTab | ShortcutId::OpenTeamTabFromPanel => "Tracker",
+        ShortcutId::PopOutSurface => "Panels",
         ShortcutId::Outline(_) => "Outline",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
@@ -594,6 +595,7 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::OpenTeamTab => "Open the Tracker tab for a chat with workers.",
         ShortcutId::OpenTeamTabFromPanel => "Open the Tracker tab while the side panel has focus.",
+        ShortcutId::PopOutSurface => "Move the active side panel file, diff or subagent tab into its own window.",
         ShortcutId::Outline(_) => "Available when the Outline has focus.",
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.

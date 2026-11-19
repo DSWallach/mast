@@ -89,12 +89,13 @@ pub enum ShortcutId {
     OpenLinear,
     OpenTeamTab,
     OpenTeamTabFromPanel,
+    PopOutSurface,
     Outline(usize),
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 32 + WORK_OUTLINE_SHORTCUTS + 24 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 32 + WORK_OUTLINE_SHORTCUTS + 25 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -146,6 +147,7 @@ impl ShortcutId {
         ShortcutId::OpenLinear,
         ShortcutId::OpenTeamTab,
         ShortcutId::OpenTeamTabFromPanel,
+        ShortcutId::PopOutSurface,
         ShortcutId::Outline(0),
         ShortcutId::Outline(1),
         ShortcutId::Outline(2),
@@ -239,6 +241,7 @@ impl ShortcutId {
             ShortcutId::OpenLinear => "Toggle Inbox column (Linear, GitHub)",
             ShortcutId::OpenTeamTab => "Open Tracker tab",
             ShortcutId::OpenTeamTabFromPanel => "Open Tracker tab from side panel",
+            ShortcutId::PopOutSurface => "Open tab in new window",
             ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL
                 .get(index)
                 .map_or("", |key| key.label()),
@@ -357,6 +360,9 @@ impl ShortcutId {
             ShortcutId::OpenLinear => "mod-shift-e",
             ShortcutId::OpenTeamTab => "mod-alt-t",
             ShortcutId::OpenTeamTabFromPanel => "t",
+            // The active right-pane tab becomes its own window. Free of every
+            // default, fixed and browser chord; also the tab context menu row.
+            ShortcutId::PopOutSurface => "mod-alt-n",
             ShortcutId::Outline(index) => crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index).and_then(|key| crate::shell::work_outline_ui::OUTLINE_NAVIGATION_KEYS.iter().find(|(_, candidate)| candidate == key).map(|(combo, _)| *combo)).unwrap_or(""),
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
@@ -429,6 +435,7 @@ pub struct KeymapConfig {
     pub open_linear: String,
     pub open_team_tab: String,
     pub open_team_tab_from_panel: String,
+    pub pop_out_surface: String,
     /// Overrides for outline actions; absent entries retain all default aliases.
     pub outline_shortcuts: HashMap<String, Vec<String>>,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
@@ -540,6 +547,7 @@ impl Default for KeymapConfig {
             open_linear: ShortcutId::OpenLinear.default_combo().into(),
             open_team_tab: ShortcutId::OpenTeamTab.default_combo().into(),
             open_team_tab_from_panel: ShortcutId::OpenTeamTabFromPanel.default_combo().into(),
+            pop_out_surface: ShortcutId::PopOutSurface.default_combo().into(),
             outline_shortcuts: HashMap::new(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
@@ -601,6 +609,7 @@ impl KeymapConfig {
             ShortcutId::OpenLinear => &self.open_linear,
             ShortcutId::OpenTeamTab => &self.open_team_tab,
             ShortcutId::OpenTeamTabFromPanel => &self.open_team_tab_from_panel,
+            ShortcutId::PopOutSurface => &self.pop_out_surface,
             ShortcutId::Outline(index) => {
                 self.outline_combos(index).into_iter().next().unwrap_or("")
             }
@@ -666,6 +675,7 @@ impl KeymapConfig {
             ShortcutId::OpenLinear => self.open_linear = combo,
             ShortcutId::OpenTeamTab => self.open_team_tab = combo,
             ShortcutId::OpenTeamTabFromPanel => self.open_team_tab_from_panel = combo,
+            ShortcutId::PopOutSurface => self.pop_out_surface = combo,
             ShortcutId::Outline(index) => {
                 if let Some(key) = crate::shell::work_outline_ui::OutlineNavKey::ALL.get(index) {
                     self.outline_shortcuts.insert(

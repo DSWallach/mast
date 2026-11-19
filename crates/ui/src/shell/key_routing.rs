@@ -165,6 +165,13 @@ pub fn apply_keymap(
             Some("TeamPanel && !Composer && !MessageComposer && !PaletteSearch"),
         )]);
     }
+    if !keymap.pop_out_surface.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.pop_out_surface, ShortcutId::PopOutSurface.default_combo()),
+            PopOutSurface,
+            None,
+        )]);
+    }
     crate::browser::bind_keys(cx, keymap);
     // ⌘F / ⌘G / ⇧⌘G inside an Artifact tab (after the global ⌘F above).
     crate::artifacts::tab::bind_keys(cx);

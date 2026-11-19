@@ -92,6 +92,7 @@ fn prepare_quit(cx: &mut App) {
                 .unwrap_or(false);
         }
     }
+    ready &= crate::popout::prepare_quit(cx);
     if ready {
         quit_after_save(cx);
     }
@@ -123,7 +124,7 @@ fn close_active_window(cx: &mut App) {
                     }
                 })
                 .ok();
-        } else {
+        } else if !crate::popout::close_active(window, cx) {
             window
                 .update(cx, |_, window, _| window.remove_window())
                 .ok();

@@ -77,6 +77,7 @@ mod perf;
 mod startup_measurement;
 pub mod pickers;
 pub mod popover;
+pub mod popout;
 pub(crate) mod pr_page;
 pub(crate) mod pr_review_launch;
 pub(crate) mod branch_review_launch;

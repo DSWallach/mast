@@ -126,6 +126,7 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 mod start_chat_ui;
 mod tabs;
+mod popout_host;
 mod titlebar;
 #[cfg(test)] use titlebar::{titlebar_new_session_alpha, titlebar_island_vertical_geometry, titlebar_right_padding, TITLEBAR_CLUSTER_PAD};
 pub use titlebar::{titlebar_cluster_start, titlebar_spacer_width, caption_buttons_width, cluster_buttons_start, cluster_clearance, TITLEBAR_CONTROL_GAP, TITLEBAR_GROUP_GAP, TITLEBAR_IDENTITY_GAP, TITLEBAR_ACTION_EDGE_INSET, CLUSTER_BUTTONS_WIDTH, TITLEBAR_ACTION_SLOT_WIDTH, TITLEBAR_TRAILING_SLOTS_WIDTH};
@@ -176,6 +177,7 @@ actions!(
         OpenItemTab,
         OpenTeamTab,
         OpenTeamTabFromPanel,
+        PopOutSurface,
         ToggleItemCard,
         ToggleRunningChats
     ]
@@ -525,6 +527,8 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    /// The surface-tab context menu (Open in new window / Close tab).
+    right_tab_menu: popover::Popup<RightSurface>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1081,6 +1085,7 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            right_tab_menu: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),

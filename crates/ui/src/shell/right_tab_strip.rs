@@ -65,6 +65,13 @@ impl Render for SurfaceTabTooltip {
     }
 }
 impl Shell {
+    pub(super) fn close_right_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.right_tab_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_tab_menu);
+        }
+        cx.notify();
+    }
+
     pub(super) fn close_right_plus(&mut self, cx: &mut Context<Self>) {
         if self.right_plus.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
@@ -238,6 +245,18 @@ impl Shell {
                     this.set_right_active(surface, cx);
                     this.focus_right_file_editor(surface, window, cx);
                 }))
+                // Right-click: Open in new window / Close.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.can_pop_out(surface) || surface != RightSurface::Review {
+                            this.right_tab_menu.open(surface);
+                            this.close_right_plus(cx);
+                        }
+                        cx.notify();
+                    }),
+                )
                 // Middle-click closes, like every tab strip.
                 .on_mouse_down(
                     gpui::MouseButton::Middle,
@@ -338,6 +357,58 @@ impl Shell {
                     chip.child(
                         crate::components::shell_parts::surface_dirty_indicator(&theme),
                     )
+                })
+                .when(self.right_tab_menu.get() == Some(&surface), |chip| {
+                    let closing = self.right_tab_menu.closing_since();
+                    let can_pop = self.can_pop_out(surface);
+                    let menu = popover::popover_card(&theme)
+                        .w(px(200.0))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_tab_menu(cx)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .when(can_pop, |menu| {
+                                    menu.child(
+                                        popover::menu_row(&theme, false, "right-tab-popout")
+                                            .id("right-tab-popout-row")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.close_right_tab_menu(cx);
+                                                this.pop_out_surface(surface, cx);
+                                            }))
+                                            .child(
+                                                icon(icons::ARROW_UP_RIGHT)
+                                                    .size(px(13.0))
+                                                    .text_color(theme.text_muted),
+                                            )
+                                            .child(SharedString::from("Open in new window")),
+                                    )
+                                })
+                                .when(surface != RightSurface::Review, |menu| {
+                                    menu.child(
+                                        popover::menu_row(&theme, false, "right-tab-close")
+                                            .id("right-tab-close-row")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.close_right_tab_menu(cx);
+                                                this.close_right_surface(surface, window, cx);
+                                            }))
+                                            .child(
+                                                icon(icons::CLOSE)
+                                                    .size(px(13.0))
+                                                    .text_color(theme.text_muted),
+                                            )
+                                            .child(SharedString::from("Close tab")),
+                                    )
+                                }),
+                        )
+                        .into_any_element();
+                    chip.relative().child(popover::anchored_menu_below_gap(
+                        "right-tab-menu",
+                        menu,
+                        closing,
+                        10.0,
+                    ))
                 });
             // Sliding transform while a sibling drags over (the terminal
             // drawer's exact recipe): animate 150ms between committed
