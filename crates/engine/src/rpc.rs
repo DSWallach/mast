@@ -1202,6 +1202,12 @@ impl EngineRpc {
 
     /// Replace the external tools `StartPrReview` shells out to (tests point
     /// `gh` at a fake and pin `WORKSPACE_WORKTREES_DIR`).
+    /// Test seam: fail the next launch right after `step`, as a crash would.
+    #[doc(hidden)]
+    pub fn inject_launch_fault(&self, step: Option<crate::work_outline_launch::LaunchStep>) {
+        self.launch.inject_fault(step);
+    }
+
     pub fn with_pr_review_tools(mut self, tools: crate::pr_review_launch::PrReviewTools) -> Self {
         self.pr_review = self.pr_review.clone().with_tools(tools);
         self
@@ -1915,6 +1921,24 @@ impl EngineRpc {
                     "Update Mast on {} and reconnect to hand off this chat.",
                     self.device_label(target)
                 )));
+            }
+            // An older host would start the successor and move workers but
+            // leave the role on the predecessor, so a role chat needs a host
+            // that moves roles.
+            let chat_id = params.get("chatId").and_then(|v| v.as_str()).unwrap_or_default();
+            if self.workspace.chat_in_standing_role(chat_id) {
+                let role_capable = self.workspace.read_devices().ok().is_some_and(|devices| {
+                    devices.iter().any(|device| {
+                        device.id == target
+                            && device.supports(mast_proto::capabilities::STANDING_ROLE_HANDOFF_V1)
+                    })
+                });
+                if !role_capable {
+                    return Err(RpcError::Failed(format!(
+                        "Update Mast on {} and reconnect to hand off this manager or assistant chat.",
+                        self.device_label(target)
+                    )));
+                }
             }
         }
         let Some(links) = &self.links else {
@@ -3814,7 +3838,7 @@ impl RpcService for EngineRpc {
                 let source = self.workspace.chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
-                if source.archived {
+                if source.archived && !source.is_standing_role_predecessor() {
                     return Err(RpcError::Failed("An archived chat cannot hand off orchestration".into()));
                 }
                 if source.device_id != self.workspace.device_id() {

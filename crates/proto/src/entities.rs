@@ -410,9 +410,20 @@ pub struct Chat {
     /// Engine-owned, stamped at import; the sidebar groups these together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task: Option<String>,
+    /// Set once a standing role (manager/assistant) has rotated away from this
+    /// chat: the chat that took over. Derived from the role's chain and
+    /// written in the same registry batch as the rotation, so views can hide
+    /// predecessors without loading roles. Write-once; never cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_role_successor: Option<String>,
 }
 
 impl Chat {
+    /// True when this chat on a standing role's chain was superseded.
+    pub fn is_standing_role_predecessor(&self) -> bool {
+        self.standing_role_successor.is_some()
+    }
+
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
@@ -1536,6 +1547,7 @@ mod tests {
             actual_model: actual.map(str::to_owned),
             scheduled_task: None,
             scheduled_task_info: None,
+            standing_role_successor: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

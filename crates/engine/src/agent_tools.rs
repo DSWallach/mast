@@ -2708,7 +2708,9 @@ impl AgentToolsService {
         let work_item_id = context.require_item("handing off orchestration")?;
         let caller = self.workspace.chat(&context.grant.chat_id).ok().flatten()
             .ok_or_else(AgentToolError::unauthenticated)?;
-        if caller.archived {
+        // A standing role archives its chat when it rotates; a retry of that
+        // hand-off must reach the launch, which replays or refuses it.
+        if caller.archived && !caller.is_standing_role_predecessor() {
             return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
         }
         let source = context.grant.chat_id.clone();

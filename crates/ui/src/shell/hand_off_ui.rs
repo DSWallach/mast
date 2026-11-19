@@ -166,6 +166,10 @@ impl Shell {
     }
 }
 
+/// The archive choice does not apply to a project's manager or the assistant:
+/// the engine moves the role to the successor and archives the source itself.
+const ROLE_ARCHIVE_NOTE: &str = "A manager or assistant chat is always archived when it hands off, whatever you choose above.";
+
 fn hand_off_summary(title: Option<&str>) -> String {
     format!("Continue {}. Read the source chat and work item for context, instructions, and any active workers.", title.unwrap_or("this work"))
 }
@@ -184,6 +188,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         .child(div().id("hand-off-archive").mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
             if let Some(WorkOutlineModal::HandOff(dialog)) = this.work_outline_modal.as_mut() { dialog.archive = !dialog.archive; cx.notify(); }
         })).child(SharedString::from(if dialog.archive { "☑ Archive this chat after hand-off" } else { "☐ Archive this chat after hand-off" })))
+        .child(div().id("hand-off-role-note").mt(px(4.0)).text_color(theme.text_muted).child(SharedString::from(ROLE_ARCHIVE_NOTE)))
         .when_some(dialog.error.clone(), |card, error| card.child(div().mt(px(8.0)).text_color(theme.warning).child(SharedString::from(error))))
         .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
             .child(popover::btn_ghost(theme, "Cancel", "hand-off-cancel").id("hand-off-cancel").on_click(cx.listener(|this, _, window, cx| { this.cancel_work_outline_modal(window, cx); })))

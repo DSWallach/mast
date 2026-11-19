@@ -490,6 +490,80 @@ async fn handoff_routes_to_the_source_host_and_requires_its_capability() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn role_handoff_needs_a_host_that_moves_roles_but_plain_handoff_does_not() {
+    use mast_proto::StandingRoleKind;
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b.workspace.create_space("role-space", "device-b", cwd.to_str().unwrap(), None, false).unwrap();
+    for id in ["role-remote", "plain-remote"] {
+        core_b.workspace.create_chat(id, Some("role-space"), None, None, None).unwrap();
+    }
+    let item = core_b.workspace.ensure_chat_work_item("role-remote").unwrap();
+    let role = core_b.workspace.adopt_standing_role(StandingRoleKind::Manager, &item, "role-remote", &[]).unwrap();
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    for id in ["role-remote", "plain-remote"] {
+        core_a.workspace.import_chat_row(&core_b.workspace.chat(id).unwrap().unwrap()).unwrap();
+    }
+    // The role row reaches device A the way production rows do: through the registry.
+    let row = core_b.workspace.registry_row(mast_doc::registry::KIND_STANDING_ROLES, &role.id).unwrap();
+    assert!(core_a.workspace.apply_registry_rows(row.seq.max(1), vec![row]));
+    assert_eq!(core_a.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-remote"));
+
+    // Device B advertises plain hand-off support, as a build before roles did.
+    let mut device = core_b.workspace.read_devices().unwrap().into_iter().find(|d| d.id == "device-b").unwrap();
+    device.capabilities = vec![mast_proto::capabilities::CHAT_HANDOFF_V1.into()];
+    core_a.workspace.upsert_device_row(&device);
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(config));
+    let client = mast_rpc::memory_client(core_a.rpc_service());
+
+    let chats_before = core_b.workspace.read_chats().unwrap().len();
+    let role_params = serde_json::json!({"chatId":"role-remote", "summary":"Continue the role", "operationId":"role-remote-op"});
+    for explicit_target in [false, true] {
+        let mut request = role_params.clone();
+        if explicit_target {
+            request["targetDeviceId"] = "device-b".into();
+        }
+        let error = client.call(methods::HAND_OFF_ORCHESTRATOR, request).await.unwrap_err();
+        assert!(error.to_string().contains("manager or assistant"), "{error}");
+    }
+    assert_eq!(core_b.workspace.read_chats().unwrap().len(), chats_before, "nothing was started");
+    assert_eq!(core_b.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some("role-remote"));
+
+    // An ordinary chat on the same host still hands off.
+    let plain = loop_hand_off(&client, serde_json::json!({"chatId":"plain-remote", "summary":"Continue plainly", "operationId":"plain-remote-op"})).await;
+    assert!(core_b.workspace.chat(plain["chatId"].as_str().unwrap()).unwrap().is_some());
+
+    // Once the host advertises role hand-off, the role chat goes through and the role moves.
+    device.capabilities.push(mast_proto::capabilities::STANDING_ROLE_HANDOFF_V1.into());
+    core_a.workspace.upsert_device_row(&device);
+    let reply = loop_hand_off(&client, role_params).await;
+    let successor = reply["chatId"].as_str().unwrap();
+    assert_eq!(core_b.workspace.standing_role_chat(StandingRoleKind::Manager, &item).as_deref(), Some(successor));
+    assert!(core_b.workspace.chat("role-remote").unwrap().unwrap().is_standing_role_predecessor());
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+async fn loop_hand_off(client: &mast_rpc::RpcClient, params: serde_json::Value) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match client.call(methods::HAND_OFF_ORCHESTRATOR, params.clone()).await {
+            Ok(reply) => return reply,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "{error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkout_change_request_stream_matches_locally_and_through_device_routing() {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");

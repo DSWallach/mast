@@ -146,6 +146,7 @@ impl Shell {
             .filter(|chat| {
                 chat.parent_chat_id.is_none()
                     && !chat.is_side_chat()
+                    && !chat.is_standing_role_predecessor()
                     && chat
                         .space_id
                         .as_deref()

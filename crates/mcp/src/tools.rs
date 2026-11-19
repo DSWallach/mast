@@ -1239,6 +1239,9 @@ impl Tools {
             let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
             chats.retain(|c| c.device_id == device);
         }
+        // Predecessors of a standing role stay readable by id (`read_chat`)
+        // but are never listed, archived or not.
+        chats.retain(|c| !c.is_standing_role_predecessor());
         if !args.include_archived {
             chats.retain(|c| !c.archived);
         }
@@ -1718,6 +1721,7 @@ impl Tools {
                 actual_model: None,
                 scheduled_task: None,
                 scheduled_task_info: None,
+                standing_role_successor: None,
                 parent_chat_id: parent_chat_id.clone(),
                 side_of: None,
                 side_absorbed_through: None,
