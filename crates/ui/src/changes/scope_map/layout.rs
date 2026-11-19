@@ -34,6 +34,8 @@ pub(super) struct Tile {
     pub bounds: Rect,
 }
 
+const MIN_TILE: f32 = 16.0;
+
 impl Folder {
     fn weight(&self) -> u64 {
         self.files.iter().map(|f| f.weight.max(1)).sum::<u64>()
@@ -59,10 +61,40 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         let mut files = Vec::new();
         collect(root, &mut files);
         if !files.is_empty() {
-            let total: u64 = files.iter().map(|file| file.weight.max(1)).sum();
+            let minimum = MIN_TILE.min(bounds.width / files.len() as f32);
+            let mut widths = vec![0.0; files.len()];
+            let mut remaining = bounds.width;
+            let mut pending: Vec<usize> = (0..files.len()).collect();
+            loop {
+                let total: u64 = pending
+                    .iter()
+                    .map(|&index| files[index].weight.max(1))
+                    .sum();
+                if pending.is_empty() {
+                    break;
+                }
+                let small: Vec<_> = pending
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        remaining * files[index].weight.max(1) as f32 / (total as f32) < minimum
+                    })
+                    .collect();
+                if small.is_empty() {
+                    for index in pending {
+                        widths[index] =
+                            remaining * files[index].weight.max(1) as f32 / total as f32;
+                    }
+                    break;
+                }
+                for index in small {
+                    widths[index] = minimum;
+                    remaining -= minimum;
+                    pending.retain(|item| *item != index);
+                }
+            }
             let mut x = bounds.x;
-            for file in &files {
-                let width = bounds.width * file.weight.max(1) as f32 / total as f32;
+            for (file, width) in files.iter().zip(widths) {
                 result.push(Tile {
                     kind: TileKind::File(file.id),
                     bounds: Rect { x, width, ..bounds },
@@ -85,20 +117,49 @@ pub(super) fn layout(root: &Folder, bounds: Rect) -> Vec<Tile> {
         } else {
             files.len()
         };
-        let mut items: Vec<_> = files[..keep].iter().map(|f| Item::File(f)).collect();
-        if keep < files.len() {
-            items.push(Item::More(files[keep..].to_vec()));
-        }
-        items.extend(folder.folders.iter().map(Item::Folder));
-        let weights: Vec<_> = items
-            .iter()
-            .map(|item| match item {
-                Item::File(file) => file.weight.max(1),
-                Item::More(files) => files.iter().map(|f| f.weight.max(1)).sum(),
-                Item::Folder(child) => child.weight(),
-            })
-            .collect();
-        for (item, rect) in items.into_iter().zip(squarify(&weights, bounds)) {
+        let mut visible = files[..keep].to_vec();
+        let mut more = files[keep..].to_vec();
+        let (items, rects) = loop {
+            let mut items: Vec<_> = visible.iter().copied().map(Item::File).collect();
+            if !more.is_empty() {
+                items.push(Item::More(more.clone()));
+            }
+            items.extend(folder.folders.iter().map(Item::Folder));
+            let weights: Vec<_> = items
+                .iter()
+                .map(|item| match item {
+                    Item::File(file) => file.weight.max(1),
+                    Item::More(files) => files.iter().map(|f| f.weight.max(1)).sum(),
+                    Item::Folder(child) => child.weight(),
+                })
+                .collect();
+            let rects = squarify(&weights, bounds);
+            let too_small: Vec<_> = rects[..visible.len()]
+                .iter()
+                .map(|rect| rect.width < MIN_TILE || rect.height < MIN_TILE)
+                .collect();
+            if too_small.iter().any(|small| *small) {
+                let mut index = 0;
+                visible.retain(|file| {
+                    let small = too_small[index];
+                    index += 1;
+                    if small {
+                        more.push(*file);
+                    }
+                    !small
+                });
+            } else if !more.is_empty()
+                && !visible.is_empty()
+                && rects
+                    .get(visible.len())
+                    .is_some_and(|rect| rect.width < MIN_TILE || rect.height < MIN_TILE)
+            {
+                more.push(visible.pop().unwrap());
+            } else {
+                break (items, rects);
+            }
+        };
+        for (item, rect) in items.into_iter().zip(rects) {
             match item {
                 Item::File(file) => result.push(Tile {
                     kind: TileKind::File(file.id),
@@ -270,7 +331,7 @@ mod tests {
             },
         );
         assert_eq!(tiles.len(), 2);
-        assert!((tiles[0].bounds.width - 200.0 / 101.0).abs() < 0.001);
+        assert_eq!(tiles[0].bounds.width, MIN_TILE);
         assert_eq!(tiles[1].bounds.x, tiles[0].bounds.width);
     }
 
@@ -304,12 +365,42 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(more.len(), 701);
+        assert!(more.len() >= 701);
         assert!(more.contains(&0));
         assert!(
             tiles
                 .iter()
                 .all(|tile| tile.bounds.width > 0.0 && tile.bounds.height > 0.0)
+        );
+    }
+
+    #[test]
+    fn small_files_are_grouped_into_usable_tiles() {
+        let folder = Folder {
+            files: (0..80)
+                .map(|id| Entry {
+                    id,
+                    weight: if id == 0 { 1000 } else { 1 },
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let tiles = layout(
+            &folder,
+            Rect {
+                width: 400.0,
+                height: 300.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            tiles
+                .iter()
+                .any(|tile| matches!(tile.kind, TileKind::More(_)))
+        );
+        assert!(
+            tiles.iter().all(|tile| tile.bounds.width >= MIN_TILE - 0.01
+                && tile.bounds.height >= MIN_TILE - 0.01)
         );
     }
 }
