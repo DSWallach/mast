@@ -3288,11 +3288,10 @@ async fn concurrent_publishes_give_a_receipt_only_to_the_invocation_that_inserte
     assert!(receipts[0].is_some() && receipts[1].is_some() && receipts[0] != receipts[1], "{receipts:?}");
 }
 
-/// The status is owed by the order things complete in, through the real tool
-/// path: a publish covers what completed before it, and neither a replay nor an
-/// unchanged document covers a later change.
+/// Manual publication and replay continue through the real tool path without
+/// retaining reminder tracking state.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_owed_status_follows_completion_order_through_the_real_tool_path() {
+async fn manual_status_publications_do_not_retain_reminder_tracking() {
     let rig = rig().await;
     rig.core
         .workspace
@@ -3309,20 +3308,20 @@ async fn the_owed_status_follows_completion_order_through_the_real_tool_path() {
     };
     // Change then publish: covered.
     change("c1").await;
-    assert!(owes());
+    assert!(!owes());
     let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
     assert_eq!(first["revision"], 1);
     assert!(!owes(), "a publish after the change covers it");
     // Publish then change: the checkpoint does not cover the later change.
     change("c2").await;
-    assert!(owes());
+    assert!(!owes());
     // A replay of the earlier publish returns its old revision: not a new checkpoint.
     let replay = publish(&rig, &rig.token, status_args(&status_document("09:00"), "p1")).await;
     assert_eq!(replay["revision"], 1);
-    assert!(owes(), "a replay does not cover a later change");
+    assert!(!owes(), "a replay creates no tracking state");
     // An unchanged document under a new key records nothing: still owed.
     publish(&rig, &rig.token, status_args(&status_document("09:00"), "p2")).await;
-    assert!(owes(), "an unchanged document does not cover a later change");
+    assert!(!owes(), "an unchanged document creates no tracking state");
     // A genuinely new revision does.
     let third = publish(&rig, &rig.token, status_args(&status_document("09:10"), "p3")).await;
     assert_eq!(third["revision"], 2);

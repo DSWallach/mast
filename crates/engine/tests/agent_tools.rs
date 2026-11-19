@@ -5458,6 +5458,7 @@ async fn manager_changes_do_not_create_reminders_and_manual_publish_still_works(
         "content": status_document("09:00")
     })).await.unwrap();
     assert_eq!(published["revision"], 1);
+    assert!(rig.core.sessions.agent_tokens().manager_status().tracked_chat_ids().is_empty());
     // An additional uncovered mutation makes the no-reminder check meaningful.
     tool(&rig, &token, "work_outline_create_child", json!({ "title": "Later task", "idempotencyKey": "disabled-w2" })).await.unwrap();
     rig.harness.release.notify_one();
@@ -5477,13 +5478,32 @@ async fn disabled_reminders_preserve_ordinary_queue_rows() {
     rig.core.doc_host.pause_all_queues();
     let text = mast_proto::manager_status_nudge_text(0);
     rig.core.doc_host.queue_message_with_id(CHAT, "user-copy", &text, Vec::new(), true).await.unwrap();
-    rig.core.sessions.agent_tokens().manager_status().changed(CHAT);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let rows = handle.doc().read_queue().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "user-copy");
     assert_eq!(rows[0].text, text);
     assert_eq!(nudges(&rig), 0);
+}
+
+/// Successful calls by many non-Managers must not leave tracker entries after
+/// their chats are deleted while automatic reminders are disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleted_non_manager_chat_churn_does_not_accumulate_status_tracking() {
+    let rig = rig().await;
+    let item = create_item(&rig, "status-churn-root", "Churn", None).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    for n in 0..24 {
+        let chat = format!("status-churn-{n}");
+        rig.core.workspace.create_chat(&chat, Some(SPACE), Some(&rig.core.device_id), None, None).unwrap();
+        assign_chat(&rig, &format!("status-churn-assign-{n}"), &chat, &item).await;
+        let lease = tokens.mint(&chat, &format!("status-churn-run-{n}"), SPACE, &rig.core.device_id);
+        tool(&rig, lease.token(), "work_outline_create_child", json!({
+            "title": format!("Child {n}"), "idempotencyKey": format!("status-churn-child-{n}")
+        })).await.unwrap();
+        assert!(rig.core.workspace.delete_chat(&chat).unwrap());
+    }
+    assert!(tokens.manager_status().tracked_chat_ids().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5649,7 +5669,7 @@ async fn adopting_a_manager_does_not_trigger_a_reminder() {
         .unwrap();
     // The call had no turn behind it: it is its own turn, placed in the project
     // from the provisional marker, and owed outright because the chat holds nothing.
-    assert!(tokens.manager_status().owes(first), "the change is held for adoption");
+    assert!(!tokens.manager_status().owes(first), "disabled tracking retains no obligation");
     // The turn ends before the chat is adopted.
     drop(lease);
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -5682,7 +5702,7 @@ async fn rotating_a_manager_does_not_trigger_a_reminder() {
         .unwrap();
     // The call had no turn behind it: the reserved hand-off places it in the
     // project, and it is held for the successor because the chat holds nothing yet.
-    assert!(tokens.manager_status().owes(successor), "the change is held for adoption");
+    assert!(!tokens.manager_status().owes(successor), "disabled tracking retains no obligation");
     drop(lease);
     // Nothing expires the reservation, so a rotation long after the turn ended
     // (here, dozens of re-checks later) is still honored.
@@ -6417,7 +6437,7 @@ async fn a_manager_edits_only_its_projects_outline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn interrupted_admin_batch_counts_committed_step_and_retry_only_new_work() {
+async fn interrupted_admin_batch_retries_without_status_tracking() {
     let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);
     let tokens = rig.core.sessions.agent_tokens();
@@ -6430,18 +6450,18 @@ async fn interrupted_admin_batch_counts_committed_step_and_retry_only_new_work()
     tracker.set_test_hook(Some(Arc::new(|event, _| event == "admin_after_commit")));
     assert!(admin(&rig, &token, steps.clone()).await.is_err());
     tracker.set_test_hook(None);
-    assert_eq!(tracker.generation(CHAT), start + 1);
+    assert_eq!(tracker.generation(CHAT), start);
     assert_eq!(title_of(&rig, &p.ticket), "First committed");
     rig.core.workspace.flush();
     rig.service.work_outline().clear_recent_for_test();
     admin(&rig, &token, steps.clone()).await.unwrap();
-    assert_eq!(tracker.generation(CHAT), start + 2, "retry counts only the new second step");
+    assert_eq!(tracker.generation(CHAT), start, "disabled tracking retains no generation");
     admin(&rig, &token, steps).await.unwrap();
-    assert_eq!(tracker.generation(CHAT), start + 2, "durable replay adds nothing");
+    assert_eq!(tracker.generation(CHAT), start, "durable replay retains no generation");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn admin_status_generation_counts_commits_and_bulk_approval_but_not_replays() {
+async fn admin_commits_and_approval_do_not_create_status_tracking() {
     let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);
     let tokens = rig.core.sessions.agent_tokens();
@@ -6451,22 +6471,22 @@ async fn admin_status_generation_counts_commits_and_bulk_approval_but_not_replay
         {"op": "rename", "itemId": p.ticket, "title": "Committed"}
     ]});
     admin(&rig, &token, rename.clone()).await.unwrap();
-    assert_eq!(generation(), start + 1);
+    assert_eq!(generation(), start);
     // A lost response and retry reaches the durable replay boundary.
     admin(&rig, &token, rename).await.unwrap();
-    assert_eq!(generation(), start + 1);
+    assert_eq!(generation(), start);
     admin(&rig, &token, json!({ "idempotencyKey": "same-title", "steps": [
         {"op": "rename", "itemId": p.ticket, "title": "Committed"}
     ]})).await.unwrap();
-    assert_eq!(generation(), start + 1, "a no-op does not owe another status");
+    assert_eq!(generation(), start, "a no-op creates no tracking state");
     let steps: Vec<Value> = (0..11).map(|i| json!({"op":"rename", "itemId":p.ticket, "title":format!("Bulk {i}")})).collect();
     let preview = json!({"idempotencyKey":"status-bulk", "dryRun":true, "steps":steps});
     let asked = admin(&rig, &token, preview.clone()).await.unwrap();
     assert_eq!(asked["needsApproval"], true);
-    assert_eq!(generation(), start + 2, "creating the Required Action is a change");
+    assert_eq!(generation(), start, "creating a Required Action creates no tracking state");
     let repeated = admin(&rig, &token, preview).await.unwrap();
     assert_eq!(asked["requestId"], repeated["requestId"]);
-    assert_eq!(generation(), start + 2, "replayed approval is not another change");
+    assert_eq!(generation(), start, "replayed approval creates no tracking state");
 }
 
 #[tokio::test(flavor = "multi_thread")]

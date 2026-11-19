@@ -1164,21 +1164,9 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
-        // The Manager status is kept current by the order things complete in:
-        // a successful state-changing call advances the chat's generation, and a
-        // publish that really inserted a new revision covers what had completed
-        // before it was admitted, nothing after.
-        let chat_id = &context.grant.chat_id;
-        let admitted_generation = (params.tool == tools::ARTIFACT_PUBLISH)
-            .then(|| self.tokens.manager_status().generation(chat_id));
+        // Reminder tracking is disabled along with the watcher. In particular,
+        // ordinary tool calls must not retain per-chat state indefinitely.
         let result = self.dispatch(&context, &params.tool, &arguments);
-        if (result.is_ok() && crate::manager_status::is_state_changing(&params.tool))
-            || context.admin_committed.get() {
-            self.tokens.manager_status().changed(chat_id);
-        }
-        if let (Some(admitted), Some(revision)) = (admitted_generation, context.publish_receipt.take()) {
-            self.tokens.manager_status().published(chat_id, revision, admitted);
-        }
         result
             .map_err(|error| match error {
                 AgentToolError::Refused {
