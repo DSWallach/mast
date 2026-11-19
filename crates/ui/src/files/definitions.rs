@@ -256,6 +256,56 @@ mod tests {
         assert_eq!(transport.queries.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
+    #[derive(Default)]
+    struct DelayedEmptyTransport {
+        sender: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>,
+    }
+    #[async_trait::async_trait]
+    impl super::super::client::WorkspaceFilesTransport for DelayedEmptyTransport {
+        async fn call(&self, _: &str, _: serde_json::Value) -> Result<serde_json::Value, mast_rpc::RpcError> {
+            Ok(serde_json::json!({"matches": [], "truncated": false}))
+        }
+        async fn subscribe(&self, _: &str, _: serde_json::Value) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, mast_rpc::RpcError> {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            *self.sender.lock().unwrap() = Some(sender);
+            Ok(receiver)
+        }
+    }
+
+    #[gpui::test]
+    fn cold_lookup_shows_indexing_then_no_definition_notice(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let transport = Arc::new(DelayedEmptyTransport::default());
+        let context = super::super::client::FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/fixture".into(), checkout_id: Some("checkout".into()) };
+        let client = WorkspaceFilesClient::with_transport(transport.clone(), context.clone());
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
+        let host = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            super::super::FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+        });
+        host.update(cx, |surface, window, cx| {
+            let path = "src/a.rs".to_string();
+            let source = "missing".to_string();
+            let theme = crate::theme::Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(source.clone(), &path, false, &theme, window, cx);
+            editor.update(cx, |editor, cx| editor.set_selected_range(3..3, cx));
+            let mut document = super::super::document::FileDocument::loading(super::super::document::DocumentKey { chat_id: "chat".into(), checkout_id: Some("checkout".into()), path: path.clone() });
+            document.editor = Some(editor);
+            surface.preview.documents.insert(path.clone(), document);
+            surface.preview.active = Some(path.clone());
+            surface.request_context = Some(context.clone());
+            surface.start_definition_lookup(client, DefinitionLookup { path, name: "missing".into(), cursor: 3, source, context }, cx);
+            assert_eq!(surface.definition_notice.as_deref(), Some("Indexing…"));
+        }).unwrap();
+        cx.run_until_parked();
+        transport.sender.lock().unwrap().as_ref().unwrap().try_send(serde_json::json!({"revision": 1})).unwrap();
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("No definition found for missing"))).unwrap();
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        host.update(cx, |surface, _, _| assert!(surface.definition_notice.is_none())).unwrap();
+    }
+
     #[test]
     fn definition_order_prefers_file_directory_and_distance() {
         let source = "src/module/file.rs";
@@ -263,6 +313,14 @@ mod tests {
         paths.sort_by_key(|path| definition_order(source, path, 1));
         assert_eq!(paths, [source, "src/module/other.rs", "src/other.rs", "tests/test.rs"]);
     }
+}
+
+struct DefinitionLookup {
+    path: String,
+    name: String,
+    cursor: usize,
+    source: String,
+    context: super::client::FilesRequestContext,
 }
 
 impl super::FilesSurface {
@@ -293,6 +351,11 @@ impl super::FilesSurface {
         let Some(context) = self.request_context.clone() else { return; };
         let Some(engine) = self.state.read(cx).engine().cloned() else { return; };
         let client = WorkspaceFilesClient::new(engine, context.clone());
+        self.start_definition_lookup(client, DefinitionLookup { path, name, cursor, source: original_source, context }, cx);
+    }
+
+    fn start_definition_lookup(&mut self, client: WorkspaceFilesClient, lookup: DefinitionLookup, cx: &mut gpui::Context<Self>) {
+        let DefinitionLookup { path, name, cursor, source: original_source, context } = lookup;
         self.show_definition_notice("Indexing…".into(), false, cx);
         self.definition_task = Some(cx.spawn(async move |surface, cx| {
             let result = async {
