@@ -6019,6 +6019,8 @@ async fn a_chat_that_is_not_a_manager_is_never_reminded() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.harness.spawns.lock().unwrap().len(), 1);
     assert_eq!(nudges(&rig), 0);
+}
+
 const HAND_CHAT: &str = "chat-hand-started";
 const OUTSIDE_CHAT: &str = "chat-other-project";
 

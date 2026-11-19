@@ -119,8 +119,6 @@ struct Turn {
     /// order the session started them, so a late report about an earlier turn
     /// can never close a later one. `0` for a turn with no session behind it.
     seq: u64,
-    /// The queued message whose delivery started the turn, when one did.
-    source: Option<String>,
     /// The agent token's run that made the turn's state-changing calls, so
     /// that run ending closes the turn. A warm session keeps one token across
     /// many turns; the turn boundaries are the session's, not the token's.
@@ -339,7 +337,7 @@ impl StatusTracker {
         };
         state.turns.insert(
             chat_id.to_owned(),
-            Turn { seq, source: source.map(str::to_owned), run_id: None, baseline, project, owed, ask },
+            Turn { seq, run_id: None, baseline, project, owed, ask },
         );
     }
 
