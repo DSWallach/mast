@@ -462,8 +462,20 @@ pub(crate) fn common_dir_of(git_dir: &Path) -> PathBuf {
 /// Directories walked by [`refs_stamp`].
 const MAX_REF_DIRS: usize = 512;
 
+#[cfg(unix)]
+pub(crate) fn metadata_inode(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn metadata_inode(_metadata: &std::fs::Metadata) -> u64 { 0 }
+
+#[cfg(test)]
+pub(crate) static REF_TIP_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Cheap fingerprint of the branch and remote-tracking refs from file metadata
-/// (no spawn, no ref contents): `packed-refs` mtime and size plus the mtime of
+/// (no spawn, no ref contents): `packed-refs` mtime, size and inode plus the mtime of
 /// every directory under `refs/heads` and `refs/remotes` (nested branches like
 /// `feature/x` included) and of each loose ref file, bounded to
 /// [`MAX_REF_DIRS`] directories. Creating, moving or deleting a ref rewrites
@@ -481,7 +493,9 @@ pub(crate) fn refs_stamp(common_dir: &Path) -> u64 {
     };
     let packed = common_dir.join("packed-refs");
     mtime(&packed).hash(&mut hasher);
-    std::fs::metadata(&packed).map_or(0, |m| m.len()).hash(&mut hasher);
+    let metadata = std::fs::metadata(&packed).ok();
+    metadata.as_ref().map_or(0, |m| m.len()).hash(&mut hasher);
+    metadata.as_ref().map_or(0, metadata_inode).hash(&mut hasher);
     let mut stack = vec![common_dir.join("refs/heads"), common_dir.join("refs/remotes")];
     let mut seen = 0usize;
     while let Some(dir) = stack.pop() {
@@ -539,6 +553,8 @@ impl TipsCache {
 /// dir is `git_dir`, read from the files (packed-refs plus loose refs): no
 /// spawn. Bounded; symbolic refs and unreadable files are skipped.
 pub(crate) fn read_ref_tips(git_dir: &Path) -> Vec<String> {
+    #[cfg(test)]
+    REF_TIP_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let common = common_dir_of(git_dir);
     let mut tips: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {

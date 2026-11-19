@@ -309,6 +309,7 @@ struct RepositoryTips {
 }
 
 struct PackedRefs {
+    inode: u64,
     modified: Option<SystemTime>,
     length: u64,
     refs: HashMap<String, String>,
@@ -931,6 +932,7 @@ fn read_head(inner: &DiffSyncInner, identity: &CheckoutIdentity) -> (Option<Stri
     let sha = loose.or_else(|| {
         let path = common_dir.join("packed-refs");
         let metadata = std::fs::metadata(&path).ok()?;
+        let inode = crate::provenance::metadata_inode(&metadata);
         let modified = metadata.modified().ok();
         let length = metadata.len();
         let mut caches = lock(&inner.packed_refs);
@@ -938,7 +940,7 @@ fn read_head(inner: &DiffSyncInner, identity: &CheckoutIdentity) -> (Option<Stri
             caches.clear();
         }
         let stale = caches.get(&common_dir)
-            .is_none_or(|cache| cache.modified != modified || cache.length != length);
+            .is_none_or(|cache| cache.inode != inode || cache.modified != modified || cache.length != length);
         if stale {
             let packed = std::fs::read_to_string(path).ok()?;
             let refs = packed.lines().take(100_000).filter_map(|line| {
@@ -948,7 +950,7 @@ fn read_head(inner: &DiffSyncInner, identity: &CheckoutIdentity) -> (Option<Stri
             #[cfg(test)]
             let parses = caches.get(&common_dir).map_or(1, |cache| cache.parses + 1);
             caches.insert(common_dir.clone(), PackedRefs {
-                modified, length, refs,
+                inode, modified, length, refs,
                 #[cfg(test)]
                 parses,
             });
@@ -4188,6 +4190,7 @@ mod repository_ref_budget_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_repository_ref_read_budget() {
+        let initial_reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst);
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let repo = root.join("repo");
@@ -4231,7 +4234,7 @@ mod repository_ref_budget_tests {
             }
         }
         let common = common_dir_of(&repo.join(".git"));
-        let reads = lock(&inner.repository_tips).get(&common).unwrap().cache.as_ref().unwrap().reads;
+        let reads = crate::provenance::REF_TIP_READS.load(Ordering::SeqCst) - initial_reads;
         let parses = lock(&inner.packed_refs).get(&common).unwrap().parses;
         assert!(reads <= 2, "tip reads: {reads}");
         assert!(parses <= 2, "packed-refs parses: {parses}");
