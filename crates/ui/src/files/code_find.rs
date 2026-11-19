@@ -237,7 +237,6 @@ impl FilesSurface {
             format!("{} of {count}", find.current + 1)
         };
         let matched = find.matches[find.current].clone();
-        self.record_code_jump(u32::try_from(matched.line + 1).unwrap_or(u32::MAX), cx);
         if let Some(editor) = self
             .preview
             .active
