@@ -86,6 +86,14 @@ In the sidebar, work items and chats have separate two-line rows. Work items use
 
 Press `⌘I` on an item row to open its Details.
 
+## Manager row
+
+Every live (not archived) project shows a **Manager** row first among its children, in the sidebar and the outline. Before the Manager has a chat, the row is a placeholder reading "Starts on your first message", and nothing is running. Click it to open Start Manager, the Start Chat dialog for the project. Sending the first message creates the Manager chat under the project on the Space's device.
+
+The chat is created hidden, the way a replaced Manager chat is hidden, and becomes the Manager only after your first message is queued and saved. Until then it appears in no list, takes no other message, and the row keeps offering Start Manager. If a start is interrupted before then, the next one makes a fresh chat, and the abandoned one stays hidden; a Create New worktree the interrupted start created and recorded is reused by the next start with the same name. If the interruption came before Mast recorded it, Mast refuses the folder as not its own, and you recover by starting again with the existing checkout selected instead of Create New. If a start is interrupted after the message was queued, the next start makes that chat the Manager and tells you the Manager already started and your new message wasn't sent, so the dialog keeps your text. From then on the row shows the chat's model and opens it, and it stays in the same place when the chat is later replaced. The Manager chat appears only in its row, even if it is moved to another work item, and it cannot be deleted from the session menu.
+
+A second start while the Manager exists is refused with the same message, so repeated clicks or retries never create two. A retry of the same attempt returns the same chat. The placeholder is left out of searches and the "Needs interaction" and similar filters, which show only the paths to chats that match; a Manager chat that matches still shows in its row. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
+
 ## Undo
 
 `⌘Z` undoes your last outline change and `⇧⌘Z` redoes it. Undo is kept in memory for this session and only covers changes you made in the UI, not ones an agent made. If the item changed since, Mast refuses and says nothing was changed. **Recent Changes…** in the row menu lists them.

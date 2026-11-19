@@ -6224,8 +6224,27 @@ impl Shell {
         }
     }
 
+    /// Whether `chat_id` is the chat a standing role (a project's Manager)
+    /// currently points at, in any loaded Space.
+    fn holds_standing_role(&self, chat_id: &str, cx: &Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        state.spaces.iter().any(|space| {
+            state.work_outline(&space.id).snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .standing_roles
+                    .iter()
+                    .any(|role| role.current_chat_id.as_deref() == Some(chat_id))
+            })
+        })
+    }
+
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        if self.holds_standing_role(&chat_id, cx) {
+            self.set_sidebar_error("A project's Manager chat can't be deleted");
+            cx.notify();
+            return;
+        }
         self.drop_side_chats_of(&chat_id, cx);
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
@@ -16629,6 +16648,12 @@ impl Shell {
         if std::env::var_os("MAST_PREVIEW_ATTENTION_EMPTY").is_some() {
             self.ensure_overview_page(cx)
                 .update(cx, |page, cx| page.show_snapshot_attention_empty(cx));
+        }
+        if let Ok(manager) = std::env::var("MAST_PREVIEW_MANAGER")
+            && matches!(manager.as_str(), "placeholder" | "chat")
+        {
+            self.ensure_overview_page(cx)
+                .update(cx, |page, cx| page.show_snapshot_manager(manager == "chat", cx));
         }
     }
 

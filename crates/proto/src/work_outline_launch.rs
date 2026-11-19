@@ -102,6 +102,67 @@ pub struct CreateChatForWorkItemParams {
     /// resolved at the first run as usual.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Make the new Chat the holder of this standing role of `workItemId`
+    /// (a project's Manager). The launch refuses when the role already has a
+    /// different Chat, and a retry of the same operation adopts only once.
+    /// Hosts without `standing-role-launch-v1` would drop it, so callers gate on
+    /// that capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_role: Option<crate::StandingRoleKind>,
+}
+
+/// Prefix of the `standingRoleSuccessor` a role's first-start Chat carries
+/// until its first message is queued and the role adopts it. The marker is
+/// what hides the Chat wherever superseded role chats are hidden, so a
+/// partial first start never shows as an ordinary session.
+pub const STANDING_ROLE_PROVISIONAL_PREFIX: &str = "provisional:";
+
+/// The provisional marker's role part for `kind` and `scope_item_id`:
+/// `provisional:<role id>`. A Chat's marker is this tag followed by `|` and the
+/// operation that created it, so recovery knows which command is its launch's.
+pub fn standing_role_provisional_tag(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
+    format!(
+        "{STANDING_ROLE_PROVISIONAL_PREFIX}{}",
+        crate::standing_role_id(kind, scope_item_id)
+    )
+}
+
+/// The marker a first-start Chat created by `operation_id` carries.
+pub fn standing_role_provisional_marker(
+    kind: crate::StandingRoleKind,
+    scope_item_id: &str,
+    operation_id: &str,
+) -> String {
+    format!(
+        "{}|{operation_id}",
+        standing_role_provisional_tag(kind, scope_item_id)
+    )
+}
+
+impl crate::Chat {
+    /// The provisional marker when this Chat is a role's first start that has
+    /// not been adopted yet.
+    pub fn standing_role_provisional(&self) -> Option<&str> {
+        self.standing_role_successor
+            .as_deref()
+            .filter(|marker| marker.starts_with(STANDING_ROLE_PROVISIONAL_PREFIX))
+    }
+
+    /// The operation that created this provisional Chat, whose derived command
+    /// is the only message the Chat may take before it is adopted.
+    pub fn standing_role_provisional_operation(&self) -> Option<&str> {
+        self.standing_role_provisional()?
+            .split_once('|')
+            .map(|(_, operation)| operation)
+    }
+
+    /// Whether this Chat is a not-yet-adopted first start of exactly this role.
+    pub fn is_provisional_for(&self, kind: crate::StandingRoleKind, scope_item_id: &str) -> bool {
+        let tag = standing_role_provisional_tag(kind, scope_item_id);
+        self.standing_role_provisional().is_some_and(|marker| {
+            marker == tag || marker.strip_prefix(tag.as_str()).is_some_and(|rest| rest.starts_with('|'))
+        })
+    }
 }
 
 /// Request a successor for an existing coordinator chat.
@@ -188,6 +249,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn provisional_tag_names_one_role_and_is_not_a_chat_id() {
+        use crate::StandingRoleKind::Manager;
+        let tag = standing_role_provisional_tag(Manager, "item-1");
+        assert_eq!(tag, "provisional:manager:item-1");
+        assert_ne!(tag, standing_role_provisional_tag(Manager, "item-2"));
+        let mut chat: crate::Chat = serde_json::from_value(json!({
+            "id": "c", "deviceId": "d", "archived": false,
+            "createdAt": "2026-01-01T00:00:00Z", "standingRoleSuccessor": tag,
+        }))
+        .unwrap();
+        assert!(chat.is_standing_role_predecessor(), "hidden like a superseded chat");
+        assert!(chat.is_provisional_for(Manager, "item-1"));
+        assert!(!chat.is_provisional_for(Manager, "item-2"));
+        // The marker carries the creating operation, and an item whose id
+        // extends another's is not confused with it.
+        chat.standing_role_successor =
+            Some(standing_role_provisional_marker(Manager, "item-1", "op-a"));
+        assert!(chat.is_provisional_for(Manager, "item-1"));
+        assert_eq!(chat.standing_role_provisional_operation(), Some("op-a"));
+        assert!(!chat.is_provisional_for(Manager, "item"));
+        assert!(!chat.is_provisional_for(Manager, "item-10"));
+        chat.standing_role_successor = Some("successor-chat".into());
+        assert!(chat.standing_role_provisional().is_none());
+    }
+
+    #[test]
     fn create_params_wire_shape() {
         let params = CreateChatForWorkItemParams {
             work_item_id: "item".into(),
@@ -213,6 +300,7 @@ mod tests {
             parent_chat_id: None,
             target_device_id: None,
             account_id: None,
+            standing_role: None,
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(

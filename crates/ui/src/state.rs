@@ -853,6 +853,13 @@ impl Default for AppState {
     }
 }
 
+/// Provisional Manager chats are hidden until activation. An earlier chat
+/// stays visible if the user kept it active during handoff.
+pub(crate) fn chat_hidden_by_standing_role(chat: &Chat) -> bool {
+    chat.standing_role_provisional().is_some()
+        || (chat.archived && chat.is_standing_role_predecessor())
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -1819,6 +1826,7 @@ impl AppState {
         self.chats
             .iter()
             .filter(|c| !c.archived && c.parent_chat_id.is_none() && !c.is_side_chat())
+            .filter(|c| !chat_hidden_by_standing_role(c))
     }
 
     pub(crate) fn restore_composer_target(
@@ -1977,7 +1985,7 @@ impl AppState {
             .chats
             .iter()
             .filter(|c| c.parent_chat_id.is_none() && !c.is_side_chat())
-            .filter(|c| !c.archived || !c.is_standing_role_predecessor())
+            .filter(|c| !chat_hidden_by_standing_role(c))
             .filter(|c| c.scheduled_task_info.is_none() || latest.contains(c.id.as_str()))
             .filter(|c| include_archived || !c.archived)
             .filter(|c| match c.space_id.as_deref() {
@@ -6269,6 +6277,26 @@ mod tests {
     }
 
     #[test]
+    fn a_provisional_manager_chat_is_in_no_session_list() {
+        let mut state = AppState::new();
+        let mut provisional = chat("provisional", 1, None);
+        provisional.standing_role_successor = Some("provisional:manager:project".into());
+        state.apply_chats(vec![chat("ordinary", 0, None), provisional]);
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["ordinary"]);
+        let overview: Vec<&str> = state
+            .overview_chats(Utc::now())
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(overview, ["ordinary"]);
+        assert!(
+            state.chats.iter().any(|c| c.id == "provisional"),
+            "still known by id, so its assignment never reads as missing"
+        );
+    }
+
+    #[test]
     fn open_pane_follows_standing_role_rotation_to_the_current_chat() {
         let mut state = AppState::new();
         let mut first = chat("first", 0, None);
@@ -6285,6 +6313,7 @@ mod tests {
         assert_eq!(state.standing_role_selection_target(), None);
         state.selected_chat = None;
         assert_eq!(state.standing_role_selection_target(), None);
+        assert!(state.visible_chats().any(|chat| chat.id == "second"));
         assert!(
             state
                 .overview_chats_with_archived(Utc::now(), true)

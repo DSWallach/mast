@@ -175,6 +175,7 @@ fn params(rig: &Rig, op: &str, prompt: &str) -> CreateChatForWorkItemParams {
         parent_chat_id: None,
         target_device_id: None,
         account_id: None,
+        standing_role: None,
     }
 }
 
@@ -241,7 +242,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
         work_item_id: derive_id("first-item", roles::ITEM),
         initial_prompt: WorkItemPrompt { text: "scenario:signed-out".into(), attachments: Vec::new() },
         config: Some(mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::ClaudeCode, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
-        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
+        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None, standing_role: None,
     };
     let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
     wait_for(|| core.doc_host.open(&reply.chat_id).ok().and_then(|handle| handle.doc().read_entries().ok()).is_some_and(|entries| entries.iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Error { message, .. } if message == "Authentication failed — sign in to Claude again.")))), "Claude authentication error in transcript").await;
@@ -286,7 +287,7 @@ async fn codex_only_launch_spawns_selected_executable() {
         work_item_id: derive_id("first-item", roles::ITEM),
         initial_prompt: WorkItemPrompt { text: "scenario:publication".into(), attachments: Vec::new() },
         config: Some(mast_proto::ChatConfig { approval_rules: false, harness: HarnessId::Codex, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true }),
-        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None,
+        execution_override: None, worktree_choice: None, operation_id: "first-launch".into(), parent_chat_id: None, target_device_id: None, account_id: None, standing_role: None,
     };
     let reply: CreateChatForWorkItemReply = serde_json::from_value(client.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(request).unwrap()).await.unwrap()).unwrap();
     wait_for(|| core.doc_host.open(&reply.chat_id).ok().and_then(|handle| handle.doc().read_entries().ok()).is_some_and(|entries| entries.iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("Publication turn completed"))))), "fake Codex response in transcript").await;
@@ -1933,5 +1934,515 @@ async fn item_rooted_at_a_nested_repository_runs_its_chat_there() {
         Some(&*ui.to_string_lossy()),
         "the composer's `/` list discovers skills in the chat's cwd"
     );
+    rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Manager: lazy creation of a project's standing role chat
+// ---------------------------------------------------------------------------
+
+async fn mark_project(rig: &Rig) {
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": rig.item,
+                    "changes": { "isProject": true }, "operationId": "op-mark-project" }),
+        )
+        .await
+        .unwrap();
+}
+
+fn manager_params(rig: &Rig, op: &str, prompt: &str) -> CreateChatForWorkItemParams {
+    CreateChatForWorkItemParams {
+        standing_role: Some(mast_proto::StandingRoleKind::Manager),
+        ..params(rig, op, prompt)
+    }
+}
+
+fn manager_chat(rig: &Rig) -> Option<String> {
+    rig.core
+        .workspace
+        .standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item)
+}
+
+fn chat_count(rig: &Rig) -> usize {
+    rig.core.workspace.work_outline_inputs(SPACE).chats.len()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_manager_message_creates_the_chat_and_the_snapshot_shows_the_role() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    assert_eq!(manager_chat(&rig), None, "nothing exists before the first message");
+    assert_eq!(chat_count(&rig), 0);
+
+    let reply = launch(&rig, &manager_params(&rig, "manager-first", "Plan the launch"))
+        .await
+        .unwrap();
+
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    let chat = rig.core.workspace.chat(&reply.chat_id).unwrap().unwrap();
+    assert!(chat.standing_role_provisional().is_none(), "activated: no longer hidden");
+    rig.core.doc_host.persist_chat_now(&reply.chat_id).expect("the chat saves");
+    let role = rig
+        .core
+        .workspace
+        .standing_role(mast_proto::StandingRoleKind::Manager, &rig.item)
+        .unwrap();
+    assert_eq!(role.chain, [reply.chat_id.clone()]);
+    assert_eq!(
+        row_field(&rig, KIND_WORK_ITEM_CHAT_ASSIGNMENTS, &reply.chat_id, "workItemId"),
+        Some(json!(rig.item)),
+        "the Manager chat sits under the project item"
+    );
+    let snapshot = mast_doc::materialize_work_outline(
+        SPACE,
+        &rig.core.workspace.work_outline_inputs(SPACE),
+    );
+    let shown = snapshot
+        .standing_role(mast_proto::StandingRoleKind::Manager, &rig.item)
+        .expect("the outline snapshot carries the role for the Manager row");
+    assert_eq!(shown.current_chat_id.as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_first_start_hands_off_to_one_successor_without_archiving() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let first = manager_params(&rig, "manager-before-handoff", "Start managing");
+    let source = launch(&rig, &first).await.unwrap().chat_id;
+    let params = json!({
+        "chatId": source, "summary": "Continue managing", "archive": false,
+        "operationId": "manager-successor",
+    });
+    let reply = rig
+        .client
+        .call(methods::HAND_OFF_ORCHESTRATOR, params.clone())
+        .await
+        .unwrap();
+    let successor = reply["chatId"].as_str().unwrap();
+    let workspace = &rig.core.workspace;
+    let predecessor = workspace.chat(&source).unwrap().unwrap();
+    assert!(!predecessor.archived);
+    assert_eq!(predecessor.standing_role_successor.as_deref(), Some(successor));
+    assert_eq!(manager_chat(&rig).as_deref(), Some(successor));
+    assert!(workspace.chat(successor).unwrap().unwrap().standing_role_provisional().is_none());
+
+    assert!(launch(&rig, &first).await.is_err());
+    let retry = rig.client.call(methods::HAND_OFF_ORCHESTRATOR, params).await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+    assert_eq!(chat_count(&rig), 2);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_manager_starts_and_retries_never_create_a_second_chat() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let first = manager_params(&rig, "manager-dup", "Plan the launch");
+    let reply = launch(&rig, &first).await.unwrap();
+
+    // A transport retry (same operation id and inputs) returns the same chat.
+    let retry = launch(&rig, &first).await.unwrap();
+    assert_eq!(retry.chat_id, reply.chat_id);
+
+    // A second click in another dialog (new operation id) is refused, not
+    // adopted over, and creates nothing.
+    let second = launch(&rig, &manager_params(&rig, "manager-dup-2", "Plan it again"))
+        .await
+        .unwrap_err();
+    assert_eq!(second.code, WorkOutlineErrorCode::OperationConflict);
+    assert!(second.message.contains("already started"), "{}", second.message);
+    assert!(second.message.contains("wasn't sent"), "{}", second.message);
+
+    assert_eq!(chat_count(&rig), 1);
+    assert!(
+        rig.core
+            .workspace
+            .chat(&derive_id("manager-dup-2", roles::CHAT))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    let role = rig
+        .core
+        .workspace
+        .standing_role(mast_proto::StandingRoleKind::Manager, &rig.item)
+        .unwrap();
+    assert_eq!(role.chain.len(), 1);
+
+    // The operation id is bound to the role: replaying it as a plain launch
+    // is a conflict rather than a second, unadopted chat.
+    let plain = launch(&rig, &params(&rig, "manager-dup", "Plan the launch"))
+        .await
+        .unwrap_err();
+    assert_eq!(plain.code, WorkOutlineErrorCode::OperationConflict);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crash_around_role_adoption_then_retry_yields_one_chat_holding_the_role() {
+    for (index, step) in [LaunchStep::Assigned, LaunchStep::RoleAdopted, LaunchStep::TurnQueued]
+        .into_iter()
+        .enumerate()
+    {
+        let rig = rig().await;
+        mark_project(&rig).await;
+        let launcher = service(&rig);
+        let op = format!("manager-crash-{index}");
+        let prompt = format!("manager crash {index}");
+        let p = manager_params(&rig, &op, &prompt);
+        launcher.inject_fault(Some(step));
+        assert!(launcher.create_chat_for_work_item(&p).await.is_err(), "{step:?} must fail");
+
+        let reply = launcher
+            .create_chat_for_work_item(&p)
+            .await
+            .unwrap_or_else(|e| panic!("retry after {step:?}: {e}"));
+        wait_for(|| turns_with(&rig, &prompt).len() == 1, "the launched turn").await;
+        launcher.create_chat_for_work_item(&p).await.unwrap();
+
+        assert_eq!(chat_count(&rig), 1, "one chat after {step:?}");
+        assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+        let role = rig
+            .core
+            .workspace
+            .standing_role(mast_proto::StandingRoleKind::Manager, &rig.item)
+            .unwrap();
+        assert_eq!(role.chain, [reply.chat_id.clone()], "adopted once after {step:?}");
+        assert_eq!(turns_with(&rig, &prompt).len(), 1, "one Run after {step:?}");
+        rig.core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_launch_for_a_plain_item_is_refused_before_anything_is_written() {
+    let rig = rig().await;
+    let error = launch(&rig, &manager_params(&rig, "manager-plain", "Plan"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, WorkOutlineErrorCode::Invalid);
+    assert!(error.message.contains("Only a project"), "{}", error.message);
+    assert_eq!(chat_count(&rig), 0);
+    assert_eq!(manager_chat(&rig), None);
+    rig.core.shutdown().await;
+}
+
+fn provisional_chats(rig: &Rig) -> Vec<mast_proto::Chat> {
+    rig.core
+        .workspace
+        .provisional_role_chats(mast_proto::StandingRoleKind::Manager, &rig.item)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unstarted_first_chat_is_hidden_takes_no_message_and_does_not_block_a_new_start() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let a = manager_params(&rig, "manager-hide-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+
+    // Hidden wherever superseded role chats are hidden, and not the Manager.
+    let hidden = provisional_chats(&rig);
+    assert_eq!(hidden.len(), 1);
+    assert!(hidden[0].is_standing_role_predecessor());
+    assert_eq!(manager_chat(&rig), None);
+    // An ordinary message cannot reach it.
+    assert!(rig.core.doc_host.queue_message(&hidden[0].id, "hello", Vec::new()).is_err());
+
+    // A later start makes its own chat and becomes the Manager; the abandoned
+    // one stays hidden and never runs anything.
+    let b = manager_params(&rig, "manager-hide-b", "second try");
+    let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
+    assert_ne!(reply.chat_id, hidden[0].id);
+    wait_for(|| turns_with(&rig, "second try").len() == 1, "the second message").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    assert_eq!(provisional_chats(&rig).len(), 1, "the abandoned chat stays hidden");
+    assert!(turns_with(&rig, "first try").is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_unstarted_chat_does_not_block_a_restart() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::ChatCreated));
+    let a = manager_params(&rig, "manager-del-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let doomed = provisional_chats(&rig).remove(0).id;
+    rig.client
+        .call(methods::MUTATE, json!({ "op": "deleteChat", "chatId": doomed }))
+        .await
+        .unwrap();
+
+    let b = manager_params(&rig, "manager-del-b", "second try");
+    let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
+    assert_ne!(reply.chat_id, doomed);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_queued_its_message_is_surfaced_by_the_next_attempt_which_sends_nothing() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::TurnQueued));
+    let a = manager_params(&rig, "manager-rec-a", "queued before the stop");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    wait_for(|| turns_with(&rig, "queued before the stop").len() == 1, "the queued turn").await;
+    assert_eq!(manager_chat(&rig), None, "queued but not yet the Manager");
+    let first = provisional_chats(&rig).remove(0).id;
+
+    // A different first message is refused, but the chat that is already
+    // running becomes the visible Manager, and the new message is not sent.
+    let b = manager_params(&rig, "manager-rec-b", "a different message");
+    let refused = launcher.create_chat_for_work_item(&b).await.unwrap_err();
+    assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
+    assert!(refused.message.contains("wasn't sent"), "{}", refused.message);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(first.as_str()));
+    assert!(provisional_chats(&rig).is_empty());
+    assert_eq!(chat_count(&rig), 1);
+    assert_eq!(user_messages(&rig, &first), 1);
+    assert!(turns_with(&rig, "a different message").is_empty());
+    // The recovery's activation is on disk when the refusal returns.
+    let disk = registry_on_disk(&rig);
+    assert_eq!(
+        disk.standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item).as_deref(),
+        Some(first.as_str())
+    );
+    assert!(disk.chat(&first).unwrap().unwrap().standing_role_provisional().is_none());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::TurnQueued));
+    let a = manager_params(&rig, "manager-rst-a", "queued before the restart");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let first = provisional_chats(&rig).remove(0).id;
+    let b = manager_params(&rig, "manager-rst-b", "after the restart");
+    rig.core.workspace.flush();
+    // Drop the first engine so its data-dir lock is released, as a restart does.
+    let old_core = rig.core;
+    old_core.shutdown().await;
+    drop(old_core);
+    drop(launcher);
+
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(rig.mock.clone()));
+    let core = EngineCore::assemble(&rig.root.join("data"), Arc::new(harnesses), HarnessId::Mock, None)
+        .expect("engine core reassembles");
+    assert!(
+        core.doc_host
+            .has_launch_command(&first, &derive_id("manager-rst-a", roles::COMMAND))
+            .unwrap(),
+        "the queued message was saved"
+    );
+    let launcher = WorkItemLaunchService::new(
+        core.workspace.clone(),
+        core.doc_host.clone(),
+        core.sessions.clone(),
+        ExecutionScopeService::new(core.workspace.clone(), core.repos.clone()),
+    );
+    let refused = launcher.create_chat_for_work_item(&b).await.unwrap_err();
+    assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
+    assert_eq!(
+        core.workspace
+            .standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item)
+            .as_deref(),
+        Some(first.as_str())
+    );
+    core.shutdown().await;
+}
+
+/// The directory holding the engine's `docs.sqlite3`, wherever the profile
+/// layout put it under the rig's temp tree.
+fn find_docs_dir(root: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_docs_dir(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|name| name == "docs.sqlite3") {
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
+fn registry_on_disk(rig: &Rig) -> mast_doc::RegistryDoc {
+    let dir = find_docs_dir(&rig.root).expect("the engine's docs database under the rig");
+    let store = mast_sync::DocsStore::open(&dir).expect("a second reader opens the database");
+    let bytes = store
+        .load_snapshot(mast_doc::REGISTRY_DOC_ID)
+        .unwrap()
+        .expect("a saved registry snapshot");
+    mast_doc::RegistryDoc::from_bytes(&bytes, "disk-reader").expect("the snapshot decodes")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provisional_chat_takes_no_continue_queue_or_relayed_message() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let a = manager_params(&rig, "manager-intake-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = provisional_chats(&rig).remove(0).id;
+
+    // The work-item continue path.
+    assert!(continue_chat(&rig, &chat, "continue-op", "sneak in").await.is_err());
+    // A direct queue with a caller-chosen command id (the path agents and
+    // scheduled runs use).
+    let payload = SessionCommandPayload::Run {
+        request: run_request("sneak in", "/tmp"),
+        message_id: "sneak-message".into(),
+    };
+    assert!(rig
+        .core
+        .doc_host
+        .queue_command_with_id(&chat, "sneak-command", payload.clone())
+        .is_err());
+    // A command relayed from another device.
+    let relayed = SessionCommandEntry {
+        id: "relay-command".into(),
+        payload,
+        issued_by: "dev-b".into(),
+        issued_at: 0,
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    assert!(rig.core.doc_host.ingest_relayed_command(&chat, relayed).await.is_err());
+    assert_eq!(commands(&rig, &chat).len(), 0, "nothing reached the chat");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_provisional_chat_and_its_binding_are_on_disk_before_the_message_is_queued() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    // Stop right before the first message is queued, with no flush and no
+    // graceful shutdown: only what the launch itself saved is on disk.
+    launcher.inject_fault(Some(LaunchStep::RegistryPersisted));
+    let a = manager_params(&rig, "manager-disk-a", "queued after the save");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = derive_id("manager-disk-a", roles::CHAT);
+
+    let disk = registry_on_disk(&rig);
+    let row = disk.chat(&chat).unwrap().expect("the chat row is on disk");
+    assert!(row.is_provisional_for(mast_proto::StandingRoleKind::Manager, &rig.item));
+    let inputs = disk.work_outline_inputs(SPACE, true);
+    assert!(inputs.assignments.iter().any(|a| a.id == chat), "the assignment is on disk");
+    assert!(
+        inputs.chat_execution_bindings.iter().any(|b| b.id == chat),
+        "the binding is on disk"
+    );
+    assert!(commands(&rig, &chat).is_empty(), "no message queued yet");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_manager_start_has_its_adoption_on_disk_when_it_returns() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let reply = launch(&rig, &manager_params(&rig, "manager-done", "Plan"))
+        .await
+        .unwrap();
+    // No flush and no shutdown first.
+    let disk = registry_on_disk(&rig);
+    assert_eq!(
+        disk.standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item).as_deref(),
+        Some(reply.chat_id.as_str())
+    );
+    let row = disk.chat(&reply.chat_id).unwrap().unwrap();
+    assert!(row.standing_role_provisional().is_none(), "the marker is cleared on disk too");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_start_reuses_the_clean_worktree_an_interrupted_attempt_created() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::ChatCreated));
+    let mut a = manager_params(&rig, "manager-wt-a", "first try");
+    a.worktree_choice = Some(WorktreeChoice::CreateNew { name: "manager wt".into() });
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+
+    // The next attempt asks for the same name and is not blocked by the
+    // worktree the interrupted one left behind.
+    let mut b = manager_params(&rig, "manager-wt-b", "second try");
+    b.worktree_choice = Some(WorktreeChoice::CreateNew { name: "manager wt".into() });
+    let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
+    assert!(reply.execution_root.contains(".worktrees"), "{}", reply.execution_root);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(reply.chat_id.as_str()));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provisional_chat_drains_its_launch_message_even_when_reissued_and_rejects_others() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    let a = manager_params(&rig, "manager-reissue-a", "first try");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let chat = provisional_chats(&rig).remove(0).id;
+    let handle = rig.core.doc_host.open(&chat).unwrap();
+    let entry = |id: &str, message: String, prompt: &str| SessionCommandEntry {
+        id: id.into(),
+        payload: SessionCommandPayload::Run {
+            request: run_request(prompt, &rig.repo.to_string_lossy()),
+            message_id: message,
+        },
+        issued_by: rig.core.workspace.device_id().to_owned(),
+        // Recent, or the drain expires it as stale.
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    // What a retry of a rejected or expired launch writes: the launch's
+    // message under a NEW command id. And a message nobody authorized.
+    let reissue = entry("reissued-command", derive_id("manager-reissue-a", roles::MESSAGE), "reissued launch");
+    let stray = entry("stray-command", "stray-message".into(), "stray message");
+    handle.doc().queue_command(&reissue).unwrap();
+    handle.doc().queue_command(&stray).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+
+    wait_for(|| turns_with(&rig, "reissued launch").len() == 1, "the reissued launch message").await;
+    assert!(turns_with(&rig, "stray message").is_empty());
+    let stray_entry = commands(&rig, &chat).into_iter().find(|c| c.id == "stray-command").unwrap();
+    assert_eq!(stray_entry.status, SessionCommandStatus::Rejected);
+    assert!(stray_entry.resolution.unwrap_or_default().contains("not started yet"));
+
+    // After the role adopts the chat, a user's Retry Delivery must not
+    // re-issue the refused message: the rejection is final.
+    rig.core
+        .workspace
+        .activate_standing_role_chat(mast_proto::StandingRoleKind::Manager, &rig.item, &chat, &[])
+        .expect("the provisional chat activates");
+    rig.core.doc_host.retry_delivery(&chat).unwrap();
+    rig.core.doc_host.drain_commands(&handle).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(turns_with(&rig, "stray message").is_empty(), "the refused message never ran");
+    let stray_commands: Vec<_> = commands(&rig, &chat)
+        .into_iter()
+        .filter(|c| matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if message_id == "stray-message"))
+        .collect();
+    assert_eq!(stray_commands.len(), 1, "no re-issued attempt: {stray_commands:?}");
+    assert_eq!(stray_commands[0].status, SessionCommandStatus::Rejected);
     rig.core.shutdown().await;
 }

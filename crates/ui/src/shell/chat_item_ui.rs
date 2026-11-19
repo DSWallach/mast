@@ -828,7 +828,7 @@ impl Shell {
                     branch: chat.branch.clone(),
                     harness: None,
                     pr_number: None,
-                    visible: true,
+                    visible: !crate::state::chat_hidden_by_standing_role(chat),
                     activity: chat
                         .last_message_at
                         .unwrap_or(chat.created_at)

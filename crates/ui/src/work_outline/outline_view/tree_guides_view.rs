@@ -47,6 +47,7 @@ fn row_title(row: &OutlineRow) -> Option<&str> {
             Some(label)
         }
         OutlineRowKind::Chat(chat) => Some(&chat.chat.title),
+        OutlineRowKind::Manager(_) => Some("Manager"),
         OutlineRowKind::Notice { .. } => None,
     }
 }

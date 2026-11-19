@@ -1974,6 +1974,15 @@ impl RegistryDoc {
     /// Tombstone: delete the chat row (and its session-status row). The
     /// per-chat session doc remains — this removes the index entry only.
     pub fn delete_chat(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        // A role's chat is the one place the role points; deleting it would
+        // leave the role naming a chat that no longer exists. Rotate it away
+        // (the hand-off archives it) first.
+        if self.standing_role_of_chat(chat_id).is_some() {
+            return Err(DocError::Schema(
+                "this chat holds a standing role (a project's Manager) and cannot be deleted"
+                    .into(),
+            ));
+        }
         let existed = self.row_exists(KIND_CHATS, chat_id);
         let link_ids: Vec<String> = self
             .overlay_rows(KIND_CHAT_PR_LINKS)
