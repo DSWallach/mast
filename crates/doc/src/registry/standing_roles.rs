@@ -90,10 +90,10 @@ impl RegistryDoc {
     }
 
     /// Whether `chat_id` is, or is about to become, a project's Manager: the
-    /// role's current chat, the successor a reserved hand-off names, or the
-    /// bootstrap chat of a project's first start, which the role adopts only
-    /// once its first message is queued. All count, so a Manager's first run
-    /// is restricted before anything has adopted it.
+    /// role's current chat, the successor a reserved hand-off names, or a
+    /// provisional first start of a Manager, which the role adopts only once
+    /// its first message is queued. All count, so a Manager's first run is
+    /// restricted before anything has adopted it.
     pub fn chat_is_manager(&self, chat_id: &str) -> bool {
         let held = self
             .read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
@@ -106,18 +106,17 @@ impl RegistryDoc {
                             .as_ref()
                             .is_some_and(|pending| pending.to_chat_id == chat_id))
             });
-        held || self.is_manager_bootstrap_chat(chat_id)
+        held || self.is_provisional_manager(chat_id)
     }
 
-    fn is_manager_bootstrap_chat(&self, chat_id: &str) -> bool {
+    fn is_provisional_manager(&self, chat_id: &str) -> bool {
+        let manager_prefix = mast_proto::standing_role_provisional_tag(StandingRoleKind::Manager, "");
         self.chat(chat_id)
             .ok()
             .flatten()
-            .and_then(|chat| chat.space_id)
-            .and_then(|space| self.chat_assigned_work_item(chat_id, &space))
-            .is_some_and(|item| {
-                chat_id
-                    == mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item)
+            .is_some_and(|chat| {
+                chat.standing_role_provisional()
+                    .is_some_and(|tag| tag.starts_with(&manager_prefix))
             })
     }
 
@@ -186,6 +185,31 @@ impl RegistryDoc {
         chat_id: &str,
         fallback_chain: &[StandingRoleModel],
     ) -> Result<StandingRole, String> {
+        self.adopt_standing_role_inner(role, scope_item_id, chat_id, fallback_chain, false)
+    }
+
+    /// Adopt the role's provisional first-start chat: the same checks as
+    /// [`Self::adopt_standing_role`], plus the chat must carry this role's
+    /// provisional marker, which the same batch clears so the chat appears
+    /// as the role's chat in one step.
+    pub fn activate_standing_role_chat(
+        &mut self,
+        role: StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[StandingRoleModel],
+    ) -> Result<StandingRole, String> {
+        self.adopt_standing_role_inner(role, scope_item_id, chat_id, fallback_chain, true)
+    }
+
+    fn adopt_standing_role_inner(
+        &mut self,
+        role: StandingRoleKind,
+        scope_item_id: &str,
+        chat_id: &str,
+        fallback_chain: &[StandingRoleModel],
+        activate_provisional: bool,
+    ) -> Result<StandingRole, String> {
         let chat = self
             .chat(chat_id)
             .map_err(|e| e.to_string())?
@@ -217,7 +241,11 @@ impl RegistryDoc {
         if self.standing_role_of_chat(chat_id).is_some() {
             return Err("this chat already holds another role".into());
         }
-        if chat.archived || chat.is_standing_role_predecessor() {
+        let provisional = chat.is_provisional_for(role, scope_item_id);
+        if activate_provisional && !provisional {
+            return Err("only this role's provisional first-start chat can be activated".into());
+        }
+        if chat.archived || (chat.is_standing_role_predecessor() && !activate_provisional) {
             return Err("an archived or superseded chat cannot hold a role".into());
         }
         let record = match existing {
@@ -241,12 +269,21 @@ impl RegistryDoc {
             chain: vec![chat_id.to_owned()],
             ..record
         };
-        self.commit_rows(vec![(
+        let mut rows = vec![(
             KIND_STANDING_ROLES,
             id,
             OpKind::Upsert,
             role_fields(&record),
-        )])?;
+        )];
+        if activate_provisional {
+            rows.push((
+                KIND_CHATS,
+                chat_id.to_owned(),
+                OpKind::Update,
+                fields([("standingRoleSuccessor", Value::Null)]),
+            ));
+        }
+        self.commit_rows(rows)?;
         Ok(record)
     }
 

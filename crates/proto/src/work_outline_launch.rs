@@ -111,22 +111,35 @@ pub struct CreateChatForWorkItemParams {
     pub standing_role: Option<crate::StandingRoleKind>,
 }
 
-/// The identity every record of a role's first launch derives from, in place
-/// of the operation id: the Chat, assignment, binding, revision, application,
-/// first message and command. An interrupted first start and a later one with
-/// another operation id then share one set of records instead of leaving an
-/// ordinary, unadopted Chat beside the Manager. The text contains spaces, which
-/// an operation id never does, so it cannot collide with an ordinary launch.
-pub fn standing_role_launch_scope(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
-    format!("standing role launch {} {scope_item_id}", kind.as_str())
+/// Prefix of the `standingRoleSuccessor` a role's first-start Chat carries
+/// until its first message is queued and the role adopts it. The marker is
+/// what hides the Chat wherever superseded role chats are hidden, so a
+/// partial first start never shows as an ordinary session.
+pub const STANDING_ROLE_PROVISIONAL_PREFIX: &str = "provisional:";
+
+/// The provisional marker of the first-start Chats of `kind` for
+/// `scope_item_id`: `provisional:<role id>`.
+pub fn standing_role_provisional_tag(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
+    format!(
+        "{STANDING_ROLE_PROVISIONAL_PREFIX}{}",
+        crate::standing_role_id(kind, scope_item_id)
+    )
 }
 
-/// The Chat a role's first launch creates.
-pub fn standing_role_bootstrap_chat_id(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
-    crate::work_outline::derive_id(
-        &standing_role_launch_scope(kind, scope_item_id),
-        crate::work_outline::roles::CHAT,
-    )
+impl crate::Chat {
+    /// The provisional marker when this Chat is a role's first start that has
+    /// not been adopted yet.
+    pub fn standing_role_provisional(&self) -> Option<&str> {
+        self.standing_role_successor
+            .as_deref()
+            .filter(|marker| marker.starts_with(STANDING_ROLE_PROVISIONAL_PREFIX))
+    }
+
+    /// Whether this Chat is a not-yet-adopted first start of exactly this role.
+    pub fn is_provisional_for(&self, kind: crate::StandingRoleKind, scope_item_id: &str) -> bool {
+        self.standing_role_provisional()
+            == Some(standing_role_provisional_tag(kind, scope_item_id).as_str())
+    }
 }
 
 /// Request a successor for an existing coordinator chat.
@@ -210,17 +223,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn role_launch_scope_cannot_be_an_operation_id() {
-        let scope = standing_role_launch_scope(crate::StandingRoleKind::Manager, "item-1");
-        assert!(scope.contains(' '), "operation ids never contain spaces");
-        assert_ne!(
-            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-1"),
-            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-2")
-        );
-        assert_ne!(
-            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-1"),
-            crate::work_outline::derive_id("standing-role-bootstrap:manager:item-1", "chat")
-        );
+    fn provisional_tag_names_one_role_and_is_not_a_chat_id() {
+        use crate::StandingRoleKind::Manager;
+        let tag = standing_role_provisional_tag(Manager, "item-1");
+        assert_eq!(tag, "provisional:manager:item-1");
+        assert_ne!(tag, standing_role_provisional_tag(Manager, "item-2"));
+        let mut chat: crate::Chat = serde_json::from_value(json!({
+            "id": "c", "deviceId": "d", "archived": false,
+            "createdAt": "2026-01-01T00:00:00Z", "standingRoleSuccessor": tag,
+        }))
+        .unwrap();
+        assert!(chat.is_standing_role_predecessor(), "hidden like a superseded chat");
+        assert!(chat.is_provisional_for(Manager, "item-1"));
+        assert!(!chat.is_provisional_for(Manager, "item-2"));
+        chat.standing_role_successor = Some("successor-chat".into());
+        assert!(chat.standing_role_provisional().is_none());
     }
 
     #[test]

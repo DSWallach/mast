@@ -1522,17 +1522,22 @@ fn a_managers_revision_stacks_the_role_ahead_of_the_projects_instructions() {
 }
 
 #[test]
-fn a_projects_bootstrap_chat_is_a_manager_before_its_role_adopts_it() {
-    use mast_proto::StandingRoleKind::Manager;
+fn a_provisional_manager_start_is_a_manager_before_its_role_adopts_it() {
+    use mast_proto::StandingRoleKind::{Assistant, Manager};
     let (mut doc, a, _b, _c) = three_levels();
     make_project(&mut doc, "op-proj", &a);
-    let bootstrap = mast_proto::standing_role_bootstrap_chat_id(Manager, &a);
-    doc.upsert_chat(&space_chat(&bootstrap, Some(SPACE))).unwrap();
-    // Not assigned yet, and an ordinary chat on the same item: neither counts.
-    assert!(!doc.chat_is_manager(&bootstrap));
-    assign(&mut doc, "as-boot", &bootstrap, &a);
-    assert!(doc.chat_is_manager(&bootstrap), "no role record exists yet");
+    let mut provisional = space_chat("first", Some(SPACE));
+    provisional.standing_role_successor =
+        Some(mast_proto::standing_role_provisional_tag(Manager, &a));
+    doc.upsert_chat(&provisional).unwrap();
+    assert!(doc.chat_is_manager("first"), "no role record exists yet");
+    assert!(provisional.is_provisional_for(Manager, &a));
+
+    // An assistant's provisional start is not a Manager, nor is a plain chat.
+    let mut other = space_chat("other", Some(SPACE));
+    other.standing_role_successor = Some(mast_proto::standing_role_provisional_tag(Assistant, &a));
+    doc.upsert_chat(&other).unwrap();
+    assert!(!doc.chat_is_manager("other"));
     doc.upsert_chat(&space_chat("plain", Some(SPACE))).unwrap();
-    assign(&mut doc, "as-plain", "plain", &a);
     assert!(!doc.chat_is_manager("plain"));
 }

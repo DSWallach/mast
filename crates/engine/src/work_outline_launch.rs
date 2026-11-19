@@ -329,6 +329,11 @@ fn same_path(a: &str, b: &str) -> bool {
         && canonical_lenient(Path::new(a)) == canonical_lenient(Path::new(b))
 }
 
+/// What a start is told when the Manager already exists (started by an earlier
+/// attempt): the message was not sent, so the dialog keeps its text.
+const MANAGER_ALREADY_STARTED: &str =
+    "This project's Manager already started; your message wasn't sent. Open the Manager instead.";
+
 fn check_operation_id(operation_id: &str) -> Result<(), WorkOutlineError> {
     let ok = !operation_id.is_empty()
         && operation_id.chars().count() <= mast_proto::work_outline::limits::MAX_OPERATION_ID_CHARS
@@ -548,17 +553,9 @@ impl WorkItemLaunchService {
         check_prompt(&p.initial_prompt)?;
         let _gate = self.gate.lock().await;
         let op = p.operation_id.as_str();
-        // A role's first start shares its records across operations (see
-        // `standing_role_launch_scope`): `scope` stands where the operation id
-        // would for every record but the claim of the operation's own inputs.
-        let scope = match p.standing_role {
-            Some(kind) => mast_proto::standing_role_launch_scope(kind, &p.work_item_id),
-            None => p.operation_id.clone(),
-        };
-        let scope = scope.as_str();
-        let chat_id = derive_id(scope, roles::CHAT);
-        let message_id = derive_id(scope, roles::MESSAGE);
-        let command_id = derive_id(scope, roles::COMMAND);
+        let chat_id = derive_id(op, roles::CHAT);
+        let message_id = derive_id(op, roles::MESSAGE);
+        let command_id = derive_id(op, roles::COMMAND);
         let inputs_hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
             work_item_id: &p.work_item_id,
             initial_prompt: &p.initial_prompt,
@@ -619,13 +616,12 @@ impl WorkItemLaunchService {
             ));
         }
         // A role launch is the role's first start: only a project can have a
-        // Manager. Every operation shares the records of that start (see
-        // `standing_role_launch_scope`) until its first message is durably
-        // queued, and the role is adopted only then, so an interrupted start
-        // is finished by whichever operation comes next. Once the message is
-        // queued, only the same first message converges; another is refused,
-        // and a role held by any other chat is never started again. The gate
-        // held above serializes launches.
+        // Manager, and a start that finds the Manager already started sends
+        // nothing. Each operation creates its own hidden provisional chat; the
+        // chat becomes the Manager only after its first message is durably
+        // queued. The gate held above serializes launches, so at most one
+        // provisional chat of a role has a queued message, and every start
+        // finishes that one first.
         if let Some(kind) = p.standing_role {
             if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
                 return Err(error(
@@ -633,37 +629,25 @@ impl WorkItemLaunchService {
                     "Only a project can have a Manager",
                 ));
             }
-            let held = self.workspace.standing_role_chat(kind, &p.work_item_id);
-            if held.as_deref().is_some_and(|current| current != chat_id) {
-                return Err(conflict(
-                    "This project's Manager already has a chat; open it instead",
-                ));
-            }
-            if self.workspace.chat(&chat_id).map_err(engine_error)?.is_some() {
-                let (queued, landed) = self
-                    .doc_host
-                    .message_command_state(&chat_id, &message_id)
-                    .map_err(engine_error)?;
-                let started = queued.is_some() || landed;
-                if started && held.is_none() {
-                    // The first message was queued but the start stopped before
-                    // adopting: finish it, whichever message this operation sent.
-                    self.workspace
-                        .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
-                        .map_err(conflict)?;
-                }
-                let prompt = crate::doc_host::queued_message_prompt(
-                    &p.initial_prompt.text,
-                    &p.initial_prompt.attachments,
-                );
-                let different = match &queued {
-                    Some(entry) => command_prompt(&entry.payload) != Some(prompt.as_str()),
-                    None => landed && !self.workspace.ledger_holds(&ledger_launch_key(op)),
-                };
-                if started && different {
-                    return Err(conflict(
-                        "This project's Manager already has a chat with a different first message; open it instead",
-                    ));
+            match self.workspace.standing_role_chat(kind, &p.work_item_id) {
+                // This operation's own, already adopted chat: a retry.
+                Some(current) if current == chat_id => {}
+                Some(_) => return Err(conflict(MANAGER_ALREADY_STARTED)),
+                None => {
+                    for candidate in self.workspace.provisional_role_chats(kind, &p.work_item_id) {
+                        if candidate.id == chat_id {
+                            continue;
+                        }
+                        if self.doc_host.has_run_command(&candidate.id).map_err(engine_error)? {
+                            // An earlier start queued its message and stopped
+                            // before adopting: surface it, and send nothing more.
+                            self.doc_host.persist_chat_now(&candidate.id).map_err(engine_error)?;
+                            self.workspace
+                                .activate_standing_role_chat(kind, &p.work_item_id, &candidate.id, &[])
+                                .map_err(conflict)?;
+                            return Err(conflict(MANAGER_ALREADY_STARTED));
+                        }
+                    }
                 }
             }
         }
@@ -708,7 +692,7 @@ impl WorkItemLaunchService {
         };
         let is_manager = match self
             .workspace
-            .instruction_revision(&derive_id(scope, roles::REVISION))
+            .instruction_revision(&derive_id(op, roles::REVISION))
         {
             // A revision this operation already wrote fixes the decision,
             // however far the role has moved since.
@@ -727,7 +711,7 @@ impl WorkItemLaunchService {
         let deliver_instructions = self.launch_delivers_instructions(
             &chat_id,
             &message_id,
-            scope,
+            op,
             manager_role.is_none()
                 && snapshot
                     .effective_instructions(&p.work_item_id)
@@ -763,7 +747,7 @@ impl WorkItemLaunchService {
             .map_err(|error| validation_error(&[error]))?;
         let resolved = match &existing_binding {
             Some(binding) => {
-                if binding.operation_id.as_deref() != Some(scope) {
+                if binding.operation_id.as_deref() != Some(op) {
                     return Err(conflict(
                         "This Chat's execution binding was captured by another operation",
                     ));
@@ -787,7 +771,8 @@ impl WorkItemLaunchService {
             &validated.execution_root,
             p.config.clone(),
             p.parent_chat_id.as_deref(),
-            p.standing_role.is_some() && existing_binding.is_none(),
+            p.standing_role
+                .map(|kind| mast_proto::standing_role_provisional_tag(kind, &p.work_item_id)),
         )?;
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
@@ -798,7 +783,7 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::ChatCreated)?;
 
         // ── 4. assignment ──
-        self.ensure_assignment(&chat_id, &p.work_item_id, scope)?;
+        self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
         self.checkpoint(LaunchStep::Assigned)?;
 
         // ── 5. execution binding ──
@@ -806,7 +791,7 @@ impl WorkItemLaunchService {
             self.workspace.capture_chat_execution_binding(
                 &chat_id,
                 &resolved,
-                scope,
+                op,
                 &self.actor(),
             )?;
         }
@@ -849,7 +834,7 @@ impl WorkItemLaunchService {
                 .mutate(WorkOutlineMutation::CreateInstructionRevision(
                     CreateInstructionRevisionParams {
                         work_item_id: p.work_item_id.clone(),
-                        operation_id: scope.to_owned(),
+                        operation_id: op.to_owned(),
                         role: manager_role,
                     },
                 ))?
@@ -864,7 +849,7 @@ impl WorkItemLaunchService {
                         turn_boundary: Some(InstructionTurnBoundary {
                             message_id: Some(message_id.clone()),
                         }),
-                        operation_id: scope.to_owned(),
+                        operation_id: op.to_owned(),
                     },
                 ))?
                 .into_application_id()?;
@@ -897,6 +882,14 @@ impl WorkItemLaunchService {
         };
 
         // ── 7. first Turn, last ──
+        if let Some(kind) = p.standing_role
+            && self
+                .workspace
+                .standing_role_chat(kind, &p.work_item_id)
+                .is_some_and(|current| current != chat_id)
+        {
+            return Err(conflict(MANAGER_ALREADY_STARTED));
+        }
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         if let Some((wakes, _)) = hand_off {
             wakes.finish_orchestrator_hand_off(&chat_id);
@@ -905,11 +898,13 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::TurnQueued)?;
 
         // ── 8. standing role ──
-        // Last: until the first message is queued the start is resumable and
-        // the Chat is not yet the Manager. Idempotent on a retry.
+        // Last: the Chat stays hidden until its first message is queued AND
+        // saved, then one registry batch makes it the Manager. Idempotent on
+        // a retry (an adopted chat is returned as is).
         if let Some(kind) = p.standing_role {
+            self.doc_host.persist_chat_now(&chat_id).map_err(engine_error)?;
             self.workspace
-                .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
+                .activate_standing_role_chat(kind, &p.work_item_id, &chat_id, &[])
                 .map_err(conflict)?;
         }
         self.checkpoint(LaunchStep::RoleAdopted)?;
@@ -1246,7 +1241,7 @@ impl WorkItemLaunchService {
         execution_root: &str,
         config: Option<ChatConfig>,
         parent_chat_id: Option<&str>,
-        retarget_unbound: bool,
+        provisional_tag: Option<String>,
     ) -> Result<(), WorkOutlineError> {
         match self.workspace.chat(chat_id).map_err(engine_error)? {
             Some(chat) => {
@@ -1257,31 +1252,28 @@ impl WorkItemLaunchService {
                     return Err(conflict("The launch's Chat has another parent Chat"));
                 }
                 if !same_path(chat.cwd.as_deref().unwrap_or(""), execution_root) {
-                    // A role's partial start that never reached its binding or a
-                    // message has run nothing in its folder: the next start's
-                    // choice replaces it.
-                    if retarget_unbound {
-                        return self
-                            .workspace
-                            .set_chat_cwd(chat_id, execution_root)
-                            .map(drop)
-                            .map_err(engine_error);
-                    }
                     return Err(conflict("The launch's Chat was created in another folder"));
                 }
                 Ok(())
             }
-            None => self
-                .workspace
-                .create_chat_with_parent(
+            None => match provisional_tag {
+                Some(tag) => self.workspace.create_provisional_role_chat(
+                    chat_id,
+                    space_id,
+                    config,
+                    execution_root.to_owned(),
+                    tag,
+                ),
+                None => self.workspace.create_chat_with_parent(
                     chat_id,
                     Some(space_id),
                     None,
                     config,
                     Some(execution_root.to_owned()),
                     parent_chat_id.map(str::to_owned),
-                )
-                .map_err(engine_error),
+                ),
+            }
+            .map_err(engine_error),
         }
     }
 
