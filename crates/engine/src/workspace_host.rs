@@ -779,6 +779,14 @@ impl WorkspaceHost {
         self.read(|doc| doc.standing_role(role, scope_item_id))
     }
 
+    pub fn chat_is_manager(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_is_manager(chat_id))
+    }
+
+    pub fn standing_role_of_chat(&self, chat_id: &str) -> Option<mast_proto::StandingRole> {
+        self.read(|doc| doc.standing_role_of_chat(chat_id))
+    }
+
     pub fn standing_role_chat(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<String> {
         self.read(|doc| doc.standing_role_chat(role, scope_item_id))
     }

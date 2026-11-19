@@ -737,7 +737,10 @@ impl Shell {
             cx.notify();
             return;
         }
-        let revision_op = entry.revision_op.id_for(&format!("{item_id}\n{effective}"));
+        let role = snapshot.standing_role_kind_of_chat(chat_id, &item_id);
+        let revision_op = entry
+            .revision_op
+            .id_for(&format!("{item_id}\n{effective}\n{role:?}"));
         entry.in_flight = true;
         entry.error = None;
         entry.done = None;
@@ -748,6 +751,7 @@ impl Shell {
             .create_instruction_revision(CreateInstructionRevisionParams {
                 work_item_id: item_id,
                 operation_id: revision_op,
+                role,
             });
         cx.notify();
         let chat_id = chat_id.to_owned();

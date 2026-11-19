@@ -1669,6 +1669,7 @@ fn agent_is_denied_every_other_operation() {
         WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
             work_item_id: own.clone(),
             operation_id: "d9".into(),
+            role: None,
         }),
         WorkOutlineMutation::ConfigureExecution(ConfigureExecutionParams {
             scope: ExecutionScope::WorkItem {

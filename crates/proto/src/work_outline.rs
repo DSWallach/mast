@@ -895,6 +895,20 @@ impl WorkOutlineSnapshot {
             .find(|role| role.role == kind && role.scope_item_id == item_id)
     }
 
+    /// The role `chat_id` currently holds at `item_id`, if any.
+    pub fn standing_role_kind_of_chat(
+        &self,
+        chat_id: &str,
+        item_id: &str,
+    ) -> Option<crate::StandingRoleKind> {
+        self.standing_roles
+            .iter()
+            .find(|role| {
+                role.scope_item_id == item_id && role.current_chat_id.as_deref() == Some(chat_id)
+            })
+            .map(|role| role.role)
+    }
+
     /// A snapshot with no content for a Space that is not (yet) available.
     pub fn unavailable(space_id: impl Into<String>, synced: bool, revision: u64) -> Self {
         Self {
@@ -1419,6 +1433,10 @@ pub struct RestoreWorkItemInstructionParams {
 pub struct CreateInstructionRevisionParams {
     pub work_item_id: String,
     pub operation_id: String,
+    /// The standing role the revision is for: a Manager's revision carries
+    /// its built-in role instructions ahead of the item's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<crate::StandingRoleKind>,
 }
 
 /// `applyInstructionRevision`: select a revision for a Chat (an immutable

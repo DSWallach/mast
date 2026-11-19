@@ -1294,6 +1294,7 @@ pub(crate) mod tests {
             chain: chain.iter().map(|id| id.to_string()).collect(),
             fallback_chain: Vec::new(),
             state: mast_proto::StandingRoleState::Idle,
+            worker_model: None,
         }
     }
 

@@ -26,6 +26,8 @@ struct RawStandingRole {
     #[serde(default)]
     state: StandingRoleState,
     #[serde(default)]
+    worker_model: Option<StandingRoleModel>,
+    #[serde(default)]
     pending_hand_off: Option<PendingStandingHandOff>,
 }
 
@@ -39,6 +41,7 @@ impl From<RawStandingRole> for StandingRole {
             chain: raw.chain,
             fallback_chain: raw.fallback_chain,
             state: raw.state,
+            worker_model: raw.worker_model,
         }
     }
 }
@@ -84,6 +87,38 @@ impl RegistryDoc {
         self.standing_roles()
             .into_iter()
             .find(|role| role.current_chat_id.as_deref() == Some(chat_id))
+    }
+
+    /// Whether `chat_id` is, or is about to become, a project's Manager: the
+    /// role's current chat, the successor a reserved hand-off names, or the
+    /// bootstrap chat of a project's first start, which the role adopts only
+    /// once its first message is queued. All count, so a Manager's first run
+    /// is restricted before anything has adopted it.
+    pub fn chat_is_manager(&self, chat_id: &str) -> bool {
+        let held = self
+            .read_kind::<RawStandingRole>(KIND_STANDING_ROLES)
+            .into_iter()
+            .any(|raw| {
+                raw.role == StandingRoleKind::Manager
+                    && (raw.current_chat_id.as_deref() == Some(chat_id)
+                        || raw
+                            .pending_hand_off
+                            .as_ref()
+                            .is_some_and(|pending| pending.to_chat_id == chat_id))
+            });
+        held || self.is_manager_bootstrap_chat(chat_id)
+    }
+
+    fn is_manager_bootstrap_chat(&self, chat_id: &str) -> bool {
+        self.chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.space_id)
+            .and_then(|space| self.chat_assigned_work_item(chat_id, &space))
+            .is_some_and(|item| {
+                chat_id
+                    == mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item)
+            })
     }
 
     /// Write rows as one checked registry batch: every op is size-gated first
@@ -198,6 +233,7 @@ impl RegistryDoc {
                 chain: Vec::new(),
                 fallback_chain: fallback_chain.to_vec(),
                 state: StandingRoleState::Idle,
+                worker_model: None,
             },
         };
         let record = StandingRole {
@@ -448,6 +484,27 @@ impl RegistryDoc {
         Ok((record, false))
     }
 
+    /// Set the model a Manager's workers start on; `None` restores the
+    /// default. The role must already have a record.
+    pub fn set_standing_role_worker_model(
+        &mut self,
+        role: StandingRoleKind,
+        scope_item_id: &str,
+        worker_model: Option<StandingRoleModel>,
+    ) -> Result<(), String> {
+        if let Some(model) = &worker_model {
+            StandingRoleModel::validate_chain(std::slice::from_ref(model))?;
+        }
+        let id = standing_role_id(role, scope_item_id);
+        self.standing_role_by_id(&id).ok_or("role does not exist")?;
+        self.commit_rows(vec![(
+            KIND_STANDING_ROLES,
+            id,
+            OpKind::Update,
+            fields([("workerModel", json!(worker_model))]),
+        )])
+    }
+
     pub fn set_standing_role_state(
         &mut self,
         role: StandingRoleKind,
@@ -474,5 +531,6 @@ fn role_fields(role: &StandingRole) -> BTreeMap<String, Value> {
         ("chain", json!(role.chain)),
         ("fallbackChain", json!(role.fallback_chain)),
         ("state", json!(role.state)),
+        ("workerModel", json!(role.worker_model)),
     ])
 }

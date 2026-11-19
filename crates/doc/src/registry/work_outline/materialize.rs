@@ -711,6 +711,23 @@ pub(crate) fn effective_hash<'a>(
     )
 }
 
+/// [`effective_hash`] for a Manager's chat: its revisions carry the built-in
+/// role entry ahead of the item's effective instructions.
+fn manager_effective_hash<'a>(
+    work_item_id: &str,
+    items_by_id: impl Fn(&str) -> Option<&'a WorkItemView>,
+    instructions: &[WorkItemInstructionView],
+    role: &mast_proto::StandingRole,
+) -> (String, usize, String) {
+    let effective = resolve_effective_instructions(work_item_id, items_by_id, instructions);
+    let entries = mast_proto::stack_manager_role_entry(effective.revision_entries(), Some(role));
+    (
+        canonical_revision_hash(&entries, INSTRUCTION_ENVELOPE_VERSION),
+        entries.len(),
+        instruction_content_key(&entries),
+    )
+}
+
 // ── the snapshot ────────────────────────────────────────────────────────────
 
 fn status_effective(status: WorkItemStatus) -> WorkItemEffectiveStatus {
@@ -1184,13 +1201,26 @@ fn materialize_instructions(
         if item.is_none() && chat_applications.is_empty() {
             continue;
         }
-        let current = item.map(|item| {
-            effective
+        let manager_role = item.and_then(|item| {
+            inputs.standing_roles.iter().find(|role| {
+                role.role == mast_proto::StandingRoleKind::Manager
+                    && role.scope_item_id == item
+                    && role.current_chat_id.as_deref() == Some(chat_id)
+            })
+        });
+        let current = item.map(|item| match manager_role {
+            Some(role) => manager_effective_hash(
+                item,
+                |id| views_by_id.get(id).copied(),
+                &instructions,
+                role,
+            ),
+            None => effective
                 .entry(item)
                 .or_insert_with(|| {
                     effective_hash(item, |id| views_by_id.get(id).copied(), &instructions)
                 })
-                .clone()
+                .clone(),
         });
         let selected = select_application(chat_applications, |revision_id| {
             match revision(revision_id, repairs) {

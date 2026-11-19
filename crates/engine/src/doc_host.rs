@@ -5402,6 +5402,15 @@ impl DocHost {
         let mut request = request;
         // A sender never supplies the envelope; the host resolves it below.
         request.instructions = None;
+        // A Manager coordinates and never edits or builds. Enforced at the
+        // launch, whatever the chat's stored config says, so the harness
+        // itself refuses file-writing and shell tools.
+        if self
+            .workspace()
+            .is_some_and(|workspace| workspace.chat_is_manager(chat_id))
+        {
+            request.restrict_to_read_only();
+        }
         // Queued-attachment refs (`pending://`) resolve to this
         // host's absolute paths before anything persists or
         // dispatches — the drain already gated on the bytes being

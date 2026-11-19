@@ -802,7 +802,12 @@ impl RegistryDoc {
         let item = self.live_item(&p.work_item_id)?;
         self.require_space(&item.space_id)?;
         let effective = self.effective_instructions_of(&p.work_item_id)?;
-        let body = build_revision_body(effective.revision_entries())?;
+        let mut entries = effective.revision_entries();
+        if p.role == Some(mast_proto::StandingRoleKind::Manager) {
+            let role = self.standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id);
+            entries = mast_proto::stack_manager_role_entry(entries, role.as_ref());
+        }
+        let body = build_revision_body(entries)?;
         let set = BTreeMap::from([
             ("spaceId".to_owned(), json!(item.space_id)),
             ("workItemId".to_owned(), json!(p.work_item_id)),

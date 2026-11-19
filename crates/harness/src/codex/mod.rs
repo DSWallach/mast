@@ -2378,6 +2378,26 @@ mod tests {
     }
 
     #[test]
+    fn a_manager_run_gets_the_read_only_sandbox_even_when_auto() {
+        for sandbox in [
+            mast_proto::SandboxLevel::WorkspaceWrite,
+            mast_proto::SandboxLevel::DangerFullAccess,
+        ] {
+            let mut request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
+            request.sandbox = sandbox;
+            request.auto_approve = true;
+            request.restrict_to_read_only();
+            request.sandbox = effective_sandbox(&request, false);
+            assert_eq!(request.sandbox, mast_proto::SandboxLevel::ReadOnly);
+            let params = thread_start_params(&request, false);
+            assert_eq!(
+                params["sandbox"],
+                json!(sandbox_mode(mast_proto::SandboxLevel::ReadOnly))
+            );
+        }
+    }
+
+    #[test]
     fn title_runs_keep_title_instructions_only() {
         let request = instruction_request(None, mast_proto::InstructionTransition::Fresh);
         let params = thread_start_params(&request, true);

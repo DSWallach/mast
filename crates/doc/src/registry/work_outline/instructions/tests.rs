@@ -183,6 +183,7 @@ fn revise(doc: &mut RegistryDoc, op: &str, work_item: &str) -> Outcome<String> {
         WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
             work_item_id: work_item.into(),
             operation_id: op.into(),
+            role: None,
         }),
     )
     .map(|reply| reply.revision_id.unwrap())
@@ -1456,4 +1457,82 @@ fn keep_session_without_instructions_selects_none() {
         keep(&mut doc, "keep-ghost", "ghost").unwrap_err().code,
         WorkOutlineErrorCode::NotFound
     );
+}
+
+// ── Manager role stacking ───────────────────────────────────────────────────
+
+fn revise_as(
+    doc: &mut RegistryDoc,
+    op: &str,
+    work_item: &str,
+    role: Option<mast_proto::StandingRoleKind>,
+) -> Outcome<String> {
+    apply(
+        doc,
+        WorkOutlineMutation::CreateInstructionRevision(CreateInstructionRevisionParams {
+            work_item_id: work_item.into(),
+            operation_id: op.into(),
+            role,
+        }),
+    )
+    .map(|reply| reply.revision_id.unwrap())
+}
+
+fn make_project(doc: &mut RegistryDoc, op: &str, work_item: &str) {
+    apply(
+        doc,
+        WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+            work_item_id: work_item.into(),
+            changes: mast_proto::WorkItemChanges {
+                is_project: Some(true),
+                ..Default::default()
+            },
+            operation_id: op.into(),
+        }),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_managers_revision_stacks_the_role_ahead_of_the_projects_instructions() {
+    use mast_proto::StandingRoleKind::Manager;
+    let (mut doc, a, _b, _c) = three_levels();
+    make_project(&mut doc, "op-proj", &a);
+    instruct(&mut doc, "i1", Some(&a), "project rule");
+    doc.upsert_chat(&space_chat("mgr", Some(SPACE))).unwrap();
+    assign(&mut doc, "as-mgr", "mgr", &a);
+    doc.adopt_standing_role(Manager, &a, "mgr", &[]).unwrap();
+    assert!(doc.chat_is_manager("mgr"));
+    assert!(!doc.chat_is_manager("chat-1"));
+
+    let stacked = revise_as(&mut doc, "r-mgr", &a, Some(Manager)).unwrap();
+    apply_revision(&mut doc, "ap-mgr", "mgr", &stacked).unwrap();
+    let snapshot = snap(&doc);
+    let body = &snapshot.revision(&stacked).unwrap().body;
+    assert_eq!(body.entries.len(), 2);
+    assert_eq!(body.entries[0].instruction_id, mast_proto::MANAGER_ROLE_INSTRUCTION_ID);
+    assert!(body.entries[0].text.contains("Manager"));
+    assert_eq!(body.entries[1].text, "project rule");
+    assert!(!state(&snapshot, "mgr").drift, "the stacked revision is current for the Manager");
+
+    // A plain revision of the same item is missing the role: drift.
+    let plain = revise_as(&mut doc, "r-plain", &a, None).unwrap();
+    apply_revision(&mut doc, "ap-plain", "mgr", &plain).unwrap();
+    assert!(state(&snap(&doc), "mgr").drift);
+}
+
+#[test]
+fn a_projects_bootstrap_chat_is_a_manager_before_its_role_adopts_it() {
+    use mast_proto::StandingRoleKind::Manager;
+    let (mut doc, a, _b, _c) = three_levels();
+    make_project(&mut doc, "op-proj", &a);
+    let bootstrap = mast_proto::standing_role_bootstrap_chat_id(Manager, &a);
+    doc.upsert_chat(&space_chat(&bootstrap, Some(SPACE))).unwrap();
+    // Not assigned yet, and an ordinary chat on the same item: neither counts.
+    assert!(!doc.chat_is_manager(&bootstrap));
+    assign(&mut doc, "as-boot", &bootstrap, &a);
+    assert!(doc.chat_is_manager(&bootstrap), "no role record exists yet");
+    doc.upsert_chat(&space_chat("plain", Some(SPACE))).unwrap();
+    assign(&mut doc, "as-plain", "plain", &a);
+    assert!(!doc.chat_is_manager("plain"));
 }

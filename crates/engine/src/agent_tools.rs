@@ -622,6 +622,43 @@ fn effective_rank(level: SandboxLevel, auto_approve: bool) -> u8 {
     }
 }
 
+/// The config of a worker a Manager starts: the project's worker default
+/// model fills in whatever the Manager left unsaid. An explicit model (the
+/// user asked for one) is kept. With no config at all the worker takes the
+/// default harness and model, capped at the Manager's own stored sandbox and
+/// never Auto, so it passes [`check_child_config`].
+fn manager_worker_config(
+    caller: Option<&mast_proto::ChatConfig>,
+    role: &mast_proto::StandingRole,
+    config: Option<mast_proto::ChatConfig>,
+) -> Option<mast_proto::ChatConfig> {
+    let default = role
+        .worker_model
+        .clone()
+        .unwrap_or_else(mast_proto::default_manager_worker_model);
+    let default_harness: Option<mast_proto::HarnessId> =
+        serde_json::from_value(Value::String(default.harness.clone())).ok();
+    match config {
+        Some(mut config) => {
+            if config.model.as_deref().is_none_or(|m| m.trim().is_empty())
+                && default_harness == Some(config.harness)
+            {
+                config.model = default.model;
+            }
+            Some(config)
+        }
+        None => Some(mast_proto::ChatConfig {
+            harness: default_harness?,
+            model: default.model,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: caller.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
+            auto_approve: false,
+            approval_rules: caller.is_some_and(|c| c.approval_rules),
+        }),
+    }
+}
+
 /// A child chat's config may never be wider than its parent's. Auto (full
 /// access, never asks) needs an Auto parent; it forces full access in the
 /// Codex harness (read-only is never widened), so an Auto child counts as
@@ -2626,7 +2663,14 @@ impl AgentToolsService {
             .ok()
             .flatten()
             .ok_or_else(AgentToolError::unauthenticated)?;
-        let config = args.config;
+        let config = match self
+            .workspace
+            .standing_role_of_chat(&context.grant.chat_id)
+            .filter(|role| role.role == mast_proto::StandingRoleKind::Manager)
+        {
+            Some(role) => manager_worker_config(caller.config.as_ref(), &role, args.config),
+            None => args.config,
+        };
         if let Some(config) = &config {
             check_child_config(caller.config.as_ref(), config)?;
             if config.auto_approve {
@@ -3004,6 +3048,55 @@ mod tests {
             "41234"
         );
         note_bound_ipc_port(0);
+    }
+
+    fn manager_role(worker_model: Option<mast_proto::StandingRoleModel>) -> mast_proto::StandingRole {
+        mast_proto::StandingRole {
+            id: "manager:p".into(),
+            role: mast_proto::StandingRoleKind::Manager,
+            scope_item_id: "p".into(),
+            current_chat_id: Some("m".into()),
+            chain: vec!["m".into()],
+            fallback_chain: Vec::new(),
+            state: mast_proto::StandingRoleState::Idle,
+            worker_model,
+        }
+    }
+
+    fn worker_config(model: Option<&str>) -> mast_proto::ChatConfig {
+        mast_proto::ChatConfig {
+            harness: mast_proto::HarnessId::ClaudeCode,
+            model: model.map(str::to_owned),
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            approval_rules: false,
+        }
+    }
+
+    #[test]
+    fn a_manager_workers_default_to_sonnet_and_stay_within_the_managers_cap() {
+        let mut caller = worker_config(Some("claude-opus-5-5"));
+        caller.sandbox = SandboxLevel::ReadOnly;
+        let config = manager_worker_config(Some(&caller), &manager_role(None), None).unwrap();
+        assert_eq!(config.harness, mast_proto::HarnessId::ClaudeCode);
+        assert_eq!(config.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert!(!config.auto_approve);
+        check_child_config(Some(&caller), &config).unwrap();
+    }
+
+    #[test]
+    fn a_manager_workers_take_the_projects_worker_model_but_keep_an_explicit_one() {
+        let role = manager_role(Some(mast_proto::StandingRoleModel {
+            harness: "claude-code".into(),
+            model: Some("claude-haiku-4-5-20251001".into()),
+        }));
+        let filled = manager_worker_config(None, &role, Some(worker_config(None))).unwrap();
+        assert_eq!(filled.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        let explicit =
+            manager_worker_config(None, &role, Some(worker_config(Some("claude-opus-5-5")))).unwrap();
+        assert_eq!(explicit.model.as_deref(), Some("claude-opus-5-5"));
     }
 
     #[test]

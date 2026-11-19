@@ -7243,6 +7243,7 @@ impl Overview {
             current_chat_id: chat,
             fallback_chain: Vec::new(),
             state: StandingRoleState::Idle,
+            worker_model: None,
         });
         self.set_outline_loads(
             [(

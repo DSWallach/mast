@@ -1394,6 +1394,21 @@ mod tests {
     }
 
     #[test]
+    fn a_manager_run_denies_file_writing_and_shell_tools_even_when_auto() {
+        let harness = ClaudeHarness::new();
+        for sandbox in ["workspace-write", "danger-full-access"] {
+            let mut request = sandbox_request(sandbox, true);
+            request.restrict_to_read_only();
+            let args = argv(&harness, &request);
+            let denied = flag_value(&args, "--disallowedTools").expect("deny list");
+            for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
+                assert!(denied.split(',').any(|t| t == tool), "{sandbox}: {tool} in {denied}");
+            }
+            assert!(!args.iter().any(|a| a.contains("bypass") || a.contains("skip-permissions")));
+        }
+    }
+
+    #[test]
     fn writable_sandboxes_keep_their_existing_arguments() {
         let harness = ClaudeHarness::new();
         let ww = argv(&harness, &sandbox_request("workspace-write", false));
