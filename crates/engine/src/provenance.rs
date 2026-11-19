@@ -87,6 +87,9 @@ pub struct ProvenanceRecorder {
     workspace: WorkspaceHost,
     transcript: TranscriptReader,
     activity: Mutex<HashMap<String, Activity>>,
+    /// Test-visible work counters: commit walks and patch-id runs.
+    walks: std::sync::atomic::AtomicU64,
+    patch_id_runs: std::sync::atomic::AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -99,6 +102,8 @@ impl ProvenanceRecorder {
             workspace,
             transcript,
             activity: Mutex::new(HashMap::new()),
+            walks: Default::default(),
+            patch_id_runs: Default::default(),
         })
     }
 
@@ -121,6 +126,14 @@ impl ProvenanceRecorder {
                 _ => {}
             }
         }
+    }
+
+    #[doc(hidden)]
+    pub fn work_counters_for_test(&self) -> (u64, u64) {
+        (
+            self.walks.load(std::sync::atomic::Ordering::Relaxed),
+            self.patch_id_runs.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     #[doc(hidden)]
@@ -164,6 +177,7 @@ impl ProvenanceRecorder {
         if !active && removed_records.is_empty() {
             return Ok(0);
         }
+        self.walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let added = own_commits(root, &head_move.old, &head_move.new).await?;
         if added.is_empty() {
             return Ok(0);
@@ -172,6 +186,7 @@ impl ProvenanceRecorder {
         let mut by_patch: HashMap<String, CommitProvenance> = HashMap::new();
         let mut added_ids: HashMap<String, String> = HashMap::new();
         if !removed_records.is_empty() {
+            self.patch_id_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let removed_ids = patch_ids(root, &removed_records.iter().map(|r| r.sha.clone()).collect::<Vec<_>>()).await;
             for record in removed_records {
                 let id = removed_ids.get(&record.sha).cloned().unwrap_or(record.patch_id.clone());
@@ -729,5 +744,42 @@ mod tests {
         a.closed.push_back((1_000, 2_000));
         assert!(a.interval_at(2_000 + ACTIVE_GRACE_MS, 9_999_999).is_some());
         assert!(a.interval_at(2_000 + ACTIVE_GRACE_MS + 1, 9_999_999).is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_moves_do_no_walk_and_patch_ids_only_run_for_remaps() {
+        let f = fixture();
+        let old = head(&f.repo);
+        commit_file(&f.repo, "b.txt", "b\n", "human commit");
+        // No chat working and no records among the removed: nothing but the
+        // single removed-commit listing.
+        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 0);
+        assert_eq!(f.recorder.work_counters_for_test(), (0, 0));
+        // An attributed commit needs a walk but no patch-ids.
+        let f = fixture();
+        let old = head(&f.repo);
+        working(&f, "chat-1");
+        commit_file(&f.repo, "b.txt", "b\n", "chat commit");
+        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.work_counters_for_test(), (1, 0));
+        // An amend of a recorded commit is the remap case: patch-ids run.
+        let recorded = head(&f.repo);
+        git(&f.repo, &["commit", "-q", "--amend", "-m", "reworded"]);
+        assert_eq!(f.recorder.handle(mv(&f, &recorded, &["chat-1"])).await.unwrap(), 1);
+        assert_eq!(f.recorder.work_counters_for_test(), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn one_move_records_at_most_the_newest_200_commits() {
+        let f = fixture();
+        let old = head(&f.repo);
+        working(&f, "chat-1");
+        let mut shas = Vec::new();
+        for i in 0..205 {
+            shas.push(commit_file(&f.repo, "many.txt", &format!("{i}\n"), &format!("c{i}")));
+        }
+        assert_eq!(f.recorder.handle(mv(&f, &old, &["chat-1"])).await.unwrap(), MAX_PROVENANCE_WALK);
+        assert!(f.workspace.commit_provenance(&shas[0]).is_none(), "oldest are beyond the cap");
+        assert!(f.workspace.commit_provenance(&shas[204]).is_some());
     }
 }
