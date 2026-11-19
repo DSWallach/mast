@@ -2,35 +2,51 @@
 //! popover picks Comment / Approve / Request changes, edits the summary, shows
 //! what will be sent, and posts everything as one batched review.
 //!
-//! Only the button in this file starts a post. Drafts whose lines cannot be
-//! placed on the PR's current diff are listed and stay local drafts.
+//! Lines are checked against GitHub's own diff at the PR's head (never the
+//! working tree) before anything can be sent. Drafts that cannot be placed there
+//! are listed and stay local. The dialog pins the PR and head it opened on, the
+//! in-flight request lives on `Changes` (not the dialog), and an unknown result
+//! is checked against GitHub before another post is allowed.
 use super::*;
-use crate::comments::CommentSide;
 use crate::composer::ComposerInput;
 use mast_proto::{
-    ReviewDraft, ReviewEvent, ReviewSide, SubmitReviewComment, SubmitReviewOutcome,
-    SubmitReviewParams, SubmitReviewReply,
+    PrepareReviewParams, PrepareReviewReply, ReviewDraft, ReviewEvent, ReviewSide,
+    SubmitReviewComment, SubmitReviewOutcome, SubmitReviewParams, SubmitReviewReply,
 };
+use std::collections::{HashMap as Map, HashSet as Set};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SubmitPhase {
+    /// Checking the drafts against GitHub's diff at the PR head.
+    Preparing,
     Editing,
     Sending,
-    Posted { url: String, already: bool },
+    /// A post ended without a clear answer; asking GitHub whether it landed.
+    Checking,
+    Posted { url: String, already: bool, warning: Option<String> },
     /// A pending review from the browser blocks a second one.
     Conflict { url: String },
-    Failed(String),
+    /// `reprepare`: the PR's head is unknown or moved, so the check must run again.
+    Failed { message: String, reprepare: bool },
 }
 
 pub(super) struct SubmitDialog {
+    /// Pinned when the dialog opens: Submit and Retry use only these.
     pub(super) target: String,
+    pub(super) pr: mast_proto::PullRequestRef,
     pub(super) event: ReviewEvent,
     pub(super) input: Entity<ComposerInput>,
-    pub(super) comments: Vec<SubmitReviewComment>,
-    pub(super) unplaced: Vec<ReviewDraft>,
-    pub(super) commit_id: Option<String>,
+    /// The PR's head on GitHub the drafts were checked against; the review is pinned to it.
+    pub(super) head_sha: Option<String>,
+    /// Draft id -> (end line, start line) as checked at prepare time.
+    pub(super) prepared: Map<String, (u32, Option<u32>)>,
+    /// Drafts GitHub's diff can place, and why it can't place the rest.
+    pub(super) validated: Set<String>,
+    pub(super) rejected: Map<String, String>,
+    /// The local checkout is not at the PR's head (unpushed commits).
+    pub(super) local_ahead: bool,
+    pub(super) last_params: Option<SubmitReviewParams>,
     pub(super) phase: SubmitPhase,
-    pub(super) task: Option<Task<()>>,
 }
 
 fn event_label(event: ReviewEvent) -> &'static str {
@@ -41,19 +57,6 @@ fn event_label(event: ReviewEvent) -> &'static str {
     }
 }
 
-/// Stable for one submission's content so a retry after a lost response finds
-/// the review it already posted, and different content never matches it.
-fn attempt_id(nonce: &str, event: ReviewEvent, body: &str, comments: &[SubmitReviewComment]) -> String {
-    let mut seed = format!("{nonce}\n{event:?}\n{}", body.trim());
-    for comment in comments {
-        seed.push_str(&format!(
-            "\n{}|{}|{}|{:?}|{:?}|{}",
-            comment.draft_id, comment.path, comment.line, comment.side, comment.start_line, comment.body
-        ));
-    }
-    mast_proto::derive_id(&seed, "mast-review-attempt")
-}
-
 fn one_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();
     let mut out: String = line.chars().take(60).collect();
@@ -61,6 +64,27 @@ fn one_line(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// Why GitHub's diff at the PR head cannot place a draft the local diff can.
+pub(super) fn unplaced_label(local_head: Option<&str>, pr_head: &str) -> &'static str {
+    match local_head {
+        Some(local) if !local.eq_ignore_ascii_case(pr_head) => "not pushed",
+        _ => "uncommitted or changed locally",
+    }
+}
+
+/// A failed post is "unknown" unless GitHub (or Mast) clearly said nothing was sent.
+fn result_unknown(error: &str) -> bool {
+    const DEFINITE: [&str; 6] = [
+        "HTTP 4",
+        "The pull request has new commits",
+        "Already posting",
+        "Add a summary",
+        "only available from the Mast app",
+        "head commit is unknown",
+    ];
+    !DEFINITE.iter().any(|marker| error.contains(marker))
 }
 
 impl Changes {
@@ -80,111 +104,268 @@ impl Changes {
                 .is_some_and(|target| self.local_review_drafts.contains_key(target))
     }
 
+    fn local_review_head(&self, cx: &App) -> Option<String> {
+        self.review_identity(cx).and_then(|(_, head)| head)
+    }
+
+    fn diff_line_text(&self, path: &str, side: ReviewSide, line: u32) -> String {
+        let Some(parsed) = self.parsed.as_ref() else {
+            return String::new();
+        };
+        parsed
+            .files
+            .iter()
+            .filter(|file| file.path == path)
+            .flat_map(|file| file.hunks.iter().flat_map(|hunk| hunk.lines.iter()))
+            .find(|candidate| match side {
+                ReviewSide::Left => candidate.old_no == Some(line),
+                ReviewSide::Right => candidate.new_no == Some(line),
+            })
+            .map(|found| found.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn submit_comment(&self, draft: &ReviewDraft, start: u32, end: u32, with_text: bool) -> SubmitReviewComment {
+        let range = start < end;
+        let text = |line| {
+            if with_text { self.diff_line_text(&draft.anchor.file, draft.anchor.side, line) } else { String::new() }
+        };
+        SubmitReviewComment {
+            draft_id: draft.id.clone(),
+            path: draft.anchor.file.clone(),
+            line: end,
+            side: draft.anchor.side,
+            start_line: range.then_some(start),
+            start_side: range.then_some(draft.anchor.side),
+            body: draft.body.clone(),
+            line_text: text(end),
+            start_text: if range { text(start) } else { String::new() },
+        }
+    }
+
+    /// What would be sent right now: the drafts that exist now, with their current
+    /// bodies, that GitHub's diff placed at the position they still have. The rest are
+    /// held back with a reason. `with_text` is only needed when building a request.
+    pub(super) fn submit_selection(
+        &self,
+        dialog: &SubmitDialog,
+        with_text: bool,
+    ) -> (Vec<SubmitReviewComment>, Vec<(ReviewDraft, String)>) {
+        let drafts = self.local_review_drafts.get(&dialog.target).map(Vec::as_slice).unwrap_or_default();
+        let (placed, unplaced) = self.draft_anchor_index.partition_drafts(drafts);
+        let mut comments = Vec::new();
+        let mut held = Vec::new();
+        for draft in unplaced.into_iter().filter(|d| !d.body.trim().is_empty()) {
+            held.push((draft.clone(), "its line is no longer in the diff".to_owned()));
+        }
+        for (draft, (start, end)) in placed.into_iter().filter(|(d, _)| !d.body.trim().is_empty()) {
+            let range = (end, (start < end).then_some(start));
+            let reason = match dialog.prepared.get(&draft.id) {
+                None => Some("added after the check; reopen to include it".to_owned()),
+                Some(checked) if *checked != range => Some("moved since the check; reopen to include it".to_owned()),
+                Some(_) => dialog.rejected.get(&draft.id).cloned().or_else(|| {
+                    (!dialog.validated.contains(&draft.id)).then(|| "not checked".to_owned())
+                }),
+            };
+            match reason {
+                Some(reason) => held.push((draft.clone(), reason)),
+                None => comments.push(self.submit_comment(draft, start, end, with_text)),
+            }
+        }
+        (comments, held)
+    }
+
     pub(super) fn open_submit_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.submit_dialog.is_some() {
+            return;
+        }
         let Some(target) = self.review_target.clone() else {
             return;
         };
-        if self.submit_pull_request().is_none() {
+        let Some(pr) = self.submit_pull_request() else {
             return;
-        }
-        let drafts = self.local_review_drafts.get(&target).cloned().unwrap_or_default();
-        let (placed, unplaced) = self.draft_anchor_index.partition_drafts(&drafts);
-        let comments = placed
-            .into_iter()
-            .map(|(draft, (start, end))| SubmitReviewComment {
-                draft_id: draft.id.clone(),
-                path: draft.anchor.file.clone(),
-                line: end,
-                side: draft.anchor.side,
-                start_line: (start < end).then_some(start),
-                start_side: (start < end).then_some(draft.anchor.side),
-                body: draft.body.clone(),
-            })
-            .filter(|comment| !comment.body.trim().is_empty())
-            .collect();
-        let unplaced = unplaced.into_iter().cloned().collect();
-        let commit_id = self.review_identity(cx).and_then(|(_, head)| head);
+        };
         let input = cx.new(|cx| ComposerInput::new("Summary (optional)", cx));
         let handle = input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+        let resuming = self.submit_inflight.as_deref() == Some(target.as_str());
         self.submit_dialog = Some(SubmitDialog {
             target,
+            pr,
             event: ReviewEvent::Comment,
             input,
-            comments,
-            unplaced,
-            commit_id,
-            phase: SubmitPhase::Editing,
-            task: None,
+            head_sha: None,
+            prepared: Map::new(),
+            validated: Set::new(),
+            rejected: Map::new(),
+            local_ahead: false,
+            last_params: None,
+            // A request from an earlier open of this dialog is still running: show it, don't repeat it.
+            phase: if resuming { SubmitPhase::Sending } else { SubmitPhase::Preparing },
         });
+        if !resuming {
+            self.prepare_submit(cx);
+        }
         cx.notify();
     }
 
+    fn busy(&self) -> bool {
+        self.submit_dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.phase, SubmitPhase::Sending | SubmitPhase::Checking))
+    }
+
     pub(super) fn close_submit_review(&mut self, cx: &mut Context<Self>) {
-        // A post in flight keeps running; its reply is applied only to the dialog that sent it.
+        // A post in flight cannot be cancelled from the UI; Esc and the trigger do nothing until it ends.
+        if self.busy() {
+            return;
+        }
         self.submit_dialog = None;
+        self.submit_prepare_task = None;
         cx.notify();
     }
 
     fn set_submit_event(&mut self, event: ReviewEvent, cx: &mut Context<Self>) {
         if let Some(dialog) = self.submit_dialog.as_mut()
-            && matches!(dialog.phase, SubmitPhase::Editing | SubmitPhase::Failed(_))
+            && matches!(dialog.phase, SubmitPhase::Editing | SubmitPhase::Failed { .. })
         {
             dialog.event = event;
             cx.notify();
         }
     }
 
-    /// The click handler of the dialog's primary button: the only call site of `SUBMIT_REVIEW`.
+    /// Check the drafts against GitHub's diff at the PR head and learn that head.
+    fn prepare_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.submit_dialog.as_ref() else {
+            return;
+        };
+        let (target, pr) = (dialog.target.clone(), dialog.pr.clone());
+        let drafts = self.local_review_drafts.get(&target).map(Vec::as_slice).unwrap_or_default();
+        let (placed, _) = self.draft_anchor_index.partition_drafts(drafts);
+        let candidates: Vec<SubmitReviewComment> = placed
+            .into_iter()
+            .filter(|(draft, _)| !draft.body.trim().is_empty())
+            .map(|(draft, (start, end))| self.submit_comment(draft, start, end, true))
+            .collect();
+        let prepared = candidates
+            .iter()
+            .map(|c| (c.draft_id.clone(), (c.line, c.start_line)))
+            .collect();
+        let params = PrepareReviewParams { owner: pr.owner, repo: pr.repo, number: pr.number, comments: candidates };
+        let value = serde_json::to_value(&params).unwrap_or_default();
+        if let Some(dialog) = self.submit_dialog.as_mut() {
+            dialog.phase = SubmitPhase::Preparing;
+            dialog.head_sha = None;
+            dialog.prepared = prepared;
+            dialog.validated.clear();
+            dialog.rejected.clear();
+        }
+        let task = self.state.update(cx, |state, cx| state.chat_diff_rpc(methods::PREPARE_REVIEW_SUBMIT, value, cx));
+        self.submit_prepare_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|value| {
+                serde_json::from_value::<PrepareReviewReply>(value).map_err(|e| e.to_string())
+            });
+            this.update(cx, |this, cx| this.finish_prepare(&target, result, cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    fn finish_prepare(&mut self, target: &str, result: Result<PrepareReviewReply, String>, cx: &mut Context<Self>) {
+        self.submit_prepare_task = None;
+        let local_head = self.local_review_head(cx);
+        let Some(dialog) = self.submit_dialog.as_mut().filter(|d| d.target == target) else {
+            return;
+        };
+        match result {
+            Ok(reply) if !reply.head_sha.trim().is_empty() => {
+                dialog.local_ahead = local_head.as_deref().is_some_and(|h| !h.eq_ignore_ascii_case(&reply.head_sha));
+                let label = unplaced_label(local_head.as_deref(), &reply.head_sha);
+                dialog.validated = reply.placed.into_iter().collect();
+                dialog.rejected = reply.unplaced.into_iter().map(|u| (u.draft_id, label.to_owned())).collect();
+                dialog.head_sha = Some(reply.head_sha);
+                dialog.phase = SubmitPhase::Editing;
+            }
+            Ok(_) => {
+                dialog.phase = SubmitPhase::Failed {
+                    message: "GitHub did not report this pull request's head commit, so Submit is off.".into(),
+                    reprepare: true,
+                };
+            }
+            Err(error) => {
+                dialog.phase = SubmitPhase::Failed {
+                    message: format!("Couldn't check your comments against GitHub: {error}"),
+                    reprepare: true,
+                };
+            }
+        }
+        cx.notify();
+    }
+
+    /// The click handler of the dialog's primary button: the only code that posts.
     pub(super) fn submit_review_now(&mut self, cx: &mut Context<Self>) {
-        let Some(pr) = self.submit_pull_request() else {
+        let Some(dialog) = self.submit_dialog.as_ref() else {
             return;
         };
-        let Some(dialog) = self.submit_dialog.as_mut() else {
-            return;
-        };
-        if matches!(dialog.phase, SubmitPhase::Sending | SubmitPhase::Posted { .. }) {
+        match &dialog.phase {
+            SubmitPhase::Failed { reprepare: true, .. } => return self.prepare_submit(cx),
+            SubmitPhase::Editing | SubmitPhase::Failed { .. } => {}
+            _ => return,
+        }
+        // The dialog's own PR and target, never whatever is selected now.
+        if self.review_target.as_deref() != Some(dialog.target.as_str()) {
+            self.submit_dialog = None;
+            cx.notify();
             return;
         }
+        let (target, pr, event) = (dialog.target.clone(), dialog.pr.clone(), dialog.event);
+        let Some(head) = dialog.head_sha.clone() else {
+            return;
+        };
         let body = dialog.input.read(cx).text().to_owned();
-        if dialog.comments.is_empty() && body.trim().is_empty() {
-            dialog.phase = SubmitPhase::Failed("Add a summary or at least one comment first.".into());
+        // Re-read the drafts now: send what exists now, with its current text.
+        let (comments, _) = self.submit_selection(dialog, true);
+        let fail = |this: &mut Self, message: &str, cx: &mut Context<Self>| {
+            if let Some(dialog) = this.submit_dialog.as_mut() {
+                dialog.phase = SubmitPhase::Failed { message: message.to_owned(), reprepare: false };
+            }
             cx.notify();
-            return;
+        };
+        if comments.is_empty() && body.trim().is_empty() {
+            return fail(self, "Add a summary or at least one comment first.", cx);
         }
-        if self.local_draft_pending.contains_key(&dialog.target) {
-            dialog.phase = SubmitPhase::Failed("Drafts are still saving. Try again in a moment.".into());
-            cx.notify();
-            return;
+        if self.local_draft_pending.contains_key(&target) {
+            return fail(self, "Drafts are still saving. Try again in a moment.", cx);
         }
-        let target = dialog.target.clone();
-        let nonce = self
-            .submit_nonces
-            .entry(target.clone())
-            .or_insert_with(|| uuid::Uuid::new_v4().to_string())
-            .clone();
         let params = SubmitReviewParams {
             target: target.clone(),
-            owner: pr.owner.clone(),
-            repo: pr.repo.clone(),
+            owner: pr.owner,
+            repo: pr.repo,
             number: pr.number,
-            event: dialog.event,
-            attempt_id: attempt_id(&nonce, dialog.event, &body, &dialog.comments),
+            event,
             body,
-            comments: dialog.comments.clone(),
-            commit_id: dialog.commit_id.clone(),
+            comments,
+            commit_id: head,
+            check_only: false,
         };
-        dialog.phase = SubmitPhase::Sending;
+        if let Some(dialog) = self.submit_dialog.as_mut() {
+            dialog.phase = SubmitPhase::Sending;
+            dialog.last_params = Some(params.clone());
+        }
+        self.run_submit(params, false, cx);
+    }
+
+    /// Send `SubmitReview` (or its check-only form). The task lives on `Changes`, so
+    /// the reply applies even if the dialog is closed or replaced meanwhile.
+    fn run_submit(&mut self, params: SubmitReviewParams, checking: bool, cx: &mut Context<Self>) {
+        let target = params.target.clone();
+        self.submit_inflight = Some(target.clone());
         let value = serde_json::to_value(&params).unwrap_or_default();
-        let task = self.state.update(cx, |state, cx| {
-            state.chat_diff_rpc(methods::SUBMIT_REVIEW, value, cx)
-        });
-        let task_target = target.clone();
-        dialog.task = Some(cx.spawn(async move |this, cx| {
+        let task = self.state.update(cx, |state, cx| state.chat_diff_rpc(methods::SUBMIT_REVIEW, value, cx));
+        self.submit_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await.and_then(|value| {
                 serde_json::from_value::<SubmitReviewReply>(value).map_err(|e| e.to_string())
             });
-            this.update(cx, |this, cx| this.finish_submit_review(&task_target, result, cx)).ok();
+            this.update(cx, |this, cx| this.finish_submit_review(&target, checking, result, cx)).ok();
         }));
         cx.notify();
     }
@@ -192,30 +373,62 @@ impl Changes {
     fn finish_submit_review(
         &mut self,
         target: &str,
+        checking: bool,
         result: Result<SubmitReviewReply, String>,
         cx: &mut Context<Self>,
     ) {
+        self.submit_task = None;
         let phase = match &result {
             Ok(reply) => match reply.outcome {
                 SubmitReviewOutcome::Posted | SubmitReviewOutcome::AlreadyPosted => SubmitPhase::Posted {
                     url: reply.url.clone(),
                     already: reply.outcome == SubmitReviewOutcome::AlreadyPosted,
+                    warning: reply.local_record_error.clone(),
                 },
                 SubmitReviewOutcome::PendingConflict => SubmitPhase::Conflict { url: reply.url.clone() },
+                SubmitReviewOutcome::NotFound => SubmitPhase::Failed {
+                    message: "The review did not reach GitHub. Nothing was posted; Retry is safe.".into(),
+                    reprepare: false,
+                },
             },
-            Err(error) => SubmitPhase::Failed(error.clone()),
+            Err(error) if checking => SubmitPhase::Failed {
+                message: format!("Result unknown: couldn't confirm with GitHub ({error}). Retry checks again before posting."),
+                reprepare: false,
+            },
+            Err(error) if result_unknown(error) => SubmitPhase::Checking,
+            Err(error) => SubmitPhase::Failed {
+                message: error.clone(),
+                reprepare: error.contains("new commits"),
+            },
         };
+        if phase == SubmitPhase::Checking {
+            // Result unknown: ask GitHub whether the review landed before any new post.
+            let check = self
+                .submit_dialog
+                .as_ref()
+                .filter(|d| d.target == target)
+                .and_then(|d| d.last_params.clone())
+                .map(|mut params| {
+                    params.check_only = true;
+                    params
+                });
+            if let Some(params) = check {
+                if let Some(dialog) = self.submit_dialog.as_mut() {
+                    dialog.phase = SubmitPhase::Checking;
+                }
+                return self.run_submit(params, true, cx);
+            }
+        }
+        self.submit_inflight = None;
         let posted = matches!(phase, SubmitPhase::Posted { .. });
         if posted {
-            self.submit_nonces.remove(target);
-            // The engine recorded the review and removed its drafts; reload both views.
+            // The engine removed the drafts it sent; reload the rest and the threads.
             self.local_review_drafts.remove(target);
             self.local_draft_acknowledged.remove(target);
             self.local_draft_comments.remove(target);
         }
         if let Some(dialog) = self.submit_dialog.as_mut().filter(|d| d.target == target) {
             dialog.phase = phase;
-            dialog.task = None;
         }
         if posted && self.review_target.as_deref() == Some(target) {
             self.load_local_drafts(target, cx);
@@ -225,6 +438,11 @@ impl Changes {
     }
 
     pub(super) fn render_submit_review(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // The dialog belongs to the review it opened on.
+        if self.submit_dialog.as_ref().is_some_and(|d| self.review_target.as_deref() != Some(d.target.as_str())) {
+            self.submit_dialog = None;
+            self.submit_prepare_task = None;
+        }
         if !self.can_submit_review() && self.submit_dialog.is_none() {
             return None;
         }
@@ -267,9 +485,14 @@ impl Changes {
         let Some(dialog) = self.submit_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let count = dialog.comments.len();
-        let busy = dialog.phase == SubmitPhase::Sending;
+        let (comments, held) = self.submit_selection(dialog, false);
+        let count = comments.len();
+        let busy = matches!(dialog.phase, SubmitPhase::Sending | SubmitPhase::Checking);
+        let preparing = dialog.phase == SubmitPhase::Preparing;
         let finished = matches!(dialog.phase, SubmitPhase::Posted { .. });
+        let conflict = matches!(dialog.phase, SubmitPhase::Conflict { .. });
+        let reprepare = matches!(dialog.phase, SubmitPhase::Failed { reprepare: true, .. });
+        let ready = dialog.head_sha.is_some() && matches!(dialog.phase, SubmitPhase::Editing | SubmitPhase::Failed { reprepare: false, .. });
         let events = [ReviewEvent::Comment, ReviewEvent::Approve, ReviewEvent::RequestChanges];
         let segments = events.into_iter().map(|event| {
             let selected = dialog.event == event;
@@ -284,29 +507,36 @@ impl Changes {
                 .child(SharedString::from(event_label(event)));
             crate::surface_chrome::segmented_key(item, theme, selected)
         });
-        let unplaced: Vec<_> = dialog
-            .unplaced
+        let hidden = held.len().saturating_sub(5);
+        let held_rows: Vec<_> = held
             .iter()
             .take(5)
-            .map(|draft| {
+            .map(|(draft, reason)| {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
                     .truncate()
                     .child(SharedString::from(format!(
-                        "{}:{} \u{2014} {}",
+                        "{}:{} \u{2014} {} ({reason})",
                         draft.anchor.file,
                         draft.anchor.end_line,
                         one_line(&draft.body)
                     )))
             })
             .collect();
-        let hidden = dialog.unplaced.len().saturating_sub(5);
+        let note = |text: &str, color: gpui::Hsla| -> AnyElement {
+            div().text_size(px(11.0)).text_color(color).child(SharedString::from(text.to_owned())).into_any_element()
+        };
         let status: Option<AnyElement> = match &dialog.phase {
-            SubmitPhase::Editing | SubmitPhase::Sending => None,
-            SubmitPhase::Failed(message) => Some(
-                crate::error_notice::ErrorNotice::from_text("submit-review-error", theme, message)
-                    .into_any_element(),
+            SubmitPhase::Editing => dialog
+                .head_sha
+                .is_none()
+                .then(|| note("The pull request's head commit is unknown, so Submit is off.", theme.warning)),
+            SubmitPhase::Preparing => Some(note("Checking your comments against GitHub\u{2026}", theme.text_muted)),
+            SubmitPhase::Sending => Some(note("Posting\u{2026}", theme.text_muted)),
+            SubmitPhase::Checking => Some(note("Result unknown; checking GitHub\u{2026}", theme.warning)),
+            SubmitPhase::Failed { message, .. } => Some(
+                crate::error_notice::ErrorNotice::from_text("submit-review-error", theme, message).into_any_element(),
             ),
             SubmitPhase::Conflict { url } => {
                 let url = url.clone();
@@ -315,11 +545,10 @@ impl Changes {
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(
-                            div().text_size(px(11.0)).text_color(theme.warning).child(
-                                "You already have a pending review on this pull request (started on GitHub). Submit or discard it there, then try again. Nothing was sent.",
-                            ),
-                        )
+                        .child(note(
+                            "You already have a pending review on this pull request (started on GitHub). Submit or discard it there, then try again. Nothing was sent.",
+                            theme.warning,
+                        ))
                         .child(
                             button("submit-review-open-pr", "Open pull request", ButtonVariant::Secondary, ButtonSize::Sm, theme)
                                 .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
@@ -327,10 +556,10 @@ impl Changes {
                         .into_any_element(),
                 )
             }
-            SubmitPhase::Posted { url, already } => {
+            SubmitPhase::Posted { url, already, warning } => {
                 let url = url.clone();
                 let text = if *already {
-                    "This review was already on GitHub; nothing was sent again."
+                    "Already posted: this review was on GitHub; nothing was sent again."
                 } else {
                     "Review posted."
                 };
@@ -340,6 +569,12 @@ impl Changes {
                         .flex_col()
                         .gap(px(6.0))
                         .child(div().text_size(px(11.5)).text_color(theme.text).child(text))
+                        .when_some(warning.clone(), |el, warning| {
+                            el.child(note(
+                                &format!("Mast couldn't save the local record ({warning}). Your drafts are still here; nothing will be posted twice."),
+                                theme.warning,
+                            ))
+                        })
                         .child(
                             button("submit-review-open-review", "Open on GitHub", ButtonVariant::Secondary, ButtonSize::Sm, theme)
                                 .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
@@ -348,12 +583,17 @@ impl Changes {
                 )
             }
         };
-        let primary_label = match (&dialog.phase, busy) {
-            (_, true) => "Submitting…",
-            (SubmitPhase::Failed(_), _) => "Retry",
-            _ => "Submit",
+        let primary_label = if busy {
+            "Posting\u{2026}"
+        } else if reprepare {
+            "Check again"
+        } else if matches!(dialog.phase, SubmitPhase::Failed { .. }) {
+            "Retry"
+        } else {
+            "Submit"
         };
-        let card = div()
+        let enabled = ready || reprepare;
+        div()
             .id("changes-submit-review")
             .debug_selector(|| "changes-submit-review".into())
             .w(px(380.0))
@@ -368,13 +608,7 @@ impl Changes {
                     this.close_submit_review(cx);
                 }
             }))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Submit review"),
-            )
+            .child(div().text_size(px(12.5)).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child("Submit review"))
             .child(div().flex().flex_row().gap(px(4.0)).children(segments))
             .child(
                 div()
@@ -389,13 +623,14 @@ impl Changes {
                     .id("submit-review-count")
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(match count {
-                        0 => "No draft comments will be posted".to_owned(),
-                        1 => "1 draft comment will be posted".to_owned(),
-                        n => format!("{n} draft comments will be posted"),
+                    .child(SharedString::from(match (preparing, count) {
+                        (true, _) => "Checking draft comments\u{2026}".to_owned(),
+                        (_, 0) => "No draft comments will be posted".to_owned(),
+                        (_, 1) => "1 draft comment will be posted".to_owned(),
+                        (_, n) => format!("{n} draft comments will be posted"),
                     })),
             )
-            .when(!dialog.unplaced.is_empty(), |el| {
+            .when(!held.is_empty(), |el| {
                 el.child(
                     div()
                         .id("submit-review-unplaced")
@@ -403,19 +638,14 @@ impl Changes {
                         .flex_col()
                         .gap(px(2.0))
                         .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.warning)
-                                .child(SharedString::from(format!(
-                                    "{} can\u{2019}t be placed on the current diff. They stay as local drafts and are not posted:",
-                                    dialog.unplaced.len()
-                                ))),
+                            div().text_size(px(11.0)).text_color(theme.warning).child(SharedString::from(format!(
+                                "{} can\u{2019}t be placed on the pull request. They stay as local drafts and are not posted:",
+                                held.len()
+                            ))),
                         )
-                        .children(unplaced)
+                        .children(held_rows)
                         .when(hidden > 0, |el| {
-                            el.child(
-                                div().text_size(px(11.0)).text_color(theme.text_faint).child(SharedString::from(format!("and {hidden} more"))),
-                            )
+                            el.child(div().text_size(px(11.0)).text_color(theme.text_faint).child(SharedString::from(format!("and {hidden} more"))))
                         }),
                 )
             })
@@ -434,25 +664,20 @@ impl Changes {
                             ButtonSize::Sm,
                             theme,
                         )
+                        .when(busy, |el| el.opacity(0.5))
                         .on_click(cx.listener(|this, _, _, cx| this.close_submit_review(cx))),
                     )
-                    .when(!finished && !matches!(dialog.phase, SubmitPhase::Conflict { .. }), |el| {
-                        el.child(
-                            button("submit-review-send", primary_label, ButtonVariant::Primary, ButtonSize::Sm, theme)
-                                .when(busy, |el| el.opacity(0.6))
-                                .on_click(cx.listener(|this, _, _, cx| this.submit_review_now(cx))),
-                        )
+                    .when(!finished && !conflict, |el| {
+                        let send = button("submit-review-send", primary_label, ButtonVariant::Primary, ButtonSize::Sm, theme)
+                            .when(!enabled || busy || preparing, |el| el.opacity(0.5));
+                        el.child(if enabled && !busy && !preparing {
+                            send.on_click(cx.listener(|this, _, _, cx| this.submit_review_now(cx)))
+                        } else {
+                            send
+                        })
                     }),
-            );
-        card.into_any_element()
-    }
-}
-
-#[allow(dead_code)]
-fn _side(side: ReviewSide) -> CommentSide {
-    match side {
-        ReviewSide::Left => CommentSide::Old,
-        ReviewSide::Right => CommentSide::New,
+            )
+            .into_any_element()
     }
 }
 
@@ -460,10 +685,37 @@ fn _side(side: ReviewSide) -> CommentSide {
 mod tests {
     use super::super::review_drafts::{line_hash, tests::install_diff};
     use super::*;
+    use crate::comments::CommentSide;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
     const TARGET: &str = "pr:o/r#1";
+
+    /// A scripted engine: what GitHub's diff accepts, what each SubmitReview returns, and
+    /// the drafts the engine would hold (only the sent ones leave).
+    #[derive(Default)]
+    struct Script {
+        drafts: Mutex<Vec<ReviewDraft>>,
+        submits: Mutex<VecDeque<Result<serde_json::Value, String>>>,
+        reject: Mutex<Vec<String>>,
+        prepare_error: Mutex<Option<String>>,
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl Script {
+        fn submit_calls(&self) -> Vec<serde_json::Value> {
+            self.calls_of(methods::SUBMIT_REVIEW)
+        }
+        fn calls_of(&self, method: &str) -> Vec<serde_json::Value> {
+            self.calls.lock().unwrap().iter().filter(|(m, _)| m == method).map(|(_, p)| p.clone()).collect()
+        }
+        fn queue(&self, reply: Result<serde_json::Value, String>) {
+            self.submits.lock().unwrap().push_back(reply);
+        }
+        fn remaining(&self) -> Vec<String> {
+            self.drafts.lock().unwrap().iter().map(|d| d.id.clone()).collect()
+        }
+    }
 
     fn draft(id: &str, hunk: &str, line_hash: &str) -> ReviewDraft {
         ReviewDraft {
@@ -484,166 +736,345 @@ mod tests {
         }
     }
 
-    /// A window over a PR review with one placeable and one unplaceable draft;
-    /// `reply` scripts the SubmitReview response.
-    fn setup<'a>(
-        cx: &'a mut gpui::TestAppContext,
-        reply: impl Fn() -> Result<serde_json::Value, String> + Send + Sync + 'static,
-    ) -> (gpui::Entity<Changes>, &'a mut gpui::VisualTestContext, Calls) {
-        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
-        let captured = calls.clone();
+    fn posted() -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"outcome":"posted","reviewId":9,"url":"https://github.com/o/r/pull/1#pullrequestreview-9"}))
+    }
+
+    fn fake(script: Arc<Script>) -> crate::diff_targets::FakeRpc {
+        Arc::new(move |method, params| {
+            script.calls.lock().unwrap().push((method.to_owned(), params.clone()));
+            let ids = |params: &serde_json::Value| -> Vec<String> {
+                params["comments"].as_array().map(|c| c.iter().filter_map(|c| c["draftId"].as_str().map(str::to_owned)).collect()).unwrap_or_default()
+            };
+            match method {
+                m if m == methods::PREPARE_REVIEW_SUBMIT => {
+                    if let Some(error) = script.prepare_error.lock().unwrap().take() {
+                        return Err(error);
+                    }
+                    let reject = script.reject.lock().unwrap().clone();
+                    let (unplaced, placed): (Vec<_>, Vec<_>) = ids(&params).into_iter().partition(|id| reject.contains(id));
+                    let unplaced: Vec<_> = unplaced.into_iter().map(|id| serde_json::json!({"draftId": id, "reason": "not in diff"})).collect();
+                    Ok(serde_json::json!({"headSha": "abc123", "placed": placed, "unplaced": unplaced}))
+                }
+                m if m == methods::SUBMIT_REVIEW => {
+                    let mut reply = script.submits.lock().unwrap().pop_front().unwrap_or_else(posted)?;
+                    let landed = matches!(reply["outcome"].as_str(), Some("posted" | "already-posted"));
+                    if landed {
+                        if reply.get("sentDraftIds").is_none() {
+                            reply["sentDraftIds"] = serde_json::json!(ids(&params));
+                        }
+                        let sent: Vec<String> = reply["sentDraftIds"].as_array().unwrap().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                        script.drafts.lock().unwrap().retain(|d| !sent.contains(&d.id));
+                    }
+                    Ok(reply)
+                }
+                m if m == methods::GET_REVIEW_DRAFTS => Ok(serde_json::to_value(script.drafts.lock().unwrap().clone()).unwrap()),
+                m if m == methods::GET_REVIEW_THREADS => Ok(serde_json::json!([])),
+                _ => Ok(serde_json::json!(true)),
+            }
+        })
+    }
+
+    /// A PR review with one draft that places and one whose line is gone.
+    fn setup(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Changes>, &mut gpui::VisualTestContext, Arc<Script>) {
+        let script = Arc::new(Script::default());
+        let rpc = fake(script.clone());
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
         });
-        let (changes, vcx) = cx.add_window_view(|_, cx| {
+        let (changes, vcx) = cx.add_window_view(move |_, cx| {
             let mut state = AppState::new();
-            state.chat_diff_rpc_override = Some(Arc::new(move |method, params| {
-                captured.lock().unwrap().push((method.to_owned(), params));
-                match method {
-                    m if m == methods::SUBMIT_REVIEW => reply(),
-                    m if m == methods::GET_REVIEW_DRAFTS => Ok(serde_json::json!([])),
-                    m if m == methods::GET_REVIEW_THREADS => Ok(serde_json::json!([])),
-                    _ => Ok(serde_json::json!(true)),
-                }
-            }));
+            state.chat_diff_rpc_override = Some(rpc);
             let state = cx.new(|_| state);
             Changes::new(state, cx)
         });
+        let seeded = script.clone();
         changes.update(vcx, |changes, cx| {
             let hunk = install_diff(changes);
             changes.review_target = Some(TARGET.into());
             changes.scope = DiffScope::Branch;
-            let placed = draft("placed", &hunk, &line_hash("a", CommentSide::New, "new"));
-            let lost = draft("lost", &hunk, "missing");
-            changes.local_review_drafts.insert(TARGET.into(), vec![placed, lost]);
+            let drafts = vec![
+                draft("placed", &hunk, &line_hash("a", CommentSide::New, "new")),
+                draft("lost", &hunk, "missing"),
+            ];
+            *seeded.drafts.lock().unwrap() = drafts.clone();
+            changes.local_review_drafts.insert(TARGET.into(), drafts);
             changes.rebuild_draft_index(cx);
         });
-        (changes, vcx, calls)
+        (changes, vcx, script)
     }
 
     fn open(changes: &gpui::Entity<Changes>, vcx: &mut gpui::VisualTestContext) {
         vcx.update(|window, cx| changes.update(cx, |c, cx| c.open_submit_review(window, cx)));
-    }
-
-    fn submit_calls(calls: &Calls) -> Vec<serde_json::Value> {
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(method, _)| method == methods::SUBMIT_REVIEW)
-            .map(|(_, params)| params.clone())
-            .collect()
-    }
-
-    fn posted_reply() -> Result<serde_json::Value, String> {
-        Ok(serde_json::json!({"outcome":"posted","reviewId":9,"url":"https://github.com/o/r/pull/1#pullrequestreview-9"}))
-    }
-
-    #[gpui::test]
-    fn dialog_counts_placed_drafts_and_lists_unplaced_ones(cx: &mut gpui::TestAppContext) {
-        let (changes, vcx, calls) = setup(cx, posted_reply);
-        assert!(changes.read_with(&*vcx, |c, _| c.can_submit_review()));
-        open(&changes, vcx);
-        changes.update(vcx, |changes, cx| {
-            let dialog = changes.submit_dialog.as_ref().unwrap();
-            assert_eq!(dialog.comments.len(), 1);
-            assert_eq!(dialog.comments[0].draft_id, "placed");
-            assert_eq!(dialog.comments[0].line, 1);
-            assert_eq!(dialog.unplaced.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["lost"]);
-            // Rendering the trigger with the dialog open must not post anything.
-            let theme = Theme::of(cx).clone();
-            let _ = changes.render_submit_review(&theme, cx);
-        });
-        assert!(submit_calls(&calls).is_empty(), "opening the dialog must not post");
-    }
-
-    #[gpui::test]
-    fn submit_posts_once_clears_sent_drafts_and_keeps_unplaced(cx: &mut gpui::TestAppContext) {
-        let (changes, vcx, calls) = setup(cx, posted_reply);
-        open(&changes, vcx);
-        changes.update(vcx, |changes, cx| {
-            changes.set_submit_event(ReviewEvent::RequestChanges, cx);
-            changes.submit_dialog.as_ref().unwrap().input.update(cx, |input, cx| input.set_text("Please fix", cx));
-            changes.submit_review_now(cx);
-        });
         vcx.run_until_parked();
-        let sent = submit_calls(&calls);
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0]["event"], "request-changes");
-        assert_eq!(sent[0]["body"], "Please fix");
-        assert_eq!(sent[0]["comments"].as_array().unwrap().len(), 1);
-        assert_eq!(sent[0]["comments"][0]["draftId"], "placed");
-        changes.read_with(&*vcx, |c, _| {
-            let dialog = c.submit_dialog.as_ref().unwrap();
-            assert!(matches!(&dialog.phase, SubmitPhase::Posted { already: false, url } if url.ends_with("-9")));
-            assert!(c.submit_nonces.is_empty());
-        });
-        let methods_called: Vec<_> = calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
-        assert!(methods_called.iter().any(|m| m == methods::GET_REVIEW_DRAFTS), "drafts reload");
-        assert!(methods_called.iter().any(|m| m == methods::GET_REVIEW_THREADS), "threads refresh");
-        // A second click while Posted does nothing.
-        changes.update(vcx, |c, cx| c.submit_review_now(cx));
-        assert_eq!(submit_calls(&calls).len(), 1);
     }
 
-    #[gpui::test]
-    fn failure_keeps_drafts_and_retry_reuses_the_attempt_id(cx: &mut gpui::TestAppContext) {
-        let attempts = Arc::new(Mutex::new(0));
-        let counter = attempts.clone();
-        let (changes, vcx, calls) = setup(cx, move || {
-            let mut n = counter.lock().unwrap();
-            *n += 1;
-            if *n == 1 { Err("could not run gh: connection reset".into()) } else { posted_reply() }
-        });
-        open(&changes, vcx);
+    fn click(changes: &gpui::Entity<Changes>, vcx: &mut gpui::VisualTestContext) {
         changes.update(vcx, |c, cx| c.submit_review_now(cx));
-        vcx.run_until_parked();
-        changes.read_with(&*vcx, |c, _| {
-            assert!(matches!(&c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Failed(m) if m.contains("connection reset")));
-            assert_eq!(c.local_review_drafts[TARGET].len(), 2, "nothing is lost");
-            assert_eq!(c.submit_nonces.len(), 1);
-        });
-        changes.update(vcx, |c, cx| c.submit_review_now(cx));
-        vcx.run_until_parked();
-        let sent = submit_calls(&calls);
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0]["attemptId"], sent[1]["attemptId"], "retry must be idempotent on GitHub");
-        changes.read_with(&*vcx, |c, _| {
-            assert!(matches!(c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Posted { .. }));
-        });
     }
 
-    #[gpui::test]
-    fn pending_review_conflict_keeps_everything_and_offers_the_pr(cx: &mut gpui::TestAppContext) {
-        let (changes, vcx, _calls) = setup(cx, || {
-            Ok(serde_json::json!({"outcome":"pending-conflict","url":"https://github.com/o/r/pull/1"}))
-        });
-        open(&changes, vcx);
-        changes.update(vcx, |c, cx| c.submit_review_now(cx));
-        vcx.run_until_parked();
+    fn phase(changes: &gpui::Entity<Changes>, vcx: &gpui::VisualTestContext) -> Option<SubmitPhase> {
+        changes.read_with(vcx, |c, _| c.submit_dialog.as_ref().map(|d| d.phase.clone()))
+    }
+
+    fn render(changes: &gpui::Entity<Changes>, vcx: &mut gpui::VisualTestContext) {
         changes.update(vcx, |c, cx| {
-            assert_eq!(
-                c.submit_dialog.as_ref().unwrap().phase,
-                SubmitPhase::Conflict { url: "https://github.com/o/r/pull/1".into() }
-            );
-            assert_eq!(c.local_review_drafts[TARGET].len(), 2);
             let theme = Theme::of(cx).clone();
             let _ = c.render_submit_review(&theme, cx);
         });
     }
 
     #[gpui::test]
-    fn empty_review_is_refused_without_a_call(cx: &mut gpui::TestAppContext) {
-        let (changes, vcx, calls) = setup(cx, posted_reply);
-        changes.update(vcx, |changes, _| {
-            changes.local_review_drafts.insert(TARGET.into(), Vec::new());
-        });
+    fn opening_checks_against_github_and_lists_what_cannot_be_placed(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        assert!(changes.read_with(&*vcx, |c, _| c.can_submit_review()));
         open(&changes, vcx);
-        changes.update(vcx, |c, cx| c.submit_review_now(cx));
-        assert!(submit_calls(&calls).is_empty());
-        changes.read_with(&*vcx, |c, _| {
-            assert!(matches!(c.submit_dialog.as_ref().unwrap().phase, SubmitPhase::Failed(_)));
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Editing));
+        changes.update(vcx, |c, cx| {
+            let dialog = c.submit_dialog.as_ref().unwrap();
+            assert_eq!(dialog.head_sha.as_deref(), Some("abc123"));
+            let (comments, held) = c.submit_selection(dialog, true);
+            assert_eq!(comments.iter().map(|c| c.draft_id.as_str()).collect::<Vec<_>>(), ["placed"]);
+            assert_eq!((comments[0].line, comments[0].line_text.as_str()), (1, "new"));
+            assert_eq!(held.iter().map(|(d, r)| (d.id.as_str(), r.as_str())).collect::<Vec<_>>(), [("lost", "its line is no longer in the diff")]);
+            let theme = Theme::of(cx).clone();
+            let _ = c.render_submit_review(&theme, cx);
         });
+        let prepares = script.calls_of(methods::PREPARE_REVIEW_SUBMIT);
+        assert_eq!(prepares.len(), 1);
+        assert_eq!(prepares[0]["comments"][0]["lineText"], "new");
+        assert!(script.submit_calls().is_empty(), "opening the dialog must not post");
+    }
+
+    #[gpui::test]
+    fn drafts_github_cannot_place_are_held_back_with_a_reason(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.reject.lock().unwrap().push("placed".into());
+        open(&changes, vcx);
+        changes.update(vcx, |c, _| {
+            let dialog = c.submit_dialog.as_ref().unwrap();
+            let (comments, held) = c.submit_selection(dialog, false);
+            assert!(comments.is_empty());
+            assert!(held.iter().any(|(d, r)| d.id == "placed" && r == "uncommitted or changed locally"));
+        });
+        assert_eq!(unplaced_label(Some("def"), "abc123"), "not pushed");
+        assert_eq!(unplaced_label(Some("ABC123"), "abc123"), "uncommitted or changed locally");
+        assert_eq!(unplaced_label(None, "abc123"), "uncommitted or changed locally");
+    }
+
+    #[gpui::test]
+    fn submit_posts_once_pinned_to_the_head_and_unplaced_drafts_survive(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        changes.update(vcx, |changes, cx| {
+            changes.set_submit_event(ReviewEvent::RequestChanges, cx);
+            changes.submit_dialog.as_ref().unwrap().input.update(cx, |input, cx| input.set_text("Please fix", cx));
+        });
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["event"], "request-changes");
+        assert_eq!(sent[0]["body"], "Please fix");
+        assert_eq!(sent[0]["commitId"], "abc123");
+        assert_eq!(sent[0]["owner"], "o");
+        assert_eq!(sent[0]["number"], 1);
+        assert_eq!(sent[0]["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(sent[0]["comments"][0]["draftId"], "placed");
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { already: false, ref url, .. }) if url.ends_with("-9")));
+        // The engine kept only the unsent draft; the reload shows exactly that.
+        assert_eq!(script.remaining(), ["lost"]);
+        changes.read_with(&*vcx, |c, _| {
+            assert_eq!(c.local_review_drafts[TARGET].iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["lost"]);
+            assert!(c.submit_inflight.is_none());
+        });
+        assert!(!script.calls_of(methods::GET_REVIEW_THREADS).is_empty(), "threads refresh");
+        // Posted: a further click does nothing.
+        click(&changes, vcx);
+        assert_eq!(script.submit_calls().len(), 1);
+    }
+
+    #[gpui::test]
+    fn second_click_while_sending_does_not_post_again(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        click(&changes, vcx);
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Sending));
+        click(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert_eq!(script.submit_calls().len(), 1);
+    }
+
+    #[gpui::test]
+    fn closing_while_sending_is_ignored_and_the_result_still_applies(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        click(&changes, vcx);
+        changes.update(vcx, |c, cx| c.close_submit_review(cx));
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Sending), "Esc/trigger/Cancel do nothing while posting");
+        vcx.update(|window, cx| changes.update(cx, |c, cx| c.open_submit_review(window, cx)));
+        vcx.run_until_parked();
+        assert_eq!(script.submit_calls().len(), 1);
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { .. })));
+        assert_eq!(script.remaining(), ["lost"]);
+    }
+
+    #[gpui::test]
+    fn switching_review_while_open_closes_without_posting(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        changes.update(vcx, |c, _| c.review_target = Some("pr:o/r#2".into()));
+        render(&changes, vcx);
+        assert_eq!(phase(&changes, vcx), None);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(script.submit_calls().is_empty());
+    }
+
+    #[gpui::test]
+    fn switching_review_while_sending_still_applies_the_reply_to_the_right_pr(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        click(&changes, vcx);
+        changes.update(vcx, |c, _| c.review_target = Some("pr:o/r#2".into()));
+        render(&changes, vcx);
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0]["number"].as_u64(), sent[0]["target"].as_str()), (Some(1), Some(TARGET)), "posted to the PR the dialog opened on");
+        assert_eq!(phase(&changes, vcx), None);
+        changes.read_with(&*vcx, |c, _| {
+            assert!(c.submit_inflight.is_none());
+            assert!(!c.local_review_drafts.contains_key(TARGET), "the posted PR's cache is dropped for a reload");
+        });
+    }
+
+    #[gpui::test]
+    fn timeout_is_checked_and_a_landed_review_is_not_posted_again(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Err("gh timed out".into()));
+        script.queue(Ok(serde_json::json!({"outcome":"already-posted","reviewId":9,"url":"https://github.com/o/r/pull/1#pullrequestreview-9","sentDraftIds":["placed"]})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent.len(), 2, "one post attempt, then one check");
+        assert_eq!(sent[0]["checkOnly"], false);
+        assert_eq!(sent[1]["checkOnly"], true);
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { already: true, .. })));
+        assert_eq!(script.remaining(), ["lost"]);
+    }
+
+    #[gpui::test]
+    fn unknown_result_blocks_posting_until_checked_then_retry_is_allowed(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Err("gh timed out".into()));
+        script.queue(Ok(serde_json::json!({"outcome":"not-found","url":"https://github.com/o/r/pull/1"})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { reprepare: false, .. })));
+        assert_eq!(script.remaining(), ["placed", "lost"], "nothing lost");
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent.iter().map(|p| p["checkOnly"].as_bool().unwrap()).collect::<Vec<_>>(), [false, true, false]);
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { already: false, .. })));
+    }
+
+    #[gpui::test]
+    fn a_clear_rejection_keeps_drafts_and_does_not_trigger_a_check(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Err("Validation Failed: line must be part of the diff (HTTP 422)".into()));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { ref message, .. }) if message.contains("HTTP 422")));
+        assert_eq!(script.submit_calls().len(), 1);
+        assert_eq!(script.remaining(), ["placed", "lost"]);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { .. })));
+    }
+
+    #[gpui::test]
+    fn pending_review_conflict_keeps_everything_and_offers_the_pr(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Ok(serde_json::json!({"outcome":"pending-conflict","url":"https://github.com/o/r/pull/1"})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Conflict { url: "https://github.com/o/r/pull/1".into() }));
+        assert_eq!(script.remaining(), ["placed", "lost"]);
+        render(&changes, vcx);
+    }
+
+    #[gpui::test]
+    fn unknown_head_disables_submit_until_the_check_succeeds(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        *script.prepare_error.lock().unwrap() = Some("gh timed out".into());
+        open(&changes, vcx);
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { reprepare: true, .. })));
+        click(&changes, vcx); // "Check again" prepares; it never posts
+        vcx.run_until_parked();
+        assert!(script.submit_calls().is_empty());
+        assert_eq!(script.calls_of(methods::PREPARE_REVIEW_SUBMIT).len(), 2);
+        assert_eq!(phase(&changes, vcx), Some(SubmitPhase::Editing));
+    }
+
+    #[gpui::test]
+    fn click_time_sends_current_drafts_and_skips_ones_added_after_the_check(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        changes.update(vcx, |c, cx| {
+            let drafts = c.local_review_drafts.get_mut(TARGET).unwrap();
+            drafts[0].body = "edited after opening".into();
+            let mut late = drafts[0].clone();
+            late.id = "late".into();
+            drafts.push(late);
+            c.rebuild_draft_index(cx);
+            let dialog = c.submit_dialog.as_ref().unwrap();
+            let (_, held) = c.submit_selection(dialog, false);
+            assert!(held.iter().any(|(d, r)| d.id == "late" && r.contains("added after the check")));
+        });
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        let sent = script.submit_calls();
+        assert_eq!(sent[0]["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(sent[0]["comments"][0]["body"], "edited after opening");
+        // A draft deleted after opening is not sent.
+        let (changes, vcx, script) = setup(cx);
+        open(&changes, vcx);
+        changes.update(vcx, |c, cx| {
+            c.local_review_drafts.get_mut(TARGET).unwrap().retain(|d| d.id != "placed");
+            c.rebuild_draft_index(cx);
+        });
+        click(&changes, vcx);
+        assert!(script.submit_calls().is_empty(), "no summary and no comments left: refused locally");
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { .. })));
+    }
+
+    #[gpui::test]
+    fn a_failed_local_record_is_reported_and_leaves_the_drafts(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.queue(Ok(serde_json::json!({"outcome":"posted","reviewId":9,"url":"u","sentDraftIds":[],"localRecordError":"disk full"})));
+        open(&changes, vcx);
+        click(&changes, vcx);
+        vcx.run_until_parked();
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Posted { warning: Some(ref w), .. }) if w == "disk full"));
+        assert_eq!(script.remaining(), ["placed", "lost"]);
+        render(&changes, vcx);
+    }
+
+    #[gpui::test]
+    fn an_empty_review_is_refused_without_a_call(cx: &mut gpui::TestAppContext) {
+        let (changes, vcx, script) = setup(cx);
+        script.reject.lock().unwrap().push("placed".into());
+        open(&changes, vcx);
+        click(&changes, vcx);
+        assert!(script.submit_calls().is_empty());
+        assert!(matches!(phase(&changes, vcx), Some(SubmitPhase::Failed { reprepare: false, .. })));
     }
 }

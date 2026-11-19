@@ -606,6 +606,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_after_a_lost_response_finds_the_review_with_the_persisted_nonce() {
+        let gh = FakeRest::new(PostMode::Lost("gh timed out"));
+        let first = PrDash::new(gh.clone(), PrDashConfig::default());
+        assert!(first.submit_review(&params(two()), "persisted").await.is_err());
+        // A new engine process: no in-memory state, only the nonce the registry kept.
+        let restarted = PrDash::new(gh.clone(), PrDashConfig::default());
+        let reply = restarted.submit_review(&params(two()), "persisted").await.unwrap();
+        assert_eq!(reply.outcome, SubmitReviewOutcome::AlreadyPosted);
+        assert_eq!(gh.posts().len(), 1);
+    }
+
+    #[tokio::test]
     async fn check_only_never_posts() {
         let gh = FakeRest::new(PostMode::Ok);
         let mut check = params(vec![]);

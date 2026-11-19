@@ -1333,8 +1333,12 @@ pub struct Changes {
     local_draft_ids: std::collections::HashSet<String>,
     local_outdated_drafts: Vec<mast_proto::ReviewDraft>,
     submit_dialog: Option<review_submit::SubmitDialog>,
-    /// Per review target, kept until a post succeeds so a retry reuses its attempt id.
-    submit_nonces: HashMap<String, String>,
+    /// The in-flight prepare/post/check lives here, not on the dialog, so closing or
+    /// replacing the dialog never drops a reply.
+    submit_task: Option<Task<()>>,
+    submit_prepare_task: Option<Task<()>>,
+    /// Review target with a post or check running.
+    submit_inflight: Option<String>,
     comment_index: HashMap<String, Vec<ReviewComment>>,
     comment_sync_key: Option<CommentSyncKey>,
     draft_anchor_index: review_drafts::DraftAnchorIndex,
@@ -1635,7 +1639,9 @@ impl Changes {
             local_draft_ids: std::collections::HashSet::new(),
             local_outdated_drafts: Vec::new(),
             submit_dialog: None,
-            submit_nonces: HashMap::new(),
+            submit_task: None,
+            submit_prepare_task: None,
+            submit_inflight: None,
             comment_index: HashMap::new(),
             comment_sync_key: None,
             draft_anchor_index: review_drafts::DraftAnchorIndex::default(),
