@@ -562,6 +562,11 @@ impl FilesSurface {
         cx.notify();
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_close_outline(&mut self) {
+        self.preview.outline_open = false;
+    }
+
     pub(crate) fn current_code_line(&self, cx: &App) -> u32 {
         if let Some((line, _)) = self.pending_editor_location { return line; }
         let Some(editor) = self.preview.active.as_ref().and_then(|path| self.preview.documents.get(path)).and_then(|document| document.editor.as_ref()) else { return u32::try_from(self.preview.list.logical_scroll_top().item_ix).unwrap_or(u32::MAX - 1).saturating_add(1); };

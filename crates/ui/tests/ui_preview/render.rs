@@ -196,6 +196,7 @@ pub fn render(
                 "code-reference" => mast_ui::snapshot::code_reference_fixture(window, cx).into(),
                 "symbol-search" => mast_ui::snapshot::symbol_search_fixture(data_dir, window, cx).into(),
                 "file-outline" => mast_ui::snapshot::file_outline_fixture(cx).into(),
+                "file-blame" => mast_ui::snapshot::file_blame_fixture(cx).into(),
                 "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
                 "scope-map" => mast_ui::snapshot::scope_map_fixture(cx).into(),
                 "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),

@@ -113,6 +113,54 @@ impl FilesSurface {
         self.blame.enabled
     }
 
+    /// Preview fixture: the review file with the gutter on, mixed provenance
+    /// and the hover popover open.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_file_blame(&mut self, cx: &mut Context<Self>) {
+        use mast_proto::BlameChat;
+        self.fixture_file_outline(cx);
+        self.fixture_close_outline();
+        let now = Utc::now().timestamp();
+        let commit = |sha: &str, author: &str, days: i64, subject: &str, chat: Option<BlameChat>| BlameCommit {
+            sha: sha.repeat(40)[..40].to_owned(),
+            author: author.into(),
+            author_time: now - days * 86_400,
+            subject: subject.into(),
+            path: "src/review.rs".into(),
+            previous_path: None,
+            chat,
+        };
+        let chat = |title: &str, confidence| BlameChat {
+            chat_id: "fixture-chat".into(),
+            title: title.into(),
+            confidence,
+            turn_id: Some("turn-3".into()),
+        };
+        let blame = Blame {
+            revision: "fixture".into(),
+            commits: vec![
+                commit("a", "Mikey", 41, "Add the review model", None),
+                commit("b", "Mikey", 3, "Track completion on Review", Some(chat("Review completion state", BlameChatConfidence::Recorded))),
+                commit("c", "Mikey", 9, "Print the completion flag", Some(chat("Debug output cleanup", BlameChatConfidence::Probably))),
+            ],
+            runs: vec![
+                BlameRun { start: 1, len: 3, commit: Some(0) },
+                BlameRun { start: 4, len: 1, commit: None },
+                BlameRun { start: 5, len: 5, commit: Some(1) },
+                BlameRun { start: 10, len: 1, commit: Some(0) },
+                BlameRun { start: 11, len: 4, commit: Some(2) },
+            ],
+        };
+        self.blame.enabled = true;
+        self.blame.popover = blame
+            .commits
+            .get(1)
+            .cloned()
+            .map(|commit| BlamePopover { commit: Some(commit), position: gpui::point(px(300.0), px(150.0)) });
+        self.blame.blame = Some(Arc::new(blame));
+        cx.notify();
+    }
+
     /// Toolbar toggle: applies here and tells the shell to apply it to every
     /// open file surface.
     pub fn toggle_blame_gutter(&mut self, cx: &mut Context<Self>) {
