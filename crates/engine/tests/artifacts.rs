@@ -2964,3 +2964,48 @@ async fn a_hand_edit_of_the_status_file_does_not_replace_the_last_published_revi
     let content = entries[0]["content"].as_str().unwrap();
     assert!(content.contains("Updated: 09:00") && !content.contains("by hand"), "{content}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stamped_manager_status_outlives_the_history_limit() {
+    let rig = rig().await;
+    rig.core
+        .workspace
+        .adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[])
+        .unwrap();
+    let first = publish(&rig, &rig.token, status_args(&status_document("09:00"), "s1")).await;
+    let id = first["artifactId"].as_str().unwrap().to_owned();
+
+    // 69 later edits by someone else push revision 1 past the history cap.
+    let mut view = rig.core.workspace.artifact(&id).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    for n in 2..=70u32 {
+        view.revisions.insert(
+            0,
+            mast_proto::ArtifactRevision {
+                id: n,
+                hash: format!("{n:064x}"),
+                note: "edit".into(),
+                at: now + i64::from(n),
+                by: mast_proto::WorkOutlineActor {
+                    kind: mast_proto::WorkOutlineActorKind::User,
+                    ..Default::default()
+                },
+                size_bytes: 1,
+                ..Default::default()
+            },
+        );
+        view.current_revision = n;
+    }
+    rig.core.workspace.put_artifact(&view).unwrap();
+    let kept = artifact(&rig, &id);
+    assert_eq!(kept.revisions[0].id, 70);
+    assert!(kept.revisions.iter().any(|r| r.id == 1 && r.manager_status.is_some()));
+
+    let read = tool(&rig, &rig.token, "briefing_read", json!({ "kind": "manager-status" }))
+        .await
+        .unwrap();
+    let entries = read["briefings"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{read}");
+    assert_eq!(entries[0]["revision"], 1);
+    assert!(entries[0]["content"].as_str().unwrap().contains("Updated: 09:00"));
+}
