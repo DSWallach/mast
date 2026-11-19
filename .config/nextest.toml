@@ -64,6 +64,7 @@ status-level = "retry"
 default-filter = '''
 not (
     test(~capture_source_context_reads_the_dispatch_checkout)
+  | test(~hand_off_reclaims_a_queued_worker_report)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
   | test(~mutations_stay_fast_on_a_large_local_registry)
@@ -97,6 +98,7 @@ fail-fast = false
 status-level = "retry"
 default-filter = '''
     test(~capture_source_context_reads_the_dispatch_checkout)
+  | test(~hand_off_reclaims_a_queued_worker_report)
   | test(~holder_probe_reports_pid_without_disturbing_the_lock)
   | test(~headless_sign_out_closes_joined_edge_rooms_and_stops_daemon)
   | test(~mutations_stay_fast_on_a_large_local_registry)

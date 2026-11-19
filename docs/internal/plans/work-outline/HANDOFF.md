@@ -1159,6 +1159,8 @@ All milestones M0–M4 of the spec, then the follow-ups below. User docs: `docs/
   - Flaky under full parallel load (pass alone): engine `work_outline_rpc::mutations_stay_fast_on_a_large_local_registry`,
     harness `opencode::tests::stalled_prompt_post_has_a_bounded_timeout`.
   - Engine integration, flaky under load: `device_routing::workspace_file_surface_proxies_over_the_relay`.
+  - Engine integration, flaky under full parallel load (passes alone 15/15, 2026-11-19): `orchestrator_wakes::hand_off_reclaims_a_queued_worker_report`
+    (asserts the queue right after an async hand-off; fix item under Bugs).
   - Engine integration, flaky under full parallel load (pass alone): `artifacts::blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates`
     (timing on the 2s question reconcile), `m5c_accounts_uploads_titles::cursor_login_flow_spawns_shim_and_auto_activates`.
   - Engine integration, flaky under full load (pass alone): `codex_login_resolver::codex_login_resolves_override_and_adds_its_directory_to_child_path`.
