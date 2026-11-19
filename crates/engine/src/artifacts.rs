@@ -1187,8 +1187,13 @@ impl ArtifactsService {
             && current_index
                 .as_ref()
                 .is_some_and(|index| *index != companion_hashes);
-        let changed =
-            view.current().map(|r| r.hash.as_str()) != Some(hash.as_str()) || companions_changed;
+        // A current Manager can attest to bytes written by an untrusted editor
+        // even when those bytes already match the stored file.
+        let manager_stamp = self.manager_stamp(&request, role.as_deref());
+        let needs_manager_attestation = manager_stamp.is_some()
+            && view.current().is_some_and(|revision| !crate::briefing::manager_provenance(&view, revision));
+        let changed = view.current().map(|r| r.hash.as_str()) != Some(hash.as_str())
+            || companions_changed || needs_manager_attestation;
         if manifest.is_some()
             && !changed
             && current_index.is_none()
@@ -1210,7 +1215,6 @@ impl ArtifactsService {
                 .unwrap_or(0)
                 .max(view.current_revision)
                 + 1;
-            let manager_stamp = self.manager_stamp(&request, role.as_deref());
             let stamped_for_writer = manager_stamp.as_ref().is_some_and(|stamp|
                 Some(stamp.chat_id.as_str()) == request.by.chat_id.as_deref());
             view.revisions.insert(

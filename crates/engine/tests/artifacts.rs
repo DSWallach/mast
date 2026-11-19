@@ -3150,6 +3150,42 @@ async fn handoff_after_status_ownership_check_never_receipts_an_unstamped_revisi
     assert_eq!(artifact.current_revision, 1);
     assert!(artifact.current().unwrap().manager_status.is_none());
     assert!(mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).is_none());
+    let mut successor = manager_caller(&rig);
+    successor.chat_id = OTHER_CHAT.into();
+    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &successor, &status_publish_args(&status_document("handoff"), "successor-status"),
+    ).unwrap();
+    assert_eq!(receipt, Some(2));
+    assert_eq!(reply["changed"], true);
+    let trusted = mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).unwrap();
+    assert_eq!(trusted.current_revision, 2);
+    assert_eq!(trusted.current().unwrap().manager_status.as_ref().unwrap().chat_id, OTHER_CHAT);
+    // Once trusted, identical bytes remain an unchanged publish.
+    let (_, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &successor, &status_publish_args(&status_document("handoff"), "successor-again"),
+    ).unwrap();
+    assert_eq!(receipt, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_can_attest_to_identical_unstamped_external_edit() {
+    let rig = rig().await;
+    rig.core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &rig.item, CHAT, &[]).unwrap();
+    let caller = manager_caller(&rig);
+    let (first, _) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&status_document("first"), "first"),
+    ).unwrap();
+    let content = status_document("external");
+    std::fs::write(first["storedPath"].as_str().unwrap(), &content).unwrap();
+    assert_eq!(rig.core.artifacts.scan_external_edits(), 1);
+    let (reply, receipt) = rig.core.artifacts.agent_publish_with_receipt(
+        &caller, &status_publish_args(&content, "attest"),
+    ).unwrap();
+    assert_eq!(receipt, Some(3));
+    assert_eq!(reply["revision"], 3);
+    let trusted = mast_engine::manager_status::status_artifact(&rig.core.workspace, SPACE, &rig.item).unwrap();
+    assert_eq!(trusted.current_revision, 3);
+    assert!(trusted.current().unwrap().manager_status.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
