@@ -88,7 +88,11 @@ Press `⌘I` on an item row to open its Details.
 
 ## Manager row
 
-Every project shows a **Manager** row first among its children, in the sidebar and the outline, with the model of its current chat as a badge. Before you use it, the row is a placeholder and nothing is running. Click it to open Start Manager, the Start Chat dialog for the project; sending the first message creates the Manager chat under the project on the Space's device. Afterwards the row opens that chat, and it stays in the same place if the chat is later replaced. A second start while the Manager already has a chat is refused, so repeated clicks or retries never create two. The row is hidden in search, in the attention filter, and for archived projects, and plain work items have none. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
+Every live (not archived) project shows a **Manager** row first among its children, in the sidebar and the outline. Before the Manager has a chat, the row is a placeholder reading "Starts on your first message", and nothing is running. Click it to open Start Manager, the Start Chat dialog for the project. Sending the first message creates the Manager chat under the project on the Space's device.
+
+Until that first message is queued, the start can be resumed: an interrupted start leaves a partial chat, which stays out of the outline, and the row keeps offering Start Manager. Sending again finishes the same start. Only after the first message is queued does the chat become the Manager. From then on the row shows the chat's model and opens it, and it stays in the same place when the chat is later replaced. The Manager chat appears only in its row, even if it is moved to another work item, and it cannot be deleted from the session menu.
+
+A second first message while the Manager already has a chat is refused, and the same message under a new attempt returns the same chat, so repeated clicks or retries never create two. The placeholder is left out of searches and the "Needs interaction" and similar filters, which show only the paths to chats that match; a Manager chat that matches still shows in its row. Starting a Manager needs an owning device that supports `standing-role-launch-v1`.
 
 ## Undo
 

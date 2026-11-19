@@ -380,6 +380,8 @@ pub(crate) fn flatten(
 
     // chat id -> item id, per Space, from each ready snapshot.
     let mut associated: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+    // First-start Chats of projects whose Manager does not hold them yet.
+    let mut unadopted_bootstrap: HashSet<String> = HashSet::new();
     for space in spaces {
         if let Some(snapshot) = ready_snapshot(&space.load) {
             let map = associated.entry(space.id.as_str()).or_default();
@@ -387,12 +389,35 @@ pub(crate) fn flatten(
                 for chat_id in &item.chat_ids {
                     map.insert(chat_id.as_str(), item.id.as_str());
                 }
+                if item.is_project {
+                    let bootstrap =
+                        mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item.id);
+                    let held = snapshot
+                        .standing_role(StandingRoleKind::Manager, &item.id)
+                        .and_then(|role| role.current_chat_id.as_deref());
+                    if held != Some(bootstrap.as_str()) {
+                        unadopted_bootstrap.insert(bootstrap);
+                    }
+                }
+            }
+            // A role's chat belongs to the role's scope item, wherever an
+            // ordinary assignment may have moved it: the Manager row is its
+            // one place.
+            for role in &snapshot.standing_roles {
+                if let Some(chat_id) = role.current_chat_id.as_deref() {
+                    map.insert(chat_id, role.scope_item_id.as_str());
+                }
             }
         }
     }
 
     let mut by_home: HashMap<String, Vec<&OutlineChat>> = HashMap::new();
     for chat in chats.iter().filter(|chat| chat.visible) {
+        // A partial first start is the Start row's business until its first
+        // message is queued and the role adopts the Chat.
+        if unadopted_bootstrap.contains(&chat.id) {
+            continue;
+        }
         if let Some(home) = chat_home(
             chat,
             &chat_by_id,
@@ -700,18 +725,7 @@ fn item_node<'s>(
         .is_project
         .then(|| snapshot.standing_role(StandingRoleKind::Manager, &item.id))
         .flatten();
-    // Before the role names a Chat, an interrupted first start may have
-    // left the role's bootstrap Chat under the project: it is the Manager's,
-    // not an ordinary Chat.
-    let manager_chat_id = manager_role
-        .and_then(|role| role.current_chat_id.clone())
-        .or_else(|| {
-            item.is_project
-                .then(|| {
-                    mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, &item.id)
-                })
-                .filter(|id| chat_nodes.iter().any(|node| matches!(&node.kind, OutlineRowKind::Chat(row) if row.chat.id == *id)))
-        });
+    let manager_chat_id = manager_role.and_then(|role| role.current_chat_id.clone());
     let manager_chat_node = manager_chat_id.as_deref().and_then(|id| {
         let at = chat_nodes.iter().position(|node| {
             matches!(&node.kind, OutlineRowKind::Chat(row) if row.chat.id == id && !row.dangling)
@@ -1343,7 +1357,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_interrupted_first_start_chat_is_the_managers_not_an_ordinary_chat() {
+    fn an_unadopted_first_start_chat_stays_hidden_and_the_row_stays_a_start() {
         let bootstrap = mast_proto::standing_role_bootstrap_chat_id(StandingRoleKind::Manager, API);
         let mut snapshot = project_snapshot(None);
         let mut assignment = snapshot.assignments.iter().find(|a| a.chat_id == CHAT_API).unwrap().clone();
@@ -1355,8 +1369,23 @@ pub(crate) mod tests {
         chats.push(chat(&bootstrap, Some("s1")));
         let model = flatten(&spaces, &chats, &HashSet::new(), &opts());
         let row = model.row(&row_key::manager("s1", API)).unwrap().manager().unwrap();
-        assert_eq!(row.chat_id.as_deref(), Some(bootstrap.as_str()));
-        assert!(model.rows.iter().all(|r| r.chat().is_none_or(|c| c.chat.id != bootstrap)));
+        assert_eq!(row.chat_id, None, "the row still offers Start Manager");
+        assert!(model.row(&row_key::chat(&bootstrap)).is_none(), "no ordinary chat row either");
+    }
+
+    #[test]
+    fn a_reassigned_manager_chat_shows_only_in_its_row() {
+        let mut snapshot = project_snapshot(Some(manager_role(API, Some(CHAT_API), &[CHAT_API])));
+        // The user moved the Manager chat to another item of the Space.
+        snapshot.assignments.iter_mut().find(|a| a.chat_id == CHAT_API).unwrap().work_item_id = Some(UI.into());
+        snapshot.items.iter_mut().find(|i| i.id == API).unwrap().chat_ids.retain(|id| id != CHAT_API);
+        snapshot.items.iter_mut().find(|i| i.id == UI).unwrap().chat_ids.push(CHAT_API.into());
+        let spaces = [ready("s1", "Repo", snapshot)];
+        let model = flatten(&spaces, &fixture_chats("s1"), &HashSet::new(), &opts());
+        let manager = model.position(&row_key::manager("s1", API)).unwrap();
+        assert_eq!(model.rows[manager].manager().unwrap().chat_id.as_deref(), Some(CHAT_API));
+        let shown: Vec<_> = model.rows.iter().filter(|r| r.chat().is_some_and(|c| c.chat.id == CHAT_API)).collect();
+        assert!(shown.is_empty(), "never also an ordinary chat under another item");
     }
 
     #[test]

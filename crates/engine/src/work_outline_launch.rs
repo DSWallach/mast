@@ -295,12 +295,12 @@ pub enum LaunchStep {
     Validated,
     ChatCreated,
     Assigned,
-    /// The new Chat holds the standing role (role launches only).
-    RoleAdopted,
     BindingCaptured,
     RevisionCreated,
     RevisionApplied,
     TurnQueued,
+    /// The new Chat holds the standing role (role launches only).
+    RoleAdopted,
 }
 
 fn error(code: WorkOutlineErrorCode, message: impl Into<String>) -> WorkOutlineError {
@@ -546,14 +546,17 @@ impl WorkItemLaunchService {
         check_prompt(&p.initial_prompt)?;
         let _gate = self.gate.lock().await;
         let op = p.operation_id.as_str();
-        // A role's first Chat is the role's own bootstrap Chat, whichever
-        // operation creates it (see `standing_role_bootstrap_chat_id`).
-        let chat_id = match p.standing_role {
-            Some(kind) => mast_proto::standing_role_bootstrap_chat_id(kind, &p.work_item_id),
-            None => derive_id(op, roles::CHAT),
+        // A role's first start shares its records across operations (see
+        // `standing_role_launch_scope`): `scope` stands where the operation id
+        // would for every record but the claim of the operation's own inputs.
+        let scope = match p.standing_role {
+            Some(kind) => mast_proto::standing_role_launch_scope(kind, &p.work_item_id),
+            None => p.operation_id.clone(),
         };
-        let message_id = derive_id(op, roles::MESSAGE);
-        let command_id = derive_id(op, roles::COMMAND);
+        let scope = scope.as_str();
+        let chat_id = derive_id(scope, roles::CHAT);
+        let message_id = derive_id(scope, roles::MESSAGE);
+        let command_id = derive_id(scope, roles::COMMAND);
         let inputs_hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
             work_item_id: &p.work_item_id,
             initial_prompt: &p.initial_prompt,
@@ -613,14 +616,14 @@ impl WorkItemLaunchService {
                 "The work item is archived",
             ));
         }
-        // A role launch starts the role's first Chat: only a project can have
-        // a Manager, and a role that already has a Chat is not started again
-        // (two clicks, two windows, or a stale placeholder). The only launch
-        // that may proceed against a held role is a retry of the operation
-        // that started it. The bootstrap Chat is shared by every operation,
-        // so a first start interrupted before adoption is finished by the
-        // next one rather than orphaned. The gate held above serializes
-        // launches, so the check stays true until the adoption below.
+        // A role launch is the role's first start: only a project can have a
+        // Manager. Every operation shares the records of that start (see
+        // `standing_role_launch_scope`) until its first message is durably
+        // queued, and the role is adopted only then, so an interrupted start
+        // is finished by whichever operation comes next. Once the message is
+        // queued, only the same first message converges; another is refused,
+        // and a role held by any other chat is never started again. The gate
+        // held above serializes launches.
         if let Some(kind) = p.standing_role {
             if kind != mast_proto::StandingRoleKind::Manager || !item.is_project {
                 return Err(error(
@@ -628,16 +631,38 @@ impl WorkItemLaunchService {
                     "Only a project can have a Manager",
                 ));
             }
-            if self
-                .workspace
-                .standing_role_chat(kind, &p.work_item_id)
-                .is_some_and(|current| {
-                    current != chat_id || !self.workspace.ledger_holds(&ledger_launch_key(op))
-                })
-            {
+            let held = self.workspace.standing_role_chat(kind, &p.work_item_id);
+            if held.as_deref().is_some_and(|current| current != chat_id) {
                 return Err(conflict(
                     "This project's Manager already has a chat; open it instead",
                 ));
+            }
+            if self.workspace.chat(&chat_id).map_err(engine_error)?.is_some() {
+                let (queued, landed) = self
+                    .doc_host
+                    .message_command_state(&chat_id, &message_id)
+                    .map_err(engine_error)?;
+                let started = queued.is_some() || landed;
+                if started && held.is_none() {
+                    // The first message was queued but the start stopped before
+                    // adopting: finish it, whichever message this operation sent.
+                    self.workspace
+                        .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
+                        .map_err(conflict)?;
+                }
+                let prompt = crate::doc_host::queued_message_prompt(
+                    &p.initial_prompt.text,
+                    &p.initial_prompt.attachments,
+                );
+                let different = match &queued {
+                    Some(entry) => command_prompt(&entry.payload) != Some(prompt.as_str()),
+                    None => landed && !self.workspace.ledger_holds(&ledger_launch_key(op)),
+                };
+                if started && different {
+                    return Err(conflict(
+                        "This project's Manager already has a chat with a different first message; open it instead",
+                    ));
+                }
             }
         }
         // Reserve the successor on the source's role before anything is
@@ -672,7 +697,7 @@ impl WorkItemLaunchService {
         let deliver_instructions = self.launch_delivers_instructions(
             &chat_id,
             &message_id,
-            op,
+            scope,
             snapshot
                 .effective_instructions(&p.work_item_id)
                 .entries
@@ -707,7 +732,7 @@ impl WorkItemLaunchService {
             .map_err(|error| validation_error(&[error]))?;
         let resolved = match &existing_binding {
             Some(binding) => {
-                if binding.operation_id.as_deref() != Some(op) {
+                if binding.operation_id.as_deref() != Some(scope) {
                     return Err(conflict(
                         "This Chat's execution binding was captured by another operation",
                     ));
@@ -731,6 +756,7 @@ impl WorkItemLaunchService {
             &validated.execution_root,
             p.config.clone(),
             p.parent_chat_id.as_deref(),
+            p.standing_role.is_some() && existing_binding.is_none(),
         )?;
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
@@ -741,24 +767,15 @@ impl WorkItemLaunchService {
         self.checkpoint(LaunchStep::ChatCreated)?;
 
         // ── 4. assignment ──
-        self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
+        self.ensure_assignment(&chat_id, &p.work_item_id, scope)?;
         self.checkpoint(LaunchStep::Assigned)?;
-
-        // ── 4b. standing role ──
-        // Idempotent: a retry finds the role already on this Chat.
-        if let Some(kind) = p.standing_role {
-            self.workspace
-                .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
-                .map_err(conflict)?;
-        }
-        self.checkpoint(LaunchStep::RoleAdopted)?;
 
         // ── 5. execution binding ──
         if existing_binding.is_none() {
             self.workspace.capture_chat_execution_binding(
                 &chat_id,
                 &resolved,
-                op,
+                scope,
                 &self.actor(),
             )?;
         }
@@ -801,7 +818,7 @@ impl WorkItemLaunchService {
                 .mutate(WorkOutlineMutation::CreateInstructionRevision(
                     CreateInstructionRevisionParams {
                         work_item_id: p.work_item_id.clone(),
-                        operation_id: op.to_owned(),
+                        operation_id: scope.to_owned(),
                     },
                 ))?
                 .into_revision_id()?;
@@ -815,7 +832,7 @@ impl WorkItemLaunchService {
                         turn_boundary: Some(InstructionTurnBoundary {
                             message_id: Some(message_id.clone()),
                         }),
-                        operation_id: op.to_owned(),
+                        operation_id: scope.to_owned(),
                     },
                 ))?
                 .into_application_id()?;
@@ -854,6 +871,16 @@ impl WorkItemLaunchService {
             wakes.evaluate(&chat_id, false).await;
         }
         self.checkpoint(LaunchStep::TurnQueued)?;
+
+        // ── 8. standing role ──
+        // Last: until the first message is queued the start is resumable and
+        // the Chat is not yet the Manager. Idempotent on a retry.
+        if let Some(kind) = p.standing_role {
+            self.workspace
+                .adopt_standing_role(kind, &p.work_item_id, &chat_id, &[])
+                .map_err(conflict)?;
+        }
+        self.checkpoint(LaunchStep::RoleAdopted)?;
 
         let (state, detail) = self.turn_state(&chat_id, &message_id)?;
         if state != WorkItemLaunchState::Rejected && let Some((_, source)) = hand_off {
@@ -1187,6 +1214,7 @@ impl WorkItemLaunchService {
         execution_root: &str,
         config: Option<ChatConfig>,
         parent_chat_id: Option<&str>,
+        retarget_unbound: bool,
     ) -> Result<(), WorkOutlineError> {
         match self.workspace.chat(chat_id).map_err(engine_error)? {
             Some(chat) => {
@@ -1197,6 +1225,16 @@ impl WorkItemLaunchService {
                     return Err(conflict("The launch's Chat has another parent Chat"));
                 }
                 if !same_path(chat.cwd.as_deref().unwrap_or(""), execution_root) {
+                    // A role's partial start that never reached its binding or a
+                    // message has run nothing in its folder: the next start's
+                    // choice replaces it.
+                    if retarget_unbound {
+                        return self
+                            .workspace
+                            .set_chat_cwd(chat_id, execution_root)
+                            .map(drop)
+                            .map_err(engine_error);
+                    }
                     return Err(conflict("The launch's Chat was created in another folder"));
                 }
                 Ok(())

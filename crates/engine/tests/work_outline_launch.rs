@@ -2038,6 +2038,14 @@ async fn duplicate_manager_starts_and_retries_never_create_a_second_chat() {
         .unwrap();
     assert_eq!(role.chain.len(), 1);
 
+    // The same first message under another operation id converges on the
+    // same chat (a duplicate click), still one chat.
+    let same = launch(&rig, &manager_params(&rig, "manager-dup-3", "Plan the launch"))
+        .await
+        .unwrap();
+    assert_eq!(same.chat_id, reply.chat_id);
+    assert_eq!(chat_count(&rig), 1);
+
     // The operation id is bound to the role: replaying it as a plain launch
     // is a conflict rather than a second, unadopted chat.
     let plain = launch(&rig, &params(&rig, "manager-dup", "Plan the launch"))
@@ -2150,4 +2158,113 @@ async fn a_second_first_message_finishes_an_interrupted_manager_start_without_an
         assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
         rig.core.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interleaved_interrupted_starts_converge_on_one_message_and_one_chat() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    let bootstrap = mast_proto::standing_role_bootstrap_chat_id(
+        mast_proto::StandingRoleKind::Manager,
+        &rig.item,
+    );
+    let a = manager_params(&rig, "manager-int-a", "message from a");
+    let b = manager_params(&rig, "manager-int-b", "message from b");
+
+    launcher.inject_fault(Some(LaunchStep::Assigned));
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    // B gets as far as the execution binding and stops; nothing is adopted.
+    launcher.inject_fault(Some(LaunchStep::BindingCaptured));
+    assert!(launcher.create_chat_for_work_item(&b).await.is_err());
+    assert_eq!(manager_chat(&rig), None);
+
+    // A's delayed retry finishes the shared start: its message is the first
+    // and the role is adopted with it.
+    let reply = launcher.create_chat_for_work_item(&a).await.unwrap();
+    assert_eq!(reply.chat_id, bootstrap);
+    wait_for(|| turns_with(&rig, "message from a").len() == 1, "a's message").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(bootstrap.as_str()));
+
+    // B's retry is refused, creates nothing and queues nothing.
+    let refused = launcher.create_chat_for_work_item(&b).await.unwrap_err();
+    assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
+    assert_eq!(chat_count(&rig), 1);
+    assert_eq!(user_messages(&rig, &bootstrap), 1);
+    assert!(turns_with(&rig, "message from b").is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_interrupted_after_its_message_is_queued_is_adopted_by_the_next_attempt() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    let bootstrap = mast_proto::standing_role_bootstrap_chat_id(
+        mast_proto::StandingRoleKind::Manager,
+        &rig.item,
+    );
+    launcher.inject_fault(Some(LaunchStep::TurnQueued));
+    let a = manager_params(&rig, "manager-heal-a", "queued before the stop");
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    assert_eq!(manager_chat(&rig), None, "queued but not adopted");
+    wait_for(|| turns_with(&rig, "queued before the stop").len() == 1, "the queued turn").await;
+
+    // Another first message is refused, but it finishes the adoption so the
+    // chat that is already running is the visible Manager.
+    let b = manager_params(&rig, "manager-heal-b", "a different message");
+    let refused = launcher.create_chat_for_work_item(&b).await.unwrap_err();
+    assert_eq!(refused.code, WorkOutlineErrorCode::OperationConflict);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(bootstrap.as_str()));
+    assert_eq!(chat_count(&rig), 1);
+    assert_eq!(user_messages(&rig, &bootstrap), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_never_started_partial_chat_takes_the_next_starts_worktree() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let launcher = service(&rig);
+    let bootstrap = mast_proto::standing_role_bootstrap_chat_id(
+        mast_proto::StandingRoleKind::Manager,
+        &rig.item,
+    );
+    launcher.inject_fault(Some(LaunchStep::ChatCreated));
+    let mut a = manager_params(&rig, "manager-wt-a", "first try");
+    a.worktree_choice = Some(WorktreeChoice::CreateNew { name: "manager wt a".into() });
+    assert!(launcher.create_chat_for_work_item(&a).await.is_err());
+    let before = rig.core.workspace.chat(&bootstrap).unwrap().unwrap().cwd;
+
+    // The default checkout the user picks next is not blocked by the stranded
+    // chat's folder.
+    let b = manager_params(&rig, "manager-wt-b", "second try");
+    let reply = launcher.create_chat_for_work_item(&b).await.unwrap();
+    assert_eq!(reply.chat_id, bootstrap);
+    let after = rig.core.workspace.chat(&bootstrap).unwrap().unwrap().cwd;
+    assert_ne!(before, after, "the partial chat moved to the new choice");
+    assert_eq!(after.as_deref(), Some(reply.execution_root.as_str()));
+    assert_eq!(chat_count(&rig), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_launch_cannot_take_the_managers_chat_id() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    // The operation id the Manager's records used to derive from is a valid
+    // ordinary one; its plain launch must not collide with the Manager's.
+    let plain = launch(
+        &rig,
+        &params(&rig, &format!("standing-role-bootstrap:manager:{}", rig.item), "plain"),
+    )
+    .await
+    .unwrap();
+    let manager = launch(&rig, &manager_params(&rig, "manager-domain", "Plan"))
+        .await
+        .unwrap();
+    assert_ne!(plain.chat_id, manager.chat_id);
+    assert_eq!(manager_chat(&rig).as_deref(), Some(manager.chat_id.as_str()));
+    assert_eq!(chat_count(&rig), 2);
+    rig.core.shutdown().await;
 }

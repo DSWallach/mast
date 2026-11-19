@@ -48,6 +48,9 @@ pub(super) struct BranchLaunch {
     pub(super) target: mast_proto::ReviewTarget,
 }
 
+/// Unique per submit across dialogs (see [`StartChatDialog::attempt`]).
+static NEXT_START_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) struct StartChatDialog {
     pub(super) space_id: String,
     /// Empty in PR mode without a work item.
@@ -100,6 +103,10 @@ pub(super) struct StartChatDialog {
     pub(super) launch_blocker: Option<String>,
     op: OperationSlot,
     pub(super) starting: bool,
+    /// The submit in flight: a completion applies only to the dialog whose
+    /// submit it answers, so a cancelled start that finishes later cannot
+    /// clear, overwrite or close a dialog reopened on the same item.
+    attempt: u64,
     pub(super) failure: Option<LaunchFailure>,
     /// The host created the Chat but rejected its first Turn:
     /// `(chat id, detail)`.
@@ -384,6 +391,7 @@ impl Shell {
             launch_blocker,
             op: OperationSlot::default(),
             starting: false,
+            attempt: 0,
             failure: None,
             rejected: None,
             _input_events: input_events,
@@ -549,6 +557,7 @@ impl Shell {
             launch_blocker: None,
             op: OperationSlot::default(),
             starting: false,
+            attempt: 0,
             failure: None,
             rejected: None,
             _input_events: input_events,
@@ -1044,13 +1053,14 @@ impl Shell {
         params.operation_id = dialog.op.id_for(&inputs);
         dialog.starting = true;
         dialog.failure = None;
-        let item_id = dialog.item_id.clone();
+        let attempt = NEXT_START_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        dialog.attempt = attempt;
         let task = actions.create_chat_for_work_item(params);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                let Some(dialog) = this.start_chat_dialog().filter(|d| d.item_id == item_id) else {
+                let Some(dialog) = this.start_chat_dialog().filter(|d| d.attempt == attempt) else {
                     return;
                 };
                 dialog.starting = false;
@@ -1063,7 +1073,7 @@ impl Shell {
                         composer_pickers.adopt_new_chat_picks(&picks, cx)
                     });
                 }
-                let Some(dialog) = this.start_chat_dialog().filter(|d| d.item_id == item_id) else {
+                let Some(dialog) = this.start_chat_dialog().filter(|d| d.attempt == attempt) else {
                     return;
                 };
                 match result {

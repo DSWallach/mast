@@ -6218,8 +6218,27 @@ impl Shell {
         }
     }
 
+    /// Whether `chat_id` is the chat a standing role (a project's Manager)
+    /// currently points at, in any loaded Space.
+    fn holds_standing_role(&self, chat_id: &str, cx: &Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        state.spaces.iter().any(|space| {
+            state.work_outline(&space.id).snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .standing_roles
+                    .iter()
+                    .any(|role| role.current_chat_id.as_deref() == Some(chat_id))
+            })
+        })
+    }
+
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        if self.holds_standing_role(&chat_id, cx) {
+            self.set_sidebar_error("A project's Manager chat can't be deleted");
+            cx.notify();
+            return;
+        }
         self.drop_side_chats_of(&chat_id, cx);
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {

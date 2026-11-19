@@ -111,13 +111,20 @@ pub struct CreateChatForWorkItemParams {
     pub standing_role: Option<crate::StandingRoleKind>,
 }
 
-/// The Chat a role's first launch creates. It is derived from the role, not
-/// from the operation id, so an interrupted first start and a later one with
-/// a different operation id converge on one Chat instead of leaving an
-/// ordinary, unadopted Chat beside the Manager.
+/// The identity every record of a role's first launch derives from, in place
+/// of the operation id: the Chat, assignment, binding, revision, application,
+/// first message and command. An interrupted first start and a later one with
+/// another operation id then share one set of records instead of leaving an
+/// ordinary, unadopted Chat beside the Manager. The text contains spaces, which
+/// an operation id never does, so it cannot collide with an ordinary launch.
+pub fn standing_role_launch_scope(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
+    format!("standing role launch {} {scope_item_id}", kind.as_str())
+}
+
+/// The Chat a role's first launch creates.
 pub fn standing_role_bootstrap_chat_id(kind: crate::StandingRoleKind, scope_item_id: &str) -> String {
     crate::work_outline::derive_id(
-        &format!("standing-role-bootstrap:{}:{scope_item_id}", kind.as_str()),
+        &standing_role_launch_scope(kind, scope_item_id),
         crate::work_outline::roles::CHAT,
     )
 }
@@ -201,6 +208,20 @@ mod tests {
     use super::*;
     use crate::{HarnessId, SandboxLevel};
     use serde_json::json;
+
+    #[test]
+    fn role_launch_scope_cannot_be_an_operation_id() {
+        let scope = standing_role_launch_scope(crate::StandingRoleKind::Manager, "item-1");
+        assert!(scope.contains(' '), "operation ids never contain spaces");
+        assert_ne!(
+            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-1"),
+            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-2")
+        );
+        assert_ne!(
+            standing_role_bootstrap_chat_id(crate::StandingRoleKind::Manager, "item-1"),
+            crate::work_outline::derive_id("standing-role-bootstrap:manager:item-1", "chat")
+        );
+    }
 
     #[test]
     fn create_params_wire_shape() {
