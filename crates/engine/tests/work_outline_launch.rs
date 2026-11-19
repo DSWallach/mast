@@ -2225,12 +2225,24 @@ async fn the_recovery_of_a_queued_start_survives_an_engine_restart() {
     core.shutdown().await;
 }
 
+/// The directory holding the engine's `docs.sqlite3`, wherever the profile
+/// layout put it under the rig's temp tree.
+fn find_docs_dir(root: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_docs_dir(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|name| name == "docs.sqlite3") {
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
 fn registry_on_disk(rig: &Rig) -> mast_doc::RegistryDoc {
-    let data = rig.root.join("data");
-    let dir = [data.join("profiles/local"), data.clone()]
-        .into_iter()
-        .find(|dir| dir.join("docs.sqlite3").exists())
-        .expect("the engine's docs database");
+    let dir = find_docs_dir(&rig.root).expect("the engine's docs database under the rig");
     let store = mast_sync::DocsStore::open(&dir).expect("a second reader opens the database");
     let bytes = store
         .load_snapshot(mast_doc::REGISTRY_DOC_ID)
