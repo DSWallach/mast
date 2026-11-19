@@ -529,6 +529,7 @@ impl TipsCache {
         tips
     }
 
+    #[cfg(test)]
     pub(crate) fn current(slot: &Option<TipsCache>) -> Option<Arc<Vec<String>>> {
         slot.as_ref().map(|cache| cache.tips.clone())
     }

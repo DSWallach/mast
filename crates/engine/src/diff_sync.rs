@@ -746,7 +746,7 @@ fn common_dir_of(git_dir: &Path) -> PathBuf {
             let joined = git_dir.join(text.trim());
             std::fs::canonicalize(&joined).unwrap_or(joined)
         }
-        Err(_) => git_dir.to_path_buf(),
+        Err(_) => std::fs::canonicalize(git_dir).unwrap_or_else(|_| git_dir.to_path_buf()),
     }
 }
 
@@ -3797,7 +3797,7 @@ mod watch_budget_tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn watch_setup_priority_changes_and_fifo_prevents_starvation() {
