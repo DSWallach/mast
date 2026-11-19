@@ -429,6 +429,112 @@ mod tests {
     }
 
     #[gpui::test]
+    fn editor_shortcut_stages_selection_on_current_chat(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Focusable as _};
+        use super::super::document::{DocumentKey, FileDocument};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let client = mast_rpc::RpcClient::new(out, inbound);
+        let responder = runtime.spawn(async move {
+            while let Some(frame) = requests.recv().await {
+                let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if request["method"] == mast_rpc::methods::DESCRIBE_EXECUTION_REPOSITORY {
+                    let identity = mast_proto::ExecutionRepositoryIdentity {
+                        repo_id: "file-repo".into(), repo_path: "/file-repo".into(),
+                        checkout_id: "file-checkout".into(), ..Default::default()
+                    };
+                    replies.send(serde_json::json!({"id": request["id"], "ok": identity}).to_string()).await.unwrap();
+                }
+            }
+        });
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default(), Default::default());
+        });
+        let state = cx.new(|_| crate::state::AppState::new());
+        state.update(cx, |state, _| {
+            state.local_device_id = Some("local".into());
+            state.chats.push(mast_proto::Chat {
+                id: "a".into(), device_id: "local".into(), title: None, archived: false,
+                cwd: Some("/file-repo".into()), branch: None, checkout_id: Some("file-checkout".into()),
+                source_context: None, config: None, last_message_preview: None, last_message_at: None,
+                created_at: chrono::Utc::now(), harness_session_id: None, harness_session_cwd: None,
+                actual_model: None, parent_chat_id: None, space_id: None, last_seen_at: None,
+                room_gen: None, linked_pr_url: None, linked_pr_source: None,
+                linked_ticket_id: None, linked_ticket_source: None,
+            });
+            state.selected_chat = Some("a".into());
+        });
+        let window = cx.add_window(|_, cx| super::super::FilesSurface::new_editor(
+            state.clone(), "a".into(), "file.rs".into(), false, 1000, 13.0, false, false, cx,
+        ));
+        window.update(cx, |surface, window, cx| {
+            let text = "first line\nsecond line\n";
+            let mut document = FileDocument::loading(DocumentKey {
+                chat_id: "a".into(), checkout_id: Some("file-checkout".into()), path: "file.rs".into(),
+            });
+            document.set_loaded(mast_proto::WorkspaceFileText {
+                checkout_id: "file-checkout".into(), path: "file.rs".into(), text: Some(text.into()),
+                content_hash: Some("hash".into()), size: text.len() as u64, modified_at: None,
+                encoding: mast_proto::WorkspaceTextEncoding::Utf8,
+                line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false,
+            });
+            let theme = crate::theme::Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(text, "file.rs", false, &theme, window, cx);
+            window.focus(&editor.focus_handle(cx), cx);
+            document.editor = Some(editor);
+            surface.preview.active = Some("file.rs".into());
+            surface.preview.documents.insert("file.rs".into(), document);
+            surface.request_context = Some(super::super::client::FilesRequestContext {
+                target: mast_proto::WorkspaceTarget { chat_id: Some("a".into()), space_id: None, checkout_path: None },
+                target_device_id: None, cwd: "/file-repo".into(), checkout_id: Some("file-checkout".into()),
+            });
+        }).unwrap();
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("b".into());
+            state.apply_chat_diff_targets(vec![mast_proto::ChatDiffTargetsView {
+                chat_id: "b".into(), targets: vec![mast_proto::ChatDiffTargetView {
+                    path: "/other-repo".into(), checkout_id: "other-checkout".into(),
+                    source: mast_proto::ChatDiffTargetSource::Agent, selected: true,
+                    repo_name: "other".into(), branch: None, head_sha: None,
+                }], ref_targets: vec![],
+            }]);
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+        });
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        window.update(cx, |surface, window, cx| {
+            let editor = surface.preview.documents["file.rs"].editor.as_ref().unwrap();
+            window.focus(&editor.focus_handle(cx), cx);
+        }).unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+        let shortcut = crate::settings::platform_combo("mod-shift-l");
+        cx.simulate_keystrokes(window.into(), &shortcut);
+        window.update(cx, |surface, _, _| assert!(surface.code_ref_status.is_none())).unwrap();
+        state.read_with(cx, |state, _| assert!(state.code_refs("b").is_empty()));
+        cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-a"));
+        cx.simulate_keystrokes(window.into(), &shortcut);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            if state.read_with(cx, |state, _| !state.code_refs("b").is_empty()) { break; }
+            assert!(std::time::Instant::now() < deadline, "reference was not staged");
+            std::thread::yield_now();
+        }
+        state.read_with(cx, |state, _| {
+            assert!(state.code_refs("a").is_empty());
+            let staged = &state.code_refs("b")[0];
+            assert_eq!(staged.reference.location.repo_id, "file-repo");
+            assert_eq!(staged.reference.location.worktree_id.as_deref(), Some("file-checkout"));
+            assert_eq!(staged.snippet, "first line\nsecond line");
+        });
+        responder.abort();
+    }
+
+    #[gpui::test]
     fn adding_without_selected_chat_reports_error(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::dark()); });
         let state = cx.new(|_| crate::state::AppState::new());
