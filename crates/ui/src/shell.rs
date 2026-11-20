@@ -2104,6 +2104,15 @@ impl Shell {
         crate::artifacts::model::cached_review_head(status, pr).map(str::to_owned)
     }
 
+    /// Make every cached link status due for a refetch without dropping what
+    /// is shown meanwhile.
+    pub(crate) fn expire_chat_header_links(&mut self) {
+        let stale = Instant::now().checked_sub(CHAT_HEADER_LINK_REFRESH + Duration::from_secs(1));
+        if let Some(stale) = stale {
+            for entry in self.chat_header_links.values_mut() { entry.fetched_at = stale; }
+        }
+    }
+
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {
         self.chat_header_links.remove(chat_id);
         self.board_links_revision = self.board_links_revision.wrapping_add(1);

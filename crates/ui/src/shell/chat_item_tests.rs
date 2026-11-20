@@ -1259,6 +1259,58 @@ fn tracker_places_an_unassigned_item_with_a_pr_in_its_pr_stage(cx: &mut TestAppC
     assert!(has(vcx, "tracker-stage-Ready to merge-true"));
 }
 
+fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkStatus {
+    let pr = serde_json::json!({"number": 57, "url": "https://github.com/example/project/pull/57", "state": state,
+        "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false});
+    serde_json::from_value(serde_json::json!({ "isWorktree": false, "pr": pr,
+        "prLinks": [{"url": "https://github.com/example/project/pull/57", "source": "created_in_chat", "detail": pr}] })).unwrap()
+}
+
+fn set_link_status(shell: &Entity<Shell>, vcx: &mut VisualTestContext, status: Option<mast_engine::pr_ticket_cache::ChatLinkStatus>) {
+    shell.update(vcx, |shell, cx| {
+        shell.chat_header_links.insert("w-0".into(), ChatHeaderLinkCache { checkout: None, status, fetched_at: Instant::now() });
+        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
+        cx.notify();
+    });
+    draw(vcx);
+}
+
+#[gpui::test]
+fn tracker_stage_follows_the_chats_pr_from_building_to_merged(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage as Stage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let counts = |vcx: &mut VisualTestContext| shell.read_with(vcx, |shell, _| shell.tracker.counts);
+    let building = counts(vcx);
+    assert!(building[Stage::Building.index()] >= 1, "{building:?}");
+    set_link_status(&shell, vcx, Some(link_status_with_pr("OPEN")));
+    let mut expected = building;
+    expected[Stage::Building.index()] -= 1;
+    expected[Stage::PrReview.index()] += 1;
+    assert_eq!(counts(vcx), expected, "an open PR moves the ticket to PR review");
+    set_link_status(&shell, vcx, Some(link_status_with_pr("MERGED")));
+    expected[Stage::PrReview.index()] -= 1;
+    expected[Stage::Done.index()] += 1;
+    assert_eq!(counts(vcx), expected, "a merged PR moves the ticket to Done");
+}
+
+#[gpui::test]
+fn tracker_refetches_stale_link_statuses_when_the_pr_cache_changes(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 1);
+    // A status read just before the PR cache filled in: no PR details yet.
+    set_link_status(&shell, vcx, Some(serde_json::from_value(serde_json::json!({
+        "isWorktree": false, "prLinks": [{"url": "https://github.com/example/project/pull/57", "source": "created_in_chat"}] })).unwrap()));
+    shell.update(vcx, |shell, cx| {
+        assert!(shell.board_links_due(&["w-0".into()], cx).is_empty(), "fresh status is not refetched on its own");
+        shell.on_tracker_pr_cache_changed("w-0", cx);
+        assert_eq!(shell.board_links_due(&["w-0".into()], cx), vec!["w-0"]);
+        assert!(shell.chat_header_links["w-0"].status.is_some(), "last known status stays visible meanwhile");
+    });
+}
+
 #[gpui::test]
 fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
