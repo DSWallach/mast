@@ -156,6 +156,9 @@ pub(super) fn input_bindings(context: &'static str, result_navigation: bool) -> 
 
 /// Bind the composer keymap. Call once at app boot.
 pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
+    for prefix in ["cmd", "ctrl"] {
+        cx.bind_keys([KeyBinding::new(&format!("{prefix}-c"), Copy, Some("QuestionPanel"))]);
+    }
     let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, false);
     generic_bindings.push(KeyBinding::new(
         "enter",

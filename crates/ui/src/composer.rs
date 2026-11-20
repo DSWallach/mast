@@ -493,263 +493,6 @@ enum EditKind {
     Delete,
 }
 
-const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
-const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
-/// Key context for palettes that reserve the arrow keys for navigation.
-pub(crate) const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
-pub(crate) const WORKSPACE_SEARCH_CONTEXT: &str = "WorkspaceSearch";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MessageEnterBindingAction {
-    Submit,
-    ModifiedSubmit,
-    NewlineOrAccept,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MessageEnterBinding {
-    keystroke: String,
-    action: MessageEnterBindingAction,
-}
-
-fn message_enter_bindings(
-    behavior: ComposerSendBehavior,
-    modifier_combo: &str,
-) -> Vec<MessageEnterBinding> {
-    match behavior {
-        ComposerSendBehavior::Enter => vec![
-            MessageEnterBinding {
-                keystroke: "enter".into(),
-                action: MessageEnterBindingAction::Submit,
-            },
-            MessageEnterBinding {
-                keystroke: modifier_combo.into(),
-                action: MessageEnterBindingAction::ModifiedSubmit,
-            },
-        ],
-        ComposerSendBehavior::ModEnter => vec![
-            MessageEnterBinding {
-                keystroke: "enter".into(),
-                action: MessageEnterBindingAction::NewlineOrAccept,
-            },
-            MessageEnterBinding {
-                keystroke: modifier_combo.into(),
-                action: MessageEnterBindingAction::ModifiedSubmit,
-            },
-        ],
-    }
-}
-
-fn message_input_context(wizard_active: bool) -> &'static str {
-    if wizard_active {
-        GENERIC_COMPOSER_CONTEXT
-    } else {
-        MESSAGE_COMPOSER_CONTEXT
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnterOutcome {
-    AcceptCompletion,
-    Submit,
-    Newline,
-}
-
-fn enter_outcome(has_completion: bool, fallback: EnterOutcome) -> EnterOutcome {
-    if has_completion {
-        EnterOutcome::AcceptCompletion
-    } else {
-        fallback
-    }
-}
-
-fn input_bindings(context: &'static str, result_navigation: bool) -> Vec<KeyBinding> {
-    let ctx = Some(context);
-    let mut bindings = vec![
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("shift-up", SelectUp, ctx),
-        KeyBinding::new("shift-down", SelectDown, ctx),
-        KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("end", End, ctx),
-        KeyBinding::new("shift-home", SelectHome, ctx),
-        KeyBinding::new("shift-end", SelectEnd, ctx),
-        // macOS line/document motion — a laptop keyboard has no home/end keys,
-        // so Cmd+arrow is the only way users reach either edge.
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("cmd-up", DocStart, ctx),
-        KeyBinding::new("cmd-down", DocEnd, ctx),
-        KeyBinding::new("shift-cmd-left", SelectHome, ctx),
-        KeyBinding::new("shift-cmd-right", SelectEnd, ctx),
-        KeyBinding::new("shift-cmd-up", SelectDocStart, ctx),
-        KeyBinding::new("shift-cmd-down", SelectDocEnd, ctx),
-        // Line-edge deletion (Cmd+Delete on macOS).
-        KeyBinding::new("cmd-backspace", DeleteToLineStart, ctx),
-        KeyBinding::new("cmd-delete", DeleteToLineEnd, ctx),
-    ];
-    if !result_navigation {
-        bindings.push(KeyBinding::new("tab", MentionTab, ctx));
-        bindings.push(KeyBinding::new("shift-enter", Newline, ctx));
-        bindings.push(KeyBinding::new("up", Up, ctx));
-        bindings.push(KeyBinding::new("down", Down, ctx));
-    }
-    for prefix in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, ctx));
-        bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, ctx));
-    }
-    // Word-level editing: Option on macOS, Ctrl on Windows/Linux.
-    let word_edit_prefix = if cfg!(target_os = "macos") {
-        "alt"
-    } else {
-        "ctrl"
-    };
-    bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-backspace"),
-        DeleteWordLeft,
-        ctx,
-    ));
-    bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-delete"),
-        DeleteWordRight,
-        ctx,
-    ));
-    bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-left"),
-        WordLeft,
-        ctx,
-    ));
-    bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-right"),
-        WordRight,
-        ctx,
-    ));
-    bindings.push(KeyBinding::new(
-        &format!("shift-{word_edit_prefix}-left"),
-        SelectWordLeft,
-        ctx,
-    ));
-    bindings.push(KeyBinding::new(
-        &format!("shift-{word_edit_prefix}-right"),
-        SelectWordRight,
-        ctx,
-    ));
-    for prefix in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(&format!("{prefix}-a"), SelectAll, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-c"), Copy, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-x"), Cut, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-v"), Paste, ctx));
-    }
-    bindings
-}
-
-/// Bind the composer keymap. Call once at app boot.
-pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
-    for prefix in ["cmd", "ctrl"] {
-        cx.bind_keys([KeyBinding::new(&format!("{prefix}-c"), Copy, Some("QuestionPanel"))]);
-    }
-    let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, false);
-    generic_bindings.push(KeyBinding::new(
-        "enter",
-        Submit,
-        Some(GENERIC_COMPOSER_CONTEXT),
-    ));
-
-    let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT, false);
-    for binding in message_enter_bindings(send_behavior, &platform_combo("mod-enter")) {
-        match binding.action {
-            MessageEnterBindingAction::Submit => message_bindings.push(KeyBinding::new(
-                &binding.keystroke,
-                Submit,
-                Some(MESSAGE_COMPOSER_CONTEXT),
-            )),
-            MessageEnterBindingAction::ModifiedSubmit => message_bindings.push(KeyBinding::new(
-                &binding.keystroke,
-                ModifiedSubmit,
-                Some(MESSAGE_COMPOSER_CONTEXT),
-            )),
-            MessageEnterBindingAction::NewlineOrAccept => message_bindings.push(KeyBinding::new(
-                &binding.keystroke,
-                MessageNewlineOrAccept,
-                Some(MESSAGE_COMPOSER_CONTEXT),
-            )),
-        }
-    }
-
-    let word_edit_prefix = if cfg!(target_os = "macos") {
-        "alt"
-    } else {
-        "ctrl"
-    };
-    // Palette-search context: TEXT-EDITING keys only. gpui dispatches matched
-    // keybindings BEFORE raw key listeners (window.rs `dispatch_key_event`),
-    // so anything bound here can never reach a palette's `on_key_down` —
-    // navigation keys (up/down/left/right/enter) are deliberately unbound and
-    // bubble to the palette frame instead.
-    let palette = Some(PALETTE_SEARCH_CONTEXT);
-    let mut palette_bindings = vec![
-        KeyBinding::new("backspace", Backspace, palette),
-        KeyBinding::new("delete", Delete, palette),
-        KeyBinding::new("home", Home, palette),
-        KeyBinding::new("end", End, palette),
-        KeyBinding::new("shift-left", SelectLeft, palette),
-        KeyBinding::new("shift-right", SelectRight, palette),
-        // Modifier-qualified motion is safe here: the palette's own navigation
-        // uses BARE arrows/enter, which stay unbound and bubble to its frame.
-        KeyBinding::new("cmd-left", Home, palette),
-        KeyBinding::new("cmd-right", End, palette),
-        KeyBinding::new("shift-cmd-left", SelectHome, palette),
-        KeyBinding::new("shift-cmd-right", SelectEnd, palette),
-        KeyBinding::new("cmd-backspace", DeleteToLineStart, palette),
-    ];
-    palette_bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-backspace"),
-        DeleteWordLeft,
-        palette,
-    ));
-    palette_bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-delete"),
-        DeleteWordRight,
-        palette,
-    ));
-    palette_bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-left"),
-        WordLeft,
-        palette,
-    ));
-    palette_bindings.push(KeyBinding::new(
-        &format!("{word_edit_prefix}-right"),
-        WordRight,
-        palette,
-    ));
-    palette_bindings.push(KeyBinding::new(
-        &format!("shift-{word_edit_prefix}-left"),
-        SelectWordLeft,
-        palette,
-    ));
-    palette_bindings.push(KeyBinding::new(
-        &format!("shift-{word_edit_prefix}-right"),
-        SelectWordRight,
-        palette,
-    ));
-    for prefix in ["cmd", "ctrl"] {
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-a"), SelectAll, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-c"), Copy, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-x"), Cut, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-v"), Paste, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, palette));
-        palette_bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, palette));
-    }
-    cx.bind_keys(palette_bindings);
-    cx.bind_keys(input_bindings(WORKSPACE_SEARCH_CONTEXT, true));
-    cx.bind_keys(generic_bindings);
-    cx.bind_keys(message_bindings);
-}
-
 /// Events the composer wrapper listens for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerInputEvent {
@@ -1070,180 +813,6 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
-    #[cfg(feature = "snapshot")]
-    pub(crate) fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.reconcile_with_state(cx);
-        self.input.update(cx, |input, cx| input.set_text(text, cx));
-    }
-
-    #[cfg(feature = "snapshot")]
-    pub(crate) fn fixture_attachment(&mut self, bytes: Vec<u8>) {
-        let attachment = attachments::stage_png_bytes("preview.png".into(), bytes);
-        self.attachments
-            .entry(self.current_key.clone())
-            .or_default()
-            .push(attachment);
-    }
-    fn refresh_sign_in_status(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<(
-        String,
-        mast_proto::HarnessId,
-        Option<String>,
-        mast_proto::ManagedAccountsSnapshot,
-    )> {
-        let state = self.state.read(cx);
-        if state.selected_chat.is_some() {
-            self.sign_in_check = None;
-            return None;
-        }
-        let harness = self.pickers.read(cx).resolved(cx).harness?;
-        if !crate::managed_accounts::supports_accounts(harness) {
-            return None;
-        }
-        let device = state.effective_device_id();
-        let missing_snapshot = state.managed_accounts_for(device.as_deref()).is_none();
-        let has_space = state.selected_space_row().is_some();
-        let snapshot = state
-            .managed_accounts_for(device.as_deref())
-            .cloned()
-            .unwrap_or_default();
-        let account = state
-            .selected_space_row()
-            .and_then(|space| {
-                crate::managed_accounts::project_account(&snapshot, &space.id, harness)
-            })
-            .map(|account| account.id.clone());
-        let key = (device.clone(), harness, account.clone());
-        let refresh = self.sign_in_check.as_ref().is_none_or(|(d, h, a, at, _)| {
-            (d, *h, a) != (&key.0, key.1, &key.2) || at.elapsed() >= Duration::from_secs(30)
-        });
-        if refresh {
-            let rpc = state.accounts_rpc(device.as_deref());
-            if missing_snapshot {
-                self.state.update(cx, |state, cx| {
-                    state.load_managed_accounts(device.clone(), cx)
-                });
-            }
-            let started = Instant::now();
-            self.sign_in_check = Some((device.clone(), harness, account.clone(), started, false));
-            let request_key = key.clone();
-            cx.spawn(async move |this, cx| {
-                let result = rpc
-                    .call(
-                        mast_rpc::methods::LOCAL_AGENT_SIGN_IN_STATUS,
-                        serde_json::json!({"harness": harness, "accountId": request_key.2.clone()}),
-                    )
-                    .await;
-                this.update(cx, |this, cx| {
-                    if let Some((d, h, a, at, signed_out)) = &mut this.sign_in_check
-                        && (&*d, *h, &*a, *at)
-                            == (&request_key.0, request_key.1, &request_key.2, started)
-                    {
-                        *signed_out = result
-                            .ok()
-                            .and_then(|value| value.as_str().map(str::to_owned))
-                            .as_deref()
-                            == Some("signed_out");
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
-            return None;
-        }
-        if missing_snapshot && has_space {
-            return None;
-        }
-        self.sign_in_check
-            .as_ref()
-            .is_some_and(|entry| entry.4)
-            .then(|| (device.unwrap_or_default(), harness, account, snapshot))
-    }
-    pub(crate) fn set_dock_frame(
-        &mut self,
-        frame: crate::composer_dock::DockFrame,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self.dock_frame != Some(frame);
-        self.dock_height_changed |= self
-            .dock_frame
-            .is_none_or(|previous| previous.amount != frame.amount);
-        self.dock_frame = Some(frame);
-        if frame.active {
-            self.flip_morph = None;
-            self.height_morph = None;
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn dock_clearance_correction(&self) -> f32 {
-        self.dock_clearance_correction
-    }
-
-    pub(crate) fn surface_bounds(&self) -> crate::new_thread_background_mask::SurfaceBounds {
-        self.surface_bounds.clone()
-    }
-
-    /// The picker entity, for the shell's canvas target selectors.
-    pub fn pickers(&self) -> &Entity<Pickers> {
-        &self.pickers
-    }
-
-    pub(crate) fn add_selected_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if text.is_empty() {
-            return;
-        }
-        self.on_state_changed(cx);
-        self.input.update(cx, |input, cx| {
-            if input.read_only {
-                return;
-            }
-            let end = input.content.len();
-            let separator = if end == 0 || input.content.ends_with('\n') {
-                ""
-            } else {
-                "\n"
-            };
-            let inserted = format!("{separator}{}\n", crate::selection_chip::markdown(text));
-            input.move_to(end, cx);
-            input.replace_text_in_range(None, &inserted, window, cx);
-            window.focus(&input.focus_handle, cx);
-        });
-        self.focus_pending = true;
-        cx.notify();
-    }
-
-    /// Feed the stable conversation-column width into responsive composer
-    /// controls.
-    pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let composer_width = width.clamp(0.0, COMPOSER_MAX_WIDTH);
-        if composer_width_changed(self.last_available_width, composer_width) {
-            self.last_available_width = Some(composer_width);
-            // The shell renders before this child, so this queues one more
-            // pass after the input has been laid out at its final width. That
-            // pass can consume the completed measurement without emitting an
-            // event from inside Taffy's multi-pass measurement callback.
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn set_queue_shortcut_revealed(&mut self, revealed: bool, cx: &mut Context<Self>) {
-        if self.queue_shortcut_revealed != revealed {
-            self.queue_shortcut_revealed = revealed;
-            cx.notify();
-        }
-    }
-
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
@@ -1458,6 +1027,181 @@ impl Composer {
         }
         composer
     }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.reconcile_with_state(cx);
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_attachment(&mut self, bytes: Vec<u8>) {
+        let attachment = attachments::stage_png_bytes("preview.png".into(), bytes);
+        self.attachments
+            .entry(self.current_key.clone())
+            .or_default()
+            .push(attachment);
+    }
+    fn refresh_sign_in_status(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(
+        String,
+        mast_proto::HarnessId,
+        Option<String>,
+        mast_proto::ManagedAccountsSnapshot,
+    )> {
+        let state = self.state.read(cx);
+        if state.selected_chat.is_some() {
+            self.sign_in_check = None;
+            return None;
+        }
+        let harness = self.pickers.read(cx).resolved(cx).harness?;
+        if !crate::managed_accounts::supports_accounts(harness) {
+            return None;
+        }
+        let device = state.effective_device_id();
+        let missing_snapshot = state.managed_accounts_for(device.as_deref()).is_none();
+        let has_space = state.selected_space_row().is_some();
+        let snapshot = state
+            .managed_accounts_for(device.as_deref())
+            .cloned()
+            .unwrap_or_default();
+        let account = state
+            .selected_space_row()
+            .and_then(|space| {
+                crate::managed_accounts::project_account(&snapshot, &space.id, harness)
+            })
+            .map(|account| account.id.clone());
+        let key = (device.clone(), harness, account.clone());
+        let refresh = self.sign_in_check.as_ref().is_none_or(|(d, h, a, at, _)| {
+            (d, *h, a) != (&key.0, key.1, &key.2) || at.elapsed() >= Duration::from_secs(30)
+        });
+        if refresh {
+            let rpc = state.accounts_rpc(device.as_deref());
+            if missing_snapshot {
+                self.state.update(cx, |state, cx| {
+                    state.load_managed_accounts(device.clone(), cx)
+                });
+            }
+            let started = Instant::now();
+            self.sign_in_check = Some((device.clone(), harness, account.clone(), started, false));
+            let request_key = key.clone();
+            cx.spawn(async move |this, cx| {
+                let result = rpc
+                    .call(
+                        mast_rpc::methods::LOCAL_AGENT_SIGN_IN_STATUS,
+                        serde_json::json!({"harness": harness, "accountId": request_key.2.clone()}),
+                    )
+                    .await;
+                this.update(cx, |this, cx| {
+                    if let Some((d, h, a, at, signed_out)) = &mut this.sign_in_check
+                        && (&*d, *h, &*a, *at)
+                            == (&request_key.0, request_key.1, &request_key.2, started)
+                    {
+                        *signed_out = result
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_owned))
+                            .as_deref()
+                            == Some("signed_out");
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return None;
+        }
+        if missing_snapshot && has_space {
+            return None;
+        }
+        self.sign_in_check
+            .as_ref()
+            .is_some_and(|entry| entry.4)
+            .then(|| (device.unwrap_or_default(), harness, account, snapshot))
+    }
+    pub(crate) fn set_dock_frame(
+        &mut self,
+        frame: crate::composer_dock::DockFrame,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.dock_frame != Some(frame);
+        self.dock_height_changed |= self
+            .dock_frame
+            .is_none_or(|previous| previous.amount != frame.amount);
+        self.dock_frame = Some(frame);
+        if frame.active {
+            self.flip_morph = None;
+            self.height_morph = None;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn dock_clearance_correction(&self) -> f32 {
+        self.dock_clearance_correction
+    }
+
+    pub(crate) fn surface_bounds(&self) -> crate::new_thread_background_mask::SurfaceBounds {
+        self.surface_bounds.clone()
+    }
+
+    /// The picker entity, for the shell's canvas target selectors.
+    pub fn pickers(&self) -> &Entity<Pickers> {
+        &self.pickers
+    }
+
+    pub(crate) fn add_selected_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.on_state_changed(cx);
+        self.input.update(cx, |input, cx| {
+            if input.read_only {
+                return;
+            }
+            let end = input.content.len();
+            let separator = if end == 0 || input.content.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            let inserted = format!("{separator}{}\n", crate::selection_chip::markdown(text));
+            input.move_to(end, cx);
+            input.replace_text_in_range(None, &inserted, window, cx);
+            window.focus(&input.focus_handle, cx);
+        });
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// Feed the stable conversation-column width into responsive composer
+    /// controls.
+    pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let composer_width = width.clamp(0.0, COMPOSER_MAX_WIDTH);
+        if composer_width_changed(self.last_available_width, composer_width) {
+            self.last_available_width = Some(composer_width);
+            // The shell renders before this child, so this queues one more
+            // pass after the input has been laid out at its final width. That
+            // pass can consume the completed measurement without emitting an
+            // event from inside Taffy's multi-pass measurement callback.
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_queue_shortcut_revealed(&mut self, revealed: bool, cx: &mut Context<Self>) {
+        if self.queue_shortcut_revealed != revealed {
+            self.queue_shortcut_revealed = revealed;
+            cx.notify();
+        }
+    }
+
 
     /// Capture-knob passthrough (`MAST_OPEN_DIALOG=model`): open the
     /// combined harness/model menu.
@@ -1877,902 +1621,6 @@ impl Composer {
         }
     }
 
-    /// Queue a Run doc command with an optimistic echo — or, with the agent
-    /// busy, park the message on the chat's pending queue instead. New chats
-    /// thread the picked config in: worktree creation (when the isolated toggle
-    /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
-    /// reasoning / options on the Run request itself (§1.7).
-    fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
-        if self.sending { return; }
-        let message_id = self.retry_send_id.take().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let failed_send = FailedSend {
-            key: self.current_key.clone(), text: text.clone(), message_id: message_id.clone(), queued: queue,
-            attachment_ids: self.staged().iter().map(|item| item.id.clone()).collect(),
-            appshot_ids: self.staged_appshots().iter().map(|item| item.id.clone()).collect(),
-            skills: self.staged_skills().to_vec(), comments: self.staged_comments(cx),
-        };
-        self.failed_send = None;
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.failure = Some("Engine not connected".into());
-            self.failure_key = None; // global — meaningful on every chat
-            self.failed_send = Some(failed_send);
-            cx.notify();
-            return;
-        };
-        // Chat id: existing selection, or client-minted for the new-chat canvas
-        // (the chat then appears from the doc host once the doc materializes).
-        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
-            Some(id) => (id, false),
-            None => (uuid::Uuid::new_v4().to_string(), true),
-        };
-        // Where the new session runs (Current checkout / reuse an existing
-        // worktree / fresh worktree off the picked base) — resolved NOW so
-        // the async block needs no picker access.
-        let plan = self.pickers.read(cx).checkout_plan();
-        // New-chat worktree chip (`crate::workspace_chip`): taken (and reset
-        // to Main checkout) only for an eligible new chat — existing chats, the
-        // overview's panel (always an existing chat), non-git / remote
-        // projects and explicit checkout-picker worktrees never see it.
-        let workspace_choice = if is_new && self.pickers.read(cx).workspace_chip_eligible(cx) {
-            Some(self.pickers.update(cx, |p, _| p.take_workspace_choice()))
-        } else {
-            None
-        };
-        // Fully-resolved model/reasoning/options — concrete values (chat config
-        // or defaults), so the engine never has to guess a "default".
-        let resolved = self.pickers.read(cx).resolved(cx);
-        let existing_cwd = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.cwd.clone());
-        // The PROJECT fixes the new chat's device + base folder — sessions are
-        // minted onto the project's device, not necessarily this one. With no
-        // project ("Don't work in a project") the composer's device pick is
-        // the host and the session runs from `~` there.
-        let space = self.state.read(cx).selected_space_row().cloned();
-        let local_device_id = self.state.read(cx).local_device_id.clone();
-        let target_device_id = self.state.read(cx).effective_device_id();
-        let device_id = if is_new {
-            target_device_id
-                .clone()
-                .unwrap_or_else(|| "local".to_string())
-        } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
-                .or_else(|| local_device_id.clone())
-                .unwrap_or_else(|| "local".to_string())
-        };
-        // Uploads/read-backs target the chat's HOST device (forwardable RPCs);
-        // for a new chat that's the target device (None when it's local).
-        let host_device_id = if is_new {
-            target_device_id
-                .clone()
-                .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
-        } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
-        };
-        let space_id = space.as_ref().map(|s| s.id.clone());
-        let space_path = space.as_ref().filter(|space| !space.is_personal()).map(|s| s.path.clone());
-        if queue && !is_new {
-            let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
-                capabilities::MESSAGE_QUEUE_V1
-            } else {
-                capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1
-            };
-            if !engine.engine_info().supports(capability)
-                || !self.state.read(cx).chat_host_supports(&chat_id, capability)
-            {
-                self.failure =
-                    Some("Update the chat's engine to queue messages during a response.".into());
-                cx.notify();
-                return;
-            }
-        }
-        // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
-        // strip empties the instant you hit send; a failure hands the files
-        // back into the chat's stash.
-        let ordinary_staged = self
-            .attachments
-            .remove(&self.current_key)
-            .unwrap_or_default();
-        let staged_appshots = self.appshots.remove(&self.current_key).unwrap_or_default();
-        // Attached-skill chips are per-draft: taken now, handed back on
-        // failure like the attachments.
-        let staged_skills = self.skills.remove(&self.current_key).unwrap_or_default();
-        let mut staged = ordinary_staged.clone();
-        staged.extend(
-            staged_appshots
-                .iter()
-                .map(|appshot| appshot.screenshot.clone()),
-        );
-        // `typed` keeps the user's own words for the failure hand-back below:
-        // restoring the folded prompt would paste the comment block into the
-        // input as literal text.
-        let key = self.current_key.clone();
-        let comments = self.state.update(cx, |state, cx| {
-            let taken = state.take_review_comments(&key);
-            if !taken.is_empty() {
-                cx.notify();
-            }
-            taken
-        });
-        let typed = text.clone();
-        // Visible preamble ahead of the user's words (never hidden prompt
-        // injection): the transcript, queue row and Run prompt all carry it.
-        let text = with_skill_preamble(&staged_skills, &text);
-        let text = crate::comments::with_comments(&text, &comments);
-        self.preview = None;
-        self.instruction_reset.remember_send(&message_id, &typed);
-        let created_at = chrono::Utc::now().timestamp_millis();
-        // Existing busy chats always queue; compatibility was checked before
-        // taking the draft, attachments, or review comments.
-        let queue = queue && !is_new;
-        let clean_queue_attachment_text = staged.is_empty()
-            || (engine
-                .engine_info()
-                .supports(capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1)
-                && self.state.read(cx).chat_host_supports(
-                    &chat_id,
-                    capabilities::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
-                ));
-
-        // Queued-attachment flow (durable-by-design): stage the bytes on the
-        // LOCAL engine, queue the command immediately with `pending://` refs,
-        // and let the engine push the bytes to a remote host afterwards —
-        // staging must never gate the queue (2026-08-19 incident: a send
-        // died with a zombie peer link because the upload sat in front of
-        // QueueCommand). Requires every engine involved to understand the
-        // ref scheme — the local engine (an IPC daemon may be older than
-        // this UI) and, for remotely-hosted chats, the host; anything older
-        // keeps the legacy blocking upload.
-        let host_is_remote = host_device_id
-            .as_deref()
-            .is_some_and(|id| local_device_id.as_deref() != Some(id));
-        // Queue rows do not carry upstream's attachment-transfer escort, so
-        // they retain the proven host-upload path and store absolute refs.
-        // Appshot XML attributes require escaped final paths. The engine's plain
-        // string replacement of pending refs cannot safely rewrite those, so
-        // rich captures use the existing upload-before-send path.
-        let queued_flow = !queue && staged_appshots.is_empty() && !staged.is_empty() && {
-            let state = self.state.read(cx);
-            let local_ok = local_device_id
-                .as_deref()
-                .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
-            let host_ok = !host_is_remote
-                || host_device_id
-                    .as_deref()
-                    .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
-            local_ok && host_ok
-        };
-        // Upload identities minted NOW: in the queued flow the `pending://`
-        // ref IS the persisted transport until the host rewrites it, so the
-        // id must exist before any bytes move.
-        let upload_ids: Vec<String> = staged
-            .iter()
-            .map(|_| uuid::Uuid::new_v4().to_string())
-            .collect();
-        // The echo carries attachment refs from the first frame, so photos
-        // render while the send is still pending. Queued flow: the refs are
-        // the real `pending://` identities (stable — no post-upload refresh).
-        // Legacy flow: synthetic `pending/…` paths that the post-upload
-        // refresh replaces with the host's absolute paths. Either way the
-        // staged bytes are seeded into the transcript cache under every
-        // device key the transcript consults.
-        let echo_paths: Vec<String> = if queued_flow {
-            staged
-                .iter()
-                .zip(&upload_ids)
-                .map(|(att, id)| format!("pending://{id}/{}", att.name))
-                .collect()
-        } else {
-            staged
-                .iter()
-                .map(|att| format!("pending/{}/{}", att.id, att.name))
-                .collect()
-        };
-        let echo_appshot_paths: HashMap<String, String> = staged
-            .iter()
-            .zip(&echo_paths)
-            .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
-            .collect();
-        let echo_text = attachments::with_attachments(
-            &appshots::with_appshots(&text, &staged_appshots, &echo_appshot_paths),
-            &echo_paths,
-        );
-        // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
-        // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
-        // path the sender can't predict, but whose id8 it minted. The alias
-        // keeps the thumbnail on the already-local bytes through that
-        // rewrite instead of blanking into a reload skeleton.
-        if queued_flow {
-            for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_attachment_alias(
-                    &device_id,
-                    upload_id,
-                    &att.name,
-                    att.image.clone(),
-                );
-                if let Some(local) = local_device_id.as_deref()
-                    && local != device_id
-                {
-                    attachments::seed_attachment_alias(
-                        local,
-                        upload_id,
-                        &att.name,
-                        att.image.clone(),
-                    );
-                }
-            }
-        }
-        for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-            if let Some(local) = local_device_id.as_deref()
-                && local != device_id
-            {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
-            }
-        }
-
-        // Optimistic echo (client-minted id doubles as the persisted message id,
-        // so the doc frame dedups it away).
-        let echo = SessionMessageEntry {
-            id: message_id.clone(),
-            role: mast_doc::MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: echo_text.clone(),
-            }],
-            created_at,
-            device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-        };
-        self.launching_new_chat = is_new;
-        if is_new {
-            cx.emit(ComposerEvent::NewThreadTransitionStarted);
-        }
-        // A queued message is not in the transcript yet — the queue panel is
-        // its echo, and it gets a real bubble when the host sends it.
-        self.state.update(cx, |s, cx| {
-            if is_new {
-                s.select_chat(Some(chat_id.clone()), cx);
-            }
-            if should_publish_optimistic_echo(queue) {
-                s.push_echo(&chat_id, echo);
-                // Working overlay until the host executes the queued command —
-                // without it a remote send flashed Completed (and could ring
-                // the done-chime) in the queue→drain→sync gap.
-                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
-            }
-            cx.notify();
-        });
-        if let Some(choice) = workspace_choice {
-            use crate::workspace_chip::{WorkspaceChoice, WorkspaceOutcome};
-            let initial = match choice {
-                WorkspaceChoice::Auto => WorkspaceOutcome::Deciding,
-                WorkspaceChoice::Worktree => WorkspaceOutcome::Creating,
-                WorkspaceChoice::MainCheckout => WorkspaceOutcome::Main {
-                    plan: None,
-                    note: None,
-                    warning: false,
-                },
-            };
-            self.pickers
-                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, initial, cx));
-        }
-        // Jev (the worktree chip's Auto classifier) sees the skill preamble
-        // too: an attached `/open-pr` or `/implement-ticket` is a strong
-        // "this will change code" signal. The worktree NAME still derives
-        // from the user's own words — a slug of "Load and follow these…"
-        // would name every skill-attached worktree the same.
-        let workspace_message = with_skill_preamble(&staged_skills, &typed);
-        let worktree_name_source = if typed.trim().is_empty() {
-            workspace_message.clone()
-        } else {
-            typed.clone()
-        };
-
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.drafts.remove(&self.current_key);
-        self.report_user_activity(cx);
-        self.failure = None;
-        self.sending = true;
-        // A queued row is represented by the queue panel, not the transcript.
-        // Claiming an own-turn anchor for it here would replace the live
-        // turn's runway with an id that has no transcript row yet.
-        if should_publish_optimistic_echo(queue) {
-            cx.emit(ComposerEvent::Sent {
-                chat_id: chat_id.clone(),
-                message_id: message_id.clone(),
-            });
-        }
-        cx.notify();
-
-        let restore_text = typed;
-        let err_chat_id = chat_id.clone();
-        let err_message_id = message_id.clone();
-        self.send_task = Some(cx.spawn(async move |this, cx| {
-            let mut dispatch_attempted = false;
-            let result: Result<Option<String>, String> = async {
-                // Attachments stage FIRST — before the chat row or anything
-                // else exists. Staging is chat-independent (keyed by
-                // uploadId), and ordering it first makes a new-chat send
-                // atomic: a staging failure aborts with NOTHING created,
-                // instead of stranding a just-minted empty chat (v0.2.12
-                // "failed to stage → empty transcript" report).
-                //
-                // Queued flow: commit the bytes to the LOCAL engine's uploads
-                // dir (fast, offline-safe) — the queued command carries the
-                // `pending://` refs and the engine delivers the bytes to a
-                // remote host afterwards, retrying until they land. Legacy
-                // flow (old engines): stage on the host device up front,
-                // bounded by a total budget so a degraded link fails the send
-                // loudly instead of grinding through silent per-chunk retries
-                // for minutes.
-                let mut content = text.clone();
-                let mut attachment_paths: Vec<String> = Vec::new();
-                let mut transfers: Vec<serde_json::Value> = Vec::new();
-                if !staged.is_empty() && queued_flow {
-                    // Local staging is disk-speed; publish progress anyway so
-                    // huge files still narrate.
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
-                        if let Err(err) = attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            None,
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
-                            return Err("Couldn't stage the attachment locally.".to_string());
-                        }
-                        transfers.push(serde_json::json!({
-                            "uploadId": upload_id,
-                            "fileName": att.name,
-                        }));
-                    }
-                    // The echo refs ARE the persisted refs — no refresh pass.
-                    attachment_paths = echo_paths.clone();
-                    content = echo_text.clone();
-                } else if !staged.is_empty() {
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
-                        match attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            host_device_id.as_deref(),
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            Ok(path) => attachment_paths.push(path),
-                            Err(err) => {
-                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    // Seed the transcript cache from local bytes so the sent
-                    // bubble's thumbnails never round-trip (seedTranscript-
-                    // Attachment in the original send path).
-                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
-                        if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-                        }
-                    }
-                    let appshot_paths: HashMap<String, String> = staged
-                        .iter()
-                        .zip(&attachment_paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
-                        .collect();
-                    content = attachments::with_attachments(
-                        &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
-                        &attachment_paths,
-                    );
-                    // A normal send already has an optimistic echo: refresh it
-                    // in place with the uploaded refs so its thumbnails never
-                    // flicker. A queued message has no transcript echo at all;
-                    // its queue row is the only representation until dispatch.
-                    if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
-                            id: message_id.clone(),
-                            role: mast_doc::MessageRole::User,
-                            parts: vec![MessagePart::Text {
-                                id: "t0".into(),
-                                text: content.clone(),
-                            }],
-                            created_at,
-                            device_id: "local".into(),
-                            status: None,
-                            continuation_of: None,
-                        };
-                        let echo_chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.remove_echo(&echo_chat_id, &message_id);
-                                s.push_echo(&echo_chat_id, refreshed);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                }
-
-                // Resolve the working directory: existing chats keep theirs;
-                // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
-                // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree created off the
-                // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
-                let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
-                } else {
-                    existing_cwd
-                }
-                .unwrap_or_else(|| ".".to_string());
-                let mut worktree_cwd: Option<String> = None;
-                // Fresh-worktree plans ride the QUEUED Run command (a
-                // WorktreeSpec the HOST materializes at drain time) instead of
-                // a blocking CreateWorktree relay RPC here: the RPC had no
-                // timeout, so a lost relay frame wedged the send on "Sending…"
-                // forever while the session ran remotely anyway (2026-08-18).
-                let mut run_worktree: Option<mast_proto::WorktreeSpec> = None;
-                // The picked ref rides createChat so the session footer names
-                // it from the first frame (it read "Select ref" until the
-                // host's diff reconciler got around to stamping the branch).
-                let mut chat_branch: Option<String> = None;
-                if is_new && space_path.is_some() {
-                    match &plan {
-                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
-                            cwd = path.clone();
-                            worktree_cwd = Some(path.clone());
-                            chat_branch = Some(branch.clone());
-                        }
-                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
-                            // Footer shows the base until the host stamps the
-                            // actual zeron/<name> branch post-creation. cwd
-                            // stays the repo folder — an old host that doesn't
-                            // know the spec degrades to the main checkout
-                            // instead of failing the run.
-                            chat_branch = base.clone();
-                            if let Some(repo_path) = &space_path {
-                                // A remote repo's branch list loads over the
-                                // relay — on a bad link it may never arrive
-                                // and the picker has no base. That must NOT
-                                // silently drop the isolation the user picked
-                                // (2026-08-19: "New worktree" ran in the main
-                                // checkout): default to HEAD, which git — any
-                                // host version — resolves as the repo's
-                                // current checkout state.
-                                let base =
-                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
-                                run_worktree = Some(mast_proto::WorktreeSpec {
-                                    repo_path: repo_path.clone(),
-                                    base,
-                                    space_id: space_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Best-effort Mutate createChat with the picked config: the
-                // engine resolves device + cwd from the PROJECT row when one
-                // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
-                if is_new {
-                    let mut mutate = serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat_id,
-                    });
-                    if let Some(object) = mutate.as_object_mut() {
-                        match &space_id {
-                            Some(space_id) => {
-                                object.insert(
-                                    "spaceId".into(),
-                                    serde_json::Value::String(space_id.clone()),
-                                );
-                            }
-                            None => {
-                                object.insert(
-                                    "deviceId".into(),
-                                    serde_json::Value::String(device_id.clone()),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(object) = mutate.as_object_mut() {
-                        if let Some(worktree_cwd) = &worktree_cwd {
-                            object.insert(
-                                "cwd".into(),
-                                serde_json::Value::String(worktree_cwd.clone()),
-                            );
-                        }
-                        if let Some(branch) = &chat_branch {
-                            object.insert(
-                                "branch".into(),
-                                serde_json::Value::String(branch.clone()),
-                            );
-                        }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
-                        }
-                    }
-                    if let Err(err) = attachments::call_with_timeout(
-                        &engine,
-                        cx.background_executor(),
-                        methods::MUTATE,
-                        mutate,
-                        std::time::Duration::from_secs(30),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
-                    }
-                }
-
-                // Worktree chip pre-dispatch step (new chats only; after
-                // createChat so the engine has a row to stamp the worktree
-                // cwd onto). Never fails the send: every error path falls
-                // back to the base checkout.
-                if let (Some(choice), Some(repo_path)) = (workspace_choice, &space_path) {
-                    use crate::workspace_chip as wc;
-                    let set_outcome = |outcome: wc::WorkspaceOutcome, failure: Option<String>, cx: &mut gpui::AsyncApp| {
-                        let chat_id = chat_id.clone();
-                        this.update(cx, |composer, cx| {
-                            composer
-                                .pickers
-                                .update(cx, |p, cx| p.set_workspace_outcome(&chat_id, outcome, cx));
-                            if let Some(failure) = failure {
-                                composer.failure = Some(failure.into());
-                                composer.failure_key = Some(chat_id.clone());
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                    };
-                    let mut create = choice.first_step() == wc::PreSendStep::Create;
-                    let mut plan_reply: Option<wc::PlanReply> = None;
-                    if choice.first_step() == wc::PreSendStep::Plan {
-                        let planned = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::PLAN_CHAT_WORKSPACE,
-                            serde_json::json!({ "message": workspace_message, "cwd": repo_path }),
-                            wc::PLAN_TIMEOUT,
-                        )
-                        .await
-                        .and_then(|value| wc::decode_plan(&value));
-                        if wc::should_create_after_plan(&planned) {
-                            create = true;
-                            plan_reply = planned.ok();
-                            set_outcome(wc::WorkspaceOutcome::Creating, None, cx);
-                        } else {
-                            if let Err(err) = &planned {
-                                tracing::warn!(error = %err, "PlanChatWorkspace failed; using the main checkout");
-                            }
-                            set_outcome(wc::main_after_plan(planned), None, cx);
-                        }
-                    }
-                    if create {
-                        let created = attachments::call_with_timeout(
-                            &engine,
-                            cx.background_executor(),
-                            wc::CREATE_CHAT_WORKTREE,
-                            serde_json::json!({
-                                "chatId": chat_id,
-                                "repoPath": repo_path,
-                                "name": wc::worktree_name(&worktree_name_source),
-                            }),
-                            wc::CREATE_TIMEOUT,
-                        )
-                        .await;
-                        let resolution = wc::resolve_create(created, plan_reply);
-                        if let Some(worktree) = resolution.cwd {
-                            // The engine already stamped the chat's dispatch
-                            // cwd; the Run request agrees with it.
-                            cwd = worktree;
-                        } else if let Some(failure) = &resolution.failure {
-                            tracing::warn!(error = %failure, "CreateChatWorktree failed; dispatching in the base checkout");
-                        }
-                        set_outcome(resolution.outcome, resolution.failure, cx);
-                    }
-                }
-
-                if queue {
-                    // A queue row is editable UI state, so its text must stay
-                    // free of the internal attachment-path trailer. The host
-                    // rebuilds that transport when it promotes the row.
-                    let appshot_paths = staged.iter().zip(&attachment_paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone())).collect();
-                    let queue_body = appshots::with_appshots(&text, &staged_appshots, &appshot_paths);
-                    let queue_text = if !clean_queue_attachment_text {
-                        content.as_str()
-                    } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
-                        attachments::ATTACHMENT_ONLY_TEXT
-                    } else {
-                        queue_body.as_str()
-                    };
-                    let params = serde_json::json!({
-                        "chatId": chat_id,
-                        "messageId": message_id,
-                        "text": queue_text,
-                        "attachments": attachment_paths,
-                        "holdForTurnEnd": true,
-                    });
-                    let reply = engine
-                        .client()
-                        .call(methods::QUEUE_MESSAGE, params)
-                        .await
-                        // A pinned row the host can't deliver is refused
-                        // with an actionable instruction-delivery message.
-                        .map_err(|e| instruction_reset::send_failure_text(&e.to_string()))?;
-                    let queue_id = reply
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .ok_or_else(|| "Send failed: queue did not return an id".to_string())?;
-                    return Ok(Some(queue_id.to_string()));
-                }
-
-                let expects_setup_handoff = run_worktree
-                    .as_ref()
-                    .and_then(|spec| spec.space_id.as_ref())
-                    .is_some();
-                let command = SessionCommandPayload::Run {
-                    request: RunRequest { scheduled_task: None, scheduled_notion_writes: None, approval_rules: resolved.approval_rules,
-                        prompt: content.clone(),
-                        harness: resolved.harness,
-                        model: resolved.model.clone(),
-                        reasoning: resolved.reasoning,
-                        model_options: resolved.model_options.clone(),
-                        cwd,
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        // The chat's persisted approval mode (chip in the
-                        // pickers row; new-chat draft on first send).
-                        auto_approve: resolved.auto_approve,
-                        resume: None,
-                        fork_from: None,
-                        attachments: attachment_paths,
-                        worktree: run_worktree,
-                        instructions: None,
-                    },
-                    message_id: message_id.clone(),
-                };
-                let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
-                let mut params = serde_json::json!({ "chatId": chat_id, "command": command, "commandId": message_id });
-                if !transfers.is_empty() {
-                    params["transfers"] = serde_json::Value::Array(transfers);
-                }
-                // Deadline-bounded: QueueCommand is a local write (in-process
-                // or IPC), but a deferred engine handle can park forever.
-                dispatch_attempted = true;
-                let queued = attachments::call_with_timeout(
-                    &engine,
-                    cx.background_executor(),
-                    methods::QUEUE_COMMAND,
-                    params,
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-                // Ingestion refuses an instruction-bearing send to a host
-                // that can't deliver it (`instructionHostUnsupported`): show
-                // its actionable message; the failure path keeps the draft.
-                .map_err(|e| instruction_reset::send_failure_text(&e))?;
-                if expects_setup_handoff
-                    && let Some(command_id) = queued
-                        .get("commandId")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                {
-                    let poll_engine = engine.clone();
-                    let poll_chat_id = chat_id.clone();
-                    let poll_target_device_id = host_device_id.clone();
-                    this.update(cx, |_, cx| {
-                        cx.spawn(async move |this, cx| {
-                            for _ in 0..480 {
-                                let mut params = serde_json::json!({
-                                    "chatId": poll_chat_id,
-                                    "commandId": command_id,
-                                });
-                                if let (Some(target), Some(object)) =
-                                    (&poll_target_device_id, params.as_object_mut())
-                                {
-                                    object.insert(
-                                        "targetDeviceId".into(),
-                                        serde_json::Value::String(target.clone()),
-                                    );
-                                }
-                                match attachments::call_with_timeout(
-                                    &poll_engine,
-                                    cx.background_executor(),
-                                    methods::TAKE_PROJECT_ACTION_SETUP,
-                                    params,
-                                    std::time::Duration::from_secs(10),
-                                )
-                                .await
-                                {
-                                    Ok(value) if value.get("ready").and_then(|v| v.as_bool()) == Some(true) => {
-                                        let setup_action = value
-                                            .get("setupAction")
-                                            .cloned()
-                                            .filter(|value| !value.is_null())
-                                            .and_then(|value| serde_json::from_value(value).ok());
-                                        let setup_error = value
-                                            .get("setupError")
-                                            .and_then(|value| value.as_str())
-                                            .map(str::to_string);
-                                        this.update(cx, |_, cx| {
-                                            cx.emit(ComposerEvent::WorktreeSetup {
-                                                chat_id: poll_chat_id.clone(),
-                                                setup_action,
-                                                setup_error,
-                                                target_device_id: poll_target_device_id.clone(),
-                                            });
-                                        })
-                                        .ok();
-                                        return;
-                                    }
-                                    Err(error) if error.starts_with("unknown method: ") => return,
-                                    Ok(_) | Err(_) => {}
-                                }
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(250))
-                                    .await;
-                            }
-                            tracing::warn!(
-                                chat = %poll_chat_id,
-                                command = %command_id,
-                                "worktree setup handoff timed out"
-                            );
-                        })
-                        .detach();
-                    })
-                    .ok();
-                }
-                Ok(None)
-            }
-            .await;
-            if queue && let Err(error) = &result {
-                tracing::warn!(chat = %err_chat_id, %error, "queue message failed");
-            }
-            if result.is_err() && is_new && !dispatch_attempted {
-                // A failed new-chat send must not strand a just-minted empty
-                // chat in the sidebar (v0.2.12 "empty transcript" report).
-                // Staging now runs before CreateChat, so usually nothing was
-                // created — but a post-mutate failure (QueueCommand) still
-                // leaves a row. Best-effort delete; a no-op if the chat was
-                // never materialized.
-                let _ = attachments::call_with_timeout(
-                    &engine,
-                    cx.background_executor(),
-                    methods::MUTATE,
-                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
-                    std::time::Duration::from_secs(5),
-                )
-                .await;
-            }
-            this.update(cx, |composer, cx| {
-                composer.sending = false;
-                composer
-                    .state
-                    .update(cx, |s, _| s.end_upload_progress());
-                if let Ok(Some(message_id)) = &result {
-                    cx.emit(ComposerEvent::Queued {
-                        chat_id: err_chat_id.clone(),
-                        message_id: message_id.clone(),
-                    });
-                }
-                if let Err(message) = result {
-                    // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the stash. A failed NEW
-                    // chat restores to the CANVAS (key "") and navigates back
-                    // there — the minted chat is gone (deleted above), so
-                    // nothing may restore under its key.
-                    let restore_key = if is_new && !dispatch_attempted {
-                        String::new()
-                    } else {
-                        err_chat_id.clone()
-                    };
-                    let mut failed_send = failed_send;
-                    failed_send.key = restore_key.clone();
-                    composer.failed_send = Some(failed_send);
-                    composer.state.update(cx, |s, cx| {
-                        s.remove_echo(&err_chat_id, &err_message_id);
-                        s.end_pending_send(&err_chat_id, &err_message_id);
-                        if is_new && !dispatch_attempted && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
-                            // Back to the canvas; the navigation draft-swap
-                            // loads the restored draft below.
-                            s.select_chat(None, cx);
-                        }
-                        for comment in &comments {
-                            s.add_review_comment(&restore_key, comment.clone());
-                        }
-                        cx.notify();
-                    });
-                    composer.restore_failed_text(&restore_key, &restore_text, &message, cx);
-                    if !staged_skills.is_empty() {
-                        // Chips attached while the send was in flight stay;
-                        // the failed send's chips rejoin them (deduped).
-                        let slot = composer.skills.entry(restore_key.clone()).or_default();
-                        let fresh = std::mem::take(slot);
-                        for name in staged_skills.iter().chain(&fresh) {
-                            attach_skill(slot, name);
-                        }
-                    }
-                    if !ordinary_staged.is_empty() {
-                        // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back —
-                        // draining the minted chat's slot too when the restore
-                        // target is the canvas.
-                        let mut merged = ordinary_staged.clone();
-                        for key in [err_chat_id.clone(), restore_key.clone()] {
-                            if let Some(slot) = composer.attachments.get_mut(&key) {
-                                let fresh: Vec<_> = slot
-                                    .drain(..)
-                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
-                                    .collect();
-                                merged.extend(fresh);
-                            }
-                        }
-                        composer.attachments.insert(restore_key.clone(), merged);
-                    }
-                    composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
 
     fn restore_failed_text(&mut self, key: &str, text: &str, error: &str, cx: &mut Context<Self>) {
         self.failure = Some(error.to_owned().into());
@@ -2834,536 +1682,22 @@ impl Composer {
 
     // ---- wizard glue ----
 
-    fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.as_mut() else {
-            return;
-        };
-        let step = wizard.select(option_ix);
-        if step == WizardStep::AutoAdvance {
-            // Clicking a single-select option is the answer: drop any typed
-            // text so the advance doesn't pick it up as an override.
-            wizard.set_typed(String::new());
-            self.input.update(cx, |input, cx| input.set_text("", cx));
-        }
-        self.refresh_wizard_placeholder(cx);
-        match step {
-            WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
-            WizardStep::Done(answers) => self.wizard_finish(answers, cx),
-            WizardStep::Stay | WizardStep::Incomplete => {}
-        }
-        cx.notify();
-    }
 
-    fn refresh_wizard_placeholder(&mut self, cx: &mut Context<Self>) {
-        let can_clarify = self.can_ask_on_side(cx);
-        if let Some(wizard) = self.wizard.as_ref() {
-            let placeholder = wizard_placeholder(wizard, can_clarify);
-            self.input
-                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
-        }
-    }
 
-    fn can_ask_on_side(&self, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        state
-            .selected_chat
-            .as_deref()
-            .is_some_and(|chat_id| state.can_ask_on_side(chat_id))
-    }
 
-    /// Open a side chat of the selected chat, asking `ask` first. While the
-    /// agent's question panel is up, the side chat is told the question and
-    /// its options, and the panel stays up for the answer.
-    fn ask_on_side(&mut self, ask: Option<String>, cx: &mut Context<Self>) {
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat
-            .clone()
-            .filter(|_| self.can_ask_on_side(cx));
-        let Some(chat_id) = chat_id else {
-            self.failure = Some("Side chats aren't available for this chat.".into());
-            self.failure_key = Some(self.current_key.clone());
-            cx.notify();
-            return;
-        };
-        let question = match self.wizard.as_ref().and_then(Wizard::current) {
-            Some(pending) => Some(clarify_prompt(pending, ask.as_deref())),
-            None => ask,
-        };
-        if let Some(wizard) = self.wizard.as_mut() {
-            wizard.set_typed(String::new());
-        }
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        cx.emit(ComposerEvent::AskOnSide { chat_id, question });
-        cx.notify();
-    }
 
-    /// The question panel's Clarify: ask about the choice in a side chat,
-    /// with whatever is typed as the question.
-    fn wizard_clarify(&mut self, cx: &mut Context<Self>) {
-        let typed = self.input.read(cx).text().trim().to_string();
-        self.ask_on_side((!typed.is_empty()).then_some(typed), cx);
-    }
 
-    /// Save the shared input's text as the current page's free-text answer.
-    /// Every page change goes through this, so Submit, Next, Back, Enter and
-    /// auto-advance all see what was typed.
-    fn wizard_capture_typed(&mut self, cx: &mut Context<Self>) {
-        let typed = self.input.read(cx).text().trim().to_string();
-        if let Some(wizard) = self.wizard.as_mut() {
-            wizard.set_typed(typed);
-        }
-    }
 
-    /// Load the current page's saved free text into the shared input.
-    fn wizard_restore_typed(&mut self, cx: &mut Context<Self>) {
-        let typed = self
-            .wizard
-            .as_ref()
-            .map(|w| w.typed().to_string())
-            .unwrap_or_default();
-        self.input.update(cx, |input, cx| input.set_text(typed, cx));
-        self.refresh_wizard_placeholder(cx);
-    }
 
-    fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
-        self.advance_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(AUTO_ADVANCE_MS))
-                .await;
-            this.update(cx, |composer, cx| composer.wizard_advance(cx))
-                .ok();
-        }));
-    }
 
-    fn wizard_advance(&mut self, cx: &mut Context<Self>) {
-        self.wizard_capture_typed(cx);
-        let Some(wizard) = self.wizard.as_mut() else {
-            return;
-        };
-        match wizard.advance() {
-            WizardStep::Done(answers) => self.wizard_finish(answers, cx),
-            // Nothing acceptable to send yet: keep the page and its text.
-            WizardStep::Incomplete => cx.notify(),
-            _ => {
-                self.wizard_restore_typed(cx);
-                cx.notify();
-            }
-        }
-    }
 
-    fn wizard_back(&mut self, cx: &mut Context<Self>) {
-        self.wizard_capture_typed(cx);
-        if self.wizard.as_mut().is_some_and(|wizard| wizard.back()) {
-            self.wizard_restore_typed(cx);
-            cx.notify();
-        }
-    }
 
-    /// Take the panel down for good: its request counts as handled, and the
-    /// borrowed composer input gets its own identity back.
-    fn retire_wizard(&mut self, cx: &mut Context<Self>) -> Option<Wizard> {
-        let wizard = self.wizard.take()?;
-        self.advance_task = None;
-        self.answered_requests.insert(wizard.request_id.clone());
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder("Do anything…", cx);
-            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
-        });
-        Some(wizard)
-    }
 
-    /// Quit the question without answering: stop the run so the chat waits
-    /// for the next message. Ending the turn resolves the question in the
-    /// transcript; anything typed stays as the draft, and an empty input
-    /// gets back the draft stashed when the question opened.
-    fn wizard_quit(&mut self, cx: &mut Context<Self>) {
-        if self.retire_wizard(cx).is_some() {
-            let draft = self.wizard_draft.take();
-            self.input.update(cx, |input, cx| {
-                if let Some(draft) = draft.filter(|_| input.is_empty()) {
-                    input.set_text(draft, cx);
-                }
-            });
-            self.interrupt_selected(cx);
-            cx.notify();
-        }
-    }
 
-    /// Submit RespondInput and retire the panel.
-    fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
-        let Some(wizard) = self.retire_wizard(cx) else {
-            return;
-        };
-        let draft = self.wizard_draft.take().unwrap_or_default();
-        self.input.update(cx, |input, cx| input.set_text(draft, cx));
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
-            return;
-        };
-        let request_id = wizard.request_id.clone();
-        let command = SessionCommandPayload::RespondInput {
-            request_id: request_id.clone(),
-            answers,
-        };
-        let failure_chat = chat_id.clone();
-        let params = match serde_json::to_value(&command) {
-            Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
-            Err(_) => return,
-        };
-        // `action_task`, NOT `send_task` — see `interrupt`.
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
-            if let Err(err) = result {
-                this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
-                    composer.failure_key = Some(failure_chat);
-                    // The answer never left this device — put the panel back.
-                    composer.answered_requests.remove(&request_id);
-                    cx.notify();
-                })
-                .ok();
-                return;
-            }
-            // Safety net against a dead-looking session: the command queued,
-            // but the host may still REJECT it (e.g. the run's resolver is
-            // gone). If the very same request is still the live pending input
-            // once the host has had ample time to execute and the resolved
-            // flag to sync back, the answer demonstrably didn't take —
-            // un-hide the panel instead of leaving the question unanswerable.
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            this.update(cx, |composer, cx| {
-                let transcript = composer.state.read(cx).transcript.clone();
-                let still_pending = pending_input_request(&transcript)
-                    .is_some_and(|(pending_id, _)| pending_id == request_id);
-                if still_pending && composer.answered_requests.remove(&request_id) {
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
 
-    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
-        // Keys bubbling out of the free-text input must not double-handle:
-        // digits select options only while the input is empty, and Enter is the
-        // input's own Submit action when it has focus.
-        let input_focused = self.input.read(cx).focus_handle.is_focused(window);
-        let input_empty = self.input.read(cx).is_empty();
-        let key = event.keystroke.key.as_str();
-        // A BARE digit picks an option. With a modifier held the keystroke
-        // belongs to an app shortcut — ⌘1..⌘9 jump to a sidebar row — and the
-        // panel must not also consume it as a selection.
-        if let Ok(digit) = key.parse::<usize>()
-            && (1..=9).contains(&digit)
-            && !event.keystroke.modifiers.modified()
-        {
-            if !input_focused || input_empty {
-                self.wizard_select(digit - 1, cx);
-                // Consumed as a selection: stop the platform from also
-                // inserting the digit into the focused free-text input.
-                cx.stop_propagation();
-            }
-        } else if key == "enter" {
-            if !input_focused {
-                self.wizard_advance(cx);
-                cx.stop_propagation();
-            }
-        } else if key == "escape" {
-            if wizard_escape_goes_back(key, input_focused, input_empty) {
-                self.wizard_back(cx);
-            }
-            cx.stop_propagation();
-        }
-    }
 
     // ---- render pieces ----
 
-    /// The agent-asked-a-question panel (zeron question-panel.tsx), rendered in
-    /// place of the composer: the same floating-pill chrome (`rounded-[26px]
-    /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
-    /// "1/3" counter chip, option rows with number kbd chips, a free-text
-    /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::of(cx).clone();
-        let Some(wizard) = self.wizard.clone() else {
-            return gpui::Empty.into_any_element();
-        };
-        let counter = wizard.counter();
-        let Some(question) = wizard.current().cloned() else {
-            return gpui::Empty.into_any_element();
-        };
-        let page = wizard.page;
-        let last = page + 1 >= wizard.questions.len();
-        let typed = self.input.read(cx).text().trim().to_string();
-        let typed_empty = typed.is_empty() || !wizard.accepts_typed();
-        let can_advance = wizard.page_answerable(&typed);
-        let can_clarify = self.can_ask_on_side(cx);
-        let typed_hint = (!typed.is_empty() && !wizard.typed_is_answer(&typed)).then_some(
-            if can_clarify {
-                "This question only takes the listed options. Enter asks about it in a side chat."
-            } else {
-                "This question only takes the listed options."
-            },
-        );
-        // The composer's own render sizes the shared input, and it doesn't
-        // run while the panel is up: left at a single-line viewport, wrapped
-        // text painted below the panel. Cap it here and let it scroll.
-        let viewport = WIZARD_INPUT_MAX_LINES * INPUT_LINE_HEIGHT;
-        self.input.update(cx, |input, cx| {
-            if input.viewport_height != Some(viewport)
-                || input.settled_viewport_height != Some(viewport)
-                || input.resizing
-                || input.overflow_top_padding != 0.0
-            {
-                input.viewport_height = Some(viewport);
-                input.settled_viewport_height = Some(viewport);
-                input.resizing = false;
-                input.overflow_top_padding = 0.0;
-                cx.notify();
-            }
-        });
-
-        let options = question.options.iter().enumerate().map(|(ix, label)| {
-            // Selection reads on the row only while no typed override exists
-            // (typed answers win — zeron question-panel.tsx `isSel`).
-            let picked = wizard.is_picked(ix) && typed_empty;
-            div()
-                .id(("wizard-option", ix))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(if picked {
-                    crate::theme::ink(0.16)
-                } else {
-                    gpui::transparent_black()
-                })
-                // zeron question-panel.tsx option rows: `transition-colors`.
-                .bg(if picked {
-                    crate::theme::ink(0.09)
-                } else {
-                    motion::hover_blend(
-                        &format!("wizard-option-{ix}"),
-                        crate::theme::ink(0.025),
-                        crate::theme::ink(0.06),
-                    )
-                })
-                .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(crate::typography::ui_rems(13.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if picked {
-                            theme.text
-                        } else {
-                            theme.text.opacity(0.9)
-                        })
-                        .child(SharedString::from(label.clone())),
-                )
-                .when(ix < 9, |el| {
-                    el.child(
-                        // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
-                        div()
-                            .flex_none()
-                            .size(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .bg(if picked {
-                                crate::theme::ink(0.16)
-                            } else {
-                                crate::theme::ink(0.05)
-                            })
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if picked {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.6)
-                            })
-                            .child(SharedString::from(format!("{}", ix + 1))),
-                    )
-                })
-        });
-
-        crate::components::conversation_wizard_surface(div()
-            .id("question-panel")
-            .key_context("QuestionPanel")
-            .track_focus(&self.wizard_focus)
-            .on_action(cx.listener(|this, _: &Copy, window, cx| {
-                if let Some(text) = crate::markdown::selection::selected_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    window.focus(&this.input.focus_handle(cx), cx);
-                }
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(event, window, cx)
-            })), &theme, COMPOSER_RADIUS)
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id(("wizard-body", page))
-                    // Keep the footer inside the window even for large inputs
-                    // or many options; the body can scroll independently.
-                    .max_h(window.viewport_size().height * 0.6)
-                    .overflow_y_scroll()
-                    .px(px(16.0))
-                    .pt(px(16.0))
-                    .flex()
-                    .flex_col()
-                    // Header: tracked uppercase + counter chip when paged.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
-                                    ))),
-                            )
-                            .when(wizard.questions.len() > 1, |el| {
-                                el.child(
-                                    div()
-                                        .h(px(20.0))
-                                        .px(px(6.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(crate::theme::ink(0.06))
-                                        .text_size(crate::typography::ui_rems(10.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(counter)),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id(("wizard-question", page))
-                            .debug_selector(|| "wizard-question".into())
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                                window.focus(&this.wizard_focus, cx);
-                            }))
-                            // A long command gets its own viewport so the
-                            // approval choices stay close at hand.
-                            .max_h(window.viewport_size().height * 0.25)
-                            .flex_shrink_0()
-                            .overflow_y_scroll()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(crate::markdown::render::plain_text(question.question.clone(), &theme)),
-                    )
-                    .when(question.multi_select, |el| {
-                        el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))
-                    })
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .children(options),
-                    )
-                    // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone())
-                            .when_some(typed_hint, |el, hint| {
-                                el.child(wizard_note(&theme, hint).mt(px(6.0)))
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .px(px(16.0))
-                    .pb(px(16.0))
-                    .pt(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                crate::popover::btn_ghost(&theme, "Quit", "wizard-quit")
-                                    .id("wizard-quit")
-                                    .debug_selector(|| "wizard-quit".into())
-                                    .on_click(cx.listener(|this, _, _, cx| this.wizard_quit(cx))),
-                            )
-                            .when(page > 0, |el| {
-                                el.child(
-                                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                                        .id("wizard-back")
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.wizard_back(cx)),
-                                        ),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .when(can_clarify, |el| {
-                                el.child(
-                                    crate::popover::btn_ghost(&theme, "Clarify", "wizard-clarify")
-                                        .id("wizard-clarify")
-                                        .debug_selector(|| "wizard-clarify".into())
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.wizard_clarify(cx)),
-                                        ),
-                                )
-                            })
-                            .child(
-                                crate::popover::btn_primary(
-                                    &theme,
-                                    if last { "Submit" } else { "Next" },
-                                )
-                                .id("wizard-submit")
-                                .px(px(16.0))
-                                .when(!can_advance, |el| el.opacity(0.4))
-                                .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
 
     fn render_send_button(
         &mut self,

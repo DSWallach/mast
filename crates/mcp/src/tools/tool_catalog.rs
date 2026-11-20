@@ -110,7 +110,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project. The personal assistant chat reads every chat in every Space.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project. Recorded handoff predecessors in that scope remain readable after archiving. The personal assistant chat reads every chat in every Space.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -146,12 +146,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "interrupt_chat",
-            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat).",
+            description: "Stop the running turn of a chat you created (the personal assistant chat: any chat; a project manager chat: any chat in its project).",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question an agent in a chat you created is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
+            description: "Answer a question an agent in a chat you created (or, for a project manager chat, any chat in its project) is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput. Reaches chats you created (the personal assistant chat: any chat).",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -389,7 +389,7 @@ pub(super) fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::ADMIN,
-            description: "ADMIN CHATS ONLY (the user grants this per chat and Space, with an expiry; refused otherwise). Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
+            description: "ADMIN CHATS AND PROJECT MANAGER CHATS ONLY (the user grants admin per chat and Space, with an expiry; a project manager holds this for its project with no expiry; refused otherwise). A project manager is limited to items and chats inside its own project: it cannot create at, move out of, or touch anything beyond the project subtree, cannot move, archive or re-flag the project item itself, and has no instruction-proposal steps. Batch of outline changes anywhere in your granted Space, attributed to you as an admin chat and undoable per turn by the user. Child template rules are managed with template_set and applied with template_apply. A project is an outline item marked as a project. steps[] ops: create{parentId?,title,description?,status?,ref?} rename{itemId,title} describe{itemId,description|null} move{itemId,parentId|null,position?} group{title,itemIds[],parentId?} status{itemId,status} archive{itemId} restore{itemId} project{itemId,isProject} destination{itemId,destinationId|null} convert_to_project{itemId,destinationId?} assign_chat{chatId,itemId|null} instruction_add{itemId|null,text} instruction_edit{instructionId,text} instruction_remove{instructionId} proposal_accept{proposalId,text?} proposal_dismiss{proposalId,reason?} resolve_request{requestId,note?} template_set{itemId,template|null} template_apply{itemId}; `$ref` names an item an earlier step created. dryRun:true previews. Over 10 steps nothing runs: you get a preview plus confirmToken and an \"Approve bulk change\" Required Action; wait for the user to resolve it themself, then repeat the SAME steps with confirmToken (30 min, one use). {read:true,maxDepth?} lists the Space tree, open requests and proposals. Never reaches other Spaces, Linear/GitHub, or irreversible deletes. Required: idempotencyKey.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -468,11 +468,12 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: agent_tool_names::ARTIFACT_PUBLISH,
-            description: "Publish every file you wrote that the user should see (plan, diagram, state machine, option comparison) as a planning artifact of your chat's work item. Mast copies it into the work item's artifact folder (<canonical checkout>/.mast/artifacts/<work item>/), records a revision when the content changed, and returns {artifactId, revision, url, storedPath}. Later publishes with the same title and role add revisions to the same artifact. Link it in your message as [title](mast-artifact:<artifactId>), never as a bare path. HTML: write <name>.fragment.html (body content only) and publish it; a sibling <name>.preview.html is copied too. Options: publish the JSON manifest with kind options; its fragments are copied with it. Side by side renders each option at a fixed design width (default 1100 px) and scales it to the column, so set `designWidth` (px) on each manifest entry or at the top level, or `data-mast-design-width` in the fragment.",
+            description: "Publish every file you wrote that the user should see (plan, diagram, state machine, option comparison) as a planning artifact of your chat's work item. Mast copies it into the work item's artifact folder (<canonical checkout>/.mast/artifacts/<work item>/), records a revision when the content changed, and returns {artifactId, revision, url, storedPath}. Later publishes with the same title and role add revisions to the same artifact. Link it in your message as [title](mast-artifact:<artifactId>), never as a bare path. HTML: write <name>.fragment.html (body content only) and publish it; a sibling <name>.preview.html is copied too. Options: publish the JSON manifest with kind options; its fragments are copied with it. Side by side renders each option at a fixed design width (default 1100 px) and scales it to the column, so set `designWidth` (px) on each manifest entry or at the top level, or `data-mast-design-width` in the fragment. A project's Manager, which cannot write files, publishes its Manager status with inline `content` instead of `path`, with title \"Manager status\" and role \"manager-status\"; no one else may use `content`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
+                    "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder). Not used with `content`." },
+                    "content": { "type": "string", "description": "The whole document as text, instead of a file. Only the project Manager's status record (role manager-status)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
                     "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet", "plan"], "description": "Structured plan JSON uses kind plan; otherwise defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
@@ -481,7 +482,8 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
                     "addressedComments": { "type": "array", "items": { "type": "string" }, "description": "Comment ids (C-n from artifact_get_plan) this revision addresses; they are marked resolved." },
                     "idempotencyKey": idempotency_key_schema()
                 },
-                "required": ["path", "title", "note", "idempotencyKey"]
+                "required": ["title", "note", "idempotencyKey"],
+                "anyOf": [{ "required": ["path"] }, { "required": ["content"] }]
             }),
         },
         ToolDef {
@@ -493,6 +495,18 @@ pub(super) fn artifact_catalog() -> Vec<ToolDef> {
             name: agent_tool_names::ARTIFACT_GET_DECISIONS,
             description: "Read sent decisions for a decision sheet in your work item, including row IDs, outcomes, notes, timestamps, revisions, and IDs no longer present in the sheet.",
             input_schema: json!({"type": "object", "properties": {"artifactId": {"type": "string"}}, "required": ["artifactId"]}),
+        },
+        ToolDef {
+            name: agent_tool_names::BRIEFING_READ,
+            description: "Read-only. The latest results artifact (briefing) of one scheduled task, or of every task in your Space, with run times: {briefings: [{task, taskId, artifactId, title, revision, runAt (epoch ms), runAtLocal (the chat host's time zone), runId, workItemId, content, contentTruncated, contentAvailable}], needYou}. runAt is when the newest genuine revision was published; content is that revision as recorded. needYou counts open Required Actions raised by scheduled tasks: all of them in the Space (failed runs included), or only the named task's. Pass `task` (the task's current or original name, its id, or the results artifact id) for one briefing; omit it for all. Pass `index: true` for run times only, without content. contentAvailable true means content was read; false means it was not read (the file lives on another device, or its recorded content could not be read), so open the artifact in Mast instead. With index true it only says the file is on this device and a later read can still fail. Use this instead of read_chat or Notion to see what a briefing found. Pass `kind: \"manager-status\"` to read your project's Manager status record instead (one entry, content is the status document); it only returns the project the calling chat works in.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "Task name, task id, or results artifact id. Omit for every task in the Space." },
+                    "index": { "type": "boolean", "default": false, "description": "Run times only, no content." },
+                    "kind": { "type": "string", "enum": ["scheduled-results", "manager-status"], "default": "scheduled-results", "description": "manager-status reads the project's Manager status record." }
+                }
+            }),
         },
         ToolDef {
             name: agent_tool_names::ARTIFACT_RENDER_CHECK,

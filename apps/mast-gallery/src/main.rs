@@ -1202,7 +1202,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

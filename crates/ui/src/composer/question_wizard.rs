@@ -615,6 +615,13 @@ impl Composer {
         crate::components::conversation_wizard_surface(
             div()
                 .id("question-panel")
+                .key_context("QuestionPanel")
+                .on_action(cx.listener(|this, _: &Copy, window, cx| {
+                    if let Some(text) = crate::markdown::selection::selected_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        window.focus(&this.input.focus_handle(cx), cx);
+                    }
+                }))
                 .debug_selector(|| "question-panel".into())
                 .role(gpui::Role::Group)
                 .when(window.is_a11y_active(), |el| {
@@ -675,6 +682,8 @@ impl Composer {
                 .child(
                     div()
                         .id(("wizard-question", page))
+                        .debug_selector(|| "wizard-question".into())
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { window.focus(&this.wizard_focus, cx); }))
                         // A long command gets its own viewport so the
                         // approval choices stay close at hand.
                         .max_h(window.viewport_size().height * 0.25)
@@ -685,7 +694,7 @@ impl Composer {
                         .line_height(px(20.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child(SharedString::from(question.question.clone())),
+                        .child(crate::markdown::render::plain_text(question.question.clone(), &theme)),
                 )
                 .when(question.multi_select, |el| {
                     el.child(wizard_note(&theme, "Select one or more options.").mt(px(4.0)))

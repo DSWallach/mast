@@ -473,6 +473,7 @@ mod tests {
         state.update(cx, |state, _| {
             state.local_device_id = Some("local".into());
             state.chats.push(mast_proto::Chat {
+                standing_role_successor: None,
                 id: "a".into(), device_id: "local".into(), title: None, archived: false,
                 cwd: Some("/file-repo".into()), branch: None, checkout_id: Some("file-checkout".into()),
                 source_context: None, config: None, last_message_preview: None, last_message_at: None,

@@ -2316,6 +2316,7 @@ mod session_lifecycle_tests {
             auto_approve: true,
             approval_rules: false,
             scheduled_task: None,
+            scheduled_notion_writes: None,
             fork_from: None,
             attachments: Vec::new(),
             worktree: None,

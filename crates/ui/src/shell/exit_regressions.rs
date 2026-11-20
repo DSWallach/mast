@@ -313,6 +313,7 @@ fn panel_saves_preserve_settings_selected_outside_the_shell(cx: &mut TestAppCont
         let code_size = 11.0 + index as f32;
         let transcript_width = 736.0 + 16.0 * index as f32;
         let geometry = Some(settings::WindowGeometry {
+            maximized: false,
             display_uuid: Some(uuid::Uuid::from_u128(7)),
             x: 80.0 + index as f32,
             y: 60.0,
@@ -788,6 +789,7 @@ fn session_chips_open_chats_and_reject_invalid_targets(cx: &mut TestAppContext) 
             shell.state.update(cx, |state, _| {
                 state.selected_chat = Some("source".into());
                 state.chats.push(mast_proto::Chat {
+                    standing_role_successor: None,
                     id: "destination".into(),
                     scheduled_task_info: None,
                     scheduled_task: None,
@@ -1033,6 +1035,7 @@ fn review_file_link_uses_bound_checkout_root(cx: &mut TestAppContext) {
                 state.local_device_id = Some("here".into());
                 state.selected_chat = Some("viz".into());
                 state.chats.push(mast_proto::Chat {
+                    standing_role_successor: None,
                     id: "viz".into(),
                     device_id: "here".into(),
                     title: None,
@@ -1145,6 +1148,7 @@ fn visualization_links_render_fragments_and_open_previews_externally(cx: &mut Te
                 state.local_device_id = Some("here".into());
                 state.selected_chat = Some("viz".into());
                 state.chats.push(mast_proto::Chat {
+                    standing_role_successor: None,
                     id: "viz".into(),
                     device_id: "here".into(),
                     title: None,

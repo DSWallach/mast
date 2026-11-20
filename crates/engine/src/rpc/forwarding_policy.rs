@@ -25,6 +25,8 @@ pub(super) fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::LIST_HARNESSES
+            | methods::TOKEN_USAGE
+            | methods::HAND_OFF_ORCHESTRATOR
             | methods::GET_PERMISSION_RULES
             | methods::REMOVE_PERMISSION_RULE
             | methods::INSTALL_HARNESS
@@ -140,6 +142,7 @@ pub(super) fn forwardable(method: &str) -> bool {
             | methods::ARTIFACT_CONTENT
             | methods::ARTIFACT_REGISTER
             | methods::ARTIFACT_PROMOTE
+            | methods::ARTIFACT_WRITE_CONTENT
             | methods::ARTIFACT_DRIFT
     )
 }

@@ -52,6 +52,7 @@ pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
     TeamTabVisibilityChanged(crate::settings::TeamTabVisibility),
     SidebarOutlineGroupsChanged(bool),
+    CompactSingleChatChanged(bool),
     LayoutChanged(crate::ui_style::UiLayout),
 }
 

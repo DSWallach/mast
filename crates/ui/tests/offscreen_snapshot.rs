@@ -419,6 +419,3 @@ fn render_style_theme_matrix() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

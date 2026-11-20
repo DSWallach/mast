@@ -256,7 +256,6 @@ pub fn apply_keymap(
     // Outline navigation keys, context `WorkOutline` minus text inputs.
     work_outline_ui::bind_work_outline_navigation(cx, keymap);
 }
-
 impl Shell {
     pub(super) fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
         if !self.right_pane_open(cx) {

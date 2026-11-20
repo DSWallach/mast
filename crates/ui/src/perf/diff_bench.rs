@@ -310,6 +310,7 @@ fn active_diff_does_not_copy_the_patch(cx: &mut gpui::TestAppContext) {
 fn bench_chat(index: usize) -> mast_proto::Chat {
     use chrono::TimeZone;
     mast_proto::Chat {
+        standing_role_successor: None,
         id: format!("c{index}"),
         device_id: "local".into(),
         title: Some(format!("Chat {index}")),

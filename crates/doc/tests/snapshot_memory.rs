@@ -82,6 +82,3 @@ fn streaming_with_a_snapshot_every_tick_has_bounded_retained_memory() {
         other => panic!("expected streamed text, got {other:?}"),
     }
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

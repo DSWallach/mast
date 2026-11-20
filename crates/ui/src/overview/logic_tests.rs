@@ -2324,6 +2324,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
         ];
         state.sessions = vec![
             mast_proto::Session {
+                todo_progress: None,
                 chat_id: "c-awaiting".into(),
                 device_id: "d".into(),
                 status: mast_proto::SessionStatus::AwaitingInput,
@@ -2334,6 +2335,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
                 last_turn_tool_failures: None,
             },
             mast_proto::Session {
+                todo_progress: None,
                 chat_id: "c-failed-tools".into(),
                 device_id: "d".into(),
                 status: mast_proto::SessionStatus::Idle,
@@ -2347,6 +2349,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
                 }),
             },
             mast_proto::Session {
+                todo_progress: None,
                 chat_id: "c-errored".into(),
                 device_id: "d".into(),
                 status: mast_proto::SessionStatus::Errored,
@@ -2458,6 +2461,7 @@ fn overview_indicates_sessions_needing_interaction_or_stalled(cx: &mut gpui::Tes
     // Updating last_turn_tool_failures on an existing idle session updates the overview.
     state.update(vcx, |state, cx| {
         state.sessions.push(mast_proto::Session {
+            todo_progress: None,
             chat_id: "c-idle".into(),
             device_id: "d".into(),
             status: mast_proto::SessionStatus::Idle,
@@ -2934,6 +2938,7 @@ fn attention_filter_reaches_outline(cx: &mut gpui::TestAppContext) {
     let now = Utc::now();
     state.update(vcx, |state, cx| {
         state.sessions.push(mast_proto::Session {
+            todo_progress: None,
             chat_id: CHAT_AUTH.into(),
             device_id: "d".into(),
             status: mast_proto::SessionStatus::AwaitingInput,
@@ -4653,7 +4658,7 @@ mod template_review_tests {
 }
 
 mod top_sessions_tests {
-    include!("overview/top_sessions_tests.rs");
+    include!("top_sessions_tests.rs");
 }
 
 /// First-use empty state of the Outline; shares this module's fixtures.

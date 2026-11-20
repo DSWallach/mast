@@ -175,6 +175,7 @@ pub(super) struct SidebarPane {
     pub(super) renders: usize,
     pub(super) shell: gpui::WeakEntity<Shell>,
     pub(super) _observation: Subscription,
+    pub(super) _overview_observation: Option<Subscription>,
 }
 
 impl Render for SidebarPane {

@@ -272,6 +272,7 @@ impl Composer {
             request: RunRequest {
                 approval_rules: resolved.approval_rules,
                 scheduled_task: None,
+                scheduled_notion_writes: None,
                 fork_from: None,
                 prompt: content.clone(),
                 harness: resolved.harness,
@@ -860,7 +861,7 @@ impl Composer {
                 .map(|c| c.device_id.clone())
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
-        let space_path = space.as_ref().map(|s| s.path.clone());
+        let space_path = space.as_ref().filter(|space| !space.is_personal()).map(|s| s.path.clone());
         if queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1

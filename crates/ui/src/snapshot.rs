@@ -188,6 +188,7 @@ fn chat_fixture_with(
                     last_completed_turn: None,
                     awaiting_input: None,
                     last_turn_tool_failures: None,
+                    todo_progress: None,
                 });
             }
         }

@@ -140,6 +140,7 @@ impl NavHistory {
 /// The settings sections (feature-inventory §1.5 routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
+    TokenUsage,
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
@@ -159,10 +160,11 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
+        SettingsSection::TokenUsage,
         SettingsSection::Appearance,
         SettingsSection::Developer,
         SettingsSection::Files,
