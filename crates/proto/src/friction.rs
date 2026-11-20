@@ -192,11 +192,14 @@ pub struct ProposeFrictionInstructionParams {
 #[serde(rename_all = "camelCase")]
 pub struct FrictionSettings {
     pub auto_capture: bool,
+    /// Space IDs explicitly allowed to read Mast friction across Spaces.
+    #[serde(default)]
+    pub all_spaces_read_grants: std::collections::BTreeSet<String>,
 }
 
 impl Default for FrictionSettings {
     fn default() -> Self {
-        Self { auto_capture: true }
+        Self { auto_capture: true, all_spaces_read_grants: Default::default() }
     }
 }
 
