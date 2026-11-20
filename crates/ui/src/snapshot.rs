@@ -78,6 +78,12 @@ pub fn symbol_search_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut Ap
     shell
 }
 
+pub fn definition_search_fixture(data_dir: PathBuf, window: &mut Window, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_definition_search(window, cx));
+    shell
+}
+
 pub fn file_outline_fixture(cx: &mut App) -> Entity<crate::files::FilesSurface> {
     let state = cx.new(|_| crate::state::AppState::new());
     let file = cx.new(|cx| crate::files::FilesSurface::new_editor(state, "fixture".into(), "src/review.rs".into(), false, 1000, 13.0, false, false, cx));

@@ -158,6 +158,7 @@ actions!(
         OpenMyPrs,
         QuickOpen,
         QuickOpenSymbols,
+        GoToDefinition,
         ToggleBlameGutter,
         FileNavigationBack,
         FileNavigationForward,

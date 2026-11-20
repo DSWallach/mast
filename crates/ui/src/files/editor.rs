@@ -40,6 +40,36 @@ pub(super) enum EditorContextAction {
     SelectAll,
 }
 
+/// Locate the identifier at a cursor offset for keyboard and context-menu navigation.
+/// The editor exposes the cursor but not its syntax tree; use its source text here.
+pub(super) fn identifier_at_cursor(source: &str, offset: usize, path: &str) -> Option<std::ops::Range<usize>> {
+    if offset > source.len() || !source.is_char_boundary(offset) { return None; }
+    let ruby = mast_syntax::language_for_path(path) == Some(mast_syntax::LanguageId::Ruby);
+    let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+    let anchor = if ruby && offset > 0 && matches!(source.as_bytes()[offset - 1], b'?' | b'!') { offset - 1 } else { offset };
+    let start = source[..anchor].char_indices().rev()
+        .find(|(_, character)| !is_identifier(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let mut end = source[anchor..].char_indices()
+        .find(|(_, character)| !is_identifier(*character))
+        .map_or(source.len(), |(index, _)| anchor + index);
+    if ruby && start < end && matches!(source.as_bytes().get(end), Some(b'?' | b'!'))
+        && !(source.as_bytes()[end] == b'!' && source.as_bytes().get(end + 1) == Some(&b'=')) { end += 1; }
+    (start < end).then_some(start..end)
+}
+
+/// Exclude the line-number gutter from definition-click fallback handling.
+pub(super) fn pointer_in_text(editor: &FileEditorState, position: gpui::Point<gpui::Pixels>) -> bool {
+    let bounds = editor.input_bounds();
+    if !bounds.contains(&position) { return false; }
+    let source = editor.value();
+    let cursor = editor.cursor().min(source.len());
+    let Some(prefix) = source.get(..cursor) else { return false; };
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let Some(line_bounds) = editor.range_to_bounds(&(line_start..line_start)) else { return false; };
+    position.x >= line_bounds.left() - editor.scroll_offset().x
+}
+
 /// Creates a stable editor entity for an open workspace document.
 pub(super) fn new_file_editor(
     text: impl Into<SharedString>,
@@ -169,6 +199,19 @@ pub(super) fn subscribe_to_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_at_cursor_respects_unicode_boundaries() {
+        let text = "call(élève_2);";
+        assert_eq!(&text[identifier_at_cursor(text, 8, "a.rs").unwrap()], "élève_2");
+        assert!(identifier_at_cursor(text, 6, "a.rs").is_none());
+        assert!(identifier_at_cursor(text, text.len(), "a.rs").is_none());
+        for name in ["ready?", "save!"] {
+            assert_eq!(&name[identifier_at_cursor(name, name.len(), "a.rb").unwrap()], name);
+            assert_eq!(&name[identifier_at_cursor(name, name.len() - 1, "a.rb").unwrap()], name);
+        }
+        assert_eq!(&"ready?"[identifier_at_cursor("ready?", 2, "a.rs").unwrap()], "ready");
+    }
 
     #[test]
     fn menu_availability_tracks_selection_editability_and_clipboard() {

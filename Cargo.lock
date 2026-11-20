@@ -5420,6 +5420,7 @@ dependencies = [
  "image",
  "image-compare",
  "libc",
+ "lsp-types",
  "mast-doc",
  "mast-engine",
  "mast-harness",

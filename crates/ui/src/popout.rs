@@ -271,6 +271,22 @@ impl PopoutWindow {
                     shell.popout_open_file(owner, path, window, cx)
                 });
             }
+            FilesEvent::DefinitionCandidates { from_path, from_line, definitions } => {
+                if let PopoutSurface::File { surface, path } = &self.surface
+                    && definitions.len() == 1 && definitions[0].0 == *path
+                {
+                    let line = definitions[0].1.start_line;
+                    surface.update(cx, |surface, cx| {
+                        surface.reveal_editor_location(line, None, cx);
+                        surface.focus_editor(window, cx);
+                    });
+                    return;
+                }
+                let from_path = from_path.clone();
+                let from_line = *from_line;
+                let definitions = definitions.clone();
+                self.with_main(cx, move |shell, window, cx| shell.popout_open_definitions(owner, from_path, from_line, definitions, window, cx));
+            }
             FilesEvent::OpenCommit(commit) => {
                 let commit = commit.clone();
                 self.with_main(cx, move |shell, _, cx| shell.popout_open_commit(owner, commit, cx));
