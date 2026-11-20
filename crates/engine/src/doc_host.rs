@@ -345,6 +345,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+// Only the host issues lease IDs. Ordinary edit leases are bare new_id()
+// values, and each client-supplied lease must match the row's stored ID.
+const STEER_RECOVERY_LEASE_PREFIX: &str = "mast-steer-recovery:";
+
+fn is_steer_recovery_lease(lease_id: &str) -> bool {
+    lease_id.starts_with(STEER_RECOVERY_LEASE_PREFIX)
+}
+
+fn steer_recovery_lease(generation: &str) -> String {
+    format!("{STEER_RECOVERY_LEASE_PREFIX}{generation}")
+}
+
 /// Put a taken queue row back after a failed send, with the instruction pin
 /// it captured at queue time and its context-reset confirmation. A send the
 /// host refused with `instructionContextResetRequired` gets the typed gate
@@ -3157,12 +3169,7 @@ impl DocHost {
         // partial attempt are only accepted if their recovery inputs match.
         for entry in rows.iter().rev() {
             let mut item = entry.item.clone();
-            item.delivery_gate = Some(QueueDeliveryGate::ReviewRequired {
-                previous_lease_id: format!("recovery:{}", item.id),
-                owner_device_id: self.inner.config.device_id.clone(),
-                since_ms: item.issued_at,
-                base_text_hash: queue_text_hash(&item.text),
-            });
+            item.delivery_gate = Some(self.steer_recovery_gate(&item, steer_recovery_lease(&item.id)));
             handle.doc.restore_queued_for_review(0, &item, entry.pin.as_ref(), entry.reset_confirmed)?;
             if tracker.test_hook("queued_steer_recovery_row", &handle.chat_id) {
                 return Err(EngineError::Other("injected partial steer recovery failure".into()));
@@ -3172,6 +3179,31 @@ impl DocHost {
             return Err(EngineError::Other("injected steer recovery flush failure".into()));
         }
         self.persist_open_chat_now(handle)
+    }
+
+    fn steer_recovery_gate(&self, item: &QueuedMessage, lease: String) -> QueueDeliveryGate {
+        QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: lease,
+            owner_device_id: self.inner.config.device_id.clone(),
+            since_ms: item.issued_at,
+            base_text_hash: queue_text_hash(&item.text),
+        }
+    }
+
+    fn review_after_queue_edit_expires(
+        &self, item: &QueuedMessage, lease: &str, owner: &str, base_text_hash: &str,
+    ) -> QueueDeliveryGate {
+        if is_steer_recovery_lease(lease) {
+            // The expired lease cannot authorize a later send. A new review
+            // must acquire its own generation.
+            return self.steer_recovery_gate(item, steer_recovery_lease(&new_id()));
+        }
+        QueueDeliveryGate::ReviewRequired {
+            previous_lease_id: lease.to_owned(),
+            owner_device_id: owner.to_owned(),
+            since_ms: now_ms(),
+            base_text_hash: base_text_hash.to_owned(),
+        }
     }
 
     fn with_queue_row_available<T>(
@@ -3625,7 +3657,15 @@ impl DocHost {
             });
         }
 
-        let lease_id = new_id();
+        let lease_id = match &item.delivery_gate {
+            Some(QueueDeliveryGate::ReviewRequired { previous_lease_id, .. })
+            | Some(QueueDeliveryGate::Editing { lease_id: previous_lease_id, .. })
+                if is_steer_recovery_lease(previous_lease_id) =>
+            {
+                steer_recovery_lease(&new_id())
+            }
+            _ => new_id(),
+        };
         let expires_at_ms = now + QUEUE_EDIT_LEASE_MS;
         let gate = QueueDeliveryGate::Editing {
             lease_id: lease_id.clone(),
@@ -3679,32 +3719,20 @@ impl DocHost {
         else {
             return Ok(RenewQueueEditOutcome::Missing);
         };
-        let QueueDeliveryGate::Editing {
+        let Some(QueueDeliveryGate::Editing {
             lease_id: current,
             owner_device_id,
             owner_instance_id,
             acquired_at_ms,
             expires_at_ms,
             base_text_hash,
-        } = item
-            .delivery_gate
-            .unwrap_or(QueueDeliveryGate::ReviewRequired {
-                previous_lease_id: String::new(),
-                owner_device_id: String::new(),
-                since_ms: now,
-                base_text_hash: String::new(),
-            })
+        }) = &item.delivery_gate
         else {
             return Ok(RenewQueueEditOutcome::Lost);
         };
-        if current != lease_id || expires_at_ms <= now {
-            if current == lease_id && expires_at_ms <= now {
-                let review = QueueDeliveryGate::ReviewRequired {
-                    previous_lease_id: current,
-                    owner_device_id,
-                    since_ms: now,
-                    base_text_hash,
-                };
+        if current != lease_id || *expires_at_ms <= now {
+            if current == lease_id && *expires_at_ms <= now {
+                let review = self.review_after_queue_edit_expires(&item, current, owner_device_id, base_text_hash);
                 let _ = handle.doc.set_queued_delivery_gate(id, Some(&review));
                 handle.publish_queue();
                 self.save_snapshot(&handle);
@@ -3713,12 +3741,12 @@ impl DocHost {
         }
         let expires_at_ms = now + QUEUE_EDIT_LEASE_MS;
         let renewed = QueueDeliveryGate::Editing {
-            lease_id: current,
-            owner_device_id,
-            owner_instance_id,
-            acquired_at_ms,
+            lease_id: current.clone(),
+            owner_device_id: owner_device_id.clone(),
+            owner_instance_id: owner_instance_id.clone(),
+            acquired_at_ms: *acquired_at_ms,
             expires_at_ms,
-            base_text_hash,
+            base_text_hash: base_text_hash.clone(),
         };
         if !handle.doc.set_queued_delivery_gate(id, Some(&renewed))? {
             return Ok(RenewQueueEditOutcome::Missing);
@@ -3803,6 +3831,23 @@ impl DocHost {
             };
             if current_lease != lease_id {
                 return Ok(FinishQueueEditOutcome::Lost);
+            }
+            if is_steer_recovery_lease(current_lease) {
+                let Some(QueueDeliveryGate::Editing { expires_at_ms, .. }) = &item.delivery_gate else {
+                    return Ok(FinishQueueEditOutcome::Lost);
+                };
+                let expired = *expires_at_ms <= now_ms();
+                // Escape and switching chats both cancel an edit. Applying
+                // either to a recovered steer must keep it behind review.
+                if expired || action == FinishQueueEditAction::Cancel {
+                    let review = self.steer_recovery_gate(&item, steer_recovery_lease(&new_id()));
+                    if !handle.doc.set_queued_delivery_gate(id, Some(&review))? {
+                        return Ok(FinishQueueEditOutcome::Missing);
+                    }
+                    handle.publish_queue();
+                    self.save_snapshot(&handle);
+                    return Ok(if expired { FinishQueueEditOutcome::Lost } else { FinishQueueEditOutcome::Cancelled });
+                }
             }
             if action == FinishQueueEditAction::Commit
                 && (expected_text_hash != Some(base_text_hash.as_str())
@@ -3906,22 +3951,19 @@ impl DocHost {
                 expires_at_ms,
                 base_text_hash,
                 ..
-            }) = item.delivery_gate
+            }) = &item.delivery_gate
             else {
                 return;
             };
             if current_lease_id != lease_id
-                || expires_at_ms != scheduled_expires_at_ms
-                || expires_at_ms > now_ms()
+                || *expires_at_ms != scheduled_expires_at_ms
+                || *expires_at_ms > now_ms()
             {
                 return;
             }
-            let review = QueueDeliveryGate::ReviewRequired {
-                previous_lease_id: current_lease_id,
-                owner_device_id,
-                since_ms: now_ms(),
-                base_text_hash,
-            };
+            let review = self.review_after_queue_edit_expires(
+                &item, current_lease_id, owner_device_id, base_text_hash,
+            );
             let Ok(changed) = handle.doc.set_queued_delivery_gate(id, Some(&review)) else {
                 return;
             };
@@ -4255,12 +4297,9 @@ impl DocHost {
                     base_text_hash,
                     ..
                 }) if *expires_at_ms <= now_ms() => {
-                    let review = QueueDeliveryGate::ReviewRequired {
-                        previous_lease_id: lease_id.clone(),
-                        owner_device_id: owner_device_id.clone(),
-                        since_ms: now_ms(),
-                        base_text_hash: base_text_hash.clone(),
-                    };
+                    let review = self.review_after_queue_edit_expires(
+                        &head, lease_id, owner_device_id, base_text_hash,
+                    );
                     if let Err(error) = handle.doc.set_queued_delivery_gate(&head.id, Some(&review)) {
                         tracing::warn!(chat = %handle.chat_id, %error, "setting queue review gate failed");
                         return;

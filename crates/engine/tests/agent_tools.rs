@@ -6481,9 +6481,16 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     assert_eq!(handle.doc().read_queue().unwrap()[0].id, warm_id);
 }
 
+async fn begin_recovered_review(client: &RpcClient, id: &str) -> (String, String) {
+    let result = client.call(methods::BEGIN_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": id, "editorDeviceId": "device", "editorInstanceId": "client"
+    })).await.unwrap();
+    assert_eq!(result["outcome"], "acquired");
+    (result["leaseId"].as_str().unwrap().to_owned(), result["baseTextHash"].as_str().unwrap().to_owned())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dispatch() {
-    use mast_engine::doc_host::{BeginQueueEditOutcome, FinishQueueEditAction};
     use mast_engine::sessions::SteerOutcome;
 
     let warm = Arc::new(Warm::default());
@@ -6514,12 +6521,61 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     assert_eq!(rows[1].text, "warm follow-up");
     assert!(warm.received.lock().unwrap().is_empty());
 
-    let BeginQueueEditOutcome::Acquired { lease_id, .. } = host
-        .begin_queued_message_edit(CHAT, direct_id, "device", "client").await.unwrap()
-    else { panic!("direct follow-up should be reviewable"); };
-    host.finish_queued_message_edit(
-        CHAT, direct_id, &lease_id, FinishQueueEditAction::ReleaseUnchanged, None, None,
-    ).await.unwrap();
+    let (cancelled, _) = begin_recovered_review(&rig.client, direct_id).await;
+    // Escape and chat switch both issue this ordinary composer RPC.
+    let cancel = |lease: &str| json!({
+        "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "cancel", "text": "unsaved draft"
+    });
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, cancel(&cancelled))
+        .await.unwrap()["outcome"], "cancelled");
+    assert_eq!(handle.doc().read_queue().unwrap()[0].text, "direct follow-up");
+    assert!(matches!(handle.doc().read_queue().unwrap()[0].delivery_gate,
+        Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
+    assert!(warm.received.lock().unwrap().is_empty());
+
+    let (before_restart, _) = begin_recovered_review(&rig.client, direct_id).await;
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(rig.harness.clone()));
+    rig.core.shutdown().await;
+    let restarted = EngineCore::assemble(
+        &rig._tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    restarted.sessions.set_agent_tools_launch(Some(AgentToolsLaunch {
+        command: "/opt/zeron/bin/zeron".into(), args: vec!["mcp".into()], ipc_port: Some(27999),
+    }));
+    let host = &restarted.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    // Exercise the saved lease after a fresh engine owns the queue.
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let release = |lease: &str| json!({
+        "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "releaseUnchanged"
+    });
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, release(&cancelled))
+        .await.unwrap()["outcome"], "lost");
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, cancel(&before_restart))
+        .await.unwrap()["outcome"], "cancelled");
+
+    let (expired, _) = begin_recovered_review(&client, direct_id).await;
+    let row = &handle.doc().read_queue().unwrap()[0];
+    let mut gate = row.delivery_gate.clone().unwrap();
+    let mast_doc::QueueDeliveryGate::Editing { expires_at_ms, .. } = &mut gate else { panic!("edit lease missing"); };
+    *expires_at_ms = 1;
+    handle.doc().set_queued_delivery_gate(direct_id, Some(&gate)).unwrap();
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, release(&expired))
+        .await.unwrap()["outcome"], "lost");
+    assert!(matches!(handle.doc().read_queue().unwrap()[0].delivery_gate,
+        Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
+    assert!(warm.received.lock().unwrap().is_empty());
+
+    // A restarted chat can retain a paused queue. Saving review clears the
+    // row's gate, then the user's Send Now releases exactly that row.
+    host.pause_all_queues();
+    let (lease, hash) = begin_recovered_review(&client, direct_id).await;
+    assert_eq!(client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "commit",
+        "text": "direct follow-up", "expectedTextHash": hash
+    })).await.unwrap()["outcome"], "committed");
+    assert!(host.send_queued_now(CHAT, direct_id).await.unwrap());
     wait_for(|| !warm.received.lock().unwrap().is_empty(), "reviewed follow-up to dispatch").await;
     assert_eq!(&*warm.received.lock().unwrap(), &["direct follow-up"]);
     assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == direct_id).count(), 1);
