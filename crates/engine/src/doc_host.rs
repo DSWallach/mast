@@ -918,6 +918,22 @@ impl ChatDocHandle {
         })
     }
 
+    /// Add a visible system notice without creating a user turn.
+    pub(crate) fn write_system_notice(&self, message_id: &str, text: &str, created_at: i64) -> Result<(), DocError> {
+        if self.doc.read_entries()?.iter().any(|entry| entry.id == message_id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_owned(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Text { id: "t0".into(), text: text.to_owned() }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+    }
+
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
     /// ended (zeron folded "Run interrupted by backend restart" the same

@@ -2113,7 +2113,7 @@ async fn manager_defers_handoff_until_queued_user_message_runs() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while !manager_chat(&rig).is_some_and(|chat| chat != source) {
         let handle = rig.core.doc_host.open(&source).unwrap();
-        assert!(tokio::time::Instant::now() < deadline, "handoff deferred: session {:?}, queue {:?}, commands {:?}, usage {:?}", rig.core.sessions.session_status(&source), handle.doc().read_queue(), handle.doc().read_commands(), handle.doc().context_usage());
+        assert!(tokio::time::Instant::now() < deadline, "handoff deferred: session {:?}, turns {:?}, queue {:?}, commands {:?}, usage {:?}", rig.core.sessions.session_status(&source), rig.mock.turns(), handle.doc().read_queue(), handle.doc().read_commands(), handle.doc().context_usage());
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Queued user decision") && turn.prompt.contains(&source)), "successor receives queued decision context").await;
@@ -2192,6 +2192,8 @@ async fn manager_unknown_context_window_explains_manual_handoff() {
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(200_000), None).unwrap();
     rig.mock.release();
     wait_for(|| rig.core.doc_host.open(&source).unwrap().doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("did not report its context window")))), "visible unknown window explanation").await;
+    let entries = rig.core.doc_host.open(&source).unwrap().doc().read_entries().unwrap();
+    assert!(entries.iter().any(|entry| entry.role == MessageRole::System && entry.parts.iter().any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("did not report its context window")))));
     assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
     rig.core.shutdown().await;
 }

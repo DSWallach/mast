@@ -91,14 +91,14 @@ pub(crate) fn start(
                     .ok()
                     .and_then(|entries| entries.into_iter().next())
                 };
-                let usage = host
+                let context = host
                     .open(&session.chat_id)
                     .ok()
-                    .and_then(|handle| handle.doc().context_usage())
-                    .and_then(|value| value.fraction());
+                    .and_then(|handle| handle.doc().context_usage());
+                let usage = context.as_ref().and_then(|value| value.fraction());
                 if usage.is_none() {
                     let id = mast_proto::derive_id(&session.chat_id, "manager-context-window-unavailable");
-                    if let Err(error) = source_handle.write_user_message(
+                    if let Err(error) = source_handle.write_system_notice(
                         &id,
                         "[Mast system message: automatic Manager handoff is unavailable because this session did not report its context window. You can hand off manually.]",
                         chrono::Utc::now().timestamp_millis(),
