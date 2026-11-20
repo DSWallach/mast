@@ -141,18 +141,11 @@ struct RunHandle {
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
     /// discarding queued boundary steers). Run retirement transfers queued
     /// entries to the recovery owner before removing the handle.
-    routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
+    routed_steers: std::collections::VecDeque<QueuedSteer>,
 }
 
-/// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
-#[derive(Debug, Clone)]
-struct RoutedSteer {
-    prompt: String,
-    message_id: String,
-    /// Original queue data, distinct from the prompt rendered for the harness.
-    queued: Option<QueuedSteer>,
-}
-
+/// Immutable queue inputs for an accepted steer. Direct sends get the
+/// equivalent row at acceptance so they can use the same recovery path.
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedSteer {
     pub item: mast_doc::QueuedMessage,
@@ -1170,7 +1163,8 @@ impl SessionsEngine {
                 let user_id = message_id.clone().unwrap_or_else(new_id);
                 if self.accept_routed_steer(
                     chat_id, Some(&run_id), &request.prompt, &delivered_prompt, &user_id,
-                    queued.clone(), request.instructions.as_ref().map(|delivery| delivery.envelope.pin()),
+                    queued.clone(),
+                    request.instructions.as_ref().map(|delivery| (delivery.envelope.pin(), context_reset_confirmed)),
                 )? {
                     acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
                     self.inner.note_message(chat_id, &request.prompt);
@@ -1386,7 +1380,7 @@ impl SessionsEngine {
                     cancel: cancel_tx,
                     engine_tx,
                     pending_inputs,
-                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                    routed_steers: std::collections::VecDeque::new(),
                 },
             );
             // A fresh run delivered the reminder to this turn. Record that
@@ -1476,24 +1470,29 @@ impl SessionsEngine {
         delivered_prompt: &str,
         user_id: &str,
         queued: Option<QueuedSteer>,
-        warm_pin: Option<InstructionRevisionPin>,
+        warm_instruction: Option<(InstructionRevisionPin, bool)>,
     ) -> Result<bool, EngineError> {
         let transition = self.inner.transition(chat_id);
         let fence = lock(&transition);
-        if queued.is_some() && self.has_queued_steer_recovery(chat_id) {
-            return Err(EngineError::Other("Queued messages are still being recovered for review".into()));
-        }
         let target = lock(&self.inner.runs).get(chat_id)
             .filter(|run| run.steerable && !*run.cancel.borrow()
                 && expected_run.is_none_or(|id| id == run.run_id))
-            .map(|run| (run.steer_tx.clone(), run.routed_steers.clone(), run.runtime_config.instructions.clone()));
-        let Some((steer_tx, ledger, live_pin)) = target else {
+            .map(|run| (run.steer_tx.clone(), run.runtime_config.instructions.clone()));
+        let Some((steer_tx, live_pin)) = target else {
             return Ok(false);
         };
+        // Recovery owns the queue prefix. No second live batch can start
+        // until that prefix is durably gated and its owner is retired.
+        if self.has_queued_steer_recovery(chat_id) {
+            return Err(EngineError::Other("Queued messages are still being recovered for review".into()));
+        }
         if let Some(pin) = queued.as_ref().and_then(|row| row.pin.as_ref())
             && live_pin.as_ref() != Some(pin)
         {
             return Err(EngineError::Other(TURN_BOUNDARY_MESSAGE.into()));
+        }
+        if prompt.trim().is_empty() || user_id.trim().is_empty() {
+            return Err(EngineError::Other("A steer requires a message ID and text".into()));
         }
         let Ok(permit) = steer_tx.try_reserve() else {
             return Ok(false);
@@ -1506,17 +1505,30 @@ impl SessionsEngine {
             return Err(EngineError::Other("Send this message from the queue".into()));
         }
         self.inner.fail_if_injected(chat_id)?;
-        handle.write_user_message(user_id, prompt, now_ms())?;
-        if let Some(pin) = warm_pin
-            && let Err(err) = self.inner.journal.note_instruction_turn(chat_id, user_id, &pin, false)
+        let issued_at = now_ms();
+        handle.write_user_message(user_id, prompt, issued_at)?;
+        if let Some((pin, reset_confirmed)) = &warm_instruction
+            && let Err(err) = self.inner.journal.note_instruction_turn(chat_id, user_id, pin, *reset_confirmed)
         {
             tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
         }
-        lock(&ledger).push_back(RoutedSteer {
-            prompt: delivered_prompt.to_owned(),
-            message_id: user_id.to_owned(),
-            queued,
+        let row = queued.unwrap_or_else(|| {
+            // Warm Run requires no attachments in RuntimeConfig::can_route.
+            // Explicit Steer is a text-only protocol operation.
+            let mut item = mast_doc::QueuedMessage::new(user_id, prompt, &self.inner.device_id);
+            item.issued_at = issued_at;
+            item.hold_for_turn_end = true;
+            let (pin, reset_confirmed) = match warm_instruction {
+                Some((pin, confirmed)) => (Some(pin), confirmed),
+                None => (live_pin, false),
+            };
+            QueuedSteer { item, pin, reset_confirmed }
         });
+        lock(&self.inner.runs)
+            .get_mut(chat_id)
+            .expect("transition fence keeps the accepting run registered")
+            .routed_steers
+            .push_back(row);
         self.inner.update_status(chat_id, SessionStatus::Working, false, None);
         permit.send(SteerMessage {
             prompt: delivered_prompt.to_owned(),
@@ -2717,7 +2729,7 @@ impl Inner {
                 let Some(run) = runs.get(chat_id).filter(|run| run.run_id == run_id) else {
                     return;
                 };
-                !lock(&run.routed_steers).is_empty()
+                !run.routed_steers.is_empty()
             };
             if pending {
                 // The next turn already owns Working. The old turn still
@@ -2735,14 +2747,14 @@ impl Inner {
         let transition = self.transition(chat_id);
         let fence = lock(&transition);
         let confirmed = {
-            let runs = lock(&self.runs);
-            let Some(run) = runs.get(chat_id).filter(|run| run.run_id == run_id) else {
+            let mut runs = lock(&self.runs);
+            let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
                 return;
             };
-            lock(&run.routed_steers).pop_front()
+            run.routed_steers.pop_front()
         };
         if let Some(steer) = confirmed {
-            self.agent_tokens.manager_status().reminder_confirmed(chat_id, &steer.message_id);
+            self.agent_tokens.manager_status().reminder_confirmed(chat_id, &steer.item.id);
         }
         self.update_status(chat_id, SessionStatus::Working, true, None);
         drop(fence);
@@ -2754,27 +2766,22 @@ impl Inner {
     fn retire_run(
         &self, chat_id: &str, run_id: &str,
         settled: Option<(SessionStatus, Option<String>)>,
-    ) -> Vec<RoutedSteer> {
+    ) {
         let transition = self.transition(chat_id);
         let fence = lock(&transition);
         let pending = {
-            let runs = lock(&self.runs);
-            let Some(run) = runs.get(chat_id).filter(|run| run.run_id == run_id) else {
-                return Vec::new();
+            let mut runs = lock(&self.runs);
+            let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
+                return;
             };
-            std::mem::take(&mut *lock(&run.routed_steers))
+            std::mem::take(&mut run.routed_steers)
         };
         let had_pending = !pending.is_empty();
-        let mut direct = Vec::new();
-        {
-            let mut recovery = lock(&self.queued_steer_recovery);
-            for steer in pending {
-                if let Some(row) = steer.queued {
-                    recovery.entry(chat_id.to_owned()).or_default().push(row);
-                } else {
-                    direct.push(steer);
-                }
-            }
+        if had_pending {
+            lock(&self.queued_steer_recovery)
+                .entry(chat_id.to_owned())
+                .or_default()
+                .extend(pending);
         }
         let closed = settled.map(|(status, completed)| {
             self.update_status(chat_id, status, false, completed.filter(|_| !had_pending))
@@ -2784,7 +2791,6 @@ impl Inner {
         if let Some(closed) = closed {
             self.publish_transition(chat_id, closed);
         }
-        direct
     }
 
     fn is_retired_run(&self, chat_id: &str, run_id: &str) -> bool {
@@ -4486,50 +4492,7 @@ async fn drive_run(
         }
     }
 
-    let orphans = inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
-    if !interrupted && !orphans.is_empty() {
-        // The dying run accepted these into its mailbox but never confirmed a
-        // Steered boundary (idle-reaper race, a mid-turn error discarding
-        // queued boundary steers, a parked child death). Their user entries
-        // are already in the transcript — a message that shows as sent must
-        // never silently not run. Re-dispatch each as a fresh turn
-        // (write_user_message dedupes by id; resume is engine-injected).
-        let engine = SessionsEngine {
-            inner: inner.clone(),
-        };
-        let chat = chat_id.clone();
-        tokio::spawn(async move {
-            for steer in orphans {
-                let Some(mut request) = engine.last_request(&chat) else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
-                    break;
-                };
-                request.prompt = steer.prompt.clone();
-                request.resume = None;
-                request.attachments = Vec::new();
-                tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
-                let Some(host) = engine.inner.doc_host() else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
-                    break;
-                };
-                host.apply_chat_approval(&chat, &mut request);
-                if let Err(err) = host
-                    .dispatch_with_source_context(
-                        &engine,
-                        &chat,
-                        harness_id,
-                        request,
-                        Some(steer.message_id.clone()),
-                    )
-                    .await
-                {
-                    tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
-                    engine.inner.fail_retired_run(&chat, &run_id);
-                    break;
-                }
-            }
-        });
-    }
+    inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
 }
 
 fn restart_marker_is_fresh(marked_at: i64, now: i64, freshness_ms: i64) -> bool {
@@ -4810,7 +4773,7 @@ mod tests {
             runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
             steer_tx: sender, interrupt_token: CancellationToken::new(), cancel, engine_tx,
             pending_inputs: Arc::new(Mutex::new(HashMap::new())),
-            routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            routed_steers: std::collections::VecDeque::new(),
         });
         assert_eq!(sessions.steer("chat", "continue", None).await.unwrap(), SteerOutcome::NotSteerable);
         assert_eq!(prepare_skill_notices(&journal, "chat", "continue").1, changes);

@@ -6663,7 +6663,7 @@ impl DocHost {
     }
 
     /// Engine-initiated continuation turns (queue promotion, steer-turned-run,
-    /// dead-run answers, crash auto-resume, orphaned-steer re-dispatch) reuse
+    /// dead-run answers and crash auto-resume) reuse
     /// a prior request, which would freeze the approval mode the chat had at
     /// its LAST explicit send. The chat row's `config.autoApprove` is the
     /// user's current choice — a mid-chat toggle applies from the next turn —

@@ -70,6 +70,7 @@ struct Warm {
     /// harness confirms it: what the agent could do the moment it sees it.
     on_steer: Mutex<Option<Box<dyn Fn() + Send>>>,
     hold_steer_confirmation: std::sync::atomic::AtomicBool,
+    fail_first_start: Mutex<Option<Arc<Notify>>>,
 }
 
 impl GatedHarness {
@@ -150,6 +151,11 @@ impl Harness for GatedHarness {
         if let Some(warm) = self.warm.clone() {
             self.spawns.lock().unwrap().push(Spawn::WithTools { prompt: request.prompt.clone(), tools });
             self.requests.lock().unwrap().push(request.clone());
+            let fail = warm.fail_first_start.lock().unwrap().take();
+            if let Some(fail) = fail {
+                fail.notified().await;
+                return Err(HarnessError::Protocol("harness stopped during startup".into()));
+            }
             warm.received.lock().unwrap().push(request.prompt.clone());
             let (feed_tx, mut feed_rx) = mpsc::unbounded_channel::<AgentEvent>();
             *warm.feed.lock().unwrap() = Some(feed_tx);
@@ -173,6 +179,15 @@ impl Harness for GatedHarness {
                         // A steer is confirmed with a Steered boundary before any
                         // event the test feeds after it.
                         biased;
+                        _ = controls.interrupt.cancelled() => {
+                            let _ = out_tx.send(Ok(AgentEvent::Done {
+                                status: DoneStatus::Interrupted,
+                                result: None,
+                                error: None,
+                                session_id: None,
+                            })).await;
+                            return;
+                        }
                         steer = controls.steering.recv() => match steer {
                             Some(message) => {
                                 if let Some(act) = warm.on_steer.lock().unwrap().as_ref() {
@@ -6370,8 +6385,12 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     let later = host.queue_message_with_id(CHAT, "queued-later", "original later row", Vec::new(), true).await.unwrap();
     let original = handle.doc().read_queue().unwrap();
     assert!(host.steer_queued_now(CHAT, &first).await.unwrap());
+    let warm_id = "warm-run-follow-up";
+    let mut request = rig.harness.requests.lock().unwrap()[0].clone();
+    request.prompt = "warm run text".into();
+    rig.core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some(warm_id.into())).await.unwrap();
     assert!(host.steer_queued_now(CHAT, &second).await.unwrap());
-    wait_for(|| warm.received.lock().unwrap().len() == 3, "both steers to reach the unconfirming harness").await;
+    wait_for(|| warm.received.lock().unwrap().len() == 4, "all three steers to reach the unconfirming harness").await;
 
     let stage = Arc::new(AtomicUsize::new(0));
     let hook_stage = stage.clone();
@@ -6384,11 +6403,10 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
         }
     })));
     let held = handle.test_queue_drain_guard().await;
-    warm.feed.lock().unwrap().as_ref().unwrap().send(AgentEvent::Done {
-        status: DoneStatus::Errored, result: None, error: Some("run closed".into()), session_id: None,
-    }).unwrap();
-    // Run exit cannot wait for the lock already held by the queue.
-    wait_for(|| !rig.core.sessions.has_live_run(CHAT), "run to retire while drain lock is held").await;
+    // An explicit Stop must return even while the queue holds its own lock.
+    assert!(tokio::time::timeout(Duration::from_secs(5), rig.core.sessions.interrupt(CHAT))
+        .await.unwrap().unwrap());
+    assert!(!rig.core.sessions.has_live_run(CHAT));
     assert_eq!(handle.doc().read_queue().unwrap().len(), 1);
 
     let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
@@ -6427,14 +6445,16 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     host.drain_queue(&handle).await;
     tokens.manager_status().set_test_hook(None);
     let rows = handle.doc().read_queue().unwrap();
-    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec![first.as_str(), second.as_str(), later.as_str()]);
-    for (row, before) in rows[..2].iter().zip(&original) {
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec![first.as_str(), warm_id, second.as_str(), later.as_str()]);
+    for (row, before) in [&rows[0], &rows[2]].into_iter().zip(&original) {
         assert!(matches!(row.delivery_gate, Some(mast_doc::QueueDeliveryGate::ReviewRequired { .. })));
         let mut restored = row.clone();
         restored.delivery_gate = None;
         assert_eq!(&restored, before);
     }
-    assert_eq!(rows[2].text, "edited during recovery");
+    assert_eq!(rows[1].text, "warm run text");
+    assert!(rows[1].delivery_gate.is_some());
+    assert_eq!(rows[3].text, "edited during recovery");
     let profile = mast_engine::EngineProfile::development(
         &rig._tmp.path().join("data"),
         &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
@@ -6445,7 +6465,7 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     persisted.import(&store.load_snapshot(CHAT).unwrap().unwrap()).unwrap();
     assert_eq!(mast_doc::SessionDoc::from_doc(persisted).read_queue().unwrap(), rows);
     assert!(!rig.core.sessions.resume_interrupted(CHAT));
-    assert_eq!(warm.received.lock().unwrap().len(), 3);
+    assert_eq!(warm.received.lock().unwrap().len(), 4);
 
     let BeginQueueEditOutcome::Acquired { lease_id, .. } = host
         .begin_queued_message_edit(CHAT, &first, "device", "client").await.unwrap()
@@ -6458,7 +6478,90 @@ async fn queued_steer_recovery_survives_cancelled_drain_and_partial_persistence(
     ));
     wait_for(|| rig.harness.spawns.lock().unwrap().len() == 2, "reviewed row to dispatch").await;
     assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == first).count(), 1);
-    assert_eq!(handle.doc().read_queue().unwrap()[0].id, second);
+    assert_eq!(handle.doc().read_queue().unwrap()[0].id, warm_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dispatch() {
+    use mast_engine::doc_host::{BeginQueueEditOutcome, FinishQueueEditAction};
+    use mast_engine::sessions::SteerOutcome;
+
+    let warm = Arc::new(Warm::default());
+    let fail = Arc::new(Notify::new());
+    *warm.fail_first_start.lock().unwrap() = Some(fail.clone());
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    host.queue_command(CHAT, run_command("primary", &rig.space_path)).unwrap();
+    wait_for(|| !rig.harness.requests.lock().unwrap().is_empty(), "startup to wait for failure").await;
+
+    let direct_id = "startup-direct";
+    let warm_id = "startup-warm";
+    assert_eq!(
+        rig.core.sessions.steer(CHAT, "direct follow-up", Some(direct_id.into())).await.unwrap(),
+        SteerOutcome::Accepted
+    );
+    let mut request = rig.harness.requests.lock().unwrap()[0].clone();
+    request.prompt = "warm follow-up".into();
+    rig.core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some(warm_id.into())).await.unwrap();
+    fail.notify_one();
+    wait_for(|| !rig.core.sessions.has_live_run(CHAT), "primary startup to fail").await;
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id]);
+    assert!(rows.iter().all(|row| row.delivery_gate.is_some()));
+    assert_eq!(rows[0].text, "direct follow-up");
+    assert_eq!(rows[1].text, "warm follow-up");
+    assert!(warm.received.lock().unwrap().is_empty());
+
+    let BeginQueueEditOutcome::Acquired { lease_id, .. } = host
+        .begin_queued_message_edit(CHAT, direct_id, "device", "client").await.unwrap()
+    else { panic!("direct follow-up should be reviewable"); };
+    host.finish_queued_message_edit(
+        CHAT, direct_id, &lease_id, FinishQueueEditAction::ReleaseUnchanged, None, None,
+    ).await.unwrap();
+    wait_for(|| !warm.received.lock().unwrap().is_empty(), "reviewed follow-up to dispatch").await;
+    assert_eq!(&*warm.received.lock().unwrap(), &["direct follow-up"]);
+    assert_eq!(handle.doc().read_entries().unwrap().iter().filter(|entry| entry.id == direct_id).count(), 1);
+    assert_eq!(handle.doc().read_queue().unwrap()[0].id, warm_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_driver_recovers_only_unconfirmed_steers() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let warm = Arc::new(Warm::default());
+    let rig = rig_with_harness(GatedHarness { warm: Some(warm.clone()), ..Default::default() }).await;
+    let host = &rig.core.doc_host;
+    let handle = host.open(CHAT).unwrap();
+    host.queue_command(CHAT, run_command("primary", &rig.space_path)).unwrap();
+    wait_for(|| warm.feed.lock().unwrap().is_some(), "primary run to start").await;
+    let sessions = &rig.core.sessions;
+    let first_start = sessions.session_status(CHAT).unwrap().started_at;
+    sessions.steer(CHAT, "confirmed steer", Some("confirmed-steer".into())).await.unwrap();
+    let tokens = sessions.agent_tokens();
+    // The confirmed steer has its own work-start timestamp, assigned by the
+    // engine only after it has retired that entry from the ledger.
+    wait_for(|| sessions.session_status(CHAT).unwrap().started_at != first_start,
+        "the engine to confirm the first steer").await;
+    warm.hold_steer_confirmation.store(true, SeqCst);
+    sessions.steer(CHAT, "needs review", Some("unconfirmed-steer".into())).await.unwrap();
+    wait_for(|| warm.received.lock().unwrap().len() == 3, "unconfirmed steer to reach the harness").await;
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        if event == "before_park_fence" && chat == CHAT {
+            panic!("injected driver failure");
+        }
+        false
+    })));
+    warm_fixture(&warm).0();
+    wait_for(|| !sessions.has_live_run(CHAT), "the unwound driver to retire").await;
+    tokens.manager_status().set_test_hook(None);
+    host.drain_queue(&handle).await;
+    let rows = handle.doc().read_queue().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "unconfirmed-steer");
+    assert!(rows[0].delivery_gate.is_some());
+    assert_eq!(warm.received.lock().unwrap().len(), 3);
 }
 
 /// A warm run keeps its token while parked. A change made with it between turns
