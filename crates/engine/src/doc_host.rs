@@ -4469,9 +4469,7 @@ impl DocHost {
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
         let _delivery = handle.delivery_lock.lock().await;
-        if !self.recover_queued_steers(handle, &sessions)
-            || handle.queue_paused.load(Ordering::Acquire)
-        {
+        if !self.recover_queued_steers(handle, &sessions) {
             return;
         }
         loop {

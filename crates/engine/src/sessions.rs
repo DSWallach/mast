@@ -2405,6 +2405,7 @@ impl Inner {
             if existed && entry.status == SessionStatus::Working
                 && status == SessionStatus::Working
                 && !fresh_start
+                && !continuing_steer
                 && completed_turn.is_none()
                 && now.signed_duration_since(entry.updated_at).num_milliseconds() < 10_000
             {
