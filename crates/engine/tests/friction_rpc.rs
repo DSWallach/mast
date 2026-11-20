@@ -20,6 +20,7 @@ async fn friction_rpc_list_dismiss_promote_and_propose() {
     client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
     let parent = client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"createWorkItem","spaceId":"space","title":"Parent","operationId":"parent"})).await.unwrap()["workItemId"].as_str().unwrap().to_owned();
     let report = FrictionReport {
+        space_name: None,
         id: String::new(),
         kind: FrictionKind::Bug,
         summary: "Failure".into(),
@@ -188,6 +189,7 @@ async fn friction_import_deduplicates_and_redacts() {
     let client = mast_rpc::memory_client(core.rpc_service());
     client.call(methods::MUTATE, json!({"op":"createSpace","spaceId":"space","deviceId":core.workspace.device_id(),"path":"/tmp"})).await.unwrap();
     let existing = FrictionReport {
+        space_name: None,
         id: String::new(),
         kind: FrictionKind::Workflow,
         summary: "Build approval".into(),

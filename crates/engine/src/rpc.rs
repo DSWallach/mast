@@ -2307,7 +2307,12 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_FRICTION_REPORTS => {
                 let p: mast_proto::ListFrictionReportsParams = parse_params(params)?;
-                let mut rows = self.workspace.friction_reports(&p.space_id);
+                if p.all_spaces && !self.registry.friction_settings().all_spaces_read_grants.contains(&p.space_id) {
+                    return Err(RpcError::Failed("Turn on Read Mast friction from all Spaces in the Space settings".into()));
+                }
+                let mut rows = if p.all_spaces {
+                    self.workspace.mast_friction_reports(&p.space_id, p.kind, p.status, p.since, 500)
+                } else { self.workspace.friction_reports(&p.space_id) };
                 rows.retain(|r| p.kind.is_none_or(|v| r.kind == v)
                     && r.status == p.status.unwrap_or(mast_proto::FrictionStatus::Open)
                     && p.harness.as_ref().is_none_or(|v| &r.provenance.harness == v)
@@ -2315,6 +2320,12 @@ impl RpcService for EngineRpc {
                     && p.since.is_none_or(|v| r.last_seen >= v));
                 rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
                 rows.truncate(p.limit.unwrap_or(100).min(1000));
+                if p.all_spaces {
+                    let spaces = self.workspace.read_spaces().map_err(|error| RpcError::Failed(error.to_string()))?;
+                    for row in &mut rows {
+                        row.space_name = Some(spaces.iter().find(|space| space.id == row.provenance.space_id).map(|space| space.display_name()).unwrap_or("Unknown Space").to_owned());
+                    }
+                }
                 RpcReply::value(&rows)
             }
             methods::IMPORT_FRICTION => {
@@ -2337,7 +2348,7 @@ impl RpcService for EngineRpc {
                     *ordinal += 1;
                     let import_id = mast_proto::derive_id(&format!("{filename}:{identity}:{ordinal}"), "friction-import-occurrence");
                     let mut report = mast_proto::FrictionReport {
-                        id: String::new(), kind: entry.kind, summary: entry.summary,
+                        id: String::new(), space_name: None, kind: entry.kind, summary: entry.summary,
                         what_happened: entry.what_happened, workaround: entry.workaround,
                         suggestion: entry.suggestion, approval: entry.approval, severity: entry.severity,
                         links: entry.links, provenance: mast_proto::FrictionProvenance {

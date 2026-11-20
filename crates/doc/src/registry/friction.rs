@@ -297,6 +297,7 @@ mod tests {
     fn report(space: &str, chat: &str, summary: &str, time: i64) -> FrictionReport {
         FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: FrictionKind::Bug,
             summary: summary.into(),
             what_happened: "Failure".into(),

@@ -74,6 +74,8 @@ pub struct FrictionOccurrence {
 #[serde(rename_all = "camelCase")]
 pub struct FrictionReport {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_name: Option<String>,
     pub kind: FrictionKind,
     pub summary: String,
     pub what_happened: String,
@@ -157,6 +159,8 @@ mod mast_filter_tests {
 #[serde(rename_all = "camelCase")]
 pub struct ListFrictionReportsParams {
     pub space_id: String,
+    #[serde(default)]
+    pub all_spaces: bool,
     pub kind: Option<FrictionKind>,
     pub status: Option<FrictionStatus>,
     pub harness: Option<String>,

@@ -1307,6 +1307,7 @@ impl AgentToolsService {
         let now = chrono::Utc::now().timestamp_millis();
         let report = mast_proto::FrictionReport {
             id: String::new(),
+            space_name: None,
             kind: args.kind,
             summary: args.summary,
             what_happened: args.what_happened,
@@ -1397,6 +1398,11 @@ impl AgentToolsService {
         let orchestrator = direct_children || project_workers;
         if context.admin_space.as_deref() != Some(&context.grant.space_id) && !orchestrator {
             return Err(WorkOutlineError::unauthorized("Only orchestrator or admin chats may dismiss friction").into());
+        }
+        if self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, id)
+            .and_then(|row| row.fields.get("provenance").and_then(|value| value.get("spaceId")).and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|space_id| space_id != context.grant.space_id) {
+            return Err(WorkOutlineError::unauthorized("Reports from another Space cannot be dismissed").into());
         }
         let reports = self.workspace.friction_reports(&context.grant.space_id);
         let id = resolve_id(id, reports.iter().map(|report| report.id.as_str()), "friction report")?;

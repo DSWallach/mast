@@ -71,6 +71,8 @@ mod tests {
 #[derive(Default)]
 pub(super) struct FrictionDetailsState {
     status: Option<FrictionStatus>,
+    all_spaces: bool,
+    settings: Option<mast_proto::FrictionSettings>,
     requested: bool,
     reports: Option<Vec<FrictionReport>>,
     error: Option<String>,
@@ -81,6 +83,37 @@ pub(super) struct FrictionDetailsState {
 }
 
 impl WorkItemDetails {
+    fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
+        let task = self.state.read(cx).work_outline_actions().get_friction_settings();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Ok(settings) = result { this.friction.settings = Some(settings); }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    fn set_friction_grant(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(mut settings) = self.friction.settings.clone() else { return; };
+        if enabled { settings.all_spaces_read_grants.insert(self.space_id.clone()); }
+        else { settings.all_spaces_read_grants.remove(&self.space_id); }
+        let task = self.state.read(cx).work_outline_actions().set_friction_settings(settings);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(settings) => {
+                        this.friction.settings = Some(settings);
+                        if !enabled { this.friction.all_spaces = false; this.fetch_friction(cx); }
+                    }
+                    Err(error) => cx.emit(DetailsEvent::Notice { text: error.message, error: true }),
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     fn fetch_friction(&mut self, cx: &mut Context<Self>) {
         self.friction.requested = true;
         self.friction.reports = None;
@@ -93,6 +126,7 @@ impl WorkItemDetails {
             .work_outline_actions()
             .list_friction_reports(ListFrictionReportsParams {
                 space_id: self.space_id.clone(),
+                all_spaces: self.friction.all_spaces,
                 kind: None,
                 status: self.friction.status,
                 harness: None,
@@ -235,6 +269,7 @@ impl WorkItemDetails {
     ) -> gpui::Div {
         if !self.friction.requested {
             self.friction.status = Some(FrictionStatus::Open);
+            self.load_friction_settings(cx);
             self.fetch_friction(cx);
         }
         let mut section = crate::components::outline_section("space-friction", theme)
@@ -296,6 +331,24 @@ impl WorkItemDetails {
                     ),
             );
             section = section.child(box_view);
+        }
+        if let Some(settings) = &self.friction.settings {
+            let enabled = settings.all_spaces_read_grants.contains(&self.space_id);
+            section = section.child(
+                crate::work_outline::hints::details_button("friction-grant", if enabled { "Read Mast friction from all Spaces: On" } else { "Read Mast friction from all Spaces: Off" }, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_friction_grant(!enabled, cx)))
+            ).child(crate::components::outline_secondary_text("Agents in this Space can read friction about Mast itself from every Space. Other friction stays private to its Space.".into(), theme));
+            if enabled {
+                let mut scope = crate::components::outline_action_row(theme);
+                for (index, (label, all_spaces)) in [("This Space", false), ("All Spaces", true)].into_iter().enumerate() {
+                    scope = scope.child(crate::work_outline::hints::details_button(("friction-scope", index), label, theme)
+                        .when(self.friction.all_spaces == all_spaces, |button| button.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.friction.all_spaces != all_spaces { this.friction.all_spaces = all_spaces; this.fetch_friction(cx); cx.notify(); }
+                        })));
+                }
+                section = section.child(scope);
+            }
         }
         let mut filters = crate::components::outline_action_row(theme);
         for (index, (label, status)) in [
@@ -381,6 +434,7 @@ impl WorkItemDetails {
                     cx.notify();
                 }));
             for chip in [
+                report.space_name.as_deref(),
                 Some(report.provenance.harness.as_str()),
                 report.provenance.model.as_deref(),
                 Some(source),
@@ -432,7 +486,7 @@ impl WorkItemDetails {
                 }
                 let fingerprint = report.fingerprint.clone();
                 let report_id = report.id.clone();
-                let picker_open = self.friction.picker.as_deref() == Some(report.id.as_str());
+                let picker_open = report.provenance.space_id == self.space_id && self.friction.picker.as_deref() == Some(report.id.as_str());
                 let create = crate::work_outline::hints::details_button(("friction-create", index), "Create bug", theme)
                     .debug_selector({
                         let selector = format!("friction-create-{}", report.id);
@@ -628,14 +682,14 @@ impl WorkItemDetails {
                                     .into()
                             })
                         });
-                details = details.child(
+                if report.provenance.space_id == self.space_id { details = details.child(
                     div()
                         .flex()
                         .gap(px(6.0))
                         .child(create)
                         .child(propose)
                         .child(dismiss),
-                );
+                ); }
                 if let Some(file_name) = &report.provenance.file_name {
                     details =
                         details.child(SharedString::from(format!("Imported from {file_name}")));
