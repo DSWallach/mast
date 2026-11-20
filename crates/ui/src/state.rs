@@ -4315,6 +4315,65 @@ mod tests {
         listener.local_addr().unwrap().port()
     }
 
+    #[tokio::test]
+    async fn desktop_restart_after_sign_in_with_pending_review() {
+        use base64::Engine as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use mast_proto::{ChatConfig, CreateChatForWorkItemParams, ManagerReviewState, ManagerReviewStep, SandboxLevel, WorkItemPrompt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed = requests.clone();
+        let edge = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let observed = observed.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+                    observed.lock().unwrap().push(line.clone());
+                    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"iat":1000,"exp":4600,"org_id":"cloud-org"}"#);
+                    let token = format!("e30.{claims}.sig");
+                    let body = if line.contains("/auth/exchange") {
+                        serde_json::json!({"user":{"id":"cloud-user","email":"cloud@example.com"},"accessToken":token,"refreshToken":"refresh-1"}).to_string()
+                    } else {
+                        serde_json::json!({"accessToken":token,"refreshToken":"refresh-2"}).to_string()
+                    };
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let profile = mast_engine::EngineProfile::local(dir.path()).unwrap();
+        let core = EngineCore::assemble_with_profile(profile, std::sync::Arc::new(default_registry()), HarnessId::Mock, None).unwrap();
+        let step = ManagerReviewStep {
+            step_id: "step".into(), project_id: "project".into(), work_item_id: "item".into(), worker_chat_id: "worker".into(), worker_create_key: "key".into(), worker_inputs_hash: "abcd".into(),
+            worker_launch: CreateChatForWorkItemParams { work_item_id: "item".into(), initial_prompt: WorkItemPrompt { text: "test".into(), attachments: vec![] }, config: None, execution_override: None, worktree_choice: None, operation_id: "operation".into(), parent_chat_id: Some("manager".into()), target_device_id: None, account_id: None, standing_role: None },
+            original_manager_chat_id: "manager".into(), operation_id: "review".into(), review_prompt: "review".into(),
+            reviewer_config: ChatConfig { harness: HarnessId::Mock, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::ReadOnly, auto_approve: false, approval_rules: false },
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({"step":{"step":step,"state":ManagerReviewState::Pending}})).unwrap();
+        let store = mast_sync::DocsStore::open(dir.path().join("profiles/local")).unwrap();
+        store.save_snapshot("internal:manager-review-steps:v1", &bytes).unwrap();
+        let config = EngineConfig { data_dir: dir.path().to_path_buf(), edge_url: edge_url.clone(), edge_token: None, ipc_port: 0, default_harness: HarnessId::Mock, org_id: None, workos_client_id: Some("client_test".into()) };
+        let auth = Engine::build_auth(&config).await;
+        let url = auth.start_headless_sign_in();
+        let state = url.split_once('?').unwrap().1.split('&').filter_map(|v| v.split_once('=')).find(|(k, _)| *k == "state").unwrap().1;
+        auth.complete_sign_in(&format!("{state}.code")).await.unwrap();
+        core.shutdown().await;
+        drop(core);
+        requests.lock().unwrap().clear(); // boundary after auth, before restart
+        let handle = EngineHandle::bootstrap(EngineBootConfig { data_dir: dir.path().to_path_buf(), ipc_port: free_port().await, edge_url, edge_token: None, org_id: None, workos_client_id: Some("client_test".into()), default_harness: HarnessId::Mock }).await.unwrap();
+        assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Synced);
+        assert!(dir.path().join("orgs/cloud-org/cloud-user").is_dir());
+        assert_eq!(store.load_snapshot("internal:manager-review-steps:v1").unwrap(), Some(bytes));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        eprintln!("desktop post-restart endpoint requests: {:?}", requests.lock().unwrap());
+        handle.shutdown().await;
+        edge.abort();
+    }
+
     struct LegacyIdentityRpc;
 
     #[async_trait]

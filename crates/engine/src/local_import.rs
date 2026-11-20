@@ -303,6 +303,9 @@ impl LocalImporter {
             return Ok(());
         };
 
+        // Do this before emitting progress or writing any target rows: the
+        // reserved owner-local review state is not part of this import.
+        crate::manager_review::ensure_import_safe(&source_store)?;
         let mut errors: Vec<String> = Vec::new();
 
         // Spaces first: chats reference `space_id`, and viewers resolve the

@@ -220,6 +220,8 @@ struct WorkspaceHostInner {
     /// durable snapshot; claimed together with the next snapshot save.
     /// Lock order: `reg` before this.
     pending_ledger_marks: Mutex<Vec<String>>,
+    /// Serializes child input claims across all RPC surfaces of this engine.
+    child_claim_gate: Mutex<()>,
     /// No registry server will ever ack this replica's writes (no edge is
     /// configured and no test room is attached): the local table is the
     /// whole truth, so local writes settle into it instead of queueing
@@ -241,6 +243,7 @@ pub struct WorkspaceHost {
 
 enum ChatOrigin {
     Parent(String),
+    Review { parent: String, marker: serde_json::Value },
     Scheduled(mast_proto::ScheduledChat),
     ArchivedExternal(mast_proto::ScheduledChat),
     /// A standing role's first-start chat: born hidden under this provisional
@@ -410,6 +413,7 @@ impl WorkspaceHost {
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
                 pending_ledger_marks: Mutex::new(Vec::new()),
+                child_claim_gate: Mutex::new(()),
                 local_authority: std::sync::atomic::AtomicBool::new(local_authority),
             }),
         };
@@ -777,6 +781,26 @@ impl WorkspaceHost {
 
     pub fn read_chats(&self) -> Result<Vec<Chat>, EngineError> {
         Ok(self.read(|doc| doc.read_chats())?)
+    }
+
+    /// Verify and persist a narrowly scoped late review-parent repair while
+    /// holding the registry lock. A failed flush is retried on the next call;
+    /// callers must not dispatch on an error.
+    pub(crate) fn repair_marked_review_parent(
+        &self, chat_id: &str, marker: &mast_proto::ManagerReviewLaunchMarker, current_manager: &str,
+    ) -> Result<bool, EngineError> {
+        let changed = {
+            let mut doc = lock(&self.inner.reg);
+            let changed = doc.repair_marked_review_parent(chat_id, marker, current_manager)
+                .map_err(EngineError::Other)?;
+            self.inner.persist_snapshot_locked(&mut doc)?;
+            changed
+        };
+        // A previous attempt may have changed memory but failed the flush;
+        // a successful no-op retry still needs to publish that repair.
+        self.inner.bump_changed();
+        if let Some(room) = lock(&self.inner.room).as_ref() { room.nudge(); }
+        Ok(changed)
     }
 
     pub fn hand_off_chat_children(&self, from: &str, to: &str, actor: &str, at_ms: i64) -> Result<(Vec<String>, bool), String> {
@@ -1332,11 +1356,19 @@ impl WorkspaceHost {
         self.read(|doc| doc.authorize_agent_mutation(chat_id, mutation))
     }
 
+    pub(crate) fn child_claim_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        lock(&self.inner.child_claim_gate)
+    }
+
     /// Whether the durable processed-command ledger holds `key` (a reserved
     /// `work-outline:` key; see `crate::work_outline`). Read errors count as
     /// "not processed": the doc-layer mutators are replay-safe on their own.
     pub fn ledger_holds(&self, key: &str) -> bool {
         self.inner.store.is_processed(key).unwrap_or(false)
+    }
+
+    pub(crate) fn ledger_holds_checked(&self, key: &str) -> Result<bool, EngineError> {
+        Ok(self.inner.store.is_processed(key)?)
     }
 
     /// Claim `key` in the durable processed-command ledger now (its own
@@ -2143,6 +2175,32 @@ impl WorkspaceHost {
         )
     }
 
+    /// Create an operation-marked review child in one registry mutation.
+    pub(crate) fn create_marked_review_chat(
+        &self, chat_id: &str, space_id: &str, config: Option<ChatConfig>,
+        cwd: String, parent: String, marker: serde_json::Value,
+    ) -> Result<(), EngineError> {
+        if let Some(existing) = self.chat(chat_id)? {
+            let recorded = self.registry_row(mast_doc::KIND_CHATS, chat_id)
+                .and_then(|row| row.fields.get("managerReviewLaunch").cloned());
+            if recorded.as_ref() != Some(&marker)
+                || existing.space_id.as_deref() != Some(space_id)
+                || existing.cwd.as_deref() != Some(cwd.as_str())
+                || existing.parent_chat_id.as_deref() != Some(parent.as_str())
+                || existing.config != config
+                || existing.archived
+            {
+                return Err(EngineError::Other("Existing review chat conflicts with the recorded launch".into()));
+            }
+        } else {
+            self.create_chat_with_origin(chat_id, Some(space_id), None, config, Some(cwd),
+                Some(ChatOrigin::Review { parent, marker }))?;
+        }
+        // Replays flush too: an earlier write may have failed after the
+        // in-memory marker was created. Never acknowledge until it persists.
+        self.persist_registry_now()
+    }
+
     /// Publish scheduled provenance with the chat so a background run is
     /// hidden even before its work-item assignment arrives.
     pub(crate) fn create_scheduled_chat(
@@ -2191,6 +2249,9 @@ impl WorkspaceHost {
         origin: Option<ChatOrigin>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
+            if matches!(&origin, Some(ChatOrigin::Review { .. })) {
+                return Err(EngineError::Other("review chat identity already exists".into()));
+            }
             // Older launchers could stop after creating the chat but before
             // recording its provenance. Complete that step on recovery.
             if let Some(ChatOrigin::Scheduled(task)) = &origin {
@@ -2227,13 +2288,14 @@ impl WorkspaceHost {
             Some(ChatOrigin::Provisional(tag)) => Some(tag.clone()),
             _ => None,
         };
-        let (parent_chat_id, scheduled_task_info) = match origin {
-            Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
-            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
-            _ => (None, None),
+        let (parent_chat_id, scheduled_task_info, review_marker) = match origin {
+            Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None, None),
+            Some(ChatOrigin::Review { parent, marker }) => (Some(parent), None, Some(marker)),
+            Some(ChatOrigin::Scheduled(task) | ChatOrigin::ArchivedExternal(task)) => (None, Some(task), None),
+            _ => (None, None, None),
         };
         self.mutate(|doc| {
-            doc.upsert_chat(&Chat {
+            let chat = Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
@@ -2273,7 +2335,11 @@ impl WorkspaceHost {
                 linked_pr_source: None,
                 linked_ticket_id: None,
                 linked_ticket_source: None,
-            })
+            };
+            match review_marker {
+                Some(marker) => doc.create_marked_review_chat(&chat, marker),
+                None => doc.upsert_chat(&chat),
+            }
         })?;
         Ok(())
     }
@@ -3276,8 +3342,12 @@ impl WorkspaceHostInner {
         // Keep export and disk write serialized: an older background snapshot
         // must not overwrite an acknowledged migration's durable snapshot.
         let mut doc = lock(&self.reg);
+        self.persist_snapshot_locked(&mut doc)
+    }
+
+    fn persist_snapshot_locked(&self, doc: &mut RegistryDoc) -> Result<(), EngineError> {
         // Any write that bypassed `mutate` settles before it is persisted.
-        self.settle_if_local(&mut doc);
+        self.settle_if_local(doc);
         let bytes = doc.to_bytes()?;
         // Taken under the registry lock: exactly the marks whose writes are
         // in `bytes` (see `WorkspaceHost::work_outline_mutate`).
@@ -3790,6 +3860,170 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    #[tokio::test]
+    async fn marked_review_creation_retries_failed_registry_flush() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(store.clone(), WorkspaceHostConfig {
+            device_id: "device".into(), device_name: "Test".into(), platform: "test".into(),
+            org_id: "org".into(), user_id: "user".into(), edge: None,
+        }).unwrap();
+        host.create_space("space", "device", "/tmp/example", None, false).unwrap();
+        host.persist_registry_now().unwrap();
+        let connection = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_registry BEFORE UPDATE ON snapshots WHEN NEW.doc_id = 'registry1' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let marker = serde_json::json!({"operationId": "op", "stepId": "step"});
+        let create = || host.create_marked_review_chat("review", "space", None, "/tmp/example".into(), "manager".into(), marker.clone());
+        assert!(create().is_err(), "failed flush must not be acknowledged");
+        let before = RegistryDoc::from_bytes(&store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap(), "device").unwrap();
+        assert!(before.chat("review").unwrap().is_none());
+        connection.execute_batch("DROP TRIGGER fail_registry;").unwrap();
+        create().unwrap();
+        let persisted = RegistryDoc::from_bytes(&store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap(), "device").unwrap();
+        assert_eq!(persisted.row(mast_doc::KIND_CHATS, "review").unwrap().fields["managerReviewLaunch"], marker);
+        create().unwrap();
+        assert!(host.create_marked_review_chat("review", "space", None, "/tmp/example".into(), "other".into(), marker).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_parent_repair_flush_failure_and_user_edit_fail_closed() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(store.clone(), WorkspaceHostConfig {
+            device_id: "device".into(), device_name: "Test".into(), platform: "test".into(),
+            org_id: "org".into(), user_id: "user".into(), edge: None,
+        }).unwrap();
+        host.create_space("space", "device", "/tmp/example", None, false).unwrap();
+        let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::User,
+            device_id: "device".into(), chat_id: None, message_id: None };
+        let item = host.work_outline_mutate(&mast_proto::WorkOutlineMutation::CreateWorkItem(
+            mast_proto::CreateWorkItemParams { space_id: "space".into(), parent_work_item_id: None,
+                placement: mast_proto::WorkOutlinePlacement::Last, title: "Project".into(),
+                description: None, status: None, operation_id: "review-item".into() }), &actor, &[])
+            .unwrap().work_item_id.unwrap();
+        for id in ["source", "destination"] {
+            host.create_chat(id, Some("space"), None, None, Some("/tmp/example".into())).unwrap();
+        }
+        host.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+        host.hand_off_chat_children("source", "destination", "source", 1).unwrap();
+        host.rotate_standing_role_for_chat("source", "destination").unwrap();
+        let marker = mast_proto::ManagerReviewLaunchMarker { project_id: item, step_id: "step".into(),
+            operation_id: "review-op".into(), inputs_hash: "hash".into(), original_manager_chat_id: "source".into(),
+            space_id: "space".into(), cwd: "/tmp/example".into(), config: None };
+        let id = mast_proto::derive_id(&marker.operation_id, mast_proto::roles::CHAT);
+        let marker_value = serde_json::to_value(&marker).unwrap();
+        host.create_marked_review_chat(&id, "space", None, "/tmp/example".into(), "source".into(), marker_value).unwrap();
+        let connection = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_repair BEFORE UPDATE ON snapshots WHEN NEW.doc_id = 'registry1' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let mut failed_changes = host.watch_changes();
+        failed_changes.borrow_and_update();
+        assert!(host.repair_marked_review_parent(&id, &marker, "destination").is_err());
+        assert!(!failed_changes.has_changed().unwrap(), "failed flush must not publish success");
+        let saved_before = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        let before = RegistryDoc::from_bytes(&saved_before, "device").unwrap();
+        assert_eq!(before.chat(&id).unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+        // Reopen a fresh host from only the durable pre-failure snapshot, as
+        // after a process died before the failed write reached storage.
+        let restart_dir = tempfile::tempdir().unwrap();
+        let restart_store = Arc::new(DocsStore::open(restart_dir.path()).unwrap());
+        restart_store.save_snapshot(REGISTRY_DOC_ID, &saved_before).unwrap();
+        let restarted = WorkspaceHost::open(restart_store.clone(), WorkspaceHostConfig {
+            device_id: "device".into(), device_name: "Test".into(), platform: "test".into(),
+            org_id: "org".into(), user_id: "user".into(), edge: None,
+        }).unwrap();
+        assert!(restarted.repair_marked_review_parent(&id, &marker, "destination").unwrap());
+        let restart_saved = RegistryDoc::from_bytes(&restart_store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap(), "device").unwrap();
+        assert_eq!(restart_saved.chat(&id).unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
+        connection.execute_batch("DROP TRIGGER fail_repair;").unwrap();
+        // The in-memory repair is not itself proof of durability: retry flushes
+        // and publishes it even though the in-memory comparison is a no-op.
+        let mut changes = host.watch_changes();
+        changes.borrow_and_update();
+        assert!(!host.repair_marked_review_parent(&id, &marker, "destination").unwrap());
+        assert!(changes.has_changed().unwrap());
+        let after = RegistryDoc::from_bytes(&store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap(), "device").unwrap();
+        assert_eq!(after.chat(&id).unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
+        // An independent parent write, even to the same value, invalidates repair proof.
+        host.mutate(|doc| { let chat = doc.chat(&id).unwrap().unwrap(); doc.upsert_chat(&chat).unwrap(); });
+        assert!(host.repair_marked_review_parent(&id, &marker, "destination").is_err());
+
+        let mut other_marker = marker.clone();
+        other_marker.operation_id = "second-review-op".into();
+        let other_id = mast_proto::derive_id(&other_marker.operation_id, mast_proto::roles::CHAT);
+        host.create_marked_review_chat(&other_id, "space", None, "/tmp/example".into(), "source".into(), serde_json::to_value(&other_marker).unwrap()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let user_host = host.clone();
+            let user_id = other_id.clone();
+            let user_barrier = barrier.clone();
+            scope.spawn(move || {
+                user_barrier.wait();
+                user_host.mutate(|doc| {
+                    let mut chat = doc.chat(&user_id).unwrap().unwrap();
+                    chat.parent_chat_id = Some("user-chosen".into());
+                    doc.upsert_chat(&chat).unwrap();
+                });
+            });
+            let repair_host = host.clone();
+            let repair_id = other_id.clone();
+            let repair_marker = other_marker.clone();
+            let repair_barrier = barrier.clone();
+            scope.spawn(move || {
+                repair_barrier.wait();
+                let _ = repair_host.repair_marked_review_parent(&repair_id, &repair_marker, "destination");
+            });
+        });
+        assert_eq!(host.chat(&other_id).unwrap().unwrap().parent_chat_id.as_deref(), Some("user-chosen"));
+        assert!(host.repair_marked_review_parent(&other_id, &other_marker, "destination").is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_review_parent_flush_recovers_after_engine_restart() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let profile = crate::profile::EngineProfile::local(dir.path()).unwrap();
+        let registry = || {
+            let registry = crate::HarnessRegistry::new();
+            registry.register(Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+            Arc::new(registry)
+        };
+        let core = crate::EngineCore::assemble_with_profile(profile.clone(), registry(), mast_proto::HarnessId::Mock, None).unwrap();
+        let device = core.device_id.clone();
+        core.workspace.create_space("space", &device, "/tmp/example", None, false).unwrap();
+        let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::User,
+            device_id: device.clone(), chat_id: None, message_id: None };
+        let item = core.workspace.work_outline_mutate(&mast_proto::WorkOutlineMutation::CreateWorkItem(
+            mast_proto::CreateWorkItemParams { space_id: "space".into(), parent_work_item_id: None,
+                placement: mast_proto::WorkOutlinePlacement::Last, title: "Project".into(),
+                description: None, status: None, operation_id: "restart-item".into() }), &actor, &[])
+            .unwrap().work_item_id.unwrap();
+        for id in ["source", "destination"] {
+            core.workspace.create_chat(id, Some("space"), None, None, Some("/tmp/example".into())).unwrap();
+        }
+        core.workspace.adopt_standing_role(mast_proto::StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+        core.workspace.hand_off_chat_children("source", "destination", "source", 1).unwrap();
+        core.workspace.rotate_standing_role_for_chat("source", "destination").unwrap();
+        let marker = mast_proto::ManagerReviewLaunchMarker { project_id: item, step_id: "step".into(),
+            operation_id: "restart-review".into(), inputs_hash: "hash".into(), original_manager_chat_id: "source".into(),
+            space_id: "space".into(), cwd: "/tmp/example".into(), config: None };
+        let id = mast_proto::derive_id(&marker.operation_id, mast_proto::roles::CHAT);
+        core.workspace.create_marked_review_chat(&id, "space", None, "/tmp/example".into(), "source".into(), serde_json::to_value(&marker).unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(profile.store_root().join("docs.sqlite3")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_restart_repair BEFORE UPDATE ON snapshots WHEN NEW.doc_id = 'registry1' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        assert!(core.workspace.repair_marked_review_parent(&id, &marker, "destination").is_err());
+        core.shutdown().await;
+        drop(core);
+        connection.execute_batch("DROP TRIGGER fail_restart_repair;").unwrap();
+        drop(connection);
+        let restarted = crate::EngineCore::assemble_with_profile(profile, registry(), mast_proto::HarnessId::Mock, None).unwrap();
+        assert_eq!(restarted.workspace.chat(&id).unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+        assert!(restarted.workspace.repair_marked_review_parent(&id, &marker, "destination").unwrap());
+        assert_eq!(restarted.workspace.chat(&id).unwrap().unwrap().parent_chat_id.as_deref(), Some("destination"));
+        restarted.shutdown().await;
+    }
 
     #[tokio::test]
     async fn workflow_pack_batch_applies_instruction_after_preview() {

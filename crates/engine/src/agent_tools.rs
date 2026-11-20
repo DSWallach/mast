@@ -682,7 +682,7 @@ fn manager_worker_config(
 /// access, never asks) needs an Auto parent; it forces full access in the
 /// Codex harness (read-only is never widened), so an Auto child counts as
 /// full access in the sandbox cap.
-fn check_child_config(
+pub(crate) fn check_child_config(
     parent: Option<&mast_proto::ChatConfig>,
     child: &mast_proto::ChatConfig,
 ) -> Result<(), AgentToolError> {
@@ -867,7 +867,7 @@ struct ClaimChildArgs {
 
 /// Ledger keys binding a `create_chat` operation to its inputs (the same
 /// scheme as Work Outline mutations, under their own prefix).
-fn child_chat_ledger_keys(operation_id: &str, inputs_hash: &str) -> (String, String) {
+pub(crate) fn child_chat_ledger_keys(operation_id: &str, inputs_hash: &str) -> (String, String) {
     (
         format!("agent-child-chat:op:{operation_id}"),
         format!("agent-child-chat:in:{inputs_hash}:{operation_id}"),
@@ -882,8 +882,6 @@ pub struct AgentToolsService {
     doc_host: Option<DocHost>,
     /// Live Chat status for `work_outline_read_subtree` (engine assembly).
     sessions: Mutex<Option<SessionsEngine>>,
-    /// Serializes `create_chat` input claims (check-then-mark).
-    child_claims: Mutex<()>,
     /// Linear integration: `read_current` adds the linked ticket in Spaces
     /// with Linear on (the key itself never reaches the agent).
     linear: Mutex<Option<crate::linear::LinearService>>,
@@ -913,7 +911,6 @@ impl AgentToolsService {
             work_outline,
             doc_host,
             sessions: Mutex::new(None),
-            child_claims: Mutex::new(()),
             linear: Mutex::new(None),
             artifacts: Mutex::new(None),
             scheduled_task_names: Mutex::new(None),
@@ -2584,9 +2581,9 @@ impl AgentToolsService {
         }
         let (operation_key, inputs_key) = child_chat_ledger_keys(&operation_id, hash);
         let ledger = |e: crate::EngineError| AgentToolError::invalid(e.to_string());
-        let _serial = lock(&self.child_claims);
-        if self.workspace.ledger_holds(&operation_key) {
-            if self.workspace.ledger_holds(&inputs_key) {
+        let _serial = self.workspace.child_claim_guard();
+        if self.workspace.ledger_holds_checked(&operation_key).map_err(ledger)? {
+            if self.workspace.ledger_holds_checked(&inputs_key).map_err(ledger)? {
                 return Ok(json!({ "replayed": true }));
             }
             return Err(WorkOutlineError::new(

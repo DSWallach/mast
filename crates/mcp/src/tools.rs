@@ -159,6 +159,7 @@ fn catalog() -> Vec<ToolDef> {
                 "properties": {
                     "idempotency_key": { "type": "string", "description": "Stable key for this request (required inside a Mast chat). The same key returns the same chat; a new chat needs a new key." },
                     "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
+                    "review": { "type": "object", "properties": { "reviewerHarness": { "type": "string" } }, "required": ["reviewerHarness"], "description": "Declare a planned automatic review. Currently unavailable until a durable receiver is qualified." },
                     "project": { "type": "string", "description": "Space id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
@@ -793,6 +794,7 @@ struct ListChatsArgs {
 
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
+    review: Option<Value>,
     #[serde(alias = "idempotencyKey")]
     idempotency_key: Option<String>,
     #[serde(alias = "workItemId")]
@@ -1303,6 +1305,13 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: CreateChatArgs,
     ) -> anyhow::Result<Value> {
+        if let Some(review) = &args.review {
+            if origin.is_none() {
+                anyhow::bail!("Review declarations require an authenticated agent");
+            }
+            self.zeron.agent_tool(agent_tool_names::REVIEW_INTENT, review.clone()).await?;
+            anyhow::bail!("Automatic review declaration is not available");
+        }
         // Agent mode: the ids derive from (token Chat, key), so a retry
         // finds the Chat it already created instead of minting another.
         let agent_key = match origin {

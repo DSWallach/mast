@@ -521,3 +521,57 @@ async fn later_local_work_imports_as_a_delta() {
     assert_eq!(skipped_chats, 2);
     synced.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_import_rejects_unreadable_review_state_before_target_writes() {
+    if run_in_isolated_home() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    seed_local(dir.path()).await;
+    let source = mast_sync::DocsStore::open(dir.path().join("profiles").join("local")).unwrap();
+    source.save_snapshot("internal:manager-review-steps:v1", b"{invalid").unwrap();
+    drop(source);
+    let core = assemble(EngineProfile::synced(dir.path(), "org-review", "user-review"));
+    let importer = core.local_import.clone().unwrap();
+    let mut events = Vec::new();
+    let error = importer.run(|event| events.push(event)).unwrap_err();
+    assert!(error.to_string().contains("Manager review state cannot be read"), "{error}");
+    assert!(events.is_empty(), "no progress should precede the guard");
+    assert!(core.workspace.space("space-1").unwrap().is_none());
+    assert!(core.workspace.chat("chat-doc").unwrap().is_none());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_import_rejects_blocked_review_before_target_writes() {
+    if run_in_isolated_home() { return; }
+    use mast_proto::{ChatConfig, CreateChatForWorkItemParams, ManagerReviewState, ManagerReviewStep, SandboxLevel, WorkItemPrompt};
+    let dir = tempfile::tempdir().unwrap();
+    seed_local(dir.path()).await;
+    let step = ManagerReviewStep {
+        step_id: "step".into(), project_id: "project".into(), work_item_id: "item".into(),
+        worker_chat_id: "worker".into(), worker_create_key: "key".into(), worker_inputs_hash: "abcd".into(),
+        worker_launch: CreateChatForWorkItemParams {
+            work_item_id: "item".into(), initial_prompt: WorkItemPrompt { text: "test".into(), attachments: vec![] },
+            config: None, execution_override: None, worktree_choice: None, operation_id: "operation".into(),
+            parent_chat_id: Some("manager".into()), target_device_id: None, account_id: None, standing_role: None,
+        },
+        original_manager_chat_id: "manager".into(), operation_id: "review".into(), review_prompt: "review".into(),
+        reviewer_config: ChatConfig { harness: HarnessId::Mock, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::ReadOnly, auto_approve: false, approval_rules: false },
+    };
+    let state = ManagerReviewState::Blocked { completion: None, review_launch: None, reason: "worker unavailable".into(), owner: "manager".into() };
+    let bytes = serde_json::to_vec(&serde_json::json!({"step": {"step": step, "state": state}})).unwrap();
+    let source = mast_sync::DocsStore::open(dir.path().join("profiles").join("local")).unwrap();
+    source.save_snapshot("internal:manager-review-steps:v1", &bytes).unwrap();
+    drop(source);
+    let core = assemble(EngineProfile::synced(dir.path(), "org-review", "user-review"));
+    let mut events = Vec::new();
+    let error = core.local_import.as_ref().unwrap().run(|event| events.push(event)).unwrap_err();
+    assert!(error.to_string().contains("cannot be imported safely"), "{error}");
+    assert!(events.is_empty());
+    assert!(core.workspace.space("space-1").unwrap().is_none());
+    assert!(core.workspace.chat("chat-doc").unwrap().is_none());
+    let source = mast_sync::DocsStore::open(dir.path().join("profiles").join("local")).unwrap();
+    assert_eq!(source.load_snapshot("internal:manager-review-steps:v1").unwrap(), Some(bytes));
+    assert!(source.load_snapshot("chat-doc").unwrap().is_some());
+    core.shutdown().await;
+}

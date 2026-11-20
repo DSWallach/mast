@@ -605,3 +605,57 @@ async fn signing_in_does_not_activate_sync_for_the_running_local_profile() {
 
     runtime.shutdown().await;
 }
+
+/// Documents the current crash-before-switch behavior. The future activation
+/// guard must replace the synced assertions with recoverable local startup.
+#[tokio::test]
+async fn restart_after_sign_in_selects_synced_despite_pending_review() {
+    use mast_proto::{ChatConfig, CreateChatForWorkItemParams, ManagerReviewState, ManagerReviewStep, SandboxLevel, WorkItemPrompt};
+    let edge = RecordingEdge::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), edge.url.clone(), Some("client_test"), None);
+    let auth = Engine::build_auth(&config).await;
+    let local = Engine::resolve_profile(&config, &auth, WorkspaceScope::Local).unwrap().unwrap();
+    let runtime = Engine::assemble_runtime(&config, auth.clone(), local).await.unwrap();
+    let step = ManagerReviewStep {
+        step_id: "step".into(), project_id: "project".into(), work_item_id: "item".into(),
+        worker_chat_id: "worker".into(), worker_create_key: "key".into(), worker_inputs_hash: "abcd".into(),
+        worker_launch: CreateChatForWorkItemParams { work_item_id: "item".into(), initial_prompt: WorkItemPrompt { text: "test".into(), attachments: vec![] }, config: None, execution_override: None, worktree_choice: None, operation_id: "operation".into(), parent_chat_id: Some("manager".into()), target_device_id: None, account_id: None, standing_role: None },
+        original_manager_chat_id: "manager".into(), operation_id: "review".into(), review_prompt: "review".into(),
+        reviewer_config: ChatConfig { harness: HarnessId::Mock, model: None, reasoning: None, model_options: Default::default(), sandbox: SandboxLevel::ReadOnly, auto_approve: false, approval_rules: false },
+    };
+    let bytes = serde_json::to_vec(&serde_json::json!({"step": {"step": step, "state": ManagerReviewState::Pending}})).unwrap();
+    let store = mast_sync::DocsStore::open(dir.path().join("profiles/local")).unwrap();
+    store.save_snapshot("internal:manager-review-steps:v1", &bytes).unwrap();
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").unwrap();
+    auth.complete_sign_in(&format!("{state}.authorization-code")).await.unwrap();
+    runtime.shutdown().await;
+    drop(runtime);
+    let restarted = Engine::build_auth(&config).await;
+    assert_eq!(Engine::initial_workspace_scope(&restarted), WorkspaceScope::Synced);
+    assert_eq!(store.load_snapshot("internal:manager-review-steps:v1").unwrap(), Some(bytes.clone()));
+
+    // Start the actual daemon using the persisted session, before any switch
+    // reservation could have been made by the former local runtime.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut daemon_config = config.clone();
+    daemon_config.ipc_port = port;
+    let daemon = tokio::spawn(Engine::new(daemon_config).run());
+    let client = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(client) = mast_rpc::connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+                break client;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("daemon started");
+    let info: mast_proto::EngineInfo = client.call_as(mast_rpc::methods::ENGINE_INFO, serde_json::json!({})).await.unwrap();
+    assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
+    assert!(dir.path().join("orgs/cloud-org/cloud-user").is_dir());
+    assert_eq!(store.load_snapshot("internal:manager-review-steps:v1").unwrap(), Some(bytes));
+    client.call(mast_rpc::methods::STOP_ENGINE, serde_json::json!({})).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), daemon).await.unwrap().unwrap().unwrap();
+}

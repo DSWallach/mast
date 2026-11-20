@@ -266,6 +266,25 @@ fn ledger_launch_inputs_key(inputs_hash: &str, operation_id: &str) -> String {
     )
 }
 
+/// Verify that an item launch durably claimed these exact inputs.
+pub(crate) fn has_worker_launch_claim(
+    workspace: &WorkspaceHost,
+    p: &CreateChatForWorkItemParams,
+) -> Result<bool, EngineError> {
+    let hash = mast_doc::registry::work_outline::inputs_hash(&LaunchInputs {
+        work_item_id: &p.work_item_id,
+        initial_prompt: &p.initial_prompt,
+        config: &p.config,
+        execution_override: &p.execution_override,
+        worktree_choice: &p.worktree_choice,
+        parent_chat_id: &p.parent_chat_id,
+        standing_role: &p.standing_role,
+        hand_off_archive: None,
+    });
+    Ok(workspace.ledger_holds_checked(&ledger_launch_key(&p.operation_id))?
+        && workspace.ledger_holds_checked(&ledger_launch_inputs_key(&hash, &p.operation_id))?)
+}
+
 /// Ledger key: this operation is about to create the worktree at `path`
 /// (claimed BEFORE `git worktree add`, so a retry can tell its own worktree
 /// from someone else's).
@@ -410,6 +429,7 @@ pub struct WorkItemLaunchService {
     /// Serializes launches so two concurrent calls with one operation id
     /// cannot interleave their steps.
     gate: Arc<tokio::sync::Mutex<()>>,
+    manager_reviews: Option<Arc<crate::manager_review::ManagerReviews>>,
     /// Test hook: fail right after this step.
     fault: Arc<Mutex<Option<LaunchStep>>>,
 }
@@ -427,8 +447,27 @@ impl WorkItemLaunchService {
             sessions,
             execution_scope,
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            manager_reviews: None,
             fault: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn with_manager_reviews(mut self, reviews: Option<Arc<crate::manager_review::ManagerReviews>>) -> Self {
+        self.manager_reviews = reviews;
+        self
+    }
+
+    /// Serialize Manager review decisions with launches and handoffs.
+    pub(crate) async fn manager_review_gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
+
+    /// Finish a recorded worker launch while the caller holds the gate.
+    pub(crate) async fn launch_manager_worker_locked(
+        &self,
+        p: &CreateChatForWorkItemParams,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        self.launch_chat_for_work_item_locked(p, None).await
     }
 
     /// Crash injection (tests): the next workflow fails right after `step`
@@ -475,8 +514,8 @@ impl WorkItemLaunchService {
     fn claim_inputs(&self, operation_id: &str, inputs_hash: &str) -> Result<(), WorkOutlineError> {
         let op_key = ledger_launch_key(operation_id);
         let inputs_key = ledger_launch_inputs_key(inputs_hash, operation_id);
-        if self.workspace.ledger_holds(&op_key) {
-            return if self.workspace.ledger_holds(&inputs_key) {
+        if self.workspace.ledger_holds_checked(&op_key).map_err(engine_error)? {
+            return if self.workspace.ledger_holds_checked(&inputs_key).map_err(engine_error)? {
                 Ok(())
             } else {
                 Err(conflict(
@@ -580,6 +619,21 @@ impl WorkItemLaunchService {
             &str,
         )>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
+        let _gate = self.gate.lock().await;
+        self.launch_chat_for_work_item_locked(p, hand_off).await
+    }
+
+    /// Caller holds the engine-wide launch/handoff gate.
+    async fn launch_chat_for_work_item_locked(
+        &self,
+        p: &CreateChatForWorkItemParams,
+        hand_off: Option<(
+            &crate::orchestrator_wakes::OrchestratorWakes,
+            &str,
+            HandOffOrigin<'_>,
+            &str,
+        )>,
+    ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
                 WorkOutlineErrorCode::WritesDisabled,
@@ -588,7 +642,16 @@ impl WorkItemLaunchService {
         }
         check_operation_id(&p.operation_id)?;
         check_prompt(&p.initial_prompt)?;
-        let _gate = self.gate.lock().await;
+        // A predeclared test worker may only start with the engine-derived
+        // request captured for that exact operation. A direct internal tool
+        // call cannot pair a claimed hash with a different actual launch.
+        if let Some(reviews) = &self.manager_reviews
+            && let Some(record) = reviews.records().into_iter()
+                .find(|record| record.step.worker_launch.operation_id == p.operation_id)
+            && record.step.worker_launch != *p
+        {
+            return Err(conflict("Worker launch differs from its predeclared review step"));
+        }
         let op = p.operation_id.as_str();
         let chat_id = derive_id(op, roles::CHAT);
         let message_id = derive_id(op, roles::MESSAGE);

@@ -1371,6 +1371,19 @@ impl RegistryDoc {
     // ── chats ───────────────────────────────────────────────────────────────
 
     pub fn upsert_chat(&mut self, chat: &Chat) -> Result<(), DocError> {
+        self.upsert_chat_inner(chat, None)
+    }
+
+    /// Create a review child and its operation marker in one registry write.
+    /// A pre-existing row, including a tombstone, is never silently adopted.
+    pub fn create_marked_review_chat(&mut self, chat: &Chat, marker: Value) -> Result<(), DocError> {
+        if !matches!(self.row_state(KIND_CHATS, &chat.id), RowState::Absent) {
+            return Err(DocError::Schema("review chat identity already exists".into()));
+        }
+        self.upsert_chat_inner(chat, Some(marker))
+    }
+
+    fn upsert_chat_inner(&mut self, chat: &Chat, review_marker: Option<Value>) -> Result<(), DocError> {
         let config = match &chat.config {
             Some(config) => serde_json::to_value(config)?,
             None => Value::Null,
@@ -1430,6 +1443,9 @@ impl RegistryDoc {
         // clear a rotation recorded since the read.
         if let Some(successor) = &chat.standing_role_successor {
             set.insert("standingRoleSuccessor".into(), json!(successor));
+        }
+        if let Some(marker) = review_marker {
+            set.insert("managerReviewLaunch".into(), marker);
         }
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1497,6 +1513,105 @@ impl RegistryDoc {
         Ok(chats)
     }
 
+    /// Verify a marked review child and, only if its original parent was
+    /// never edited, repair a late-created child to the current Manager.
+    /// This comparison and update run under the caller's registry lock.
+    pub fn repair_marked_review_parent(
+        &mut self,
+        chat_id: &str,
+        marker: &mast_proto::ManagerReviewLaunchMarker,
+        current_manager: &str,
+    ) -> Result<bool, String> {
+        if chat_id != mast_proto::derive_id(&marker.operation_id, mast_proto::roles::CHAT) {
+            return Err("review child identity does not match its operation".into());
+        }
+        if self.work_item_space(&marker.project_id).as_deref() != Some(marker.space_id.as_str()) {
+            return Err("review project and Space do not match".into());
+        }
+        let role = self.standing_role(mast_proto::StandingRoleKind::Manager, &marker.project_id)
+            .ok_or("Manager role is unavailable")?;
+        if role.state != mast_proto::StandingRoleState::Idle
+            || role.current_chat_id.as_deref() != Some(current_manager)
+        {
+            return Err("Manager authority changed or handoff is in progress".into());
+        }
+        let first = role.chain.iter().position(|id| id == &marker.original_manager_chat_id)
+            .ok_or("original Manager is not in the role chain")?;
+        let last = role.chain.iter().position(|id| id == current_manager)
+            .filter(|last| *last >= first).ok_or("invalid Manager role chain")?;
+        for pair in role.chain[first..=last].windows(2) {
+            let provenance = self.overlay_row(KIND_CHATS, &pair[1])
+                .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+                .ok_or("Manager handoff provenance is unavailable")?;
+            if provenance.get("fromChatId").and_then(Value::as_str) != Some(pair[0].as_str())
+                || provenance.get("actorChatId").and_then(Value::as_str) != Some(pair[0].as_str())
+            {
+                return Err("Manager handoff chain conflicts".into());
+            }
+        }
+        let row = self.overlay_row(KIND_CHATS, chat_id).ok_or("review chat is unavailable")?;
+        let expected = serde_json::to_value(marker).map_err(|error| error.to_string())?;
+        if row.fields.get("managerReviewLaunch") != Some(&expected) {
+            return Err("review chat marker is missing or conflicts".into());
+        }
+        let chat = self.chat(chat_id).map_err(|error| error.to_string())?
+            .filter(|chat| !chat.archived).ok_or("review chat is unavailable or archived")?;
+        let manager = self.chat(current_manager).map_err(|error| error.to_string())?
+            .filter(|manager| !manager.archived).ok_or("current Manager is unavailable")?;
+        if manager.space_id.as_deref() != Some(marker.space_id.as_str())
+            || manager.device_id != chat.device_id
+            || chat.space_id.as_deref() != Some(marker.space_id.as_str())
+            || chat.cwd.as_deref() != Some(marker.cwd.as_str())
+            || chat.config != marker.config
+        {
+            return Err("review chat immutable fields conflict with its launch".into());
+        }
+        let parent = chat.parent_chat_id.as_deref().ok_or("review chat has no parent")?;
+        let parent_clock = row.clocks.get("parentChatId").ok_or("review parent clock is missing")?;
+        let marker_clock = row.clocks.get("managerReviewLaunch").ok_or("review marker clock is missing")?;
+        if parent == current_manager {
+            if current_manager == marker.original_manager_chat_id && parent_clock == marker_clock {
+                return Ok(false);
+            }
+            for field in ["managerReviewParentRepair", "managerReviewHandoff"] {
+                let expected_from = if field == "managerReviewParentRepair" {
+                    Some(marker.original_manager_chat_id.as_str())
+                } else {
+                    last.checked_sub(1).map(|index| role.chain[index].as_str())
+                };
+                let was_transferred = field != "managerReviewHandoff" || self
+                    .overlay_row(KIND_CHATS, current_manager)
+                    .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+                    .and_then(|provenance| provenance.get("workerChatIds").cloned())
+                    .and_then(|ids| ids.as_array().cloned())
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(chat_id)));
+                if let Some(proof) = row.fields.get(field)
+                    && was_transferred
+                    && expected_from.is_some()
+                    && proof.get("fromChatId").and_then(Value::as_str) == expected_from
+                    && proof.get("toChatId").and_then(Value::as_str) == Some(current_manager)
+                    && proof.get("marker") == Some(&expected)
+                    && row.clocks.get(field) == Some(parent_clock)
+                {
+                    return Ok(false);
+                }
+            }
+            return Err("review parent has no matching authorized provenance".into());
+        }
+        if parent != marker.original_manager_chat_id || parent_clock != marker_clock {
+            return Err("review parent was changed; resolve the conflict before retrying".into());
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, fields([
+            ("parentChatId", json!(current_manager)),
+            ("managerReviewParentRepair", json!({
+                "fromChatId": marker.original_manager_chat_id,
+                "toChatId": current_manager,
+                "marker": expected,
+            })),
+        ]));
+        Ok(true)
+    }
+
     /// Reparent active direct children and record the hand-off on the destination.
     pub fn hand_off_chat_children(
         &mut self,
@@ -1551,9 +1666,25 @@ impl RegistryDoc {
         let workers: Vec<String> = chats.into_iter()
             .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
             .map(|chat| chat.id).collect();
+        let manager_role = self.standing_role_of_chat(from)
+            .filter(|role| role.role == mast_proto::StandingRoleKind::Manager
+                && role.current_chat_id.as_deref() == Some(from));
         for worker in &workers {
-            self.write(KIND_CHATS, worker, OpKind::Update,
-                fields([("parentChatId", json!(to))]));
+            let mut set = fields([("parentChatId", json!(to))]);
+            // Review-only provenance rides the same row operation and clock
+            // as the parent edit. Ordinary chats and older readers retain
+            // their existing handoff representation.
+            if let Some(role) = &manager_role
+                && let Some(marker) = self.overlay_row(KIND_CHATS, worker)
+                    .and_then(|row| row.fields.get("managerReviewLaunch").cloned())
+                && marker.get("projectId").and_then(Value::as_str) == Some(role.scope_item_id.as_str())
+                && marker.get("operationId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+            {
+                set.insert("managerReviewHandoff".into(), json!({
+                    "fromChatId": from, "toChatId": to, "marker": marker,
+                }));
+            }
+            self.write(KIND_CHATS, worker, OpKind::Update, set);
         }
         self.write(KIND_CHATS, to, OpKind::Update, fields([("orchestratorHandOff", json!({
             "fromChatId": from, "actorChatId": actor, "at": at_ms, "workerChatIds": workers,

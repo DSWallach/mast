@@ -23,6 +23,25 @@ use serde_json::{Value, json};
 const SPACE: &str = "space-1";
 const PARENT: &str = "chat-parent";
 
+#[tokio::test(flavor = "multi_thread")]
+async fn review_intent_rejects_unsupported_receiver_before_create_chat_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(tmp.path(), Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+    core.workspace.create_space(SPACE, &core.device_id, "/tmp", None, false).unwrap();
+    core.workspace.create_chat(PARENT, Some(SPACE), None, None, None).unwrap();
+    let lease = core.sessions.agent_tokens().mint(PARENT, "run", SPACE, &core.device_id);
+    let tools = Tools::new(Arc::new(Mast::with_client(mast_rpc::memory_client(core.rpc_service()), Some(lease.token().to_owned()))));
+    let err = tools.call("create_chat", json!({"idempotency_key":"review-intent", "prompt":"run tests", "review":{"reviewerHarness":"codex"}})).await.unwrap_err();
+    assert!(err.contains("no current receiver is qualified"), "{err}");
+    assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
+    let operation = mast_proto::agent_tools::operation_id(PARENT, "review-intent");
+    assert!(!core.workspace.ledger_holds(&format!("agent-child-chat:op:{operation}")));
+    let forged = Tools::new(Arc::new(Mast::with_client(mast_rpc::memory_client(core.rpc_service()), Some("forged".into()))));
+    assert!(forged.call("create_chat", json!({"idempotency_key":"bad", "review":{"reviewerHarness":"codex"}})).await.is_err());
+    assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
+    core.shutdown().await;
+}
+
 /// Stands in for Claude Code (so the MCP tools see an available harness)
 /// and completes every Run at once without spawning anything.
 struct FakeClaude;

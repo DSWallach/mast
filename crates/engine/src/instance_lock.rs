@@ -20,6 +20,7 @@ use crate::EngineError;
 #[derive(Debug)]
 pub struct InstanceLock {
     _file: File,
+    root: std::path::PathBuf,
 }
 
 impl InstanceLock {
@@ -101,7 +102,29 @@ impl InstanceLock {
             // considered only after the OS lock probe reports contention.
             let _ = std::fs::write(windows_pid_path(data_dir), std::process::id().to_string());
         }
-        Ok(Self { _file: file })
+        let root = std::fs::canonicalize(data_dir)?;
+        Ok(Self { _file: file, root })
+    }
+
+    /// Verify that this held lock still names the requested authority domain.
+    pub(crate) fn validate_root(&self, data_dir: &Path) -> Result<(), EngineError> {
+        let root = std::fs::canonicalize(data_dir)?;
+        if root != self.root {
+            return Err(EngineError::Other("instance lock belongs to a different device root".into()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = self._file.metadata()?;
+            let current = std::fs::metadata(root.join("engine.lock"))?;
+            if (held.dev(), held.ino()) != (current.dev(), current.ino()) {
+                return Err(EngineError::Other("instance lock file changed since acquisition".into()));
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(EngineError::Other("instance lock file identity cannot be verified on this platform".into()));
+        #[cfg(unix)]
+        Ok(())
     }
 
     /// Best-effort liveness probe: the pid stamped by the engine currently holding
@@ -189,6 +212,23 @@ fn windows_holder_pid(data_dir: &Path) -> String {
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_root_accepts_alias_rejects_wrong_root_and_replaced_lock() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("alias");
+        symlink(dir.path(), &alias).unwrap();
+        let lock = InstanceLock::acquire(dir.path()).unwrap();
+        assert!(lock.validate_root(&alias).is_ok());
+        assert!(lock.validate_root(other.path()).is_err());
+        std::fs::rename(dir.path().join("engine.lock"), dir.path().join("old.lock")).unwrap();
+        std::fs::write(dir.path().join("engine.lock"), b"").unwrap();
+        assert!(lock.validate_root(dir.path()).is_err());
+    }
 
     #[test]
     fn holder_probe_reports_pid_without_disturbing_the_lock() {

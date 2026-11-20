@@ -48,6 +48,7 @@ pub mod local_import;
 pub mod managed_accounts;
 mod model_catalogs;
 pub mod orchestrator_wakes;
+mod manager_review;
 pub mod permission_rules;
 pub mod personal_assistant;
 pub mod pr_chat_links;
@@ -226,6 +227,8 @@ pub struct EngineCore {
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
+    launch: work_outline_launch::WorkItemLaunchService,
+    manager_reviews: Option<Arc<manager_review::ManagerReviews>>,
     workspace_scope: WorkspaceScope,
     /// Host-local workflow pack import receipts.
     workflow_pack_receipts: PathBuf,
@@ -354,6 +357,13 @@ impl EngineCore {
         // as configInvalid and its resume attempt consumed.
         let repos = Repos::new(data_dir, &device_id);
         doc_host.set_repos(repos.clone());
+        // Automatic review dispatch stays disabled until authority and rollout
+        // prerequisites can be verified. Do not open or mutate its store yet.
+        let manager_reviews = None;
+        let launch = work_outline_launch::WorkItemLaunchService::new(
+            workspace.clone(), doc_host.clone(), sessions.clone(),
+            doc_host.execution_scope().expect("repos wired").clone(),
+        ).with_manager_reviews(manager_reviews.clone());
         let orchestrator_wakes = orchestrator_wakes::OrchestratorWakes::new(
             sessions.clone(), doc_host.clone(), workspace.clone(),
             Some(data_dir.join("orchestrator-wakes.json")),
@@ -713,6 +723,8 @@ impl EngineCore {
             context_usage,
             artifacts,
             orchestrator_wakes,
+            launch,
+            manager_reviews,
             workspace_scope: profile.scope(),
             workflow_pack_receipts: data_dir.join("workflow-pack-receipts"),
             auth: std::sync::Mutex::new(None),
@@ -856,7 +868,9 @@ impl EngineCore {
         .with_pr_review_sync(self.pr_review_sync.clone())
         .with_context_usage(self.context_usage.clone())
         .with_artifacts(self.artifacts.clone())
-        .with_orchestrator_wakes(self.orchestrator_wakes.clone());
+        .with_orchestrator_wakes(self.orchestrator_wakes.clone())
+        .with_launch_service(self.launch.clone())
+        .with_manager_reviews(self.manager_reviews.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
         {
             // Everything captured here is a plain reader: the sessions engine

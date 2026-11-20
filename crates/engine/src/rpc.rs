@@ -858,6 +858,7 @@ pub struct EngineRpc {
     /// `CreateChatForWorkItem` / `ContinueChatForWorkItem` and child-Chat
     /// inheritance (Work Outline Milestone 3 stage 2).
     launch: crate::work_outline_launch::WorkItemLaunchService,
+    manager_reviews: Option<std::sync::Arc<crate::manager_review::ManagerReviews>>,
     /// `AgentAuthenticate` / `AgentToolCall` (Work Outline Milestone 4):
     /// token-authenticated agent tools, local to this engine.
     agent_tools: std::sync::Arc<crate::agent_tools::AgentToolsService>,
@@ -1005,6 +1006,7 @@ impl EngineRpc {
             work_outline,
             execution_scope,
             launch,
+            manager_reviews: None,
             agent_tools,
             pr_review,
             linear: crate::linear::LinearService::default(),
@@ -1030,6 +1032,18 @@ impl EngineRpc {
         self
     }
 
+    /// Attach the engine-wide owner-local Manager review records.
+    pub(crate) fn with_manager_reviews(mut self, reviews: Option<std::sync::Arc<crate::manager_review::ManagerReviews>>) -> Self {
+        self.manager_reviews = reviews;
+        self
+    }
+
+    /// Share the engine-wide launch and handoff serialization gate across RPC surfaces.
+    pub(crate) fn with_launch_service(mut self, launch: crate::work_outline_launch::WorkItemLaunchService) -> Self {
+        self.launch = launch;
+        self
+    }
+
     /// Share the engine's orchestrator-wake service (its watchers run in the
     /// engine, not per RPC surface).
     pub fn with_orchestrator_wakes(
@@ -1038,6 +1052,196 @@ impl EngineRpc {
     ) -> Self {
         self.orchestrator_wakes = wakes;
         self
+    }
+
+    /// Predeclare one review using the current Manager's authenticated grant.
+    /// The worker ID comes from the Manager's planned create_chat key.
+    async fn register_manager_review(
+        &self,
+        token: &str,
+        registration: mast_proto::ManagerReviewRegistration,
+    ) -> Result<mast_proto::CreateChatForWorkItemReply, RpcError> {
+        let _gate = self.launch.manager_review_gate().await;
+        let origin = self.agent_tools.authenticate(token)
+            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+        crate::manager_review::require_durable_review_receiver(registration.reviewer_config.harness)
+            .map_err(RpcError::Failed)?;
+        let project = self.agent_tools.manager_scope_now(&origin.chat_id)
+            .ok_or_else(|| RpcError::Failed("Only the current Manager may declare a review".into()))?;
+        let snapshot = self.work_outline.snapshot(&origin.space_id);
+        if !snapshot.is_within(&project, &registration.work_item_id)
+            || snapshot.item(&registration.work_item_id).is_none_or(|item| item.archived_at.is_some())
+        {
+            return Err(RpcError::Failed("Review work item is outside the Manager's project".into()));
+        }
+        let space = self.workspace.space(&origin.space_id).map_err(|error| RpcError::Failed(error.to_string()))?
+            .ok_or_else(|| RpcError::Failed("Review Space is unavailable".into()))?;
+        if space.device_id != self.workspace.device_id() {
+            return Err(RpcError::Failed("Declare the review on the Space owner".into()));
+        }
+        let manager = self.workspace.chat(&origin.chat_id).map_err(|error| RpcError::Failed(error.to_string()))?
+            .ok_or_else(|| RpcError::Failed("Manager chat is unavailable".into()))?;
+        crate::agent_tools::check_child_config(manager.config.as_ref(), &registration.reviewer_config)
+            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+        mast_proto::agent_tools::validate_idempotency_key(Some(&registration.worker_create_key))
+            .map_err(RpcError::Failed)?;
+        let inputs = registration.worker_inputs.as_object()
+            .ok_or_else(|| RpcError::Failed("Worker launch inputs must be an object".into()))?;
+        const FIELDS: [&str; 8] = ["spaceId", "deviceId", "config", "parentChatId", "title", "branch", "cwd", "prompt"];
+        if inputs.len() != FIELDS.len() + 1 || FIELDS.iter().any(|key| !inputs.contains_key(*key))
+            || inputs.get("spaceId").and_then(serde_json::Value::as_str) != Some(origin.space_id.as_str())
+            || inputs.get("deviceId").and_then(serde_json::Value::as_str) != Some(origin.device_id.as_str())
+            || inputs.get("parentChatId").and_then(serde_json::Value::as_str) != Some(origin.chat_id.as_str())
+            || inputs.get("workItemId").and_then(serde_json::Value::as_str) != Some(registration.work_item_id.as_str())
+            || inputs.get("cwd") != Some(&serde_json::Value::Null)
+            || inputs.get("branch") != Some(&serde_json::Value::Null)
+            || inputs.get("prompt").and_then(serde_json::Value::as_str).is_none_or(|text| text.trim().is_empty())
+        {
+            return Err(RpcError::Failed("Worker launch inputs do not match the authorized review step".into()));
+        }
+        let worker_config: mast_proto::ChatConfig = serde_json::from_value(inputs["config"].clone())
+            .map_err(|error| RpcError::Failed(format!("Invalid worker config: {error}")))?;
+        crate::agent_tools::check_child_config(manager.config.as_ref(), &worker_config)
+            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+        let worker_inputs_hash = mast_proto::derive_id(&registration.worker_inputs.to_string(), "mcp-create-chat-inputs");
+        let worker_request = mast_proto::agent_tools::AgentToolCallParams {
+            token: token.to_owned(),
+            tool: mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT.into(),
+            arguments: serde_json::json!({
+                "idempotencyKey": registration.worker_create_key,
+                "workItemId": registration.work_item_id,
+                "prompt": inputs["prompt"],
+                "config": worker_config,
+                "harnessOmitted": registration.harness_omitted,
+                "modelOmitted": registration.model_omitted,
+            }),
+        };
+        let worker_launch = self.agent_tools.prepare_child_launch(&worker_request)
+            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+        let worker_op = mast_proto::agent_tools::operation_id(&origin.chat_id, &registration.worker_create_key);
+        let worker_chat_id = mast_proto::derive_id(&worker_op, mast_proto::roles::CHAT);
+        let operation_id = mast_proto::derive_id(&format!("{}\0{}", project, registration.step_id), "manager-review-operation");
+        let step = mast_proto::ManagerReviewStep {
+            step_id: registration.step_id,
+            project_id: project,
+            work_item_id: registration.work_item_id,
+            worker_chat_id,
+            worker_create_key: registration.worker_create_key,
+            worker_inputs_hash,
+            worker_launch,
+            original_manager_chat_id: origin.chat_id,
+            operation_id,
+            reviewer_config: registration.reviewer_config,
+            review_prompt: registration.review_prompt,
+        };
+        let _claim = self.workspace.child_claim_guard();
+        let reviews = self.manager_reviews.as_ref().ok_or_else(|| RpcError::Failed("Manager review storage is unavailable".into()))?;
+        let previously_declared = reviews.records().iter().any(|record| record.step == step);
+        if !previously_declared && self.workspace.chat(&step.worker_chat_id)
+            .map_err(|error| RpcError::Failed(error.to_string()))?.is_some()
+        {
+            return Err(RpcError::Failed("Worker already exists before the review was declared".into()));
+        }
+        let launch = step.worker_launch.clone();
+        let step_id = step.step_id.clone();
+        if reviews.records().iter().any(|record| record.step.step_id == step_id
+            && matches!(record.state, mast_proto::ManagerReviewState::Blocked { .. }))
+        {
+            return Err(RpcError::Failed("Review step is blocked; resolve it before retrying".into()));
+        }
+        reviews.register(step).map_err(RpcError::Failed)?;
+        drop(_claim);
+        match self.launch.launch_manager_worker_locked(&launch).await {
+            Ok(reply) => Ok(reply),
+            Err(error) => {
+                reviews.block(&step_id, &format!("Worker launch failed: {}", error.message), "Manager")
+                    .map_err(RpcError::Failed)?;
+                Err(RpcError::Failed(error.to_wire_message()))
+            }
+        }
+    }
+
+    /// Authenticate a typed worker completion against its predeclared launch.
+    /// This helper is not exposed until automatic reconciliation is wired.
+    async fn accept_manager_review(
+        &self,
+        token: &str,
+        completion: mast_proto::ManagerReviewCompletion,
+    ) -> Result<(), RpcError> {
+        let _gate = self.launch.manager_review_gate().await;
+        let origin = self.agent_tools.authenticate(token)
+            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+        let reviews = self.manager_reviews.as_ref()
+            .ok_or_else(|| RpcError::Failed("Manager review storage is unavailable".into()))?;
+        let record = reviews.records().into_iter().find(|record| record.step.step_id == completion.step_id)
+            .ok_or_else(|| RpcError::Failed("Unknown Manager review step".into()))?;
+        let step = &record.step;
+        if origin.chat_id != step.worker_chat_id {
+            return Err(RpcError::Failed("Worker is not authorized for this review step".into()));
+        }
+        let worker_op = mast_proto::agent_tools::operation_id(&step.original_manager_chat_id, &step.worker_create_key);
+        let (op_key, inputs_key) = crate::agent_tools::child_chat_ledger_keys(&worker_op, &step.worker_inputs_hash);
+        let op_claimed = self.workspace.ledger_holds_checked(&op_key)
+            .map_err(|error| RpcError::Failed(format!("Cannot verify worker launch claim: {error}")))?;
+        let inputs_claimed = self.workspace.ledger_holds_checked(&inputs_key)
+            .map_err(|error| RpcError::Failed(format!("Cannot verify worker launch inputs: {error}")))?;
+        if !op_claimed || !inputs_claimed {
+            return Err(RpcError::Failed("Worker launch does not match the declared inputs".into()));
+        }
+        if !crate::work_outline_launch::has_worker_launch_claim(&self.workspace, &step.worker_launch)
+            .map_err(|error| RpcError::Failed(error.to_string()))?
+        {
+            return Err(RpcError::Failed("Worker did not launch with the declared inputs".into()));
+        }
+        let binding = self.workspace.checked_chat_execution_binding(&origin.chat_id)
+            .map_err(|error| RpcError::Failed(error.to_string()))?
+            .ok_or_else(|| RpcError::Failed("Worker has no captured launch binding".into()))?;
+        if binding.operation_id.as_deref() != Some(worker_op.as_str()) {
+            return Err(RpcError::Failed("Worker binding is from another launch".into()));
+        }
+        let worker = self.workspace.chat(&origin.chat_id).map_err(|error| RpcError::Failed(error.to_string()))?
+            .filter(|chat| !chat.archived && chat.space_id.as_deref() == Some(origin.space_id.as_str()))
+            .ok_or_else(|| RpcError::Failed("Worker is unavailable or archived".into()))?;
+        if self.workspace.chat_assigned_work_item(&worker.id, &origin.space_id).as_deref() != Some(step.work_item_id.as_str()) {
+            return Err(RpcError::Failed("Worker is no longer assigned to the declared work item".into()));
+        }
+        let role = self.workspace.standing_role(mast_proto::StandingRoleKind::Manager, &step.project_id)
+            .ok_or_else(|| RpcError::Failed("Manager role is unavailable".into()))?;
+        if role.state != mast_proto::StandingRoleState::Idle {
+            return Err(RpcError::Failed("Manager handoff is in progress; retry completion".into()));
+        }
+        let current = role.current_chat_id.as_deref().ok_or_else(|| RpcError::Failed("Manager role has no current holder".into()))?;
+        let start = role.chain.iter().position(|id| id == &step.original_manager_chat_id)
+            .ok_or_else(|| RpcError::Failed("Original Manager is not in the role chain".into()))?;
+        let end = role.chain.iter().position(|id| id == current)
+            .filter(|end| *end >= start).ok_or_else(|| RpcError::Failed("Invalid Manager role chain".into()))?;
+        if worker.parent_chat_id.as_deref() != Some(current) {
+            return Err(RpcError::Failed("Worker is not attached to the current Manager".into()));
+        }
+        for pair in role.chain[start..=end].windows(2) {
+            let provenance = self.workspace.registry_row(mast_doc::KIND_CHATS, &pair[1])
+                .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
+                .ok_or_else(|| RpcError::Failed("Manager handoff provenance is unavailable".into()))?;
+            if provenance.get("fromChatId").and_then(serde_json::Value::as_str) != Some(pair[0].as_str())
+                || !provenance.get("workerChatIds").and_then(serde_json::Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(worker.id.as_str())))
+            {
+                return Err(RpcError::Failed("Worker was not transferred by the Manager handoff".into()));
+            }
+        }
+        let space = self.workspace.space(&origin.space_id)
+            .map_err(|error| RpcError::Failed(error.to_string()))?
+            .ok_or_else(|| RpcError::Failed("Review Space is unavailable".into()))?;
+        if space.device_id != self.workspace.device_id() {
+            return Err(RpcError::Failed("Report the review on the Space owner".into()));
+        }
+        let snapshot = self.work_outline.snapshot(&origin.space_id);
+        if !snapshot.is_within(&step.project_id, &step.work_item_id)
+            || snapshot.item(&step.work_item_id).is_none_or(|item| item.archived_at.is_some())
+        {
+            return Err(RpcError::Failed("Review work item is outside the Manager's project".into()));
+        }
+        reviews.accept(&origin.chat_id, current, completion).map_err(RpcError::Failed)
     }
 
     /// Run a blocking artifact operation, mapping its error to the
@@ -3882,7 +4086,15 @@ impl RpcService for EngineRpc {
                 let grant = service.tokens().authenticate(&p.token).ok();
                 let tool = p.tool.clone();
                 let result: Result<serde_json::Value, RpcError> =
-                    if p.tool == mast_proto::mast_management::TOOL {
+                    if p.tool == mast_proto::agent_tools::tools::REVIEW_INTENT {
+                        let origin = self.agent_tools.authenticate(&p.token)
+                            .map_err(|error| RpcError::Failed(error.to_wire_message()))?;
+                        let _ = origin;
+                        let harness: HarnessId = serde_json::from_value(p.arguments.get("reviewerHarness").cloned().unwrap_or(serde_json::Value::Null))
+                            .map_err(|error| RpcError::Failed(format!("Invalid reviewer harness: {error}")))?;
+                        crate::manager_review::require_durable_review_receiver(harness).map_err(RpcError::Failed)?;
+                        Err(RpcError::Failed("Automatic review declaration is not available".into()))
+                    } else if p.tool == mast_proto::mast_management::TOOL {
                         self.assistant_manage(&p).await
                     } else if p.tool == mast_proto::agent_tools::tools::LAUNCH_CHILD_CHAT {
                         match tokio::task::spawn_blocking(move || service.prepare_child_launch(&p))
@@ -6032,6 +6244,66 @@ impl RpcService for EngineRpc {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn manager_review_is_disabled_and_rpc_surfaces_share_launch_gate() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(registry), HarnessId::Mock, None).unwrap();
+        let first = core.rpc_service();
+        let second = core.rpc_service();
+        assert!(first.manager_reviews.is_none());
+        assert!(second.manager_reviews.is_none());
+        let guard = first.launch.manager_review_gate().await;
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), second.launch.manager_review_gate()).await.is_err());
+        drop(guard);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), second.launch.manager_review_gate()).await.is_ok());
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn manager_review_registration_rejects_unqualified_receiver_before_mutation() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(registry), HarnessId::Mock, None).unwrap();
+        core.workspace.create_space("space", &core.device_id, "/tmp", None, false).unwrap();
+        core.workspace.create_chat("manager", Some("space"), None, None, None).unwrap();
+        let rpc = core.rpc_service();
+        let lease = rpc.agent_tools.tokens().mint("manager", "run", "space", &core.device_id);
+        let registration = mast_proto::ManagerReviewRegistration {
+            step_id: "step".into(), work_item_id: "item".into(), worker_create_key: "key".into(),
+            worker_inputs: serde_json::json!({}), harness_omitted: false, model_omitted: false,
+            reviewer_config: mast_proto::ChatConfig { harness: HarnessId::Codex, model: None, reasoning: None, model_options: Default::default(), sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: false, approval_rules: false },
+            review_prompt: "review".into(),
+        };
+        let error = rpc.register_manager_review(lease.token(), registration).await.unwrap_err().to_string();
+        assert!(error.contains("no current receiver is qualified"), "{error}");
+        assert_eq!(core.workspace.read_chats().unwrap().len(), 1);
+        assert!(rpc.manager_reviews.is_none());
+        let operation = mast_proto::agent_tools::operation_id("manager", "key");
+        let (operation_key, input_key) = crate::agent_tools::child_chat_ledger_keys(&operation, "unused");
+        assert!(!core.workspace.ledger_holds_checked(&operation_key).unwrap());
+        assert!(!core.workspace.ledger_holds_checked(&input_key).unwrap());
+        let store = mast_sync::DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.load_snapshot("internal:manager-review-steps:v1").unwrap().is_none());
+        assert!(!store.processed_commands().unwrap().iter().any(|(key, _)| key.starts_with("agent-child-chat:") && key.ends_with(&operation)));
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn review_claim_ledger_read_failure_is_not_treated_as_absent() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(dir.path(), std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("orgs/dev-org/dev-user/docs.sqlite3")).unwrap();
+        db.execute("DROP TABLE processed_commands", []).unwrap();
+        assert!(core.workspace.ledger_holds_checked("missing").is_err());
+        core.shutdown().await;
+    }
+
     #[tokio::test]
     async fn hand_off_config_preserves_and_validates_selection() {
         use super::*;

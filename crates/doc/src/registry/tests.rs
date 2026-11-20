@@ -2226,3 +2226,154 @@ fn read_kind_in_place_matches_the_overlay_path() {
         Some("Renamed")
     );
 }
+
+#[test]
+fn review_chat_creation_records_marker_with_chat_and_refuses_existing_identity() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let row = chat("reviewer", "dev-a");
+    let marker = json!({"projectId": "project", "stepId": "step", "operationId": "operation", "inputsHash": "hash", "originalManagerChatId": "manager"});
+    doc.create_marked_review_chat(&row, marker.clone()).unwrap();
+    let created = doc.overlay_row(KIND_CHATS, "reviewer").unwrap();
+    assert_eq!(created.fields["managerReviewLaunch"], marker);
+    assert_eq!(created.clocks.get("managerReviewLaunch"), created.clocks.get("parentChatId"));
+    let last = doc.pending.last().unwrap();
+    assert_eq!(last.ops.len(), 1);
+    assert!(last.ops[0].set.as_ref().unwrap().contains_key("managerReviewLaunch"));
+    assert!(doc.create_marked_review_chat(&row, json!({"operationId": "other"})).is_err());
+    let unmarked = chat("unmarked", "dev-a");
+    doc.upsert_chat(&unmarked).unwrap();
+    assert!(doc.create_marked_review_chat(&unmarked, json!({"operationId": "op"})).is_err());
+    assert!(doc.delete_chat("unmarked").unwrap());
+    assert!(doc.create_marked_review_chat(&unmarked, json!({"operationId": "op"})).is_err());
+}
+
+#[test]
+fn marked_review_handoff_records_child_proof_without_changing_ordinary_handoff() {
+    let (mut doc, item) = role_doc(&["source", "destination"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+    let mut review = chat("review-child", "dev-a");
+    review.space_id = Some("space".into());
+    review.parent_chat_id = Some("source".into());
+    let marker = json!({"projectId": item, "stepId": "step", "operationId": "op", "inputsHash": "hash", "originalManagerChatId": "source"});
+    doc.create_marked_review_chat(&review, marker.clone()).unwrap();
+    let mut plain = chat("plain-child", "dev-a");
+    plain.space_id = Some("space".into());
+    plain.parent_chat_id = Some("source".into());
+    doc.upsert_chat(&plain).unwrap();
+    let mut foreign = chat("foreign-review", "dev-a");
+    foreign.space_id = Some("space".into());
+    foreign.parent_chat_id = Some("source".into());
+    doc.create_marked_review_chat(&foreign, json!({"projectId": "another-project", "operationId": "op"})).unwrap();
+    doc.hand_off_chat_children("source", "destination", "source", 123).unwrap();
+    let moved = doc.overlay_row(KIND_CHATS, "review-child").unwrap();
+    let proof = &moved.fields["managerReviewHandoff"];
+    assert_eq!(proof["fromChatId"], "source");
+    assert_eq!(proof["toChatId"], "destination");
+    assert_eq!(proof["marker"], marker);
+    assert_eq!(moved.clocks.get("parentChatId"), moved.clocks.get("managerReviewHandoff"));
+    assert!(!doc.overlay_row(KIND_CHATS, "plain-child").unwrap().fields.contains_key("managerReviewHandoff"));
+    assert!(!doc.overlay_row(KIND_CHATS, "foreign-review").unwrap().fields.contains_key("managerReviewHandoff"));
+    let bytes = doc.to_bytes().unwrap();
+    let restored = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    let saved = restored.overlay_row(KIND_CHATS, "review-child").unwrap();
+    assert_eq!(saved.fields["managerReviewHandoff"], *proof);
+    assert_eq!(saved.clocks.get("parentChatId"), saved.clocks.get("managerReviewHandoff"));
+    // An independent write of the same parent gets a new clock, so it cannot
+    // masquerade as the handoff that established this proof.
+    let mut edited = doc.chat("review-child").unwrap().unwrap();
+    edited.parent_chat_id = Some("destination".into());
+    doc.upsert_chat(&edited).unwrap();
+    let edited = doc.overlay_row(KIND_CHATS, "review-child").unwrap();
+    assert_ne!(edited.clocks.get("parentChatId"), edited.clocks.get("managerReviewHandoff"));
+}
+
+#[test]
+fn marked_review_proof_tracks_multiple_manager_handoffs_and_ordinary_readers() {
+    let (mut doc, item) = role_doc(&["source", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+    let mut review = chat("review", "dev-a");
+    review.space_id = Some("space".into());
+    review.parent_chat_id = Some("source".into());
+    let marker = json!({"projectId": item, "stepId": "step", "operationId": "op", "inputsHash": "hash", "originalManagerChatId": "source"});
+    doc.create_marked_review_chat(&review, marker.clone()).unwrap();
+    doc.hand_off_chat_children("source", "second", "source", 1).unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "source", "second").unwrap();
+    doc.hand_off_chat_children("second", "third", "second", 2).unwrap();
+    let row = doc.overlay_row(KIND_CHATS, "review").unwrap();
+    assert_eq!(row.fields["managerReviewHandoff"]["fromChatId"], "second");
+    assert_eq!(row.fields["managerReviewHandoff"]["toChatId"], "third");
+    assert_eq!(row.fields["managerReviewHandoff"]["marker"], marker);
+    assert_eq!(row.clocks.get("parentChatId"), row.clocks.get("managerReviewHandoff"));
+    // The regular Chat decoder does not require knowledge of the additive proof.
+    assert_eq!(doc.chat("review").unwrap().unwrap().parent_chat_id.as_deref(), Some("third"));
+    let before = row.fields["managerReviewHandoff"].clone();
+    assert!(doc.hand_off_chat_children("second", "third", "second", 3).unwrap().1);
+    assert_eq!(doc.overlay_row(KIND_CHATS, "review").unwrap().fields["managerReviewHandoff"], before);
+}
+
+#[test]
+fn late_review_parent_repair_checks_marker_chain_and_user_edits() {
+    let (mut doc, item) = role_doc(&["source", "destination"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+    doc.hand_off_chat_children("source", "destination", "source", 1).unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "source", "destination").unwrap();
+    let marker = mast_proto::ManagerReviewLaunchMarker {
+        project_id: item, step_id: "step".into(), operation_id: "review-op".into(),
+        inputs_hash: "hash".into(), original_manager_chat_id: "source".into(),
+        space_id: "space".into(), cwd: "/tmp/repo".into(), config: chat("x", "dev-a").config,
+    };
+    let id = mast_proto::derive_id(&marker.operation_id, mast_proto::roles::CHAT);
+    let mut review = chat(&id, "dev-a");
+    review.space_id = Some("space".into());
+    review.parent_chat_id = Some("source".into());
+    doc.create_marked_review_chat(&review, serde_json::to_value(&marker).unwrap()).unwrap();
+    let mut forged = marker.clone();
+    forged.inputs_hash = "different".into();
+    assert!(doc.repair_marked_review_parent(&id, &forged, "destination").is_err());
+    assert!(doc.repair_marked_review_parent(&id, &marker, "source").is_err());
+    assert!(doc.repair_marked_review_parent(&id, &marker, "destination").unwrap());
+    assert!(!doc.repair_marked_review_parent(&id, &marker, "destination").unwrap());
+    let repaired = doc.overlay_row(KIND_CHATS, &id).unwrap();
+    assert_eq!(repaired.clocks.get("parentChatId"), repaired.clocks.get("managerReviewParentRepair"));
+    let mut edit = doc.chat(&id).unwrap().unwrap();
+    edit.parent_chat_id = Some("destination".into());
+    doc.upsert_chat(&edit).unwrap();
+    assert!(doc.repair_marked_review_parent(&id, &marker, "destination").is_err());
+
+    let mut second_marker = marker.clone();
+    second_marker.operation_id = "another-review-op".into();
+    let second_id = mast_proto::derive_id(&second_marker.operation_id, mast_proto::roles::CHAT);
+    let mut second = chat(&second_id, "dev-a");
+    second.space_id = Some("space".into());
+    second.parent_chat_id = Some("source".into());
+    doc.create_marked_review_chat(&second, serde_json::to_value(&second_marker).unwrap()).unwrap();
+    // A user write restoring the same original value is still an intervening edit.
+    doc.upsert_chat(&second).unwrap();
+    assert!(doc.repair_marked_review_parent(&second_id, &second_marker, "destination").is_err());
+    assert_eq!(doc.chat(&second_id).unwrap().unwrap().parent_chat_id.as_deref(), Some("source"));
+}
+
+#[test]
+fn transferred_review_parent_requires_matching_latest_handoff_proof_clock() {
+    let (mut doc, item) = role_doc(&["source", "second", "third"]);
+    doc.adopt_standing_role(StandingRoleKind::Manager, &item, "source", &[]).unwrap();
+    let marker = mast_proto::ManagerReviewLaunchMarker {
+        project_id: item.clone(), step_id: "step".into(), operation_id: "review-proof".into(),
+        inputs_hash: "hash".into(), original_manager_chat_id: "source".into(),
+        space_id: "space".into(), cwd: "/tmp/repo".into(), config: chat("x", "dev-a").config,
+    };
+    let id = mast_proto::derive_id(&marker.operation_id, mast_proto::roles::CHAT);
+    let mut review = chat(&id, "dev-a");
+    review.space_id = Some("space".into());
+    review.parent_chat_id = Some("source".into());
+    doc.create_marked_review_chat(&review, serde_json::to_value(&marker).unwrap()).unwrap();
+    doc.hand_off_chat_children("source", "second", "source", 1).unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "source", "second").unwrap();
+    doc.hand_off_chat_children("second", "third", "second", 2).unwrap();
+    doc.rotate_standing_role(StandingRoleKind::Manager, &item, "second", "third").unwrap();
+    assert!(!doc.repair_marked_review_parent(&id, &marker, "third").unwrap());
+    let mut edit = doc.chat(&id).unwrap().unwrap();
+    edit.parent_chat_id = Some("third".into());
+    doc.upsert_chat(&edit).unwrap();
+    assert!(doc.repair_marked_review_parent(&id, &marker, "third").is_err());
+}
