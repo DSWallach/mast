@@ -181,6 +181,34 @@ async fn restart_reclaims_only_wake_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_with_reports_off_drops_a_pulled_back_ordinary_report() {
+    let rig = Rig::new().await;
+    rig.wakes.report_to_parent("w1", "pulled back report").await.unwrap();
+    let path = rig.store.with_file_name("orchestrator-wake-events.json");
+    // Crash boundary: the Manager pullback retired the row ID, but the queue
+    // removal never reached the snapshot, so the old row is still persisted.
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["orchestrators"][ORCH][0]["message_id"] = serde_json::Value::Null;
+    saved["orchestrators"][ORCH][0]["retired_messages"] = serde_json::json!([{"chat_id": ORCH, "message_id": "wake-row"}]);
+    let handle = rig.core.doc_host.open(ORCH).unwrap();
+    handle.doc().push_queued(&mast_doc::QueuedMessage { id: "wake-row".into(), text: "Worker updates".into(), attachments: vec![],
+        hold_for_turn_end: false, issued_by: rig.core.device_id.clone(), issued_at: 1, edited_at: None, delivery_gate: None }).unwrap();
+    let mut settings = rig.wakes.settings(ORCH);
+    settings.worker_reports = false;
+    rig.wakes.set_settings(ORCH, settings).await;
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let tick = rig.clock.clone();
+    let restarted = OrchestratorWakes::new(rig.core.sessions.clone(), rig.core.doc_host.clone(),
+        rig.core.workspace.clone(), Some(rig.store.clone()), Arc::new(move || tick.load(Ordering::SeqCst)));
+    assert!(handle.doc().read_queue().unwrap().iter().all(|entry| entry.id != "wake-row"));
+    assert!(restarted.status(ORCH).held.is_empty());
+    rig.advance(2 * USER_QUIET_MS);
+    restarted.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().iter().all(|prompt| !prompt.contains("pulled back report")));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_replays_a_dequeued_unreceipted_report() {
     let rig = Rig::new().await;
     rig.wakes.report_to_parent("w1", "dequeued report").await.unwrap();

@@ -701,7 +701,6 @@ impl OrchestratorWakes {
                 let settings = state.core.settings(&chat);
                 let ineligible = workspace.chat(&chat).ok().flatten().is_some_and(|recipient| recipient.archived)
                     || !settings.enabled;
-                let reports_off = !settings.wakes_for(WakeEventKind::WorkerReport);
                 let handle = match doc_host.open(&chat) {
                     Ok(handle) => handle,
                     Err(error) => { tracing::warn!(%error, %chat, "could not open wake recipient during recovery"); unavailable.insert(chat); continue; }
@@ -750,7 +749,12 @@ impl OrchestratorWakes {
                         });
                         let cancelled = entry.event.final_handback.as_ref().is_some_and(|tag|
                             saved.cancelled_handbacks.contains(&tag.operation_id));
-                        let disabled = ineligible || (reports_off && entry.event.final_handback.is_some());
+                        // Apply the per-kind toggle to undelivered events (a retired queue
+                        // ID can outlive a crash); delivered ordinary entries keep the
+                        // existing completion rules.
+                        let kind_off = !settings.wakes_for(entry.event.kind);
+                        let disabled = ineligible
+                            || (kind_off && (entry.event.final_handback.is_some() || report_in_transcript.is_none()));
                         let discard = !delivered_handback && (disabled || entry.discarded || cancelled);
                         changed |= entry.discarded != discard;
                         entry.discarded = discard;
