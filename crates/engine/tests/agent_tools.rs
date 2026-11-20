@@ -4878,6 +4878,152 @@ async fn final_handback_delivery_respects_keep_and_reassignment() {
     }
 }
 
+#[cfg(debug_assertions)]
+const HANDOFF_ORIGINAL: &str = "Unedited report for the Manager";
+#[cfg(debug_assertions)]
+const HANDOFF_REPLACEMENT: &str = "A different queued message";
+
+#[cfg(debug_assertions)]
+async fn queue_final_handback_for_test(rig: &Rig, key: &str) -> (Value, mast_doc::QueuedMessage) {
+    let lease = rig.core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-test", SPACE, &rig.core.device_id,
+    );
+    let current = tool(rig, lease.token(), "work_outline_read_current", json!({})).await.unwrap();
+    let arguments = json!({
+        "idempotencyKey": key,
+        "expectedGeneration": current["assignmentGeneration"],
+        "report": HANDOFF_ORIGINAL,
+    });
+    rig.core.orchestrator_wakes.note_user_activity(CHAT, Some(true)).await;
+    tool(rig, lease.token(), "final_handback", arguments.clone()).await.unwrap();
+    rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
+    let row = rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()
+        .into_iter().find(|row| row.text.contains(HANDOFF_ORIGINAL)).unwrap();
+    (arguments, row)
+}
+
+#[cfg(debug_assertions)]
+async fn retry_final_handback(core: &EngineCore, arguments: Value) -> Result<Value, String> {
+    let lease = core.sessions.agent_tokens().mint(
+        ARCHIVE_CHILD, "handback-queue-retry", SPACE, &core.device_id,
+    );
+    mast_rpc::memory_client(core.rpc_service()).call(
+        mast_proto::agent_tools::TOOL_CALL_METHOD,
+        json!({ "token": lease.token(), "tool": "final_handback", "arguments": arguments }),
+    ).await.map_err(|error| error.to_string())
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_edited_queue_row_cannot_prove_delivery() {
+    let a = archive_rig().await;
+    let rig = &a.rig;
+    assign_chat(rig, "handoff-queue-edit", ARCHIVE_CHILD, &a.p.ticket).await;
+    rig.core.doc_host.open(ARCHIVE_CHILD).unwrap();
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(rig, "queue-edit").await;
+    assert!(rig.core.doc_host.update_queued_message(CHAT, &queued.id, HANDOFF_REPLACEMENT).unwrap());
+    drop(guard);
+    wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
+        request.prompt == HANDOFF_REPLACEMENT), "edited row reaches the Manager").await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "queue-edit");
+    let path = rig._tmp.path().join("data/orchestrator-wake-events.json");
+    wait_for(|| {
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["cancelled_handbacks"].as_array().is_some_and(|ids|
+            ids.iter().any(|id| id == &operation_id))
+    }, "edited wake is excluded from archive evidence").await;
+    assert!(retry_final_handback(&rig.core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(!chat_archived(rig, ARCHIVE_CHILD));
+    rig.harness.release.notify_one();
+    rig.core.shutdown().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_restart_checks_transcript_before_disabling_or_discarding() {
+    for edited in [false, true] {
+        let a = archive_rig().await;
+        let rig = a.rig;
+        assign_chat(&rig, "handoff-disabled-recipient", ARCHIVE_CHILD, &a.p.ticket).await;
+        let parent = rig.core.doc_host.open(CHAT).unwrap();
+        let guard = parent.test_queue_drain_guard().await;
+        let (arguments, queued) = queue_final_handback_for_test(&rig, "before-disabled").await;
+        // Simulate stopping after the recipient transcript write and before
+        // the wake service can persist its delivery acknowledgement.
+        assert!(parent.doc().take_queued(&queued.id).unwrap().is_some());
+        let text = if edited { HANDOFF_REPLACEMENT } else { &queued.text };
+        parent.write_user_message(&queued.id, text, 1).unwrap();
+        rig.core.doc_host.flush_all();
+        let mut settings = rig.core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = false;
+        rig.core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        drop(guard);
+        rig.core.shutdown().await;
+        let Rig { _tmp, core, client, service, .. } = rig;
+        drop((core, client, service, parent));
+
+        let harness = GatedHarness::default();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness.clone()));
+        let core = EngineCore::assemble(
+            &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+        ).unwrap();
+        let mut settings = core.orchestrator_wakes.settings(CHAT);
+        settings.enabled = true;
+        core.orchestrator_wakes.set_settings(CHAT, settings).await;
+        let retry = retry_final_handback(&core, arguments).await;
+        if edited {
+            assert!(retry.unwrap_err().contains("removed or edited"));
+            assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+        } else {
+            assert_eq!(retry.unwrap()["delivery"], "delivered");
+        }
+        core.orchestrator_wakes.evaluate(CHAT, true).await;
+        assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+        assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+        assert!(harness.requests.lock().unwrap().is_empty());
+        core.shutdown().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_handback_explicit_queue_removal_survives_retry_and_restart() {
+    let a = archive_rig().await;
+    let rig = a.rig;
+    assign_chat(&rig, "handoff-remove", ARCHIVE_CHILD, &a.p.ticket).await;
+    let parent = rig.core.doc_host.open(CHAT).unwrap();
+    let guard = parent.test_queue_drain_guard().await;
+    let (arguments, queued) = queue_final_handback_for_test(&rig, "queue-remove").await;
+    parent.doc().set_queued_delivery_gate(&queued.id, Some(&mast_doc::QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "edit".into(),
+        owner_device_id: rig.core.device_id.clone(),
+        since_ms: 1,
+        base_text_hash: String::new(),
+    })).unwrap();
+    drop(guard);
+    assert!(rig.core.doc_host.remove_queued_message(CHAT, &queued.id).await.unwrap());
+    assert!(retry_final_handback(&rig.core, arguments.clone()).await.unwrap_err()
+        .contains("removed or edited"));
+    assert!(!chat_archived(&rig, ARCHIVE_CHILD));
+    rig.core.shutdown().await;
+    let Rig { _tmp, core, client, service, .. } = rig;
+    drop((core, client, service, parent));
+
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(GatedHarness::default()));
+    let core = EngineCore::assemble(
+        &_tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None,
+    ).unwrap();
+    assert!(retry_final_handback(&core, arguments).await.unwrap_err().contains("removed or edited"));
+    assert!(core.orchestrator_wakes.status(CHAT).held.is_empty());
+    assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn archive_info_rates_children_and_project_workers_only() {
     let a = archive_rig().await;

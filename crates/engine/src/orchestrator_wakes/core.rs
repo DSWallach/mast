@@ -198,6 +198,20 @@ impl WakeCore {
         }
     }
 
+    pub fn discard_cancelled_handbacks(
+        &mut self,
+        orch: &str,
+        cancelled: &std::collections::HashSet<String>,
+    ) {
+        if let Some(state) = self.orchs.get_mut(orch) {
+            state.held.retain(|event| event.final_handback.as_ref()
+                .is_none_or(|tag| !cancelled.contains(&tag.operation_id)));
+            if state.held.is_empty() {
+                state.window_start_ms = None;
+            }
+        }
+    }
+
     /// Transfer undelivered events without reapplying settings or deduplication.
     /// The caller serializes this with delivery and copies settings separately.
     pub fn transfer_held(&mut self, from: &str, to: &str) {

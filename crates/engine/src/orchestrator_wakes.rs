@@ -34,7 +34,7 @@ pub use self::core::{
     Batch, Ctx, DEDUPE_TTL_MS, Decision, USER_QUIET_MS, WAKE_WINDOW_MS, WakeCore, WakeEvent,
     resolved_key,
 };
-use crate::doc_host::DocHost;
+use crate::doc_host::{ChatDocHandle, DocHost, queue_text_hash};
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
 
@@ -190,10 +190,8 @@ impl WakePersistence {
                     let prune = entry.delivered && entry.retired_messages.is_empty() && entry.message_id.as_deref() == Some(&message);
                     if prune {
                         completed.push(entry.event.id.clone());
-                        if let Some(handback) = &entry.event.final_handback
-                            && handback.parent_chat_id == chat
-                        {
-                            handbacks.push(handback.clone());
+                        if let Some(receipt) = entry.handback_receipt(&chat) {
+                            handbacks.push(receipt);
                         }
                     }
                     !prune
@@ -233,9 +231,12 @@ impl EventTurns {
         if !persistence.store.final_handback_history_ready {
             return Err("final handback delivery history is unavailable".into());
         }
+        if persistence.store.cancelled_handbacks.contains(&expected.operation_id) {
+            return Err("the Manager removed or edited the queued final report".into());
+        }
         match persistence.store.delivered_handbacks.get(&expected.operation_id) {
             None => Ok(false),
-            Some(Some(receipt)) if receipt == expected => Ok(true),
+            Some(Some(receipt)) if &receipt.handback == expected && receipt.is_verified() => Ok(true),
             Some(_) => Err("final handback receipt conflicts with this intent".into()),
         }
     }
@@ -267,11 +268,24 @@ impl EventTurns {
         Ok(())
     }
 
-    fn mark_queued(&self, chat_id: &str, events: &[WakeEvent], message_id: &str) -> Result<(), String> {
+    fn mark_queued(
+        &self,
+        chat_id: &str,
+        events: &[WakeEvent],
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), String> {
         if let Some(persistence) = lock(&self.persistence).as_mut() {
             let before = persistence.clone();
             persistence.prune();
-            persistence.store.mark_queued(chat_id, &events.iter().map(|event| event.id.clone()).collect(), message_id);
+            let text_hash = events.iter().any(|event| event.final_handback.is_some())
+                .then(|| queue_text_hash(text));
+            persistence.store.mark_queued(
+                chat_id,
+                &events.iter().map(|event| event.id.clone()).collect(),
+                message_id,
+                text_hash.as_deref(),
+            );
             if let Err(error) = persistence.write() {
                 *persistence = before;
                 return Err(error);
@@ -280,12 +294,28 @@ impl EventTurns {
         Ok(())
     }
 
-    pub(crate) fn mark_delivered(self: &Arc<Self>, chat_id: &str, message_id: &str, snapshot: Option<&Arc<crate::chat_persistence::ChatPersistence>>) {
+    pub(crate) fn mark_delivered(self: &Arc<Self>, handle: &ChatDocHandle, message_id: &str) {
+        let chat_id = handle.chat_id();
         if let Some(persistence) = lock(&self.persistence).as_mut() {
-            let exists = persistence.store.orchestrators.get(chat_id).is_some_and(|events| events.iter().any(|entry| entry.message_id.as_deref() == Some(message_id)));
-            if !exists { return; }
-            persistence.store.mark_delivered(chat_id, message_id);
-            if let Some(snapshot) = snapshot {
+            let Some(events) = persistence.store.orchestrators.get(chat_id) else { return };
+            let mut events = events.iter().filter(|entry| entry.message_id.as_deref() == Some(message_id)).peekable();
+            if events.peek().is_none() {
+                return;
+            }
+            let transcript_hash = if events.any(|entry| entry.event.final_handback.is_some()) {
+                match handle.doc().read_entries() {
+                    Ok(entries) => entries.iter().find(|entry| entry.id == message_id)
+                        .and_then(handback_transcript_hash),
+                    Err(error) => {
+                        tracing::warn!(%error, chat = %chat_id, "could not verify final handback transcript");
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            persistence.store.mark_delivered(chat_id, message_id, transcript_hash.as_deref());
+            if let Some(snapshot) = &handle.persistence {
                 persistence.generations.insert((chat_id.to_owned(), message_id.to_owned()), (snapshot.clone(), snapshot.generation()));
             } else {
                 persistence.legacy_receipts.insert((chat_id.to_owned(), message_id.to_owned()), std::time::Instant::now());
@@ -293,6 +323,54 @@ impl EventTurns {
             if let Err(error) = persistence.write() {
                 tracing::warn!(%error, chat = %chat_id, "could not save wake delivery receipt");
             }
+        }
+        self.schedule_prune(chat_id, message_id);
+    }
+
+    pub(crate) fn is_final_handback_message(&self, chat_id: &str, message_id: &str) -> bool {
+        lock(&self.persistence).as_ref().is_some_and(|persistence| {
+            persistence.store.orchestrators.get(chat_id).is_some_and(|entries| {
+                entries.iter().any(|entry| entry.message_id.as_deref() == Some(message_id)
+                    && entry.event.final_handback.is_some())
+            })
+        })
+    }
+
+    /// Keep an explicit removal durable before the queue row can disappear.
+    /// The queue drain is held by the caller while it verifies the row still exists.
+    pub(crate) fn cancel_removed_handback(&self, chat_id: &str, message_id: &str) -> Result<bool, String> {
+        let mut guard = lock(&self.persistence);
+        let Some(persistence) = guard.as_mut() else { return Ok(false) };
+        let Some(entries) = persistence.store.orchestrators.get(chat_id) else { return Ok(false) };
+        let cancelled: Vec<_> = entries.iter()
+            .filter(|entry| entry.message_id.as_deref() == Some(message_id))
+            .filter_map(|entry| entry.event.final_handback.as_ref().map(|tag| tag.operation_id.clone()))
+            .collect();
+        if cancelled.is_empty() {
+            return Ok(false);
+        }
+        let before = persistence.store.clone();
+        persistence.store.cancelled_handbacks.extend(cancelled);
+        for entry in persistence.store.orchestrators.get_mut(chat_id).into_iter().flatten() {
+            if entry.message_id.as_deref() == Some(message_id) {
+                entry.discarded = true;
+            }
+        }
+        if let Err(error) = persistence.write() {
+            persistence.store = before;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn finish_removed_handback(self: &Arc<Self>, handle: &ChatDocHandle, message_id: &str) {
+        let chat_id = handle.chat_id();
+        if let Err(error) = self.discard_queued_message(chat_id, message_id, handle.persistence.as_ref()) {
+            tracing::warn!(%error, chat = %chat_id, "could not retire removed wake row");
+        }
+        let mut turns = lock(&self.turns);
+        if turns.get(chat_id).is_some_and(|turn| turn.message_id == message_id) {
+            turns.remove(chat_id);
         }
         self.schedule_prune(chat_id, message_id);
     }
@@ -343,7 +421,10 @@ impl EventTurns {
     pub(crate) fn is_discarded_message(&self, chat_id: &str, message_id: &str) -> bool {
         lock(&self.persistence).as_ref().is_some_and(|persistence| {
             persistence.store.orchestrators.get(chat_id).is_some_and(|entries| {
-                entries.iter().any(|entry| entry.discarded && entry.message_id.as_deref() == Some(message_id))
+                entries.iter().any(|entry| entry.discarded && (
+                    entry.message_id.as_deref() == Some(message_id) || entry.retired_messages.iter()
+                        .any(|row| row.chat_id == chat_id && row.message_id == message_id)
+                ))
             })
         })
     }
@@ -558,19 +639,10 @@ impl OrchestratorWakes {
                     unavailable.insert(chat);
                     continue;
                 }
+                let settings = state.core.settings(&chat);
                 let ineligible = workspace.chat(&chat).ok().flatten().is_some_and(|recipient| recipient.archived)
-                    || !state.core.settings(&chat).enabled;
-                if ineligible {
-                    if let Some(entries) = saved.orchestrators.get_mut(&chat) {
-                        for entry in entries { entry.discarded = true; }
-                    }
-                    if let Err(error) = saved.write(&path) {
-                        tracing::warn!(%error, %chat, "could not persist wake discard before recovery");
-                        unavailable.insert(chat);
-                        continue;
-                    }
-                    tracing::info!(%chat, "discarded wakes for archived or disabled coordinator during recovery");
-                }
+                    || !settings.enabled;
+                let reports_off = !settings.wakes_for(WakeEventKind::WorkerReport);
                 let handle = match doc_host.open(&chat) {
                     Ok(handle) => handle,
                     Err(error) => { tracing::warn!(%error, %chat, "could not open wake recipient during recovery"); unavailable.insert(chat); continue; }
@@ -579,12 +651,16 @@ impl OrchestratorWakes {
                     Ok(queue) => queue.into_iter().map(|item| item.id).collect(),
                     Err(error) => { tracing::warn!(%error, %chat, "could not read wake recipient queue during recovery"); unavailable.insert(chat); continue; }
                 };
-                let has_handback = saved.orchestrators.get(&chat).is_some_and(|events| {
-                    events.iter().any(|entry| entry.event.final_handback.is_some())
-                });
-                let transcript: HashSet<String> = if has_handback {
+                let final_messages: HashSet<&str> = saved.orchestrators[&chat].iter()
+                    .filter(|entry| entry.event.final_handback.is_some())
+                    .filter_map(|entry| entry.message_id.as_deref()).collect();
+                let transcript: HashMap<String, Option<String>> = if !final_messages.is_empty() {
                     match handle.doc().read_entries() {
-                        Ok(entries) => entries.into_iter().map(|entry| entry.id).collect(),
+                        Ok(entries) => entries.into_iter().map(|entry| {
+                            let hash = final_messages.contains(entry.id.as_str())
+                                .then(|| handback_transcript_hash(&entry)).flatten();
+                            (entry.id, hash)
+                        }).collect(),
                         Err(error) => {
                             tracing::warn!(%error, %chat, "could not read final handback recipient transcript");
                             unavailable.insert(chat);
@@ -592,8 +668,40 @@ impl OrchestratorWakes {
                         }
                     }
                 } else {
-                    handle.doc().recent_message_ids(50).into_iter().collect()
+                    handle.doc().recent_message_ids(50).into_iter().map(|id| (id, None)).collect()
                 };
+                // A disabled or archived Manager can already have received the
+                // report. Reconcile its transcript before discarding stale wakes.
+                let mut changed = false;
+                if let Some(entries) = saved.orchestrators.get_mut(&chat) {
+                    for entry in entries {
+                        let report_in_transcript = entry.message_id.as_ref().and_then(|id| transcript.get(id));
+                        let delivered_handback = entry.event.final_handback.as_ref().is_some_and(|tag| {
+                            if saved.cancelled_handbacks.contains(&tag.operation_id) {
+                                return false;
+                            }
+                            let Some(hash) = report_in_transcript else { return false };
+                            if entry.has_original_text(hash.as_deref()) && tag.parent_chat_id == chat {
+                                return true;
+                            }
+                            if tag.parent_chat_id == chat {
+                                changed |= saved.cancelled_handbacks.insert(tag.operation_id.clone());
+                            }
+                            false
+                        });
+                        let cancelled = entry.event.final_handback.as_ref().is_some_and(|tag|
+                            saved.cancelled_handbacks.contains(&tag.operation_id));
+                        let disabled = ineligible || (reports_off && entry.event.final_handback.is_some());
+                        let discard = !delivered_handback && (disabled || entry.discarded || cancelled);
+                        changed |= entry.discarded != discard;
+                        entry.discarded = discard;
+                    }
+                }
+                if changed && let Err(error) = saved.write(&path) {
+                    tracing::warn!(%error, %chat, "could not persist wake reconciliation before recovery");
+                    unavailable.insert(chat);
+                    continue;
+                }
                 let mut removed = HashSet::new();
                 let mut cross_blocked = HashSet::new();
                 if let Some(events) = saved.orchestrators.get(&chat) {
@@ -619,7 +727,7 @@ impl OrchestratorWakes {
                             }
                     }
                     let ids: HashSet<_> = events.iter().flat_map(|entry| entry.message_id.iter().chain(entry.retired_messages.iter().filter(|retired| retired.chat_id == chat).map(|retired| &retired.message_id))).filter(|id| queue.contains(*id)).cloned().collect();
-                    for id in events.iter().filter_map(|entry| entry.message_id.as_ref().filter(|id| entry.discarded || !transcript.contains(*id))).filter(|id| !queue.contains(*id)) {
+                    for id in events.iter().filter_map(|entry| entry.message_id.as_ref().filter(|id| entry.discarded || !transcript.contains_key(*id))).filter(|id| !queue.contains(*id)) {
                         if let Some(snapshot) = &handle.persistence {
                             retired_generations.insert((chat.clone(), id.clone()), (snapshot.clone(), snapshot.generation()));
                         } else {
@@ -665,7 +773,7 @@ impl OrchestratorWakes {
                             return !entry.retired_messages.is_empty();
                         }
                         if let Some(id) = entry.message_id.clone() {
-                            if transcript.contains(&id) {
+                            if transcript.contains_key(&id) {
                                 let snapshot_pending = handle.persistence.as_ref().is_none_or(|snapshot| !snapshot.has_saved(snapshot.generation()));
                                 if removed.contains(&id) || !entry.retired_messages.is_empty() || snapshot_pending {
                                     entry.delivered = true;
@@ -673,11 +781,9 @@ impl OrchestratorWakes {
                                     return true;
                                 }
                                 completed.push(entry.event.id.clone());
-                                if let Some(handback) = &entry.event.final_handback
-                            && handback.parent_chat_id == chat
-                        {
-                            handbacks.push(handback.clone());
-                        }
+                                if let Some(receipt) = entry.handback_receipt(&chat) {
+                                    handbacks.push(receipt);
+                                }
                                 return false;
                             }
                             if queue.contains(&id) && !removed.contains(&id) { blocked = true; return true; }
@@ -1640,28 +1746,33 @@ impl OrchestratorWakes {
         let Ok(_drain) = handle.drain_lock.try_lock() else {
             return Ok(());
         };
-        let doc = handle.doc();
-        if workspace.archive_final_handback_if(intent, || {
-            let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
-            let queued = self.inner.sessions.turn_in_flight(worker)
-                || self.inner.sessions.has_any_pending_input(worker)
-                || self.inner.sessions.has_interrupted_turn(worker)
-                || DocHost::session_doc_has_queued_turn(doc)?;
-            let no_owned_subagents = !queued && !doc.read_entries()?.iter()
-                .flat_map(|entry| &entry.parts)
-                .any(|part| {
-                    use mast_doc::{MessagePart, SubagentStatus};
-                    matches!(part, MessagePart::Tool {
-                        subagent_status: Some(SubagentStatus::Running),
-                        ..
-                    } | MessagePart::Tool {
-                        subagent_ref: Some(_),
-                        subagent_status: None,
-                        ..
-                    })
-                });
-            Ok((delivered, queued, no_owned_subagents))
-        })? {
+        let archived = {
+            let _ingress = lock(&handle.work_ingress);
+            let doc = handle.doc();
+            workspace.archive_final_handback_if(intent, || {
+                let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
+                let queued = self.inner.sessions.turn_in_flight(worker)
+                    || self.inner.sessions.has_any_pending_input(worker)
+                    || self.inner.sessions.has_interrupted_turn(worker)
+                    || DocHost::session_doc_has_queued_turn(doc)?;
+                let no_owned_subagents = !queued && !doc.read_entries()?.iter()
+                    .flat_map(|entry| &entry.parts)
+                    .any(|part| {
+                        use mast_doc::{MessagePart, SubagentStatus};
+                        matches!(part, MessagePart::Tool {
+                            subagent_status: Some(SubagentStatus::Running),
+                            ..
+                        } | MessagePart::Tool {
+                            subagent_ref: Some(_),
+                            subagent_status: None,
+                            ..
+                        })
+                    });
+                Ok((delivered, queued, no_owned_subagents))
+            })?
+        };
+        drop(_drain);
+        if archived {
             workspace.persist_registry_now()?;
         }
         Ok(())
@@ -2012,6 +2123,9 @@ impl OrchestratorWakes {
                 return;
             }
         }
+        if let Some(persistence) = lock(&self.inner.event_turns.persistence).as_ref() {
+            state.core.discard_cancelled_handbacks(orch, &persistence.store.cancelled_handbacks);
+        }
         match state.core.decide(orch, now, ctx, force) {
             Decision::Nothing | Decision::Hold(_) => {}
             Decision::WaitUntil { at_ms, .. } => {
@@ -2031,7 +2145,7 @@ impl OrchestratorWakes {
                     tracing::warn!(%error, chat = %orch, "could not save held wake events");
                     return;
                 }
-                if let Err(error) = self.inner.event_turns.mark_queued(orch, &batch.events, &message_id) {
+                if let Err(error) = self.inner.event_turns.mark_queued(orch, &batch.events, &message_id, &text) {
                     tracing::warn!(%error, chat = %orch, "could not save wake queue receipt");
                     return;
                 }
@@ -2079,6 +2193,15 @@ impl OrchestratorWakes {
             }
             this.evaluate(&orch, false).await;
         });
+    }
+}
+
+fn handback_transcript_hash(entry: &mast_doc::SessionMessageEntry) -> Option<String> {
+    match (entry.role, entry.parts.as_slice()) {
+        (mast_doc::MessageRole::User, [mast_doc::MessagePart::Text { text, .. }]) => {
+            Some(queue_text_hash(text))
+        }
+        _ => None,
     }
 }
 

@@ -16,11 +16,32 @@ pub(super) struct WakeStore {
     pub completed_ids: HashMap<String, Vec<String>>,
     /// Positive receipts survive event pruning. Legacy stores have none.
     #[serde(default)]
-    pub delivered_handbacks: HashMap<String, Option<FinalHandback>>,
+    pub delivered_handbacks: HashMap<String, Option<HandbackReceipt>>,
+    /// Explicit queue deletion or delivery of an edited payload retires the intent.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub cancelled_handbacks: HashSet<String>,
     /// True only after an empty typed history was established durably or a
     /// previously established history was read successfully.
     #[serde(default)]
     pub final_handback_history_ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct HandbackReceipt {
+    #[serde(flatten)]
+    pub handback: FinalHandback,
+    /// Missing on early development stores that only compared message IDs.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub text_hash: Option<String>,
+}
+
+impl HandbackReceipt {
+    pub fn is_verified(&self) -> bool {
+        self.message_id.as_deref().is_some_and(|id| !id.is_empty())
+            && self.text_hash.as_deref().is_some_and(|hash| hash.len() == 64)
+    }
 }
 
 #[cfg(test)]
@@ -42,6 +63,7 @@ mod tests {
                 at_ms,
             },
             message_id: None,
+            message_text_hash: None,
             delivered: false,
             discarded: false,
             retired_messages: Vec::new(),
@@ -112,18 +134,26 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wakes.json");
         let mut store = WakeStore::default();
-        let receipt = FinalHandback {
-            operation_id: "op".into(), worker_chat_id: "worker".into(),
-            parent_chat_id: "parent".into(), project_id: "project".into(),
-            assignment_generation: "generation".into(),
+        let receipt = HandbackReceipt {
+            handback: FinalHandback {
+                operation_id: "op".into(),
+                worker_chat_id: "worker".into(),
+                parent_chat_id: "parent".into(),
+                project_id: "project".into(),
+                assignment_generation: "generation".into(),
+            },
+            message_id: Some("message".into()),
+            text_hash: Some("a".repeat(64)),
         };
+        let old_receipt = serde_json::to_value(&receipt.handback).unwrap();
+        assert!(!serde_json::from_value::<HandbackReceipt>(old_receipt).unwrap().is_verified());
         store.remember_handback(receipt.clone());
         store.remember_handback(receipt.clone());
         store.write(&path).unwrap();
         let mut restored = WakeStore::read(&path);
         assert_eq!(restored.delivered_handbacks["op"], Some(receipt.clone()));
         let mut conflicting = receipt.clone();
-        conflicting.assignment_generation = "other".into();
+        conflicting.handback.assignment_generation = "other".into();
         restored.remember_handback(conflicting);
         restored.remember_handback(receipt);
         assert_eq!(restored.delivered_handbacks["op"], None);
@@ -184,7 +214,7 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event, event(2).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message", None);
         store.synchronize_held(&HashMap::new());
         let entries = &store.orchestrators["chat"];
         assert_eq!(entries.len(), 1);
@@ -197,7 +227,7 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message", None);
         store.synchronize_held(&held);
         assert!(store.orchestrators["chat"][0].message_id.is_none());
     }
@@ -207,9 +237,9 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-1");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-1", None);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-2");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-2", None);
         store.synchronize_held(&held);
         assert_eq!(store.orchestrators["chat"][0].retired_messages.len(), 2);
     }
@@ -239,6 +269,9 @@ pub(super) struct StoredEvent {
     pub event: WakeEvent,
     /// Queue and transcript messages retain the same id.
     pub message_id: Option<String>,
+    /// Exact rendered message admitted to the Manager queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_text_hash: Option<String>,
     #[serde(default)]
     pub delivered: bool,
     /// Discarded events retain queue identities until removal is durable.
@@ -256,6 +289,22 @@ pub(super) struct RetiredMessage {
 }
 
 impl StoredEvent {
+    pub fn has_original_text(&self, transcript_hash: Option<&str>) -> bool {
+        transcript_hash.is_some() && self.message_text_hash.as_deref() == transcript_hash
+    }
+
+    pub fn handback_receipt(&self, recipient: &str) -> Option<HandbackReceipt> {
+        let handback = self.event.final_handback.as_ref()?;
+        if handback.parent_chat_id != recipient {
+            return None;
+        }
+        Some(HandbackReceipt {
+            handback: handback.clone(),
+            message_id: Some(self.message_id.clone()?),
+            text_hash: Some(self.message_text_hash.clone()?),
+        })
+    }
+
     pub fn retire(&mut self, chat: &str, message: &str) {
         if !self
             .retired_messages
@@ -280,11 +329,14 @@ impl WakeStore {
             self.final_handback_history_ready = true;
         }
     }
-    pub fn remember_handback(&mut self, handback: FinalHandback) {
+    pub fn remember_handback(&mut self, receipt: HandbackReceipt) {
+        if self.cancelled_handbacks.contains(&receipt.handback.operation_id) {
+            return;
+        }
         // Conflicting reuse must not turn an unrelated handback into proof.
-        match self.delivered_handbacks.entry(handback.operation_id.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(Some(handback)); }
-            std::collections::hash_map::Entry::Occupied(entry) if entry.get().as_ref() == Some(&handback) => {}
+        match self.delivered_handbacks.entry(receipt.handback.operation_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(Some(receipt)); }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get().as_ref() == Some(&receipt) => {}
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 entry.insert(None);
                 tracing::warn!("conflicting final handback identity");
@@ -315,16 +367,22 @@ impl WakeStore {
         for (chat, events) in held {
             let entries = self.orchestrators.entry(chat.clone()).or_default();
             for event in events {
+                if event.final_handback.as_ref().is_some_and(|tag|
+                    self.cancelled_handbacks.contains(&tag.operation_id)) {
+                    continue;
+                }
                 if let Some(entry) = entries.iter_mut().find(|entry| entry.event.id == event.id) {
                     if let Some(message) = entry.message_id.clone() {
                         entry.retire(chat, &message);
                     }
                     entry.message_id = None;
+                    entry.message_text_hash = None;
                     entry.delivered = false;
                 } else {
                     entries.push(StoredEvent {
                         event: event.clone(),
                         message_id: None,
+                        message_text_hash: None,
                         delivered: false,
                         discarded: false,
                         retired_messages: Vec::new(),
@@ -335,24 +393,37 @@ impl WakeStore {
         self.limit();
     }
 
-    pub fn mark_queued(&mut self, chat: &str, event_ids: &HashSet<String>, message_id: &str) {
+    pub fn mark_queued(
+        &mut self,
+        chat: &str,
+        event_ids: &HashSet<String>,
+        message_id: &str,
+        text_hash: Option<&str>,
+    ) {
         if let Some(entries) = self.orchestrators.get_mut(chat) {
             for entry in entries
                 .iter_mut()
                 .filter(|entry| event_ids.contains(&entry.event.id))
             {
                 entry.message_id = Some(message_id.to_owned());
+                entry.message_text_hash = entry.event.final_handback.as_ref()
+                    .and(text_hash).map(str::to_owned);
                 entry.delivered = false;
             }
         }
     }
 
-    pub fn mark_delivered(&mut self, chat: &str, message_id: &str) {
+    pub fn mark_delivered(&mut self, chat: &str, message_id: &str, transcript_hash: Option<&str>) {
         if let Some(entries) = self.orchestrators.get_mut(chat) {
             for entry in entries
                 .iter_mut()
                 .filter(|entry| entry.message_id.as_deref() == Some(message_id))
             {
+                if let Some(handback) = &entry.event.final_handback
+                    && !entry.has_original_text(transcript_hash)
+                {
+                    self.cancelled_handbacks.insert(handback.operation_id.clone());
+                }
                 entry.delivered = true;
             }
         }
@@ -419,6 +490,7 @@ impl WakeStore {
                     entry.retire(from, &message);
                 }
                 entry.message_id = None;
+                entry.message_text_hash = None;
                 entry.delivered = false;
                 destination.push(entry);
             }
