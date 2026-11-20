@@ -2828,13 +2828,13 @@ impl Inner {
     fn retire_run(
         &self, chat_id: &str, run_id: &str,
         settled: Option<(SessionStatus, Option<String>)>,
-    ) -> bool {
+    ) -> Option<bool> {
         let transition = self.transition(chat_id);
         let fence = lock(&transition);
         let pending = {
             let mut runs = lock(&self.runs);
             let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
-                return false;
+                return None;
             };
             std::mem::take(&mut run.routed_steers)
         };
@@ -2853,7 +2853,7 @@ impl Inner {
         if let Some(closed) = closed {
             self.publish_transition(chat_id, closed);
         }
-        !had_pending
+        Some(!had_pending)
     }
 
     fn is_retired_run(&self, chat_id: &str, run_id: &str) -> bool {
@@ -4627,13 +4627,13 @@ async fn drive_run(
     }
 
     let no_pending = inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
-    if no_pending {
+    if no_pending == Some(true) {
         for observation in staged_observations.drain(..) {
             if let Err(error) = inner.journal.commit_observation(&chat_id, &observation) {
                 tracing::warn!(chat = %chat_id, %error, "could not commit turn outcome");
             }
         }
-    } else if final_outcome.is_some() && !finalizing.message_ids.is_empty() {
+    } else if no_pending == Some(false) && final_outcome.is_some() && !finalizing.message_ids.is_empty() {
         // The accepted steer remains in recovery; the prior run is not a
         // success. Commit a distinct Interrupted observation after retirement.
         let ids: Vec<String> = finalizing.message_ids.iter().cloned().collect();
