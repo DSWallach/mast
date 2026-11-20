@@ -244,6 +244,8 @@ pub fn run_app(config: UiConfig) {
             ui_settings.surface,
             cx,
         );
+        tracing::info_span!("startup_follow_system_appearance")
+            .in_scope(|| appearance::follow_system(cx));
         history::init(
             ui_settings.git_history_columns,
             ui_settings.git_history_column_widths,
