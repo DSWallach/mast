@@ -2350,13 +2350,20 @@ async fn idle_continue_during_manager_rotation_reaches_successor() {
     }
     let followup = json!({ "chatId": source, "prompt": { "text": "Idle request during rotation" }, "operationId": "idle-race-followup" });
     let send = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone());
+    let duplicate = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone());
     tokio::pin!(send);
+    tokio::pin!(duplicate);
     assert!(tokio::time::timeout(Duration::from_millis(150), &mut send).await.is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(150), &mut duplicate).await.is_err());
     drop(launch_guard);
-    let reply = send.await.unwrap();
+    let (reply, duplicate) = tokio::join!(send, duplicate);
+    let reply = reply.unwrap();
+    let duplicate = duplicate.unwrap();
     let successor = manager_chat(&rig).unwrap();
     assert_ne!(source, successor);
     assert_eq!(reply["chatId"], successor);
+    assert_eq!(duplicate["chatId"], successor);
+    assert_eq!(reply["commandId"], duplicate["commandId"]);
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Idle request during rotation")), "successor follow-up").await;
     let replay = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup).await.unwrap();
     assert_eq!(replay["chatId"], successor);
