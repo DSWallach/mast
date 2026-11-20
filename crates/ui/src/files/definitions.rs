@@ -129,7 +129,9 @@ impl SymbolDefinitionProvider {
     pub fn mark_navigation_handled(&self) { self.state.borrow_mut().navigation_handled = true; }
     pub fn take_navigation_handled(&self) -> bool { std::mem::take(&mut self.state.borrow_mut().navigation_handled) }
 
-    pub(super) fn is_indexing(&self) -> bool { self.state.borrow().revision.is_none() }
+    pub(super) fn is_indexing(&self) -> bool {
+        self.state.borrow().revision.is_none() && !watch_failed_recently(self.client.request_context())
+    }
 
     pub(super) fn start_watch(&self, cx: &mut App) {
         let mut shared = self.shared.borrow_mut();
