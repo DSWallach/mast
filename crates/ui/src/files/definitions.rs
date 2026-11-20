@@ -256,6 +256,7 @@ mod tests {
     #[derive(Default)]
     struct DefinitionTransport {
         queries: std::sync::atomic::AtomicUsize,
+        subscriptions: std::sync::atomic::AtomicUsize,
         sender: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>,
     }
     #[async_trait::async_trait]
@@ -265,6 +266,7 @@ mod tests {
             Ok(serde_json::json!({"matches": [{"path": "src/a.rs", "symbol": {"name": "call", "kind": "function", "startLine": 1, "endLine": 1}}], "truncated": false}))
         }
         async fn subscribe(&self, _: &str, _: serde_json::Value) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, mast_rpc::RpcError> {
+            self.subscriptions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (sender, receiver) = tokio::sync::mpsc::channel(4);
             sender.try_send(serde_json::json!({"revision": 1})).unwrap();
             *self.sender.lock().unwrap() = Some(sender);
@@ -386,10 +388,50 @@ mod tests {
         cx.update(|cx| { first.start_watch(cx); second.start_watch(cx); });
         cx.run_until_parked();
         assert!(!transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
-        cx.executor().advance_clock(Duration::from_secs(120));
+        assert_eq!(transport.subscriptions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        cx.executor().advance_clock(Duration::from_secs(90));
+        cx.update(|cx| first.start_watch(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(90));
+        cx.run_until_parked();
+        assert!(!transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
+        cx.executor().advance_clock(Duration::from_secs(30));
         cx.run_until_parked();
         assert!(first.shared.borrow().watch.is_none());
         assert!(transport.sender.lock().unwrap().as_ref().unwrap().is_closed());
+    }
+
+    #[gpui::test]
+    fn command_click_in_comments_and_strings_does_not_navigate(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, atomic::Ordering};
+        let transport = Arc::new(DefinitionTransport::default());
+        let context = FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("click-chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/click-fixture".into(), checkout_id: Some("checkout".into()) };
+        let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context), "a.rs".into());
+        let source = "fn value() {} // value\nlet s = \"value\";";
+        provider.state.borrow_mut().parsed = Some((0, Rc::new(mast_syntax::symbols::identifier_ranges(source, "a.rs"))));
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
+        let host = cx.add_window(|_, cx| { let state = cx.new(|_| crate::state::AppState::new()); super::super::FilesSurface::new_editor(state, "click-chat".into(), "a.rs".into(), false, 1000, 13.0, false, false, cx) });
+        let editor = host.update(cx, |surface, window, cx| {
+            let theme = crate::theme::Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(source, "a.rs", false, &theme, window, cx);
+            let mut document = super::super::document::FileDocument::loading(super::super::document::DocumentKey { chat_id: "click-chat".into(), checkout_id: Some("checkout".into()), path: "a.rs".into() });
+            document.set_loaded(mast_proto::WorkspaceFileText { checkout_id: "checkout".into(), path: "a.rs".into(), text: Some(source.into()), content_hash: Some("hash".into()), size: source.len() as u64, modified_at: None, encoding: mast_proto::WorkspaceTextEncoding::Utf8, line_ending: Some(mast_proto::WorkspaceLineEnding::Lf), read_only_reason: None, truncated: false });
+            document.editor = Some(editor.clone());
+            surface.preview.documents.insert("a.rs".into(), document);
+            surface.preview.active = Some("a.rs".into());
+            surface.definition_providers.insert("a.rs".into(), provider.clone());
+            editor
+        }).unwrap();
+        cx.update_window(host.into(), |_, window, cx| { window.refresh(); let _ = window.draw(cx); }).unwrap();
+        for offset in [source.find("// value").unwrap() + 4, source.rfind("value").unwrap() + 1] {
+            cx.update_window(host.into(), |_, window, cx| {
+                let position = editor.read(cx).range_to_bounds(&(offset..offset + 1)).unwrap().center();
+                window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent { position, button: gpui::MouseButton::Left, click_count: 1, modifiers: gpui::Modifiers::secondary_key(), ..Default::default() }), cx);
+            }).unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(transport.subscriptions.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.queries.load(Ordering::SeqCst), 0);
     }
 
     #[gpui::test]
