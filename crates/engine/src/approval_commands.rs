@@ -191,7 +191,7 @@ fn repository_executable_matches(
     let Some(scope) = rule.cwd_scope.as_deref().and_then(|scope| Path::new(scope).canonicalize().ok()) else {
         return false;
     };
-    if !cwd.starts_with(&scope) || !permitted_roots.iter().any(|root| root.canonicalize().is_ok_and(|root| {
+    if cwd != scope.as_path() || !permitted_roots.iter().any(|root| root.canonicalize().is_ok_and(|root| {
         root == scope || (scope.starts_with(&root) && checkout_top_level(&scope))
     })) {
         return false;
@@ -1130,6 +1130,10 @@ mod tests {
         let decide = |command: &str| matching_rules(&json!(command), ApprovalRuleHarness::Codex, root.path(), &[root.path()], std::slice::from_ref(&rule)).is_some();
         assert!(decide("scripts/run.sh abc"));
         assert!(!decide("scripts/run.sh abc extra"));
+        let nested = root.path().join("nested");
+        std::fs::create_dir_all(nested.join("scripts")).unwrap();
+        std::fs::copy(&script, nested.join("scripts/run.sh")).unwrap();
+        assert!(matching_rules(&json!("scripts/run.sh abc"), ApprovalRuleHarness::Codex, &nested, &[root.path()], std::slice::from_ref(&rule)).is_none());
         std::fs::write(&script, b"#!/bin/sh\nexit 1\n").unwrap();
         assert!(!decide("scripts/run.sh abc"));
     }

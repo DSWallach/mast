@@ -311,7 +311,8 @@ fn approval_rule_proposal_accept_creates_rule_and_resolves(cx: &mut gpui::TestAp
     draw(vcx);
     press(vcx, "required-actions-approve-rule-proposal".into());
     assert_eq!(mutations(&calls, "setApprovalRule").len(), 1);
-    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["enabled"], true);
+    assert_eq!(mutations(&calls, "setApprovalRule")[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
     assert_eq!(mutations(&calls, "resolveUserActionRequest").len(), 1);
 }
 
@@ -335,7 +336,7 @@ fn approval_script_proposal_does_not_populate_environment(cx: &mut gpui::TestApp
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0]["editEnvironment"], false);
     assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["repositoryExecutable"]["path"], "scripts/run.sh");
-    assert!(saved[0]["rule"]["commandPolicy"]["constraints"].get("environment").is_none());
+    assert_eq!(saved[0]["rule"]["commandPolicy"]["constraints"]["environment"], serde_json::json!([]));
 }
 
 #[gpui::test]

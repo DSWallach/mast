@@ -89,12 +89,10 @@ fn proposed_approval_rule(row: &RequiredActionRow) -> Option<mast_proto::work_ou
     object.insert("createdBy".into(), serde_json::json!(format!("agent:{}", row.chat_id)));
     object.insert("enabled".into(), serde_json::json!(true));
     let mut rule: mast_proto::work_outline::ApprovalRule = serde_json::from_value(value).ok()?;
-    if let Some(path) = executable {
-        rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
-            environment: None,
-            repository_executable: Some(mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None }),
-        });
-    }
+    rule.constraints = Some(mast_proto::work_outline::ApprovalRuleConstraints {
+        environment: Some(Vec::new()),
+        repository_executable: executable.map(|path| mast_proto::work_outline::RepositoryApprovalExecutable { path, sha256: None }),
+    });
     if rule.label.trim().is_empty() || (rule.argv_prefix.is_empty() && rule.command_regex.as_deref().is_none_or(str::is_empty))
         || rule.cwd_scope.as_deref().is_some_and(|cwd| !std::path::Path::new(cwd).is_absolute()) || rule.validate().is_err() { return None; }
     Some(rule)
