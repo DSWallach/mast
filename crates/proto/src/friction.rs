@@ -96,6 +96,63 @@ pub struct FrictionReport {
     pub promoted_at: Option<i64>,
 }
 
+/// Whether a report is sufficiently specific to Mast to share across Spaces.
+pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
+    if !matches!(report.kind, FrictionKind::Bug | FrictionKind::ToolFailure) {
+        return false;
+    }
+    let names_tool = |text: &str| {
+        text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|word| crate::agent::agent_tools::USAGE.iter().any(|usage| usage.tool == word))
+    };
+    names_tool(&report.summary) || names_tool(&report.what_happened)
+        || report.links.iter().any(|link| match &link.target {
+            crate::RequestLinkTarget::Url { url } | crate::RequestLinkTarget::Pr { url } => {
+                url.starts_with("mast://") || url.starts_with("mast-artifact:")
+                    || url.starts_with("https://github.com/Pluto8195/mast/issues/")
+                    || url.starts_with("https://github.com/Pluto8195/mast/pull/")
+            }
+            _ => false,
+        })
+}
+
+#[cfg(test)]
+mod mast_filter_tests {
+    use super::*;
+
+    fn report(kind: &str, summary: &str, detail: &str, source: &str) -> FrictionReport {
+        serde_json::from_value(serde_json::json!({
+            "id": "report", "kind": kind, "summary": summary, "whatHappened": detail,
+            "workaround": null, "suggestion": null, "approval": null, "severity": null,
+            "provenance": {"chatId": "chat", "harness": "test", "model": null,
+                "spaceId": "space", "workItemId": null, "branch": null,
+                "createdAt": 1, "source": source},
+            "fingerprint": "report", "occurrences": 1, "lastSeen": 1, "status": "open"
+        })).unwrap()
+    }
+
+    #[test]
+    fn recognizes_registered_tools_and_mast_links() {
+        assert!(friction_is_about_mast(&report("tool_failure", "review_publish refused: failed", "error", "auto")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "create_chat returned an error", "agent")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "work_outline_read_current failed", "agent")));
+        let mut linked = report("bug", "Failed", "Details", "agent");
+        linked.links.push(crate::RequestLink { label: "issue".into(), target: crate::RequestLinkTarget::Url { url: "https://github.com/Pluto8195/mast/issues/42".into() } });
+        assert!(friction_is_about_mast(&linked));
+    }
+
+    #[test]
+    fn excludes_other_kinds_and_non_mast_tools() {
+        for kind in ["permission", "environment", "workflow", "docs"] {
+            assert!(!friction_is_about_mast(&report(kind, "review_publish failed", "Details", "auto")));
+        }
+        for name in ["gh", "cargo test", "Linear", "shell"] {
+            assert!(!friction_is_about_mast(&report("tool_failure", name, "failed", "auto")));
+        }
+        assert!(!friction_is_about_mast(&report("bug", "review_publish_extra", "Details", "agent")));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFrictionReportsParams {
