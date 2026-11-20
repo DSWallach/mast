@@ -264,7 +264,7 @@ async fn missing_agent_is_rejected_before_creating_a_chat() {
 async fn signed_out_claude_launch_reaches_transcript() {
     const ISOLATED: &str = "MAST_TEST_FIRST_RUN_CLAUDE_ISOLATED";
     if std::env::var_os(ISOLATED).is_none() {
-        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "work_outline_launch::signed_out_claude_launch_reaches_transcript"])
             .env(ISOLATED, "1")
@@ -272,7 +272,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
             .env("MAST_DATA_DIR", profile.path().join("data"))
             .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
             .env("CODEX_HOME", profile.path().join("codex"))
-            .env("TMPDIR", "/private/tmp")
+            .env("TMPDIR", std::env::temp_dir())
             .env("MAST_NO_LOGIN_SHELL", "1")
             .output().unwrap();
         assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "child did not run exactly one test: {}", String::from_utf8_lossy(&output.stdout));
@@ -280,7 +280,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
         return;
     }
 
-    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let repo = root.join("repo");
     init_repo(&repo, "README");
@@ -310,7 +310,7 @@ async fn signed_out_claude_launch_reaches_transcript() {
 async fn codex_only_launch_spawns_selected_executable() {
     const ISOLATED: &str = "MAST_TEST_FIRST_RUN_CODEX_ISOLATED";
     if std::env::var_os(ISOLATED).is_none() {
-        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+        let profile = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "work_outline_launch::codex_only_launch_spawns_selected_executable"])
             .env(ISOLATED, "1")
@@ -318,14 +318,14 @@ async fn codex_only_launch_spawns_selected_executable() {
             .env("MAST_DATA_DIR", profile.path().join("data"))
             .env("CLAUDE_CONFIG_DIR", profile.path().join("claude"))
             .env("CODEX_HOME", profile.path().join("codex"))
-            .env("TMPDIR", "/private/tmp")
+            .env("TMPDIR", std::env::temp_dir())
             .env("MAST_NO_LOGIN_SHELL", "1")
             .output().unwrap();
         assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "child did not run exactly one test: {}", String::from_utf8_lossy(&output.stdout));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
-    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::Builder::new().prefix("mast-first-run-").tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let repo = root.join("repo");
     init_repo(&repo, "README");
