@@ -2338,7 +2338,7 @@ impl RpcService for EngineRpc {
                 if p.all_spaces {
                     let values: Vec<_> = rows.iter().map(|row| {
                         if row.provenance.space_id != p.space_id {
-                            mast_proto::foreign_friction_view(row, row.space_name.as_deref().unwrap_or("Unknown Space"))
+                            crate::workspace_host::foreign_friction_view(row, row.space_name.as_deref().unwrap_or("Unknown Space"))
                         } else { serde_json::to_value(row).unwrap_or_default() }
                     }).collect();
                     RpcReply::value(&values)

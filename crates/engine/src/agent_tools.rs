@@ -1309,11 +1309,15 @@ impl AgentToolsService {
             id: String::new(),
             space_name: None,
             kind: args.kind,
-            summary: args.summary,
-            what_happened: args.what_happened,
-            workaround: args.workaround,
-            suggestion: args.suggestion,
-            approval: args.approval,
+            summary: mast_harness::redact::redact_secrets(&args.summary),
+            what_happened: mast_harness::redact::redact_secrets(&args.what_happened),
+            workaround: args.workaround.map(|value| mast_harness::redact::redact_secrets(&value)),
+            suggestion: args.suggestion.map(|value| mast_harness::redact::redact_secrets(&value)),
+            approval: args.approval.map(|mut approval| {
+                approval.command = mast_harness::redact::redact_secrets(&approval.command);
+                approval.why = mast_harness::redact::redact_secrets(&approval.why);
+                approval
+            }),
             severity: args.severity,
             links: args.links,
             provenance: mast_proto::FrictionProvenance {
@@ -1374,7 +1378,7 @@ impl AgentToolsService {
             let space_id = report.provenance.space_id.clone();
             let space_name = spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space");
             if all_spaces && space_id != context.grant.space_id {
-                return mast_proto::foreign_friction_view(&report, space_name);
+                return crate::workspace_host::foreign_friction_view(&report, space_name);
             }
             let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let mut value = json!(report);

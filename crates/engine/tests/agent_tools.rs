@@ -3978,6 +3978,22 @@ async fn friction_provenance_deduplication_and_filters() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn friction_agent_reports_redact_secrets_before_storage() {
+    let rig = rig().await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "friction-redaction", SPACE, &rig.core.device_id);
+    let value = tool(&rig, lease.token(), "report_friction", json!({
+        "kind":"bug", "summary":"ghp_fake_summary", "whatHappened":"ghp_fake_detail",
+        "workaround":"ghp_fake_workaround", "suggestion":"ghp_fake_suggestion",
+        "approval":{"command":"ghp_fake_command", "why":"ghp_fake_reason"}
+    })).await.unwrap();
+    let stored = rig.core.workspace.friction_reports(SPACE).pop().unwrap();
+    let stored = serde_json::to_string(&stored).unwrap();
+    assert!(!stored.contains("ghp_fake"), "{stored}");
+    assert!(!value.to_string().contains("ghp_fake"));
+    assert_eq!(stored.matches("[REDACTED]").count(), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     let rig = rig().await;
     rig.client.call(methods::MUTATE, json!({"op":"createSpace", "spaceId":OTHER_SPACE, "deviceId":rig.core.device_id, "path":"/tmp/other-space"})).await.unwrap();
@@ -3988,7 +4004,8 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     foreign.id.clear(); foreign.fingerprint.clear(); foreign.provenance.space_id = OTHER_SPACE.into();
     foreign.kind = mast_proto::FrictionKind::ToolFailure;
     foreign.provenance.source = mast_proto::FrictionSource::Auto;
-    foreign.summary = "review_publish refused: failed".into();
+    foreign.summary = "review_publish refused: failed ghp_fake_summary".into();
+    foreign.what_happened = "Legacy report ghp_fake_detail".into();
     foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None });
     foreign.links.push(mast_proto::RequestLink { label:"private".into(), target:mast_proto::RequestLinkTarget::Chat { id:"private-chat".into() } });
     foreign.provenance.work_item_id = Some("private-item".into());
@@ -4012,6 +4029,12 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     let found = reports.iter().find(|row| row["id"] == included.id).unwrap();
     assert_eq!(found["spaceId"], OTHER_SPACE);
     assert_eq!(found["spaceName"], "other-space");
+    assert_eq!(found["summary"], "review_publish refused: failed [REDACTED]");
+    assert_eq!(found["whatHappened"], "Legacy report [REDACTED]");
+    let rpc_rows = rig.client.call(methods::LIST_FRICTION_REPORTS, json!({"spaceId":SPACE,"allSpaces":true})).await.unwrap();
+    let rpc_foreign = rpc_rows.as_array().unwrap().iter().find(|row| row["id"] == included.id).unwrap();
+    assert_eq!(rpc_foreign["summary"], "review_publish refused: failed [REDACTED]");
+    assert_eq!(rpc_foreign["whatHappened"], "Legacy report [REDACTED]");
     for key in ["approval", "links", "provenance", "chatId", "workItemId", "branch"] { assert!(found.get(key).is_none(), "{key} leaked"); }
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"scope-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
     let error = tool(&rig, token, "dismiss_friction", json!({"id":included.id,"reason":"Test"})).await.unwrap_err();

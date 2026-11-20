@@ -37,6 +37,14 @@ use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
 
+/// Redact legacy reports at the cross-Space response boundary.
+pub(crate) fn foreign_friction_view(report: &mast_proto::FrictionReport, space_name: &str) -> serde_json::Value {
+    let mut value = mast_proto::foreign_friction_view(report, space_name);
+    value["summary"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.summary));
+    value["whatHappened"] = serde_json::json!(mast_harness::redact::redact_secrets(&report.what_happened));
+    value
+}
+
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
 pub const WORKSPACE_DOC_ID: &str = "workspace2";
