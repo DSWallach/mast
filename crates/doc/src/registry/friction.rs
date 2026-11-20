@@ -67,13 +67,26 @@ impl RegistryDoc {
 
     /// Read reports across Spaces, applying the caller's privacy filter.
     pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize) -> Vec<FrictionReport> {
-        let mut reports: Vec<_> = self.overlay_rows(KIND_FRICTION_REPORTS).iter()
-            .filter_map(decode)
-            .filter(|report| kind.is_none_or(|kind| report.kind == kind)
+        let mut reports = Vec::new();
+        self.visit_rows(KIND_FRICTION_REPORTS, |row| {
+            if let Some(kind) = kind {
+                let expected = serde_json::to_value(kind).ok();
+                if row.fields.get("kind") != expected.as_ref() { return; }
+            }
+            if let Some(since) = since {
+                let last_seen = row.fields.iter().filter(|(name, _)| name.starts_with(COUNTER_PREFIX))
+                    .filter_map(|(_, value)| value.get("lastSeen").and_then(Value::as_i64))
+                    .max().or_else(|| row.fields.get("lastSeen").and_then(Value::as_i64));
+                if last_seen.is_some_and(|last_seen| last_seen < since) { return; }
+            }
+            let Some(report) = decode(row) else { return; };
+            if kind.is_none_or(|kind| report.kind == kind)
                 && status.is_none_or(|status| report.status == status)
                 && since.is_none_or(|since| report.last_seen >= since)
-                && (report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report)))
-            .collect();
+                && (report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(&report)) {
+                reports.push(report);
+            }
+        });
         reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
         reports.truncate(limit.min(500));
         reports
