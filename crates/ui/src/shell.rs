@@ -8923,7 +8923,7 @@ impl Shell {
             // window above this column.)
             .children(assistant_section)
             .child(filter_row)
-            .when(theme.ui_style.layout != crate::ui_style::UiLayout::Compact, |el| {
+            .when(theme.ui_style.behavior.show_sidebar_overview_switch, |el| {
                 el.child(self.render_overview_switch(theme, cx))
             })
             .children(self.render_overview_filter_notice(theme, cx))
