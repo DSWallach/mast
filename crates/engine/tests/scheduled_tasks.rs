@@ -1896,6 +1896,23 @@ async fn standing_crash_recovery_fixture(later_steer: bool) {
     core.shutdown().await;
     drop(core);
 
+    if !later_steer {
+        // Inspect the snapshot that the next engine will actually load, after
+        // shutdown has finished and immediately before boot recovery runs.
+        let store = mast_sync::DocsStore::open(item_profile(&root).store_root()).unwrap();
+        let persisted = loro::LoroDoc::new();
+        persisted.import(&store.load_snapshot(&chat).unwrap().unwrap()).unwrap();
+        let doc = mast_doc::SessionDoc::from_doc(persisted);
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.iter().rev().find(|entry| entry.role == mast_doc::MessageRole::User).unwrap().id, scheduled_message);
+        assert!(entries.iter().any(|entry| entry.status == Some(mast_doc::MessageStatus::Streaming)
+            && chrono::Utc::now().timestamp_millis() - entry.created_at < 12 * 60 * 60 * 1000));
+        assert!(doc.read_queue().unwrap().iter().all(|row| row.id != scheduled_message));
+        assert!(!matches!(journal.last_event(&chat).unwrap(), Some((_, mast_proto::AgentEvent::Done { .. }))));
+        assert_eq!(journal.resume_attempts(&chat), 0);
+        drop(store);
+    }
+
     let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
     wait_for_run_state(&reopened, &run, ScheduledRunState::Failed).await;
     let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
