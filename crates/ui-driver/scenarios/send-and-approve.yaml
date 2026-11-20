@@ -4,11 +4,11 @@ name: send-and-approve
 world: { preset: small, seed: 1, mock: approval }
 screenshot: on-fail
 steps:
-  - expect: { visible: "#composer-input" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']" }
   - open: { chat: "Fresh chat" }
   - expect: { visible: "#transcript-region" }
-  - type: { into: "#composer-input", text: "run the tests" }
-  - expect: { visible: "#composer-input", focused: true, value: "run the tests" }
+  - type: { into: "multilinetextinput[name='Do anything…']", text: "run the tests" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "run the tests" }
   - key: "enter"
   - expect: { text: "run the tests", within: "#transcript-region" }
   - expect: { visible: "#question-panel" }

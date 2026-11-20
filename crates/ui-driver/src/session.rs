@@ -78,6 +78,8 @@ fn init_app(
     s.ui_layout = UiLayout::Minimal;
     s.appearance = mast_ui::appearance::AppearanceMode::Dark;
     s.sidebar_collapsed = false;
+    // Scenarios navigate the stable session-list fixture by chat title.
+    s.sidebar_overview = false;
     s.live_app_icon = false;
     s.show_menu_bar_item = false;
     mast_ui::settings::init(s.clone(), data, cx);

@@ -3,7 +3,7 @@ name: type-then-backspace
 world: { preset: small, seed: 1 }
 screenshot: on-fail
 steps:
-  - type: { into: "#composer-input", text: "hello world" }
-  - expect: { visible: "#composer-input", focused: true, value: "hello world" }
+  - type: { into: "multilinetextinput[name='Do anything…']", text: "hello world" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']", focused: true, value: "hello world" }
   - key: "backspace"
-  - expect: { visible: "#composer-input", value: "hello worl" }
+  - expect: { visible: "multilinetextinput[name='Do anything…']", value: "hello worl" }

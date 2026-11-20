@@ -76,7 +76,7 @@ impl Render for ChatRowView {
                 args.harness,
                 args.status,
                 args.selected,
-                false,
+                args.chat.archived,
                 false,
                 args.drag,
                 args.jump_label,
