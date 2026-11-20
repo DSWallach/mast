@@ -692,8 +692,7 @@ fn friction_all_spaces_scope_obeys_grant(cx: &mut gpui::TestAppContext) {
             mast_rpc::methods::GET_FRICTION_SETTINGS => Ok(serde_json::json!({"autoCapture":true,"allSpacesReadGrants":["s1"]})),
             mast_rpc::methods::LIST_FRICTION_REPORTS if params["allSpaces"] == true => Ok(serde_json::json!([{
                 "id":"foreign", "spaceName":"Other Space", "kind":"tool_failure", "summary":"review_publish failed", "whatHappened":"Failed",
-                "provenance":{"chatId":"chat", "harness":"codex", "model":null, "spaceId":"s2", "createdAt":1, "source":"agent"},
-                "fingerprint":"foreign", "occurrences":1, "lastSeen":1, "status":"open"
+                "spaceId":"s2", "severity":null, "occurrences":1, "lastSeen":1, "status":"open"
             }])),
             mast_rpc::methods::LIST_FRICTION_REPORTS => Ok(serde_json::json!([])),
             _ => template_reply(method, params),

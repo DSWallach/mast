@@ -66,12 +66,15 @@ impl RegistryDoc {
     }
 
     /// Read reports across Spaces, applying the caller's privacy filter.
-    pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<FrictionReport> {
+    pub fn mast_friction_reports(&self, _space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<FrictionStatus>, since: Option<i64>, _limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<FrictionReport> {
         let mut reports = Vec::new();
         self.visit_filtered_rows(KIND_FRICTION_REPORTS, |row| {
             if let Some(kind) = kind {
                 let expected = serde_json::to_value(kind).ok();
                 if row.fields.get("kind") != expected.as_ref() { return false; }
+            }
+            if let Some(status) = status {
+                if row.fields.get("status") != serde_json::to_value(status).ok().as_ref() { return false; }
             }
             if let Some(since) = since {
                 let last_seen = row.fields.iter().filter(|(name, _)| name.starts_with(COUNTER_PREFIX))
@@ -86,13 +89,10 @@ impl RegistryDoc {
                 && status.is_none_or(|status| report.status == status)
                 && since.is_none_or(|since| report.last_seen >= since)
                 && harness.is_none_or(|harness| report.provenance.harness == harness)
-                && model.is_none_or(|model| report.provenance.model.as_deref() == Some(model))
-                && (report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(&report)) {
+                && model.is_none_or(|model| report.provenance.model.as_deref() == Some(model)) {
                 reports.push(report);
             }
         });
-        reports.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
-        reports.truncate(limit.min(500));
         reports
     }
 

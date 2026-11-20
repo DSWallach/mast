@@ -103,18 +103,21 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
     if !matches!(report.kind, FrictionKind::Bug | FrictionKind::ToolFailure) {
         return false;
     }
+    static TOOLS: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    let tools = TOOLS.get_or_init(|| crate::agent::agent_tools::USAGE.iter().map(|usage| usage.tool)
+        .chain(crate::agent::agent_tools::tools::MCP_ONLY.iter().copied()).collect());
     let names_tool = |text: &str| {
-        text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .any(|word| {
-                let known = crate::agent::agent_tools::USAGE.iter().any(|usage| usage.tool == word)
-                    || crate::agent::agent_tools::tools::MCP_ONLY.contains(&word);
-                // Bare names such as `whoami` can also be shell commands.
-                known && (word.contains('_') || text.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part.eq_ignore_ascii_case("mast"))
-                    || (report.provenance.source == FrictionSource::Auto
-                        && report.summary.starts_with(&format!("{word} refused:"))))
+        ["mcp__mast-agent__", "mast-agent.", "mast-agent/"].iter().any(|prefix| {
+            text.match_indices(*prefix).any(|(index, _)| {
+                if text[..index].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return false; }
+                let name = text[index + prefix.len()..].split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+                tools.contains(name)
             })
+        })
     };
-    names_tool(&report.summary) || names_tool(&report.what_happened)
+    let captured_refusal = report.provenance.source == FrictionSource::Auto
+        && report.summary.split_once(" refused: ").is_some_and(|(tool, code)| !code.is_empty() && tools.contains(tool));
+    captured_refusal || names_tool(&report.summary) || names_tool(&report.what_happened)
         || report.links.iter().any(|link| match &link.target {
             crate::RequestLinkTarget::Url { url } | crate::RequestLinkTarget::Pr { url } => {
                 let url = url.to_ascii_lowercase();
@@ -123,6 +126,14 @@ pub fn friction_is_about_mast(report: &FrictionReport) -> bool {
             }
             _ => false,
         })
+}
+
+/// The fields that may cross a Space boundary.
+pub fn foreign_friction_view(report: &FrictionReport, space_name: &str) -> serde_json::Value {
+    serde_json::json!({"id":report.id, "kind":report.kind, "summary":report.summary,
+        "whatHappened":report.what_happened, "severity":report.severity,
+        "occurrences":report.occurrences, "lastSeen":report.last_seen, "status":report.status,
+        "spaceId":report.provenance.space_id, "spaceName":space_name})
 }
 
 #[cfg(test)]
@@ -143,9 +154,9 @@ mod mast_filter_tests {
     #[test]
     fn recognizes_registered_tools_and_mast_links() {
         assert!(friction_is_about_mast(&report("tool_failure", "review_publish refused: failed", "error", "auto")));
-        assert!(friction_is_about_mast(&report("bug", "Failed", "create_chat returned an error", "agent")));
-        assert!(friction_is_about_mast(&report("bug", "Failed", "work_outline_read_current failed", "agent")));
-        assert!(friction_is_about_mast(&report("tool_failure", "list_chats failed", "error", "agent")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "mast-agent.create_chat returned an error", "agent")));
+        assert!(friction_is_about_mast(&report("bug", "Failed", "mast-agent/work_outline_read_current failed", "agent")));
+        assert!(friction_is_about_mast(&report("tool_failure", "mcp__mast-agent__review_publish failed", "error", "agent")));
         assert!(friction_is_about_mast(&report("tool_failure", "whoami refused: failed", "error", "auto")));
         let mut linked = report("bug", "Failed", "Details", "agent");
         linked.links.push(crate::RequestLink { label: "issue".into(), target: crate::RequestLinkTarget::Url { url: "https://github.com/Pluto8195/mast/issues/42".into() } });
@@ -162,6 +173,8 @@ mod mast_filter_tests {
         }
         assert!(!friction_is_about_mast(&report("tool_failure", "server rejected server request: unknown", "Unsupported server request", "auto")));
         assert!(!friction_is_about_mast(&report("tool_failure", "whoami failed", "shell command failed", "agent")));
+        assert!(!friction_is_about_mast(&report("tool_failure", "Linear list_projects returned 401", "failed", "agent")));
+        assert!(!friction_is_about_mast(&report("tool_failure", "our API's send_message endpoint 500s", "failed", "agent")));
         assert!(!friction_is_about_mast(&report("bug", "Build failed", "Project test failed", "import")));
         assert!(!friction_is_about_mast(&report("bug", "review_publish_extra", "Details", "agent")));
         let mut unrelated = report("bug", "Failure", "Details", "agent");

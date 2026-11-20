@@ -1279,7 +1279,11 @@ impl WorkspaceHost {
     }
 
     pub fn mast_friction_reports(&self, space_id: &str, kind: Option<mast_proto::FrictionKind>, status: Option<mast_proto::FrictionStatus>, since: Option<i64>, limit: usize, harness: Option<&str>, model: Option<&str>) -> Vec<mast_proto::FrictionReport> {
-        self.read(|doc| doc.mast_friction_reports(space_id, kind, status, since, limit, harness, model))
+        let mut rows = self.read(|doc| doc.mast_friction_reports(space_id, kind, status, since, limit, harness, model));
+        rows.retain(|report| report.provenance.space_id == space_id || mast_proto::friction_is_about_mast(report));
+        rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+        rows.truncate(limit.min(500));
+        rows
     }
 
     // ── Planning artifacts (registry rows; policy in `crate::artifacts`) ──

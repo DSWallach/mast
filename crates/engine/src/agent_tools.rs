@@ -1371,12 +1371,16 @@ impl AgentToolsService {
         reports.truncate(args.limit.unwrap_or(100).min(500));
         let spaces = if all_spaces { self.workspace.read_spaces().map_err(|error| AgentToolError::invalid(error.to_string()))? } else { Vec::new() };
         let reports: Vec<Value> = reports.into_iter().map(|report| {
-            let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let space_id = report.provenance.space_id.clone();
+            let space_name = spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space");
+            if all_spaces && space_id != context.grant.space_id {
+                return mast_proto::foreign_friction_view(&report, space_name);
+            }
+            let reason = self.workspace.registry_row(mast_doc::registry::friction::KIND_FRICTION_REPORTS, &report.id).and_then(|row| row.fields.get("dismissalReason").cloned());
             let mut value = json!(report);
             if all_spaces {
                 value["spaceId"] = json!(space_id);
-                value["spaceName"] = json!(spaces.iter().find(|space| space.id == space_id).map(|space| space.display_name()).unwrap_or("Unknown Space"));
+                value["spaceName"] = json!(space_name);
             }
             if let Some(reason) = reason { value["dismissalReason"] = reason; }
             value

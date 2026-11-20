@@ -73,6 +73,7 @@ pub(super) struct FrictionDetailsState {
     status: Option<FrictionStatus>,
     all_spaces: bool,
     settings: Option<mast_proto::FrictionSettings>,
+    space_id: Option<String>,
     requested: bool,
     reports: Option<Vec<FrictionReport>>,
     error: Option<String>,
@@ -100,10 +101,12 @@ impl WorkItemDetails {
     }
 
     fn load_friction_settings(&mut self, cx: &mut Context<Self>) {
+        let space_id = self.space_id.clone();
         let task = self.state.read(cx).work_outline_actions().get_friction_settings();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
+                if this.space_id != space_id { return; }
                 if let Ok(settings) = result { this.friction.settings = Some(settings); }
                 cx.notify();
             }).ok();
@@ -155,6 +158,12 @@ impl WorkItemDetails {
                 }
                 match result {
                     Ok(reports) => this.friction.reports = Some(reports),
+                    Err(error) if this.friction.all_spaces && error.message.contains("Turn on Read Mast friction from all Spaces") => {
+                        this.friction.all_spaces = false;
+                        this.friction.settings = None;
+                        this.load_friction_settings(cx);
+                        this.fetch_friction(cx);
+                    }
                     Err(error) => this.friction.error = Some(error.message),
                 }
                 cx.notify();
@@ -280,6 +289,12 @@ impl WorkItemDetails {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        if self.friction.space_id.as_deref() != Some(&self.space_id) {
+            let generation = self.friction.generation + 1;
+            self.friction = FrictionDetailsState::default();
+            self.friction.generation = generation;
+            self.friction.space_id = Some(self.space_id.clone());
+        }
         if !self.friction.requested {
             self.friction.status = Some(FrictionStatus::Open);
             self.load_friction_settings(cx);
@@ -453,9 +468,9 @@ impl WorkItemDetails {
                     cx.notify();
                 }));
             for chip in [
-                Some(report.provenance.harness.as_str()),
+                (!report.provenance.harness.is_empty()).then_some(report.provenance.harness.as_str()),
                 report.provenance.model.as_deref(),
-                Some(source),
+                (report.provenance.space_id == self.space_id).then_some(source),
             ]
             .into_iter()
             .flatten()
@@ -716,7 +731,7 @@ impl WorkItemDetails {
                 if let Some(file_name) = &report.provenance.file_name {
                     details =
                         details.child(SharedString::from(format!("Imported from {file_name}")));
-                } else {
+                } else if report.provenance.space_id == self.space_id {
                     let chat_id = report.provenance.chat_id.clone();
                     details = details.child(
                         div()

@@ -3987,7 +3987,9 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     let mut foreign: mast_proto::FrictionReport = serde_json::from_value(local["report"].clone()).unwrap();
     foreign.id.clear(); foreign.fingerprint.clear(); foreign.provenance.space_id = OTHER_SPACE.into();
     foreign.kind = mast_proto::FrictionKind::ToolFailure;
+    foreign.provenance.source = mast_proto::FrictionSource::Auto;
     foreign.summary = "review_publish refused: failed".into();
+    foreign.approval = Some(mast_proto::FrictionApproval { command:"private command".into(), why:"private".into(), answer:None });
     let included = rig.core.workspace.record_friction(foreign.clone()).unwrap();
     foreign.id.clear(); foreign.fingerprint.clear(); foreign.kind = mast_proto::FrictionKind::Environment;
     foreign.summary = "Other environment".into();
@@ -4007,6 +4009,7 @@ async fn friction_all_spaces_requires_grant_and_filters_foreign_reports() {
     let found = reports.iter().find(|row| row["id"] == included.id).unwrap();
     assert_eq!(found["spaceId"], OTHER_SPACE);
     assert_eq!(found["spaceName"], "other-space");
+    for key in ["approval", "links", "provenance", "chatId", "workItemId", "branch"] { assert!(found.get(key).is_none(), "{key} leaked"); }
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"scope-child", "spaceId":SPACE, "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
     let error = tool(&rig, token, "dismiss_friction", json!({"id":included.id,"reason":"Test"})).await.unwrap_err();
     assert!(error.contains("another Space"), "{error}");
