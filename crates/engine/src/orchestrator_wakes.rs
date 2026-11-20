@@ -1188,8 +1188,11 @@ impl OrchestratorWakes {
         // same lock, and `WakeCore::decide` holds while any queue row exists
         // (`core.rs` Hold(Queued)); one Deliver renders a single batch as one
         // row, however many events (a mixed batch can hold several final
-        // reports) it contains. So this loop normally sees one row; the
-        // per-row retraction here is defensive hardening.
+        // reports) it contains. So this loop normally sees one row, but that is
+        // not strictly guaranteed: a Deliver landing in the gap between the
+        // queue drain's take and the session turning active, followed by a
+        // failed dispatch that re-queues the first row, can leave two. The
+        // per-row retraction here covers that.
         let mut first_error = None;
         for row in rows {
             let stopped = (|| -> Result<(), String> {
