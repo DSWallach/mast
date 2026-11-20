@@ -544,6 +544,20 @@ impl OrchestratorWakes {
             let mut legacy_receipts = HashMap::new();
             let mut unavailable = HashSet::new();
             for chat in saved.orchestrators.keys().cloned().collect::<Vec<_>>() {
+                let invalid_handback = saved.orchestrators[&chat].iter().any(|entry| {
+                    let Some(tag) = &entry.event.final_handback else { return false };
+                    !workspace.authenticated_final_handback(&tag.operation_id).is_some_and(|intent| {
+                        *tag == handback_identity(&intent)
+                            && entry.event.worker_chat_id == intent.worker_chat_id
+                            && entry.event.kind == WakeEventKind::WorkerReport
+                            && entry.event.report.as_deref() == Some(&intent.report)
+                    })
+                });
+                if invalid_handback {
+                    tracing::warn!(%chat, "could not authenticate stored final handback");
+                    unavailable.insert(chat);
+                    continue;
+                }
                 let ineligible = workspace.chat(&chat).ok().flatten().is_some_and(|recipient| recipient.archived)
                     || !state.core.settings(&chat).enabled;
                 if ineligible {
@@ -944,18 +958,21 @@ impl OrchestratorWakes {
     pub async fn set_settings(&self, chat_id: &str, settings: WakeSettings) -> WakeStatus {
         let this = self.clone();
         let chat = chat_id.to_owned();
-        if let Err(error) = tokio::task::spawn_blocking(move || {
+        let reports_enabled = tokio::task::spawn_blocking(move || {
             let mut state = lock(&this.inner.state);
+            let had_reports = state.core.settings(&chat).wakes_for(WakeEventKind::WorkerReport);
             state.core.set_settings(&chat, settings);
-            state
-                .settings_overrides
-                .insert(chat, settings);
+            state.settings_overrides.insert(chat, settings);
             if let Err(error) = this.inner.event_turns.synchronize_held(&state.core.held_events()) {
                 tracing::warn!(%error, "could not save held wake events");
             }
             this.persist(&state);
-        }).await {
-            tracing::warn!(%error, "wake settings worker failed");
+            !had_reports && settings.wakes_for(WakeEventKind::WorkerReport)
+        }).await;
+        match reports_enabled {
+            Ok(true) => self.recover_final_handbacks_for(Some(chat_id)).await,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "wake settings worker failed"),
         }
         self.evaluate(chat_id, false).await;
         self.status(chat_id)
@@ -1566,6 +1583,10 @@ impl OrchestratorWakes {
     /// Retry locally authenticated intents after recovery. Unavailable
     /// history or changed ownership is retained for a later explicit review.
     pub async fn recover_final_handbacks(&self) {
+        self.recover_final_handbacks_for(None).await;
+    }
+
+    async fn recover_final_handbacks_for(&self, parent: Option<&str>) {
         let workspace = self.inner.workspace.clone();
         let Ok(intents) = tokio::task::spawn_blocking(move || workspace.locally_authenticated_final_handbacks()).await else {
             tracing::warn!("could not load final handback recovery intents");
@@ -1573,6 +1594,9 @@ impl OrchestratorWakes {
         };
         for intent in intents {
             if self.inner.cancel.is_cancelled() { break; }
+            if parent.is_some_and(|parent| parent != intent.parent_chat_id) {
+                continue;
+            }
             if let Err(error) = self.report_final_handback(&intent).await {
                 tracing::warn!(%error, worker = %intent.worker_chat_id, "final handback remains pending");
             }
@@ -1621,6 +1645,7 @@ impl OrchestratorWakes {
             let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
             let queued = self.inner.sessions.turn_in_flight(worker)
                 || self.inner.sessions.has_any_pending_input(worker)
+                || self.inner.sessions.has_interrupted_turn(worker)
                 || DocHost::session_doc_has_queued_turn(doc)?;
             let no_owned_subagents = !queued && !doc.read_entries()?.iter()
                 .flat_map(|entry| &entry.parts)

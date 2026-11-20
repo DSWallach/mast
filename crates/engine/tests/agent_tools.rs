@@ -4727,6 +4727,21 @@ async fn final_handback_receipt_requires_recipient_transcript() {
     assert_eq!(wakes.report_final_handback(&intent).await.unwrap().delivery, "delivered");
 }
 
+async fn await_handback_receipt(core: &EngineCore, data_dir: &Path, operation_id: &str) {
+    let path = data_dir.join("orchestrator-wake-events.json");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        core.doc_host.flush_all();
+        core.orchestrator_wakes.flush_receipts().await;
+        let store: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if store["delivered_handbacks"][operation_id].is_object() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "handback receipt was not saved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_handback_rpc_recovers_held_report_and_archives_once() {
     let a = archive_rig().await;
@@ -4795,13 +4810,23 @@ async fn final_handback_rpc_recovers_held_report_and_archives_once() {
     core.orchestrator_wakes.evaluate(CHAT, true).await;
     wait_for(|| harness.requests.lock().unwrap().iter().any(|request|
         request.prompt.contains("Unique final handback result")), "manager receives handback").await;
-    core.doc_host.flush_all();
-    core.orchestrator_wakes.flush_receipts().await;
+    let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "lost-reply");
+    await_handback_receipt(&core, &_tmp.path().join("data"), &operation_id).await;
     let delivered: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry.clone()).await.unwrap();
     assert_eq!(delivered["delivery"], "delivered");
     tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    let profile = mast_engine::EngineProfile::development(
+        &_tmp.path().join("data"),
+        &std::env::var("MAST_ORG_ID").unwrap_or_else(|_| "dev-org".into()),
+        &std::env::var("MAST_USER_ID").unwrap_or_else(|_| "dev-user".into()),
+    );
+    let journal = mast_engine::RunJournal::open(profile.store_root().join("journals")).unwrap();
+    journal.note_interrupted(ARCHIVE_CHILD, mast_proto::InterruptedOutcome::Resumed, 1);
     assert!(worker.doc().take_queued("pending-worker-message").unwrap().is_some());
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(!core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived);
+    core.sessions.dismiss_interrupted(ARCHIVE_CHILD);
     wait_for(|| core.workspace.chat(ARCHIVE_CHILD).unwrap().unwrap().archived, "automatic archive").await;
     let reply: Value = rpc.call(mast_proto::agent_tools::TOOL_CALL_METHOD, retry).await.unwrap();
     assert_eq!(reply["delivery"], "delivered");
@@ -4842,8 +4867,8 @@ async fn final_handback_delivery_respects_keep_and_reassignment() {
         rig.core.orchestrator_wakes.evaluate(CHAT, true).await;
         wait_for(|| rig.harness.requests.lock().unwrap().iter().any(|request|
             request.prompt.contains("Guarded final report")), "protected worker report").await;
-        rig.core.doc_host.flush_all();
-        rig.core.orchestrator_wakes.flush_receipts().await;
+        let operation_id = mast_proto::agent_tools::operation_id(ARCHIVE_CHILD, "protected-worker");
+        await_handback_receipt(&rig.core, &rig._tmp.path().join("data"), &operation_id).await;
         let reply = tool(rig, lease.token(), "final_handback", args).await.unwrap();
         assert_eq!(reply["delivery"], "delivered");
         tokio::time::sleep(Duration::from_millis(2200)).await;

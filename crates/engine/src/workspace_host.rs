@@ -3040,6 +3040,16 @@ impl WorkspaceHost {
         self.ledger_holds(&Self::final_handback_ledger_key(intent))
     }
 
+    pub(crate) fn authenticated_final_handback(
+        &self,
+        operation_id: &str,
+    ) -> Option<mast_doc::registry::final_handback::FinalHandbackIntent> {
+        self.read(|doc| doc.final_handback_intent(operation_id))
+            .ok()
+            .flatten()
+            .filter(|intent| self.final_handback_is_locally_authenticated(intent))
+    }
+
     pub(crate) fn locally_authenticated_final_handbacks(&self) -> Vec<mast_doc::registry::final_handback::FinalHandbackIntent> {
         self.read(|doc| doc.final_handback_intents()).into_iter().filter(|intent| {
             self.final_handback_is_locally_authenticated(intent)
