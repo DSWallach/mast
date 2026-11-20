@@ -258,6 +258,7 @@ mod tests {
         cx.run_until_parked();
         assert!(provider.state.borrow().revision.is_none());
         assert!(provider.state.borrow().watch.is_none());
+        clear_watch_failure(provider.client.request_context());
     }
 
     #[gpui::test]
