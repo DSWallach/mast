@@ -29,23 +29,48 @@ pub(crate) fn start(
     wakes: OrchestratorWakes,
     launch: WorkItemLaunchService,
 ) -> CancellationToken {
+    start_inner(workspace, host, sessions, artifacts, wakes, launch, None)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn start_paused(
+    workspace: WorkspaceHost, host: DocHost, sessions: SessionsEngine,
+    artifacts: ArtifactsService, wakes: OrchestratorWakes, launch: WorkItemLaunchService,
+) -> (CancellationToken, tokio::sync::oneshot::Sender<()>) {
+    let (resume, paused) = tokio::sync::oneshot::channel();
+    (start_inner(workspace, host, sessions, artifacts, wakes, launch, Some(paused)), resume)
+}
+
+fn start_inner(
+    workspace: WorkspaceHost, host: DocHost, sessions: SessionsEngine,
+    artifacts: ArtifactsService, wakes: OrchestratorWakes, launch: WorkItemLaunchService,
+    paused: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> CancellationToken {
     let cancel = CancellationToken::new();
     let stopped = cancel.clone();
+    let mut rx = sessions.watch_sessions();
+    // Capture before spawning: a first turn that finishes before the spawned
+    // task is polled must not be mistaken for a restart-era completion.
+    let mut previous: HashMap<String, Option<String>> = rx.borrow().iter()
+        .map(|session| (session.chat_id.clone(), session.last_completed_turn.clone()))
+        .collect();
     tokio::spawn(async move {
-        let mut rx = sessions.watch_sessions();
-        let mut previous: HashMap<String, Option<String>> = HashMap::new();
+        if let Some(paused) = paused {
+            tokio::select! { _ = stopped.cancelled() => return, _ = paused => {} }
+        }
+        let mut recheck = tokio::time::interval(std::time::Duration::from_secs(1));
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
         loop {
+            if stopped.is_cancelled() { break; }
             let rows: Vec<Session> = rx.borrow_and_update().clone();
             for session in rows {
-                let old =
-                    previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
+                let old = previous.get(&session.chat_id);
                 let Some(turn) = session.last_completed_turn.as_deref() else {
                     continue;
                 };
                 if session.status != SessionStatus::Idle
-                    || old.is_none()
-                    || old.flatten().as_deref() == Some(turn)
+                    || old.and_then(|value| value.as_deref()) == Some(turn)
                 {
                     continue;
                 }
@@ -81,6 +106,7 @@ pub(crate) fn start(
                 let Some(space) = chat.space_id.as_deref() else {
                     continue;
                 };
+                previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
                 let status = || {
                     briefing::read(
                         &artifacts,
@@ -220,7 +246,11 @@ pub(crate) fn start(
                     }
                 }
             }
-            tokio::select! { _ = stopped.cancelled() => break, result = rx.changed() => if result.is_err() { break; } }
+            tokio::select! {
+                _ = stopped.cancelled() => break,
+                _ = recheck.tick() => {},
+                result = rx.changed() => if result.is_err() { break; }
+            }
         }
     });
     cancel

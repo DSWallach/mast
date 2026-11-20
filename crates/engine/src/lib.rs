@@ -260,6 +260,13 @@ impl EngineCore {
     pub async fn test_work_item_launch_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.work_item_launch.test_gate().await
     }
+    /// Replace the automatic watcher with one paused after registration.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_start_paused_manager_watcher(&self) -> (tokio_util::sync::CancellationToken, tokio::sync::oneshot::Sender<()>) {
+        self.automatic_manager_handoff.cancel();
+        automatic_manager_handoff::start_paused(self.workspace.clone(), self.doc_host.clone(), self.sessions.clone(), self.artifacts.clone(), self.orchestrator_wakes.clone(), self.work_item_launch.clone())
+    }
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$MAST_ORG_ID` / `$MAST_USER_ID` (dev defaults `dev-org` / `dev-user`);

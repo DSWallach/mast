@@ -774,7 +774,10 @@ impl ScheduledTasks {
 
         // Parent selection and creation must serialize with Manager handoff's
         // child transfer and role rotation on this engine.
-        let _launch = self.0.launch_service.lock_launch().await;
+        let _launch = tokio::select! {
+            _ = self.0.cancel.cancelled() => return Err(fail("Scheduled task dispatch stopped")),
+            guard = self.0.launch_service.lock_launch() => guard,
+        };
         crate::work_outline_launch::launch_scheduled_chat(
             &self.0.workspace,
             &self.0.host,
