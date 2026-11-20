@@ -1267,7 +1267,7 @@ fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkSta
 }
 
 fn pr_update(urls: &[&str]) -> mast_engine::pr_ticket_cache::PrCacheUpdate {
-    mast_engine::pr_ticket_cache::PrCacheUpdate { revision: 1, urls: urls.iter().map(|url| (*url).to_owned()).collect(), any_branch: false }
+    mast_engine::pr_ticket_cache::PrCacheUpdate { revision: 1, urls: urls.iter().map(|url| (*url).to_owned()).collect(), branches: Vec::new() }
 }
 
 const PR_57: &str = "https://github.com/example/project/pull/57";
@@ -1347,13 +1347,63 @@ fn a_pr_cache_update_expires_only_the_chats_it_touches(cx: &mut TestAppContext) 
         assert!(shell.board_links_due(&ids, cx).is_empty());
         shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx);
         assert_eq!(shell.board_links_due(&ids, cx), vec!["w-0"], "only the chat linked to the changed PR is due");
+        shell.chat_header_links.get_mut("w-2").unwrap().checkout = Some(("/repo/w-2".into(), "w2".into(), Some("feature/w-2".into())));
         let mut update = pr_update(&[]);
-        update.any_branch = true;
+        update.branches = vec![mast_engine::pr_ticket_cache::PrBranchKey { cwd: "/repo/w-2".into(), branch: "feature/w-2".into() }];
         shell.on_tracker_pr_cache_changed(CHAT_API, Some(&update), cx);
         let mut due = shell.board_links_due(&ids, cx);
         due.sort();
-        assert_eq!(due, vec!["w-0", "w-2"], "a branch change also reaches chats with no PR yet");
+        assert_eq!(due, vec!["w-0", "w-2"], "a branch change reaches only the chats on that branch, not every chat without a PR");
     });
+}
+
+#[gpui::test]
+fn a_large_tracker_refetches_every_due_chat_without_an_unrelated_rebuild(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage as Stage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
+    add_workers(&shell, vcx, 20);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // Statuses already known and unchanged: their refetch replies must not rely on a rebuild to continue.
+    shell.update(vcx, |shell, _| for i in 0..20 {
+        shell.chat_header_links.get_mut(&format!("w-{i}")).unwrap().status = Some(Default::default());
+    });
+    let building = stage_counts(&shell, vcx);
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, None, cx));
+    draw(vcx);
+    // Answer every link status request; only the last chat to be asked has a PR.
+    let mut asked = std::collections::HashSet::new();
+    let mut idle_rounds = 0;
+    while idle_rounds < 5 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        let mut got = false;
+        while let Ok(line) = requests.try_recv() {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] != mast_rpc::methods::CHAT_LINK_STATUS { continue; }
+            got = true;
+            let chat = request["params"]["chatId"].as_str().unwrap().to_owned();
+            let status = if chat == "w-19" { link_status_with_pr("OPEN") } else { mast_engine::pr_ticket_cache::ChatLinkStatus::default() };
+            asked.insert(chat);
+            replies.try_send(serde_json::json!({"id": request["id"], "ok": status}).to_string()).unwrap();
+        }
+        idle_rounds = if got { 0 } else { idle_rounds + 1 };
+        vcx.executor().advance_clock(Duration::from_millis(500));
+    }
+    draw(vcx);
+    let missing: Vec<_> = (0..20).map(|i| format!("w-{i}")).filter(|id| !asked.contains(id)).collect();
+    assert!(missing.is_empty(), "every due chat is refetched, not just the first 8; missing {missing:?}");
+    let mut expected = building;
+    expected[Stage::Building.index()] -= 1;
+    expected[Stage::PrReview.index()] += 1;
+    assert_eq!(stage_counts(&shell, vcx), expected, "the last chat reaches PR review");
+    drop(guard);
 }
 
 #[gpui::test]

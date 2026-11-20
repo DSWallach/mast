@@ -2095,6 +2095,7 @@ impl Shell {
                         },
                     );
                     if changed { this.mark_board_links_dirty(chat_id, cx); }
+                    this.top_up_board_links(cx);
                 }
                 cx.notify();
             })
@@ -2112,15 +2113,21 @@ impl Shell {
     /// Make the link statuses a PR cache update touched due for a refetch,
     /// without dropping what is shown meanwhile. `None` (an update that does
     /// not say what changed) expires everything.
-    pub(crate) fn expire_chat_header_links(&mut self, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>) {
+    pub(crate) fn expire_chat_header_links(&mut self, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>, cx: &App) {
         let Some(stale) = Instant::now().checked_sub(CHAT_HEADER_LINK_REFRESH + Duration::from_secs(1)) else { return; };
-        for entry in self.chat_header_links.values_mut() {
+        let state = self.state.read(cx);
+        for (id, entry) in self.chat_header_links.iter_mut() {
             let touched = match (update, entry.status.as_ref()) {
                 (None, _) | (_, None) => true,
                 (Some(update), Some(status)) => {
                     let urls = status.pr_links.iter().map(|link| link.url.as_str()).chain(status.pr.iter().filter_map(|pr| pr.url.as_deref()));
-                    let linked = urls.clone().any(|url| update.urls.iter().any(|changed| changed.eq_ignore_ascii_case(url)));
-                    linked || (update.any_branch && status.pr_links.is_empty() && status.pr.is_none())
+                    urls.clone().any(|url| update.urls.iter().any(|changed| changed.eq_ignore_ascii_case(url)))
+                        || (!update.branches.is_empty() && {
+                            let chat = state.chats.iter().find(|chat| &chat.id == id);
+                            let on_changed = |cwd: &str, branch: &str| update.branches.iter().any(|key| key.cwd == cwd && key.branch == branch);
+                            chat.is_some_and(|chat| chat.cwd.as_deref().zip(chat.branch.as_deref()).is_some_and(|(cwd, branch)| on_changed(cwd, branch)))
+                                || entry.checkout.as_ref().is_some_and(|(path, _, branch)| branch.as_deref().is_some_and(|branch| on_changed(path, branch)))
+                        })
                 }
             };
             if touched { entry.fetched_at = stale; }

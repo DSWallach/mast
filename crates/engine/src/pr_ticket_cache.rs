@@ -69,8 +69,16 @@ pub struct PrCacheUpdate {
     pub revision: u64,
     /// PR URLs whose cached state changed (old and new).
     pub urls: Vec<String>,
-    /// A branch lookup changed, so chats without a PR link may now have one.
-    pub any_branch: bool,
+    /// Branch lookups whose result changed (checkout path and branch), so the
+    /// chats on those branches can be refreshed.
+    pub branches: Vec<PrBranchKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrBranchKey {
+    pub cwd: String,
+    pub branch: String,
 }
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(20);
@@ -407,7 +415,8 @@ impl PrTicketCache {
     /// Queue a refresh unless the entry is a merged PR (terminal) or the key is
     /// backing off after a transient failure. Never hold `pr_cache` when calling.
     fn queue_pr_refresh(&self, key: PrKey) {
-        if lock(&self.inner.pr_cache).get(&key).is_some_and(Entry::is_merged) { return; }
+        // Only a PR URL is terminal once merged; a branch can be reused for a follow-up PR.
+        if matches!(key, PrKey::Url(_)) && lock(&self.inner.pr_cache).get(&key).is_some_and(Entry::is_merged) { return; }
         if lock(&self.inner.pr_retry).get(&key).is_some_and(|(_, next)| Instant::now() < *next) { return; }
         lock(&self.inner.pending_pr).insert(key);
     }
@@ -969,13 +978,16 @@ impl PrTicketCache {
     /// Drain up to `KEYS_PER_SWEEP` pending PR keys, oldest observation first
     /// (never-fetched keys first of all).
     fn take_pending_prs(&self) -> Vec<PrKey> {
-        let mut pending = lock(&self.inner.pending_pr);
-        let cache = lock(&self.inner.pr_cache);
-        let mut all: Vec<(Option<Instant>, PrKey)> = pending.iter()
-            .map(|key| (cache.get(key).map(|entry| entry.fetched_at), key.clone())).collect();
-        drop(cache);
+        // One lock at a time: `queue_completion_observations` takes the cache
+        // before pending, so never hold pending while reading the cache.
+        let keys: Vec<PrKey> = lock(&self.inner.pending_pr).iter().cloned().collect();
+        let mut all: Vec<(Option<Instant>, PrKey)> = {
+            let cache = lock(&self.inner.pr_cache);
+            keys.into_iter().map(|key| (cache.get(&key).map(|entry| entry.fetched_at), key)).collect()
+        };
         all.sort_by_key(|(at, _)| *at);
         let take: Vec<PrKey> = all.into_iter().take(KEYS_PER_SWEEP).map(|(_, key)| key).collect();
+        let mut pending = lock(&self.inner.pending_pr);
         for key in &take { pending.remove(key); }
         take
     }
@@ -985,7 +997,7 @@ impl PrTicketCache {
     fn publish_pr_results(&self, results: Vec<(PrKey, PrLookup)>) {
         if results.is_empty() { return; }
         let mut urls = HashSet::<String>::new();
-        let mut any_branch = false;
+        let mut branches = Vec::<PrBranchKey>::new();
         let mut cache = lock(&self.inner.pr_cache);
         let mut retry = lock(&self.inner.pr_retry);
         for (key, lookup) in results {
@@ -1006,19 +1018,25 @@ impl PrTicketCache {
                 for status in [&old, &new].into_iter().flatten() {
                     if let Some(url) = &status.url { urls.insert(url.clone()); }
                 }
-                if let PrKey::Url(url) = &key { urls.insert(url.clone()); } else { any_branch = true; }
+                match &key {
+                    PrKey::Url(url) => { urls.insert(url.clone()); }
+                    PrKey::Branch { cwd, branch } | PrKey::CheckoutBranch { cwd, branch } => {
+                        let key = PrBranchKey { cwd: cwd.to_string_lossy().into_owned(), branch: branch.clone() };
+                        if !branches.contains(&key) { branches.push(key); }
+                    }
+                }
             }
             cache.insert(key, Entry { data: new, fetched_at: Instant::now() });
         }
         drop(retry);
         drop(cache);
-        if urls.is_empty() && !any_branch { return; }
+        if urls.is_empty() && branches.is_empty() { return; }
         let mut urls: Vec<String> = urls.into_iter().collect();
         urls.sort();
         self.inner.pr_revision.send_modify(|update| {
             update.revision = update.revision.wrapping_add(1);
             update.urls = urls;
-            update.any_branch = any_branch;
+            update.branches = branches;
         });
     }
 
@@ -1806,6 +1824,31 @@ mod tests {
         assert_eq!(status.pr_links[0].detail.as_ref().map(|pr| pr.state.as_str()), Some("MERGED"));
         assert_eq!(cache.request_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("MERGED".into()));
         assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn a_merged_branch_lookup_is_rechecked_but_a_merged_url_is_not() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let mut merged = open_pr_for_test(url);
+        merged.state = "MERGED".into();
+        let key = PrKey::Branch { cwd: PathBuf::from("/tmp/repo-reuse"), branch: "reused".into() };
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(merged))]);
+        age(&cache, &key, CACHE_TTL + Duration::from_secs(5));
+        lock(&cache.inner.pending_pr).clear();
+        cache.status_for_chat_links(None, Some("/tmp/repo-reuse"), Some("reused"), &[], None);
+        assert!(lock(&cache.inner.pending_pr).contains(&key), "a reused branch can have a follow-up PR");
+    }
+
+    #[test]
+    fn a_changed_branch_lookup_is_published_by_checkout_and_branch() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/9";
+        let key = PrKey::Branch { cwd: PathBuf::from("/tmp/repo-a"), branch: "feature".into() };
+        cache.publish_pr_results(vec![(key, PrLookup::Found(open_pr_for_test(url)))]);
+        let update = cache.watch_pr_revision().borrow().clone();
+        assert_eq!(update.branches, vec![PrBranchKey { cwd: "/tmp/repo-a".into(), branch: "feature".into() }]);
+        assert_eq!(update.urls, vec![url.to_owned()]);
     }
 
     #[test]
