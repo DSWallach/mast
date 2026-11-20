@@ -309,10 +309,10 @@ fn scope_title_of(item: &WorkItemView) -> String {
     }
 }
 
-fn sorted_scope<'a>(
-    instructions: &'a [WorkItemInstructionView],
+fn sorted_scope(
+    instructions: &[WorkItemInstructionView],
     matches: impl Fn(&WorkItemInstructionView) -> bool,
-) -> Vec<&'a WorkItemInstructionView> {
+) -> Vec<&WorkItemInstructionView> {
     let mut scope: Vec<_> = instructions
         .iter()
         .filter(|i| !i.archived() && matches(i))

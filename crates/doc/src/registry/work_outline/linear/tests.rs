@@ -160,6 +160,35 @@ fn modified(doc: &RegistryDoc, id: &str) -> Vec<String> {
 }
 
 #[test]
+fn worker_automation_defaults_off_and_persists_per_space() {
+    use mast_proto::work_outline::{MergedPrCompletion, SetWorkerAutomationParams};
+    let mut doc = doc();
+    let defaults = snap(&doc).space_settings;
+    assert!(!defaults.worker_worktrees);
+    assert_eq!(defaults.merged_pr_completion, None);
+    assert_eq!(defaults.archive_workers_after_days, None);
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: None, worker_worktrees: true,
+        merged_pr_completion: Some(MergedPrCompletion::Ask),
+        archive_workers_after_days: Some(3), operation_id: "worker-settings".into(),
+    })).unwrap();
+    let settings = snap(&doc).space_settings;
+    assert!(settings.worker_worktrees);
+    assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
+    assert_eq!(settings.archive_workers_after_days, Some(3));
+    assert_eq!(doc.work_outline_snapshot(OFF_SPACE, true).space_settings, defaults);
+    apply(&mut doc, WorkOutlineMutation::SetWorkerAutomation(SetWorkerAutomationParams {
+        space_id: SPACE.into(), field: Some(mast_proto::work_outline::WorkerAutomationField::Worktrees),
+        worker_worktrees: false, merged_pr_completion: None, archive_workers_after_days: None,
+        operation_id: "worker-worktrees-off".into(),
+    })).unwrap();
+    let settings = snap(&doc).space_settings;
+    assert!(!settings.worker_worktrees);
+    assert_eq!(settings.merged_pr_completion, Some(MergedPrCompletion::Ask));
+    assert_eq!(settings.archive_workers_after_days, Some(3));
+}
+
+#[test]
 fn spaces_default_to_linear_off_and_the_setting_is_lww() {
     let mut doc = doc();
     assert!(!snap(&doc).space_settings.linear_enabled);
@@ -529,4 +558,33 @@ fn system_writes_never_overwrite_a_field_the_user_took_over() {
     assert_eq!(item.title, "Mine");
     assert_eq!(item.description.as_deref(), Some("Body v2"));
     assert_eq!(item.status, WorkItemStatus::Pending);
+}
+
+#[test]
+fn space_linear_account_defaults_and_updates_independently() {
+    let mut doc = doc();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
+    let set = |account_id, operation_id: &str| {
+        WorkOutlineMutation::SetSpaceLinearAccount(SetSpaceLinearAccountParams {
+            space_id: SPACE.into(),
+            account_id,
+            operation_id: operation_id.into(),
+        })
+    };
+    apply(&mut doc, set(Some("personal".into()), "account-1")).unwrap();
+    assert_eq!(
+        snap(&doc).space_settings.linear_account_id.as_deref(),
+        Some("personal")
+    );
+    assert_eq!(
+        doc.work_outline_snapshot(OFF_SPACE, true)
+            .space_settings
+            .linear_account_id,
+        None
+    );
+    let batches = doc.batches_written();
+    apply(&mut doc, set(Some("personal".into()), "account-2")).unwrap();
+    assert_eq!(doc.batches_written(), batches);
+    apply(&mut doc, set(None, "account-3")).unwrap();
+    assert_eq!(snap(&doc).space_settings.linear_account_id, None);
 }

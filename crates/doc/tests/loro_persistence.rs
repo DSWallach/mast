@@ -1,4 +1,8 @@
 //! Actual 1.13.7 persisted bytes, shared with the edge compatibility tests.
+#[cfg(test)]
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
 use loro::{ExportMode, LoroDoc, ToJson};
 use serde_json::{Value, json};
 
@@ -41,6 +45,3 @@ fn legacy_update_waiting_for_snapshot_is_not_lost() {
         serde_json::from_str(include_str!("fixtures/loro-1.13.7/updated.json")).unwrap();
     assert_eq!(doc.get_deep_value().to_json_value(), expected);
 }
-
-#[path = "../../../test_support/isolation.rs"]
-mod test_isolation;

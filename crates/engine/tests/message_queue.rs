@@ -405,10 +405,14 @@ async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
 
     let (after_harness, after_prompts) = HeldHarness::new(SteeringMode::TurnBoundary);
     let after = assemble_at(&data_dir, after_harness);
-    // Materializing the persisted chat starts its background drain task. Give
-    // that task time to prove the restored row stays frozen.
-    assert_eq!(queue_texts(&after), vec!["after restart"]);
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Observe a drain reaching the paused decision, even if startup already ran.
+    let handle = after.doc_host.open(CHAT).unwrap();
+    let mut paused_drain = handle.test_paused_drain_observer();
+    after.doc_host.drain_queue(&handle).await;
+    tokio::time::timeout(Duration::from_secs(30), paused_drain.changed())
+        .await
+        .expect("paused drain decision timed out")
+        .expect("paused drain observer closed");
     assert!(
         !after_prompts.lock().unwrap().iter().any(|prompt| prompt == "after restart"),
         "startup must not dispatch the recovered queue row"
@@ -557,6 +561,92 @@ async fn a_steer_command_holds_for_an_agent_that_takes_no_mid_turn_prompt() {
     .await;
     assert!(queue_texts(&core).is_empty());
 
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+fn auto_request(prompt: &str) -> RunRequest {
+    serde_json::from_value(serde_json::json!({
+        "prompt": prompt, "model": null, "reasoning": null, "cwd": "/tmp",
+        "sandbox": "workspace-write", "resume": null
+    })).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_commands_serialize_and_preserve_message_ids() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let send = |command: &str, message: &str, prompt: &str| {
+        core.doc_host.queue_command_with_transfers_and_id(CHAT, command,
+            SessionCommandPayload::AutoMessage { request: auto_request(prompt), message_id: message.into(), instructions: None }, Vec::new())
+    };
+    send("auto-one", "message-one", "first").unwrap();
+    send("auto-two", "message-two", "second").unwrap();
+    send("auto-two", "message-two", "second").unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1 && queue_texts(&core).len() == 1,
+        "one automatic prompt to run and one to wait").await;
+    let first = prompts.lock().unwrap()[0].clone();
+    let second = if first == "first" { "second" } else { "first" };
+    assert_eq!(queue_texts(&core), vec![second]);
+    let _ = harness.finish.send(());
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the second automatic prompt").await;
+    let expected = if first == "first" { [("first", "message-one"), ("second", "message-two")] }
+        else { [("second", "message-two"), ("first", "message-one")] };
+    for (prompt, id) in expected {
+        assert_eq!(user_message_id(&core, prompt).as_deref(), Some(id));
+        assert_eq!(user_messages(&core).iter().filter(|text| text.as_str() == prompt).count(), 1);
+    }
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_command_steers_a_working_chat() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    core.doc_host.queue_command_with_transfers_and_id(CHAT, "auto-steer",
+        SessionCommandPayload::AutoMessage { request: auto_request("follow up"), message_id: "auto-steer-message".into(), instructions: None }, Vec::new()).unwrap();
+    wait_for(|| user_message_id(&core, "follow up").is_some(), "automatic steer").await;
+    assert_eq!(user_message_id(&core, "follow up").as_deref(), Some("auto-steer-message"));
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_command_rechecks_a_chat_that_started_after_enqueue() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let guard = handle.test_delivery_guard().await;
+    core.doc_host.queue_command_with_transfers_and_id(CHAT, "auto-transition",
+        SessionCommandPayload::AutoMessage { request: auto_request("follow up"), message_id: "auto-transition-message".into(), instructions: None }, Vec::new()).unwrap();
+    let request: RunRequest = serde_json::from_value(serde_json::json!({
+        "prompt": "opening", "model": null, "reasoning": null, "cwd": "/tmp",
+        "sandbox": "workspace-write", "resume": null
+    })).unwrap();
+    core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some("opening-message".into())).await.unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    drop(guard);
+    wait_for(|| queue_texts(&core) == vec!["follow up"], "automatic prompt to wait").await;
+    assert!(user_message_id(&core, "follow up").is_none());
+    let _ = harness.finish.send(());
+    wait_for(|| user_message_id(&core, "follow up").as_deref() == Some("auto-transition-message"), "automatic prompt to run").await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_command_rejects_a_chat_waiting_for_input() {
+    let (core, harness, _) = setup_asking(SteeringMode::StepBoundary).await;
+    core.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| core.sessions.session_status(CHAT).is_some_and(|s|
+        s.status == mast_proto::SessionStatus::AwaitingInput), "input request").await;
+    core.doc_host.queue_command_with_transfers_and_id(CHAT, "auto-awaiting",
+        SessionCommandPayload::AutoMessage { request: auto_request("follow up"), message_id: "auto-awaiting-message".into(), instructions: None }, Vec::new()).unwrap();
+    wait_for(|| core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().iter().any(|c|
+        c.id == "auto-awaiting" && c.status == mast_doc::SessionCommandStatus::Rejected), "rejected automatic command").await;
+    assert!(user_message_id(&core, "follow up").is_none());
+    assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
     core.shutdown().await;
 }

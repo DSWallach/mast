@@ -287,6 +287,14 @@ impl ChangeRequestClientState {
         total
     }
 
+    pub(crate) fn change_request_for_key(
+        &self,
+        key: &ChangeRequestWatchKey,
+    ) -> Option<&ChangeRequestSummary> {
+        change_request_for_key(key, self.snapshots.values())
+    }
+
+    #[cfg(test)]
     pub fn change_request_for_chat<'a>(
         &'a self,
         chat: &Chat,
@@ -296,33 +304,71 @@ impl ChangeRequestClientState {
     }
 }
 
+/// The selected checkout used for chat display and PR lookup. A missing
+/// target preserves the conversation's existing source context.
+pub(crate) struct DisplayCheckout<'a> {
+    pub path: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    pub checkout_id: Option<&'a str>,
+    pub bound: bool,
+}
+
+pub(crate) fn display_checkout<'a>(
+    chat: &'a Chat,
+    target: Option<&'a mast_proto::ChatDiffTargetView>,
+) -> DisplayCheckout<'a> {
+    if let Some(target) = target {
+        return DisplayCheckout {
+            path: Some(&target.path),
+            branch: target.branch.as_deref(),
+            checkout_id: Some(&target.checkout_id),
+            bound: true,
+        };
+    }
+    let source = chat.source_context.as_ref();
+    DisplayCheckout {
+        path: source.map(|source| source.repo_root.as_str()),
+        branch: source
+            .map(|source| source.branch.as_str())
+            .or(chat.branch.as_deref()),
+        checkout_id: source.map(|source| source.checkout_id.as_str()),
+        bound: false,
+    }
+}
+
+pub(crate) fn checkout_watch_key(
+    chat: &Chat,
+    target: Option<&mast_proto::ChatDiffTargetView>,
+) -> Option<ChangeRequestWatchKey> {
+    let checkout = display_checkout(chat, target);
+    // Legacy scalar branch metadata does not establish a checkout identity.
+    if !checkout.bound && chat.source_context.is_none() {
+        return None;
+    }
+    let branch = checkout.branch?.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    Some(ChangeRequestWatchKey {
+        device_id: chat.device_id.clone(),
+        cwd: checkout.path?.to_owned(),
+        branch: branch.to_owned(),
+        checkout_id: checkout.checkout_id.map(str::to_owned),
+    })
+}
+
 /// Active, fully identified checkouts that need host-side PR resolution.
-pub(crate) fn desired_watch_targets(
+pub(crate) fn desired_watch_targets<'a>(
     chats: &[Chat],
     _spaces: &[Space],
     is_unsupported: impl Fn(&str) -> bool,
+    target_for: impl Fn(&str) -> Option<&'a mast_proto::ChatDiffTargetView>,
 ) -> HashSet<ChangeRequestWatchKey> {
     chats
         .iter()
         .filter(|chat| !chat.archived)
         .filter(|chat| !is_unsupported(&chat.device_id))
-        .filter_map(|chat| {
-            let source = chat.source_context.as_ref()?;
-            let (cwd, branch, checkout_id) = (
-                source.repo_root.as_str(),
-                source.branch.as_str(),
-                Some(source.checkout_id.clone()),
-            );
-            if branch.trim().is_empty() {
-                return None;
-            }
-            Some(ChangeRequestWatchKey {
-                device_id: chat.device_id.clone(),
-                cwd: cwd.to_owned(),
-                branch: branch.to_owned(),
-                checkout_id,
-            })
-        })
+        .filter_map(|chat| checkout_watch_key(chat, target_for(&chat.id)))
         .collect()
 }
 
@@ -349,31 +395,28 @@ pub(crate) fn watch_params(
 ///
 /// Only conversation-owned source context is trusted. Legacy scalar metadata
 /// cannot prove that a worktree has not switched branches since it was written.
+#[cfg(test)]
 pub fn change_request_for_chat<'a>(
     chat: &Chat,
-    spaces: &[Space],
+    _spaces: &[Space],
     snapshots: impl IntoIterator<Item = &'a CheckoutChangeRequestStatus>,
 ) -> Option<&'a ChangeRequestSummary> {
-    let branch = conversation_branch(chat, spaces)?.trim();
-    if branch.is_empty() {
-        return None;
-    }
-    let source = chat.source_context.as_ref()?;
-    let cwd = source.repo_root.as_str();
-    let checkout_id = chat
-        .source_context
-        .as_ref()
-        .map(|source| source.checkout_id.as_str())
-        .or(chat.checkout_id.as_deref());
+    let key = checkout_watch_key(chat, None)?;
+    change_request_for_key(&key, snapshots)
+}
 
+fn change_request_for_key<'a>(
+    key: &ChangeRequestWatchKey,
+    snapshots: impl IntoIterator<Item = &'a CheckoutChangeRequestStatus>,
+) -> Option<&'a ChangeRequestSummary> {
     snapshots
         .into_iter()
         .find(|snapshot| {
-            snapshot.device_id == chat.device_id
-                && snapshot.cwd == cwd
-                && snapshot.branch == branch
-                && checkout_id.is_none_or(|checkout_id| {
-                    !snapshot.checkout_id.is_empty() && snapshot.checkout_id == checkout_id
+            snapshot.device_id == key.device_id
+                && snapshot.cwd == key.cwd
+                && snapshot.branch == key.branch
+                && key.checkout_id.as_ref().is_none_or(|id| {
+                    !snapshot.checkout_id.is_empty() && snapshot.checkout_id == *id
                 })
         })
         .and_then(|snapshot| snapshot.change_request.as_ref())
@@ -382,6 +425,7 @@ pub fn change_request_for_chat<'a>(
 /// Branch metadata safe to render for this conversation. Pre-source-context
 /// rows are intentionally rejected: their scalar branch may describe an old
 /// state of either a shared checkout or a worktree.
+#[cfg(test)]
 pub(crate) fn conversation_branch<'a>(chat: &'a Chat, _spaces: &'a [Space]) -> Option<&'a str> {
     chat.source_context
         .as_ref()
@@ -474,10 +518,55 @@ mod tests {
     }
 
     #[test]
+    fn bound_checkout_selects_its_branch_for_pull_request_lookup() {
+        let chat = with_source(chat("chat", "local", Some("/repo"), None), "superproject");
+        let target = mast_proto::ChatDiffTargetView {
+            path: "/repo/submodule".into(),
+            checkout_id: "submodule".into(),
+            source: mast_proto::ChatDiffTargetSource::Agent,
+            selected: true,
+            repo_name: "submodule".into(),
+            branch: Some("feature/pr".into()),
+            head_sha: None,
+        };
+        let key = checkout_watch_key(&chat, Some(&target)).unwrap();
+        assert_eq!(key.cwd, "/repo/submodule");
+        assert_eq!(key.branch, "feature/pr");
+        let watches = desired_watch_targets(
+            std::slice::from_ref(&chat),
+            &[],
+            |_| false,
+            |_| Some(&target),
+        );
+        assert_eq!(watches, HashSet::from([key.clone()]));
+        let mut state = ChangeRequestClientState::default();
+        state.store(
+            key.clone(),
+            snapshot("local", "/repo/submodule", "submodule"),
+        );
+        assert_eq!(
+            state.change_request_for_key(&key).map(|pr| pr.number),
+            Some(90)
+        );
+        let mut wrong = key.clone();
+        wrong.checkout_id = Some("other".into());
+        assert!(state.change_request_for_key(&wrong).is_none());
+        assert!(
+            state
+                .change_request_for_key(&checkout_watch_key(&chat, None).unwrap())
+                .is_none()
+        );
+        let mut detached = target;
+        detached.branch = None;
+        assert!(checkout_watch_key(&chat, Some(&detached)).is_none());
+    }
+
+    #[test]
     fn shared_checkout_keeps_conversation_branches_independent() {
         let first = with_source(chat("first", "local", Some("/repo"), None), "feature/one");
         let second = with_source(chat("second", "local", Some("/repo"), None), "feature/two");
-        let targets = desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false);
+        let targets =
+            desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false, |_| None);
         assert_eq!(targets.len(), 2);
         assert!(targets.iter().any(|target| target.branch == "feature/one"));
         assert!(targets.iter().any(|target| target.branch == "feature/two"));
@@ -531,7 +620,7 @@ mod tests {
         let status = snapshot("local", "/repo", "checkout");
         assert!(change_request_for_chat(&chat, &[], [&status]).is_none());
         assert!(conversation_branch(&chat, &[]).is_none());
-        assert!(desired_watch_targets(&[chat], &[], |_| false).is_empty());
+        assert!(desired_watch_targets(&[chat], &[], |_| false, |_| None).is_empty());
     }
 
     #[test]
@@ -539,7 +628,7 @@ mod tests {
         let chat = chat("chat", "local", None, None);
         let status = snapshot("local", "/project", "checkout");
         assert!(change_request_for_chat(&chat, &[space("local")], [&status]).is_none());
-        assert!(desired_watch_targets(&[chat], &[space("local")], |_| false).is_empty());
+        assert!(desired_watch_targets(&[chat], &[space("local")], |_| false, |_| None).is_empty());
     }
 
     #[test]
@@ -563,16 +652,18 @@ mod tests {
             chat("two", "local", Some("/repo"), Some("checkout")),
             "feature/pr",
         );
-        let targets = desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false);
+        let targets =
+            desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false, |_| None);
         assert_eq!(targets.len(), 1);
 
         second.archived = true;
-        let targets = desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false);
+        let targets =
+            desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false, |_| None);
         assert_eq!(targets.len(), 1);
 
         let mut first = first;
         first.archived = true;
-        assert!(desired_watch_targets(&[first, second], &[], |_| false).is_empty());
+        assert!(desired_watch_targets(&[first, second], &[], |_| false, |_| None).is_empty());
     }
 
     #[test]
@@ -595,7 +686,8 @@ mod tests {
 
         assert!(state.change_request_for_chat(&chat, &[]).is_none());
         assert!(
-            desired_watch_targets(&[chat], &[], |device| !state.is_supported(device)).is_empty()
+            desired_watch_targets(&[chat], &[], |device| !state.is_supported(device), |_| None)
+                .is_empty()
         );
     }
 
@@ -613,7 +705,8 @@ mod tests {
         assert!(state.clear_unsupported_on_version_change("host", Some("0.2.3")));
         assert!(state.is_supported("host"));
         assert_eq!(
-            desired_watch_targets(&[chat], &[], |device| !state.is_supported(device)).len(),
+            desired_watch_targets(&[chat], &[], |device| !state.is_supported(device), |_| None)
+                .len(),
             1
         );
     }

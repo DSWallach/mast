@@ -300,9 +300,7 @@ impl Probe {
                 if item.archived_at.is_some() {
                     return Err("The item is archived".into());
                 }
-                let has_children = super::restructure::live_children(snapshot, Some(work_item_id))
-                    .first()
-                    .is_some();
+                let has_children = !super::restructure::live_children(snapshot, Some(work_item_id)).is_empty();
                 if has_children || !item.chat_ids.is_empty() {
                     return Err("The item has since gained children or chats".into());
                 }

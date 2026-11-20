@@ -7,6 +7,8 @@ use std::{collections::BTreeSet, ops::Range, path::Path, sync::atomic::AtomicUsi
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+pub mod symbols;
+
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_SPANS: usize = 200_000;
 
@@ -129,6 +131,50 @@ pub struct HighlightSpan {
 pub struct HighlightedDocument {
     pub language: LanguageId,
     pub lines: Vec<Vec<HighlightSpan>>,
+}
+
+/// Find the innermost named function or class enclosing each one-based line.
+/// The source is parsed once, and unsupported grammars return no names.
+pub fn enclosing_symbols(source: &str, path: &str, lines: &[u32]) -> Vec<Option<String>> {
+    use LanguageId::*;
+    let language: tree_sitter::Language = match language_for_path(path) {
+        Some(Rust) => tree_sitter_rust::LANGUAGE.into(),
+        Some(JavaScript | Jsx) => tree_sitter_javascript::LANGUAGE.into(),
+        Some(TypeScript) => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Some(Tsx) => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Some(Python) => tree_sitter_python::LANGUAGE.into(),
+        Some(Go) => tree_sitter_go::LANGUAGE.into(),
+        Some(C) => tree_sitter_c::LANGUAGE.into(),
+        Some(Cpp) => tree_sitter_cpp::LANGUAGE.into(),
+        Some(Java) => tree_sitter_java::LANGUAGE.into(),
+        _ => return vec![None; lines.len()],
+    };
+    if source.len() > DEFAULT_MAX_SOURCE_BYTES { return vec![None; lines.len()]; }
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language).is_err() { return vec![None; lines.len()]; }
+    let Some(tree) = parser.parse(source, None) else { return vec![None; lines.len()]; };
+    lines.iter().map(|line| {
+        let point = tree_sitter::Point::new(line.saturating_sub(1) as usize, 0);
+        let mut node = tree.root_node().descendant_for_point_range(point, point)?;
+        loop {
+            if matches!(node.kind(), "function_item" | "function_definition" | "function_declaration" | "method_definition" | "method_declaration" | "class_definition" | "class_declaration" | "struct_item" | "interface_declaration") {
+                if let Some(name) = node.child_by_field_name("name").and_then(|name| name.utf8_text(source.as_bytes()).ok()) {
+                    return Some(name.to_owned());
+                }
+            }
+            node = node.parent()?;
+        }
+    }).collect()
+}
+
+#[cfg(test)]
+mod symbol_tests {
+    #[test]
+    fn enclosing_symbols_find_nested_functions_and_skip_unsupported_sources() {
+        let source = "fn first() {\n    let x = 1;\n}\nfn second() {\n    call();\n}\n";
+        assert_eq!(super::enclosing_symbols(source, "a.rs", &[2, 5]), vec![Some("first".into()), Some("second".into())]);
+        assert_eq!(super::enclosing_symbols(source, "a.unknown", &[2]), vec![None]);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

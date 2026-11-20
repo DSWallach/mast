@@ -162,10 +162,14 @@ fn is_fatal(error: &LinearError) -> bool {
 struct Pass<'a> {
     work_outline: &'a Arc<WorkOutlineService>,
     space_id: &'a str,
+    account_changes: &'a LinearService,
+    snapshot: &'a WorkOutlineSnapshot,
 }
 
 impl Pass<'_> {
     async fn mutate(&self, mutation: WorkOutlineMutation) -> bool {
+        let _guard = self.account_changes.lock_account_changes().await;
+        if !super::sync::account_matches(self.work_outline, self.snapshot, self.space_id) { return false; }
         let service = self.work_outline.clone();
         let result = tokio::task::spawn_blocking(move || {
             let actor = service.system_actor();
@@ -215,6 +219,7 @@ fn record_for(identifier: &str, now: i64) -> WorkItemExternalSyncState {
 /// many items were created, restored, marked or archived.
 pub async fn sync(
     linear: &LinearService,
+    account_changes: &LinearService,
     work_outline: &Arc<WorkOutlineService>,
     snapshot: &WorkOutlineSnapshot,
     space_id: &str,
@@ -250,6 +255,8 @@ pub async fn sync(
     let pass = Pass {
         work_outline,
         space_id,
+        account_changes,
+        snapshot,
     };
     let now = crate::now_ms();
     let mut changed = 0;

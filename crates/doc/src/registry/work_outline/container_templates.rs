@@ -814,7 +814,7 @@ impl Writer<'_> {
 /// The worker-destination node of a project node: the first flagged
 /// descendant not below another project.
 fn destination_of(project: &RuleNode) -> Option<&RuleNode> {
-    fn find<'a>(node: &'a RuleNode) -> Option<&'a RuleNode> {
+    fn find(node: &RuleNode) -> Option<&RuleNode> {
         for child in &node.children {
             if child.is_worker_destination {
                 return Some(child);

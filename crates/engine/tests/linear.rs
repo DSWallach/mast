@@ -5,6 +5,7 @@
 //! createWorkItemFromLinear over RPC, the linked-item sync, agent context,
 //! and that the key never appears in replies, agent payloads, or logs.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -95,7 +96,9 @@ struct MockState {
     attachments: HashMap<String, Vec<Value>>,
     /// Answer attachment queries with a GraphQL validation error.
     attachments_error: bool,
+    accept_other_key: bool,
     delay: Duration,
+    block_issue: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 #[derive(Clone)]
@@ -177,7 +180,7 @@ fn page(nodes: Vec<Value>, next: Option<&str>) -> Value {
 }
 
 fn route(state: &MockState, operation: &str, auth: Option<&str>, variables: &Value) -> Reply {
-    if auth != Some(KEY) {
+    if auth != Some(KEY) && !(state.accept_other_key && auth == Some(OTHER_KEY)) {
         return Reply {
             status: 401,
             headers: Vec::new(),
@@ -226,7 +229,7 @@ fn route(state: &MockState, operation: &str, auth: Option<&str>, variables: &Val
         "MastLinearMyProjects" => {
             Reply::ok(json!({ "projects": page(state.projects.clone(), None) }))
         }
-        "MastLinearProjectIssues" => {
+        "MastLinearProjectIssues" | "MastLinearProjectIssuesAll" => {
             let id = variables["id"].as_str().unwrap_or_default();
             match state.project_issues.get(id) {
                 Some(nodes) => {
@@ -302,7 +305,7 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<MockState>>) 
         .unwrap_or_default()
         .to_owned();
     let auth = headers.get("authorization").cloned();
-    let (reply, delay) = {
+    let (reply, delay, blocked) = {
         let mut state = state.lock().unwrap();
         state.recorded.push(Recorded {
             authorization: auth.clone(),
@@ -313,8 +316,13 @@ async fn serve(mut stream: tokio::net::TcpStream, state: Arc<Mutex<MockState>>) 
             Some(reply) => reply,
             None => route(&state, &operation, auth.as_deref(), &request["variables"]),
         };
-        (reply, state.delay)
+        let blocked = if operation == "MastLinearIssue" { state.block_issue.take() } else { None };
+        (reply, state.delay, blocked)
     };
+    if let Some((started, release)) = blocked {
+        started.notify_one();
+        release.notified().await;
+    }
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
@@ -588,6 +596,95 @@ async fn rate_limits_retry_with_a_capped_wait_then_give_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn list_queries_limit_the_number_of_pages() {
+    let rig = rig().await;
+    rig.mock.state.lock().unwrap().my_issue_pages = (0..8)
+        .map(|index| vec![issue_node(&format!("ENG-{index}"), "Ticket", None, "started")])
+        .collect();
+    let issues = rig.call(methods::LINEAR_MY_ISSUES, json!({})).await.unwrap();
+    assert_eq!(issues.as_array().unwrap().len(), 5);
+    assert_eq!(rig.mock.count("MastLinearMyIssues"), 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tracker_project_page_reports_when_the_bounded_result_has_more() {
+    let rig = rig().await;
+    for index in 0..5 {
+        let nodes = (0..50).map(|offset| issue_node(&format!("ENG-{}", index * 50 + offset + 1), "Ticket", None, "started")).collect();
+        let cursor = format!("page-{}", index + 1);
+        rig.mock.script(Reply::ok(json!({ "project": { "issues": page(nodes, Some(&cursor)) } })));
+    }
+    let result = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "large", "includeCompleted": true })).await.unwrap();
+    assert_eq!(result["issues"].as_array().unwrap().len(), 250);
+    assert_eq!(result["hasMore"], true);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 5);
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "large", "cachedOnly": true })).await.unwrap();
+    assert_eq!(cached["hasMore"], true);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 5);
+    for index in 0..5 {
+        let nodes = (0..50).map(|offset| issue_node(&format!("FIX-{}", index * 50 + offset + 1), "Ticket", None, "started")).collect();
+        let cursor = (index < 4).then(|| format!("exact-{}", index + 1));
+        rig.mock.script(Reply::ok(json!({ "project": { "issues": page(nodes, cursor.as_deref()) } })));
+    }
+    let exact = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, json!({ "projectId": "exact" })).await.unwrap();
+    assert_eq!(exact["issues"].as_array().unwrap().len(), 250);
+    assert_eq!(exact["hasMore"], false);
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tracker_project_page_cache_is_isolated_by_account() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-1", "Account A", None, "started")], None)}})));
+    let params = json!({"spaceId": SPACE, "projectId": "shared"});
+    let first = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params.clone()).await.unwrap();
+    assert_eq!(first["issues"][0]["title"], "Account A");
+
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT,
+        json!({"label": "Personal", "apiKey": OTHER_KEY})).await.unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": account["id"], "operationId": "cache-select-personal"})).await.unwrap();
+    assert!(rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.is_err());
+    rig.mock.script(Reply::ok(json!({"project": {"issues": page(vec![
+        issue_node("ENG-2", "Account B", None, "started")], None)}})));
+    let second = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE, params).await.unwrap();
+    assert_eq!(second["issues"][0]["title"], "Account B");
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+        "accountId": null, "operationId": "cache-select-default"})).await.unwrap();
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUE_PAGE,
+        json!({"spaceId": SPACE, "projectId": "shared", "cachedOnly": true})).await.unwrap();
+    assert_eq!(cached["issues"][0]["title"], "Account A");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_project_issue_lookup_does_not_retry_missing_projects() {
+    let rig = rig().await;
+    for _ in 0..2 {
+        let error = rig.linear_err(methods::LINEAR_PROJECT_ISSUES,
+            json!({ "projectId": "missing", "includeCompleted": true })).await;
+        assert_eq!(error.code, LinearErrorCode::NotFound);
+    }
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 1);
+    let _ = rig.linear_err(methods::LINEAR_PROJECT_ISSUES,
+        json!({ "projectId": "missing", "includeCompleted": true, "force": true })).await;
+    assert_eq!(rig.mock.count("MastLinearProjectIssuesAll"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linear_sync_watch_emits_after_the_existing_space_pass() {
+    let rig = rig().await;
+    rig.enable(SPACE, true).await;
+    let mut watch = rig.client.subscribe_checked(methods::WATCH_LINEAR_SYNC, json!({ "spaceId": SPACE })).await.unwrap();
+    assert_eq!(watch.recv().await.unwrap(), json!(0));
+    let outline = Arc::new(mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()));
+    mast_engine::linear::sync::sync_enabled_spaces(&rig.core.linear, &outline, &rig.core.workspace, None).await;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), watch.recv()).await.unwrap().unwrap(), json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn list_queries_paginate_and_parse() {
     let rig = rig().await;
     {
@@ -661,6 +758,14 @@ async fn list_queries_paginate_and_parse() {
         .unwrap();
     assert_eq!(open.as_array().unwrap().len(), 1);
     assert_eq!(open[0]["identifier"], json!("ENG-5"));
+    let all = rig
+        .call(methods::LINEAR_PROJECT_ISSUES, json!({ "projectId": "p-1", "includeCompleted": true }))
+        .await.unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(all[1]["identifier"], json!("ENG-6"));
+    let cached = rig.call(methods::LINEAR_PROJECT_ISSUES,
+        json!({ "projectId": "p-1", "includeCompleted": true, "cachedOnly": true })).await.unwrap();
+    assert_eq!(cached, all);
     let err = rig
         .linear_err(
             methods::LINEAR_PROJECT_ISSUES,
@@ -840,6 +945,33 @@ async fn space_scoped_linear_operations_need_linear_on() {
     // Still off in the other Space.
     let text = rig.mutate(create(OFF_SPACE, "op-other")).await.unwrap_err();
     assert!(text.contains("linear/disabledForSpace"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_discards_issue_fetched_before_account_switch() {
+    let rig = rig().await;
+    rig.mock.set_issue(issue_node("ENG-1", "Initial", Some("Initial body"), "started"));
+    rig.enable(SPACE, true).await;
+    let item = rig.from_linear("race-item", None, "ENG-1").await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({"label": "Personal", "apiKey": OTHER_KEY})).await.unwrap();
+    rig.mock.set_issue(issue_node("ENG-1", "Account A", Some("Account A body"), "started"));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    rig.mock.state.lock().unwrap().block_issue = Some((started.clone(), release.clone()));
+    let refresh = rig.call(methods::LINEAR_REFRESH_LINKED_ITEMS, json!({"spaceId": SPACE}));
+    let switch = async {
+        started.notified().await;
+        rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": SPACE,
+            "accountId": account["id"], "operationId": "race-switch"})).await.unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::join!(refresh, switch);
+    assert_eq!(result.unwrap()["updated"], 0);
+    let snapshot = rig.snapshot(SPACE);
+    let item = snapshot.item(&item).unwrap();
+    assert_eq!(item.title, "ENG-1 · Initial");
+    assert_eq!(item.description.as_deref(), Some("Initial body"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1333,4 +1465,94 @@ async fn project_detail_is_read_only_cached_and_served_stored() {
         )
         .await;
     assert_eq!(missing.code, LinearErrorCode::NotFound);
+}
+
+#[path = "../../../test_support/isolation.rs"]
+mod test_isolation;
+
+#[tokio::test]
+async fn named_account_removal_reports_disabled_spaces_and_rpc_hides_keys() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = tokio::time::timeout(Duration::from_secs(5), rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    }))).await.expect("add timed out").unwrap();
+    let id = account["id"].as_str().unwrap();
+    assert_eq!(account["label"], "Personal");
+    assert!(account["keySet"].as_bool().unwrap());
+    assert!(!account.to_string().contains(OTHER_KEY));
+    tokio::time::timeout(Duration::from_secs(5), rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"
+    }))).await.expect("select timed out").unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(5), rig.linear_err(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id}))).await.expect("remove timed out");
+    assert!(error.message.contains("off"));
+    assert_eq!(rig.snapshot(OFF_SPACE).space_settings.linear_account_id.as_deref(), Some(id));
+    rig.mutate(json!({
+        "op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": null, "operationId": "select-default"
+    })).await.unwrap();
+    rig.call(methods::LINEAR_REMOVE_ACCOUNT, json!({"accountId": id})).await.unwrap();
+    let accounts = rig.call(methods::LINEAR_LIST_ACCOUNTS, json!({})).await.unwrap();
+    assert_eq!(accounts.as_array().unwrap().len(), 1);
+    assert!(!accounts.to_string().contains(KEY));
+    assert!(!rig.seen.lock().unwrap().iter().any(|reply| reply.contains(OTHER_KEY)));
+    let captured = logs().0.lock().unwrap();
+    assert!(!String::from_utf8_lossy(&captured).contains(OTHER_KEY));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_queries_resolve_space_account_and_isolate_cached_results() {
+    let rig = rig().await;
+    rig.mock.script(Reply::ok(json!({"viewer": {"id": "personal", "name": "Personal"}})));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    })).await.unwrap();
+    let id = account["id"].as_str().unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "select-personal"})).await.unwrap();
+    rig.mock.set_issue(issue_node("ENG-1", "Default issue", None, "started"));
+    let default = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    rig.mock.script(Reply::ok(json!({"issue": issue_node("ENG-1", "Personal issue", None, "started")})));
+    let personal = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(default["title"], "Default issue");
+    assert_eq!(personal["title"], "Personal issue");
+    let calls: Vec<_> = rig.mock.recorded().into_iter().filter(|r| r.operation == "MastLinearIssue").collect();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].authorization.as_deref() == Some(KEY));
+    assert!(calls[1].authorization.as_deref() == Some(OTHER_KEY));
+    let cached = rig.call(methods::LINEAR_ISSUE, json!({"spaceId": SPACE, "identifier": "ENG-1"})).await.unwrap();
+    assert_eq!(cached["title"], "Default issue");
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+    let error = rig.linear_err(methods::LINEAR_ISSUE, json!({"spaceId": OFF_SPACE,
+        "expectedAccountId": "default", "identifier": "ENG-1"})).await;
+    assert_eq!(error.code, LinearErrorCode::Network);
+    assert_eq!(rig.mock.count("MastLinearIssue"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linear_sync_uses_the_selected_space_account() {
+    let rig = rig().await;
+    rig.mock.state.lock().unwrap().accept_other_key = true;
+    rig.mock.set_issue(issue_node("ENG-1", "Updated", None, "started"));
+    let account = rig.call(methods::LINEAR_ADD_ACCOUNT, json!({
+        "label": "Personal", "apiKey": OTHER_KEY
+    })).await.unwrap();
+    let id = account["id"].as_str().unwrap();
+    rig.mutate(json!({"op": "setSpaceLinearAccount", "spaceId": OFF_SPACE,
+        "accountId": id, "operationId": "sync-personal-account"})).await.unwrap();
+    rig.enable(SPACE, true).await;
+    rig.enable(OFF_SPACE, true).await;
+    for (space, op) in [(SPACE, "default-sync-item"), (OFF_SPACE, "personal-sync-item")] {
+        rig.mutate(json!({"op": "createWorkItemFromLinear", "spaceId": space,
+            "placement": {"type": "last"}, "operationId": op,
+            "issue": {"id": "uuid-ENG-1", "identifier": "ENG-1", "title": "Original",
+                "url": "https://linear.app/example/issue/ENG-1"}})).await.unwrap();
+        rig.call(methods::LINEAR_REFRESH_LINKED_ITEMS, json!({"spaceId": space})).await.unwrap();
+    }
+    let calls: Vec<_> = rig.mock.recorded().into_iter().filter(|r| r.operation == "MastLinearIssue").collect();
+    assert!(calls.iter().any(|call| call.authorization.as_deref() == Some(KEY)));
+    assert!(calls.iter().any(|call| call.authorization.as_deref() == Some(OTHER_KEY)));
+    assert_eq!(rig.snapshot(SPACE).item(&derive_id("default-sync-item", roles::ITEM)).unwrap().title, "ENG-1 · Updated");
+    assert_eq!(rig.snapshot(OFF_SPACE).item(&derive_id("personal-sync-item", roles::ITEM)).unwrap().title, "ENG-1 · Updated");
 }

@@ -257,6 +257,31 @@ fn scheduled_item_payload(
     })
 }
 
+fn worker_branch_name(issue: Option<&str>, title: &str) -> String {
+    let issue = issue.map(crate::chat_workspace_plan::kebab_case).filter(|s| !s.is_empty());
+    let mut title = crate::chat_workspace_plan::kebab_case(title);
+    if let Some(prefix) = issue.as_deref() {
+        if title == prefix { title.clear(); }
+        else if let Some(rest) = title.strip_prefix(&format!("{prefix}-")) { title = rest.to_owned(); }
+    }
+    title.truncate(title.len().min(48));
+    let title = title.trim_end_matches('-');
+    match (issue, title.is_empty()) {
+        (Some(issue), false) => format!("{issue}-{title}"),
+        (Some(issue), true) => issue,
+        (None, false) => title.to_owned(),
+        (None, true) => "worker".to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn worker_branch_names_include_the_issue_and_title() {
+    assert_eq!(worker_branch_name(Some("ENG-123"), "ENG-123 · Fix login"), "eng-123-fix-login");
+    assert_eq!(worker_branch_name(None, "Repair login"), "repair-login");
+    assert_eq!(worker_branch_name(None, "!!!"), "worker");
+}
+
 /// Ledger key: this device accepted `operationId` for a launch.
 fn ledger_launch_key(operation_id: &str) -> String {
     format!(
@@ -951,7 +976,33 @@ No active workers.");
             }
             None => match automatic {
                 Some(intent) => intent.execution.clone(),
-                None => self.effective_configuration(p, &space_id).await?,
+                None => {
+                let mut resolved = self.effective_configuration(p, &space_id).await?;
+                let has_item_setup = matches!(&resolved.source_scope, mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { .. });
+                let has_worktree = resolved.configuration.bindings.iter()
+                    .any(|binding| binding.worktree_id.is_some() || binding.worktree_path.is_some());
+                if hand_off.is_none() && p.parent_chat_id.is_some() && snapshot.space_settings.worker_worktrees
+                    && p.execution_override.is_none() && p.worktree_choice.is_none()
+                    && !has_item_setup && !has_worktree && resolved.invalid_reason.is_none()
+                {
+                    let issue = snapshot.linear_issue_reference(&item.id).map(|r| r.external_id.as_str());
+                    let name = worker_branch_name(issue, &item.title);
+                    self.apply_worker_worktree(&mut resolved, &name, op).await?;
+                    let pinned = self.workspace.configure_worker_execution_if_absent(&mast_proto::ConfigureExecutionParams {
+                        scope: ExecutionScope::WorkItem { work_item_id: item.id.clone() },
+                        configuration: Some(resolved.configuration.clone()),
+                        operation_id: derive_id(op, "worker-execution"),
+                    }, &WorkOutlineActor { kind: WorkOutlineActorKind::System,
+                        device_id: self.workspace.device_id().to_owned(), chat_id: None, message_id: None })?;
+                    if !pinned {
+                        return Err(conflict("The item's execution setup changed while creating the worker worktree"));
+                    }
+                    resolved.source_scope = mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem {
+                        work_item_id: item.id.clone(),
+                    };
+                }
+                resolved
+                }
             },
         };
         let validated = self
@@ -976,6 +1027,48 @@ No active workers.");
                 mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op)
             }),
         )?;
+        // A Work Outline launch has no Run worktree directive, so stamp the
+        // branch needed for opted-in PR tracking here. This launch-time lookup
+        // leaves an existing value alone.
+        if p.parent_chat_id.is_some() && (snapshot.space_settings.merged_pr_completion.is_some()
+            || (snapshot.space_settings.worker_worktrees && resolved.configuration.bindings.iter().any(|binding| binding.worktree_path.is_some())))
+            && self.workspace.chat(&chat_id).map_err(engine_error)?.is_some_and(|chat| chat.branch.is_none())
+        {
+            let root = std::path::PathBuf::from(&validated.execution_root);
+            if let Some(branch) = tokio::task::spawn_blocking(move || crate::chat_workspace_plan::current_branch(&root))
+                .await.map_err(|e| engine_error(EngineError::Other(e.to_string())))? {
+                self.workspace.set_chat_branch_if_absent(&chat_id, &branch).map_err(engine_error)?;
+            }
+        }
+        // Name the chat before its first turn can schedule automatic titling.
+        // Preserve an existing title on retries or after a user rename.
+        if p.parent_chat_id.is_some()
+            && self
+            .workspace
+            .chat(&chat_id)
+            .map_err(engine_error)?
+            .is_some_and(|chat| {
+                chat.title
+                    .as_deref()
+                    .is_none_or(|title| title.trim().is_empty())
+            })
+        {
+            let title = match snapshot.linear_issue_reference(&item.id) {
+                Some(reference) => format!("{} {}", reference.external_id, item.title),
+                None if item.title.trim().eq_ignore_ascii_case("planning") => {
+                    let context = item.parent_work_item_id.as_deref()
+                        .and_then(|id| snapshot.item(id))
+                        .map(|parent| parent.title.as_str())
+                        .filter(|title| !title.trim().is_empty() && !title.trim().eq_ignore_ascii_case("planning"))
+                        .unwrap_or_else(|| space.display_name());
+                    format!("{context} {}", item.title)
+                }
+                None => item.title.clone(),
+            };
+            self.workspace
+                .rename_chat(&chat_id, &title)
+                .map_err(engine_error)?;
+        }
         // The account chip's pick binds before the first run resolves one.
         if let (Some(account_id), Some(config)) = (p.account_id.as_deref(), p.config.as_ref()) {
             self.sessions
@@ -986,6 +1079,27 @@ No active workers.");
 
         // ── 4. assignment ──
         self.ensure_assignment(&chat_id, &p.work_item_id, op)?;
+        // Starting work on a pending item marks it active; completed and
+        // archived items are never touched. Read live so a retry after the
+        // item moved on does not revert it.
+        let still_pending = mast_doc::materialize_work_outline(
+            &space_id,
+            &self.workspace.work_outline_inputs(&space_id),
+        )
+        .item(&p.work_item_id)
+        .is_some_and(|item| {
+            item.archived_at.is_none() && item.status == mast_proto::WorkItemStatus::Pending
+        });
+        if still_pending {
+            self.mutate(WorkOutlineMutation::UpdateWorkItem(mast_proto::UpdateWorkItemParams {
+                work_item_id: p.work_item_id.clone(),
+                changes: mast_proto::WorkItemChanges {
+                    status: Some(mast_proto::WorkItemStatus::Active),
+                    ..Default::default()
+                },
+                operation_id: derive_id(op, "activate-item"),
+            }))?;
+        }
         self.checkpoint(LaunchStep::Assigned)?;
 
         // ── 5. execution binding ──
@@ -1318,6 +1432,16 @@ No active workers.");
         choice: &WorktreeChoice,
         operation_id: &str,
     ) -> Result<(), WorkOutlineError> {
+        self.apply_worktree_choice_internal(resolved, choice, operation_id, false).await
+    }
+
+    async fn apply_worktree_choice_internal(
+        &self,
+        resolved: &mut ResolvedExecutionConfiguration,
+        choice: &WorktreeChoice,
+        operation_id: &str,
+        exact_slug: bool,
+    ) -> Result<(), WorkOutlineError> {
         let invalid = |message: &str| error(WorkOutlineErrorCode::Invalid, message);
         let configuration = &mut resolved.configuration;
         let target = match configuration.bindings.iter().position(|b| b.primary) {
@@ -1382,7 +1506,7 @@ No active workers.");
             } => (worktree_id.clone(), worktree_path.clone()),
             WorktreeChoice::CreateNew { name } => {
                 let (path, checkout_id) = self
-                    .create_worktree_for_operation(&binding, name, operation_id)
+                    .create_worktree_for_operation(&binding, name, operation_id, exact_slug)
                     .await?;
                 (checkout_id, path)
             }
@@ -1395,6 +1519,38 @@ No active workers.");
             None => configuration.bindings.push(binding),
         }
         Ok(())
+    }
+
+    async fn apply_worker_worktree(
+        &self,
+        resolved: &mut ResolvedExecutionConfiguration,
+        name: &str,
+        operation_id: &str,
+    ) -> Result<(), WorkOutlineError> {
+        // Select a free name, or the checkout already claimed by this launch.
+        let repo = resolved.configuration.bindings.iter().find(|b| b.primary)
+            .or_else(|| (resolved.configuration.bindings.len() == 1).then(|| &resolved.configuration.bindings[0]))
+            .map(|binding| binding.repo_path.clone())
+            .unwrap_or_else(|| resolved.configuration.execution_root.clone());
+        let mut suffix = 1_u32;
+        let selected = loop {
+            let candidate = if suffix == 1 { name.to_owned() } else { format!("{name}-{suffix}") };
+            let repo_path = std::path::PathBuf::from(&repo);
+            let candidate_owned = candidate.clone();
+            let (path, occupied) = tokio::task::spawn_blocking(move || {
+                let (path, _) = crate::chat_workspace_plan::chat_worktree_target_for_slug(&repo_path, &candidate_owned)?;
+                let occupied = path.exists() || crate::chat_workspace_plan::local_branch_exists(&repo_path, &candidate_owned);
+                Ok::<_, EngineError>((path, occupied))
+            }).await.map_err(|e| engine_error(EngineError::Other(e.to_string())))?.map_err(engine_error)?;
+            if !occupied || self.workspace.ledger_holds(&ledger_worktree_key(operation_id, &path)) {
+                break candidate;
+            }
+            if suffix >= 100 {
+                return Err(error(WorkOutlineErrorCode::Invalid, "No available worktree name after 100 attempts"));
+            }
+            suffix = suffix.checked_add(1).ok_or_else(|| error(WorkOutlineErrorCode::Invalid, "No available worktree name"))?;
+        };
+        self.apply_worktree_choice_internal(resolved, &WorktreeChoice::CreateNew { name: selected }, operation_id, true).await
     }
 
     /// Create `.worktrees/<label>/<slug(name)>` for `binding`'s repository
@@ -1410,13 +1566,18 @@ No active workers.");
         binding: &RepositoryBinding,
         name: &str,
         operation_id: &str,
+        exact_slug: bool,
     ) -> Result<(String, String), WorkOutlineError> {
         let repo_path = std::path::PathBuf::from(&binding.repo_path);
         let name_owned = name.to_owned();
         let target = {
             let repo_path = repo_path.clone();
             tokio::task::spawn_blocking(move || {
-                crate::chat_workspace_plan::chat_worktree_target(&repo_path, &name_owned)
+                if exact_slug {
+                    crate::chat_workspace_plan::chat_worktree_target_for_slug(&repo_path, &name_owned)
+                } else {
+                    crate::chat_workspace_plan::chat_worktree_target(&repo_path, &name_owned)
+                }
             })
             .await
             .map_err(|e| engine_error(EngineError::Other(e.to_string())))?
@@ -1467,7 +1628,11 @@ No active workers.");
         self.workspace.ledger_mark(&key).map_err(engine_error)?;
         let name_owned = name.to_owned();
         let created = tokio::task::spawn_blocking(move || {
-            crate::chat_workspace_plan::create_chat_worktree(&repo_path, &name_owned)
+            if exact_slug {
+                crate::chat_workspace_plan::create_chat_worktree_for_slug(&repo_path, &name_owned)
+            } else {
+                crate::chat_workspace_plan::create_chat_worktree(&repo_path, &name_owned)
+            }
         })
         .await
         .map_err(|e| engine_error(EngineError::Other(e.to_string())))?

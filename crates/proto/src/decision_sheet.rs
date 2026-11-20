@@ -473,7 +473,7 @@ impl DecisionSheet {
                 if decision.options.iter().any(|o| o.id.trim().is_empty() || o.label.trim().is_empty() || !option_ids.insert(&o.id)) {
                     return Err(format!("invalid or duplicate option for {:?}", decision.id));
                 }
-                if !decision.recommended_option.is_some_and(|id| option_ids.contains(&id.to_owned())) || decision.recommendation.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                if !decision.recommended_option.is_some_and(|id| option_ids.contains(&id.to_owned())) || decision.recommendation.is_none_or(|r| r.trim().is_empty()) {
                     return Err(format!("recommendation and valid recommendedOption required for {:?}", decision.id));
                 }
             } else if decision.recommended_option.is_some() {

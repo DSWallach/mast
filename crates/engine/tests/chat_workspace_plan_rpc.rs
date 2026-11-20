@@ -6,6 +6,7 @@
 //! `EngineRpc` — that a real `CreateChatWorktree` call stamps the chat row's
 //! `cwd` so its next dispatch runs in the new worktree automatically.
 
+#![allow(clippy::disallowed_methods)] // spawn sites here are tests/build scripts (post-mortem P3)
 use std::path::Path;
 
 use mast_engine::{EngineCore, HarnessRegistry};

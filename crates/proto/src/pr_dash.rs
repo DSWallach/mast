@@ -58,12 +58,14 @@ impl PrDashTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum PrDashBucket {
     // Authored tab.
     NeedsYou,
     Comments,
     Ready,
     NoReviewer,
+    #[default]
     InReview,
     CiRunning,
     Draft,
@@ -243,11 +245,6 @@ pub struct PrDashRow {
     pub chats: Vec<PrDashChat>,
 }
 
-impl Default for PrDashBucket {
-    fn default() -> Self {
-        Self::InReview
-    }
-}
 
 /// Params of `PrDashboard`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

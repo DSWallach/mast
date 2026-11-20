@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // build script (post-mortem P3)
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {

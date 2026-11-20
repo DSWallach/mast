@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::WakeEvent;
+use super::{WakeEvent, core::FinalHandback};
 
 const EVENT_CAP: usize = 500;
 
@@ -14,6 +14,34 @@ pub(super) struct WakeStore {
     pub orchestrators: HashMap<String, Vec<StoredEvent>>,
     #[serde(default)]
     pub completed_ids: HashMap<String, Vec<String>>,
+    /// Positive receipts survive event pruning. Legacy stores have none.
+    #[serde(default)]
+    pub delivered_handbacks: HashMap<String, Option<HandbackReceipt>>,
+    /// Explicit queue deletion or delivery of an edited payload retires the intent.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub cancelled_handbacks: HashSet<String>,
+    /// True only after an empty typed history was established durably or a
+    /// previously established history was read successfully.
+    #[serde(default)]
+    pub final_handback_history_ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct HandbackReceipt {
+    #[serde(flatten)]
+    pub handback: FinalHandback,
+    /// Missing on early development stores that only compared message IDs.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub text_hash: Option<String>,
+}
+
+impl HandbackReceipt {
+    pub fn is_verified(&self) -> bool {
+        self.message_id.as_deref().is_some_and(|id| !id.is_empty())
+            && self.text_hash.as_deref().is_some_and(|hash| hash.len() == 64)
+    }
 }
 
 #[cfg(test)]
@@ -31,9 +59,11 @@ mod tests {
                 kind: WakeEventKind::WorkerReport,
                 summary: String::new(),
                 report: Some("report".into()),
+                final_handback: None,
                 at_ms,
             },
             message_id: None,
+            message_text_hash: None,
             delivered: false,
             discarded: false,
             retired_messages: Vec::new(),
@@ -62,6 +92,29 @@ mod tests {
     }
 
     #[test]
+    fn typed_history_is_initialized_only_without_any_existing_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wakes.json");
+        let mut fresh = WakeStore::read(&path);
+        fresh.establish_final_handback_history(false);
+        assert!(fresh.final_handback_history_ready);
+        fresh.write(&path).unwrap();
+        assert!(WakeStore::read(&path).final_handback_history_ready);
+        std::fs::write(&path, b"{").unwrap();
+        let mut corrupt = WakeStore::read(&path);
+        corrupt.establish_final_handback_history(true);
+        assert!(!corrupt.final_handback_history_ready);
+        corrupt.write(&path).unwrap();
+        let mut restarted = WakeStore::read(&path);
+        restarted.establish_final_handback_history(true);
+        assert!(!restarted.final_handback_history_ready);
+        std::fs::remove_file(&path).unwrap();
+        let mut missing = WakeStore::read(&path);
+        missing.establish_final_handback_history(true);
+        assert!(!missing.final_handback_history_ready);
+    }
+
+    #[test]
     fn completed_identity_survives_store_reload() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wakes.json");
@@ -74,6 +127,36 @@ mod tests {
             core.remember_delivered_id("chat", id, 10);
         }
         assert!(!core.record("chat", event(1).event, 11));
+    }
+
+    #[test]
+    fn final_handback_receipt_survives_reload_and_conflicts_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wakes.json");
+        let mut store = WakeStore::default();
+        let receipt = HandbackReceipt {
+            handback: FinalHandback {
+                operation_id: "op".into(),
+                worker_chat_id: "worker".into(),
+                parent_chat_id: "parent".into(),
+                project_id: "project".into(),
+                assignment_generation: "generation".into(),
+            },
+            message_id: Some("message".into()),
+            text_hash: Some("a".repeat(64)),
+        };
+        let old_receipt = serde_json::to_value(&receipt.handback).unwrap();
+        assert!(!serde_json::from_value::<HandbackReceipt>(old_receipt).unwrap().is_verified());
+        store.remember_handback(receipt.clone());
+        store.remember_handback(receipt.clone());
+        store.write(&path).unwrap();
+        let mut restored = WakeStore::read(&path);
+        assert_eq!(restored.delivered_handbacks["op"], Some(receipt.clone()));
+        let mut conflicting = receipt.clone();
+        conflicting.handback.assignment_generation = "other".into();
+        restored.remember_handback(conflicting);
+        restored.remember_handback(receipt);
+        assert_eq!(restored.delivered_handbacks["op"], None);
     }
 
     #[test]
@@ -131,7 +214,7 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event, event(2).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message", None);
         store.synchronize_held(&HashMap::new());
         let entries = &store.orchestrators["chat"];
         assert_eq!(entries.len(), 1);
@@ -144,7 +227,7 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message", None);
         store.synchronize_held(&held);
         assert!(store.orchestrators["chat"][0].message_id.is_none());
     }
@@ -154,9 +237,9 @@ mod tests {
         let mut store = WakeStore::default();
         let held = HashMap::from([("chat".into(), vec![event(1).event])]);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-1");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-1", None);
         store.synchronize_held(&held);
-        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-2");
+        store.mark_queued("chat", &HashSet::from(["1".into()]), "message-2", None);
         store.synchronize_held(&held);
         assert_eq!(store.orchestrators["chat"][0].retired_messages.len(), 2);
     }
@@ -186,6 +269,9 @@ pub(super) struct StoredEvent {
     pub event: WakeEvent,
     /// Queue and transcript messages retain the same id.
     pub message_id: Option<String>,
+    /// Exact rendered message admitted to the Manager queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_text_hash: Option<String>,
     #[serde(default)]
     pub delivered: bool,
     /// Discarded events retain queue identities until removal is durable.
@@ -203,6 +289,22 @@ pub(super) struct RetiredMessage {
 }
 
 impl StoredEvent {
+    pub fn has_original_text(&self, transcript_hash: Option<&str>) -> bool {
+        transcript_hash.is_some() && self.message_text_hash.as_deref() == transcript_hash
+    }
+
+    pub fn handback_receipt(&self, recipient: &str) -> Option<HandbackReceipt> {
+        let handback = self.event.final_handback.as_ref()?;
+        if handback.parent_chat_id != recipient {
+            return None;
+        }
+        Some(HandbackReceipt {
+            handback: handback.clone(),
+            message_id: Some(self.message_id.clone()?),
+            text_hash: Some(self.message_text_hash.clone()?),
+        })
+    }
+
     pub fn retire(&mut self, chat: &str, message: &str) {
         if !self
             .retired_messages
@@ -222,6 +324,25 @@ impl StoredEvent {
 }
 
 impl WakeStore {
+    pub fn establish_final_handback_history(&mut self, any_intents: bool) {
+        if !any_intents {
+            self.final_handback_history_ready = true;
+        }
+    }
+    pub fn remember_handback(&mut self, receipt: HandbackReceipt) {
+        if self.cancelled_handbacks.contains(&receipt.handback.operation_id) {
+            return;
+        }
+        // Conflicting reuse must not turn an unrelated handback into proof.
+        match self.delivered_handbacks.entry(receipt.handback.operation_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(Some(receipt)); }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get().as_ref() == Some(&receipt) => {}
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+                tracing::warn!("conflicting final handback identity");
+            }
+        }
+    }
     pub fn remember_completed(&mut self, chat: &str, id: &str) {
         let ids = self.completed_ids.entry(chat.to_owned()).or_default();
         if !ids.iter().any(|existing| existing == id) {
@@ -237,7 +358,7 @@ impl WakeStore {
     pub fn synchronize_held(&mut self, held: &HashMap<String, Vec<WakeEvent>>) {
         for (chat, entries) in &mut self.orchestrators {
             entries.retain(|entry| {
-                entry.discarded || entry.message_id.is_some()
+                entry.discarded || entry.message_id.is_some() || !entry.retired_messages.is_empty()
                     || held
                         .get(chat)
                         .is_some_and(|events| events.iter().any(|event| event.id == entry.event.id))
@@ -246,16 +367,23 @@ impl WakeStore {
         for (chat, events) in held {
             let entries = self.orchestrators.entry(chat.clone()).or_default();
             for event in events {
+                if event.final_handback.as_ref().is_some_and(|tag|
+                    self.cancelled_handbacks.contains(&tag.operation_id)) {
+                    continue;
+                }
                 if let Some(entry) = entries.iter_mut().find(|entry| entry.event.id == event.id) {
                     if let Some(message) = entry.message_id.clone() {
                         entry.retire(chat, &message);
                     }
                     entry.message_id = None;
+                    entry.message_text_hash = None;
                     entry.delivered = false;
+                    entry.discarded = false;
                 } else {
                     entries.push(StoredEvent {
                         event: event.clone(),
                         message_id: None,
+                        message_text_hash: None,
                         delivered: false,
                         discarded: false,
                         retired_messages: Vec::new(),
@@ -266,24 +394,37 @@ impl WakeStore {
         self.limit();
     }
 
-    pub fn mark_queued(&mut self, chat: &str, event_ids: &HashSet<String>, message_id: &str) {
+    pub fn mark_queued(
+        &mut self,
+        chat: &str,
+        event_ids: &HashSet<String>,
+        message_id: &str,
+        text_hash: Option<&str>,
+    ) {
         if let Some(entries) = self.orchestrators.get_mut(chat) {
             for entry in entries
                 .iter_mut()
                 .filter(|entry| event_ids.contains(&entry.event.id))
             {
                 entry.message_id = Some(message_id.to_owned());
+                entry.message_text_hash = entry.event.final_handback.as_ref()
+                    .and(text_hash).map(str::to_owned);
                 entry.delivered = false;
             }
         }
     }
 
-    pub fn mark_delivered(&mut self, chat: &str, message_id: &str) {
+    pub fn mark_delivered(&mut self, chat: &str, message_id: &str, transcript_hash: Option<&str>) {
         if let Some(entries) = self.orchestrators.get_mut(chat) {
             for entry in entries
                 .iter_mut()
                 .filter(|entry| entry.message_id.as_deref() == Some(message_id))
             {
+                if let Some(handback) = &entry.event.final_handback
+                    && !entry.has_original_text(transcript_hash)
+                {
+                    self.cancelled_handbacks.insert(handback.operation_id.clone());
+                }
                 entry.delivered = true;
             }
         }
@@ -350,6 +491,7 @@ impl WakeStore {
                     entry.retire(from, &message);
                 }
                 entry.message_id = None;
+                entry.message_text_hash = None;
                 entry.delivered = false;
                 destination.push(entry);
             }
@@ -383,10 +525,12 @@ impl WakeStore {
     pub fn limit(&mut self) {
         for (chat, events) in &mut self.orchestrators {
             if events.len() > EVENT_CAP {
-                // Discard receipts protect queue removals across crashes and
-                // cannot be evicted until their snapshots are durable.
-                events.sort_by_key(|event| (event.discarded, event.event.at_ms));
-                let count = (events.len() - EVENT_CAP).min(events.iter().take_while(|event| !event.discarded).count());
+                // These receipts guard transcript and queue identities through
+                // restart. Capacity only limits ordinary pending wake events.
+                let protected = |event: &StoredEvent| event.discarded || event.event.final_handback.is_some();
+                events.sort_by_key(|event| (protected(event), event.event.at_ms));
+                let count = (events.len() - EVENT_CAP)
+                    .min(events.iter().take_while(|event| !protected(event)).count());
                 events.drain(..count);
                 if count > 0 {
                     tracing::warn!(%chat, count, "discarded oldest pending wake events at capacity");

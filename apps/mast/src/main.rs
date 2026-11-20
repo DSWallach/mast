@@ -4,6 +4,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#![allow(clippy::disallowed_methods)] // TODO(post-mortem P3): route direct spawns (1 non-test sites) through mast_harness::command / git_command
 mod auth_cli;
 mod daemon;
 mod doctor;
