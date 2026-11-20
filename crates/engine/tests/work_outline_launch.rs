@@ -2068,7 +2068,11 @@ async fn manager_critical_context_without_status_keeps_predecessor_context() {
     }
     rig.client.call(methods::QUEUE_MESSAGE, send).await.unwrap();
     assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Continue after rotation")).count(), 1);
-    settle(&rig, &successor).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while rig.core.sessions.turn_in_flight(&successor) {
+        assert!(tokio::time::Instant::now() < deadline, "successor did not settle: session {:?}, turns {:?}, queue {:?}", rig.core.sessions.session_status(&successor), rig.mock.turns(), rig.core.doc_host.open(&successor).unwrap().doc().read_queue());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let followup = json!({ "chatId": source, "prompt": { "text": "Idle follow-up after handoff" }, "operationId": "idle-after-handoff" });
     let reply = rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, followup.clone()).await.unwrap();
     assert_eq!(reply["chatId"], successor);
@@ -2423,6 +2427,7 @@ async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
     let rig = rig().await;
     mark_project(&rig).await;
     let source = launch(&rig, &manager_params(&rig, "running-task-manager", "Start managing")).await.unwrap().chat_id;
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt == "Start managing"), "Manager first turn").await;
     settle(&rig, &source).await;
     let draft = mast_proto::ScheduledTaskDraft {
         name: "Running task".into(), prompt: "Run across Manager handoff [hold]".into(),
@@ -2441,7 +2446,11 @@ async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
     assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(source.as_str()));
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
     rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Rotate while task runs" }, "operationId": "running-task-trigger" })).await.unwrap();
-    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "Manager successor").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !manager_chat(&rig).is_some_and(|chat| chat != source) {
+        assert!(tokio::time::Instant::now() < deadline, "no successor: source session {:?}, child session {:?}, turns {:?}, source queue {:?}, usage {:?}, role {:?}", rig.core.sessions.session_status(&source), rig.core.sessions.session_status(&child), rig.mock.turns(), rig.core.doc_host.open(&source).unwrap().doc().read_queue(), rig.core.doc_host.open(&source).unwrap().doc().context_usage(), rig.core.workspace.standing_role_of_chat(&source));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let successor = manager_chat(&rig).unwrap();
     assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
     rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
