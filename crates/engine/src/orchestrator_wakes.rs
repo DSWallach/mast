@@ -460,6 +460,8 @@ struct Inner {
     workspace: WorkspaceHost,
     event_turns: Arc<EventTurns>,
     clock: Clock,
+    #[cfg(debug_assertions)]
+    test_clock_offset_ms: std::sync::atomic::AtomicI64,
     store: Option<PathBuf>,
     /// Ends the watchers: they hold the sessions/doc-host graph alive.
     cancel: tokio_util::sync::CancellationToken,
@@ -661,6 +663,8 @@ impl OrchestratorWakes {
                 workspace,
                 event_turns,
                 clock,
+                #[cfg(debug_assertions)]
+                test_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
                 store,
                 cancel: tokio_util::sync::CancellationToken::new(),
             }),
@@ -703,7 +707,16 @@ impl OrchestratorWakes {
     }
 
     fn now(&self) -> i64 {
-        (self.inner.clock)()
+        let now = (self.inner.clock)();
+        #[cfg(debug_assertions)]
+        let now = now.saturating_add(self.inner.test_clock_offset_ms.load(std::sync::atomic::Ordering::Relaxed));
+        now
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_advance_clock(&self, by_ms: i64) {
+        self.inner.test_clock_offset_ms.fetch_add(by_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn spawn_watchers(&self) {

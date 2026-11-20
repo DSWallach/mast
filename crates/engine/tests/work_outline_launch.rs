@@ -2125,7 +2125,7 @@ async fn manager_eighty_percent_checkpoints_then_hands_off() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
@@ -2167,6 +2167,12 @@ async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(later_turn)), "later source turn").await;
     settle(&rig, &source).await;
     assert_eq!(rig.core.workspace.part_done_hand_off_from(&source).unwrap(), pending);
+    let report_text = "Hold this report until the exact successor has started";
+    let report = rig.core.orchestrator_wakes.report_to_parent("retry-worker", report_text).await.unwrap();
+    assert_eq!(report.parent_chat_id, pending.to_chat_id);
+    assert_eq!(report.delivery, "queuedForParent");
+    let event = rig.core.orchestrator_wakes.status(&pending.to_chat_id).held.into_iter()
+        .find(|event| event.report.as_deref() == Some(report_text)).unwrap();
 
     let Rig { _tmp, core, mock, client, root, item, .. } = rig;
     drop(tokens);
@@ -2176,8 +2182,40 @@ async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(mock.clone()));
     let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    // This test uses a current-thread executor. Install the retry pause
+    // before the engine's first spawned task can be polled.
+    let (watcher, resume) = restarted.test_start_paused_manager_watcher();
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let deliver = || client.call(methods::WAKE_DELIVER_NOW, json!({ "chatId": pending.to_chat_id }));
+    let successor = restarted.doc_host.open(&pending.to_chat_id).unwrap();
+    let starts_before = mock.turns().len();
+    assert!(restarted.orchestrator_wakes.status(&pending.to_chat_id).held.iter().any(|held| held.id == event.id));
+
+    deliver().await.unwrap();
+    let assert_held = || {
+        assert!(restarted.orchestrator_wakes.status(&pending.to_chat_id).held.iter().any(|held| held.id == event.id),
+            "the worker report must stay held until the automatic handoff commits");
+        assert!(!restarted.sessions.has_live_run(&pending.to_chat_id));
+        assert_eq!(mock.turns().len(), starts_before);
+        assert!(successor.doc().read_queue().unwrap().is_empty());
+        let wake_path = root.join("data/orchestrator-wake-events.json");
+        let wakes: serde_json::Value = serde_json::from_slice(&std::fs::read(wake_path).unwrap()).unwrap();
+        let record = wakes["orchestrators"][&pending.to_chat_id].as_array().unwrap().iter()
+            .find(|entry| entry["event"]["id"] == event.id).unwrap();
+        assert!(record["message_id"].is_null());
+        assert_eq!(record["delivered"], false);
+    };
+    assert_held();
+    restarted.orchestrator_wakes.test_advance_clock(121_000);
+    restarted.orchestrator_wakes.evaluate(&pending.to_chat_id, false).await;
+    assert_held();
+
+    mock.hold_matching(Some("coordinator hand-off"));
+    resume.send(()).unwrap();
     wait_for(|| restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item).as_deref()
         == Some(pending.to_chat_id.as_str()), "original successor after restart").await;
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains("coordinator hand-off")),
+        "the original successor's first harness start").await;
     let successors = mock.turns().into_iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).collect::<Vec<_>>();
     assert_eq!(successors.len(), 1);
     assert!(successors[0].prompt.contains("Original worker title"));
@@ -2187,6 +2225,20 @@ async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
     assert_eq!(tokens.admin().live(&source), Some(intervening_grant));
     assert!(tokens.admin().live(&pending.to_chat_id).is_none());
     assert!(restarted.workspace.chat(&source).unwrap().unwrap().archived);
+    assert_eq!(mock.turns().len(), starts_before + 1);
+    assert!(mock.turns().iter().all(|turn| !turn.prompt.contains(report_text)));
+    mock.hold_matching(None);
+    mock.release();
+    wait_for(|| restarted.sessions.session_status(&pending.to_chat_id).is_some_and(|status|
+        status.status == mast_proto::SessionStatus::Idle), "successor first turn to settle").await;
+    deliver().await.unwrap();
+    wait_for(|| mock.turns().iter().any(|turn| turn.prompt.contains(report_text)), "released wake to start").await;
+    deliver().await.unwrap();
+    let turns = mock.turns();
+    assert_eq!(turns.len(), starts_before + 2);
+    assert!(turns[starts_before].prompt.contains("coordinator hand-off"));
+    assert!(turns[starts_before + 1].prompt.contains(report_text));
+    watcher.cancel();
     restarted.shutdown().await;
 }
 
