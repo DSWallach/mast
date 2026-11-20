@@ -2412,6 +2412,40 @@ async fn scheduled_start_during_manager_rotation_uses_successor_parent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scheduled_run_started_before_handoff_keeps_one_turn_and_new_parent() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "running-task-manager", "Start managing")).await.unwrap().chat_id;
+    settle(&rig, &source).await;
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: "Running task".into(), prompt: "Run across Manager handoff [hold]".into(),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(&rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(rig.item.clone()),
+        output: Default::default(), after_success: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: "running-task".into(), expected_revision: 0, draft, operation_id: "save-running-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
+    rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Run across Manager handoff")), "scheduled task start").await;
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let child = snapshot.runs.iter().find(|run| run.task_id == "running-task").unwrap().chat_id.clone().unwrap();
+    assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(source.as_str()));
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Rotate while task runs" }, "operationId": "running-task-trigger" })).await.unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "Manager successor").await;
+    let successor = manager_chat(&rig).unwrap();
+    assert_eq!(rig.core.workspace.chat(&child).unwrap().unwrap().parent_chat_id.as_deref(), Some(successor.as_str()));
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: "running-task".into(), operation_id: "run-running-task".into() }).await.unwrap();
+    let replay = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    assert_eq!(replay.runs.iter().filter(|run| run.task_id == "running-task").count(), 1);
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("Run across Manager handoff")).count(), 1);
+    assert_eq!(rig.core.orchestrator_wakes.report_to_parent(&child, "task remains active").await.unwrap().parent_chat_id, successor);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scheduled_shutdown_cancels_wait_for_handoff_gate() {
     let rig = rig().await;
     let draft = mast_proto::ScheduledTaskDraft {
