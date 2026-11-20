@@ -1835,6 +1835,49 @@ async fn old_done_does_not_complete_a_later_standing_run_after_restart() {
 }
 
 #[tokio::test]
+async fn standing_unknown_outcome_survives_restart_without_second_start() {
+    // Before observation, before commit, and a failed observation flush.
+    for fault in [1, 2, 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let harness = mast_harness::mock::InstructionMockHarness::default();
+        let (core, _, item) = item_core_with(&root, harness.clone()).await;
+        let mut task = item_draft(&root, Some(item));
+        task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+        save_lifecycle_task(&core, "unknown-outcome", 0, task).await;
+        core.sessions.test_outcome_journal_fault(fault);
+        let run = claim_lifecycle_run(&core, "unknown-outcome", "unknown-first").await;
+        wait_for_run_state(&core, &run, ScheduledRunState::Failed).await;
+        let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+        let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+        let chat = failed.chat_id.clone().unwrap();
+        let detail = failed.detail.as_deref().unwrap();
+        assert!(detail.contains("Outcome unknown") && detail.contains(&run.id) && detail.contains(&chat));
+        assert!(detail.contains("not automatically retried"));
+        assert_eq!(harness.turns().len(), 1);
+        core.shutdown().await;
+        drop(core);
+
+        // Reconstruct the persisted scheduler state just before it observed
+        // the missing terminal record, as after a crash at that boundary.
+        let db = rusqlite::Connection::open(item_profile(&root).store_root().join("scheduled-tasks.sqlite3")).unwrap();
+        db.execute("UPDATE runs SET body=json_set(body,'$.state','queued','$.finishedAt',null,'$.detail',null), state='queued' WHERE id=?1", [&run.id]).unwrap();
+        drop(db);
+
+        let (reopened, _, _) = item_core_with(&root, harness.clone()).await;
+        for _ in 0..2 {
+            reopened.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+        }
+        let snapshot = reopened.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+        let failed = snapshot.runs.iter().find(|r| r.id == run.id).unwrap();
+        assert_eq!(failed.state, ScheduledRunState::Failed);
+        assert_eq!(failed.chat_id.as_deref(), Some(chat.as_str()));
+        assert_eq!(harness.turns().len(), 1, "fault {fault} retried the turn");
+        reopened.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn standing_runs_use_each_snapshot_and_manual_turn_has_no_task_environment() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -2021,6 +2064,46 @@ async fn standing_run_defers_on_busy_drain_then_retries_once() {
         _ => false,
     }).count(), 1);
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn standing_rotation_defers_on_busy_drain_and_recovers_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (core, _, item) = item_core(&root).await;
+    let mut task = item_draft(&root, Some(item.clone()));
+    task.chat_mode = ScheduledTaskChatMode::ContinueChat;
+    task.refresh = ScheduledTaskRefresh::ContextHeavy;
+    save_lifecycle_task(&core, "busy-rotation", 0, task).await;
+    let first = claim_lifecycle_run(&core, "busy-rotation", "rotation-initial").await;
+    wait_for_run_state(&core, &first, ScheduledRunState::Completed).await;
+    let before = core.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    let handle = core.doc_host.open(&before).unwrap();
+    handle.doc().update_context_usage(Some(90), Some(100)).unwrap();
+    core.doc_host.persist_chat_now(&before).unwrap();
+    let guard = handle.test_queue_drain_guard().await;
+    let second = claim_lifecycle_run(&core, "busy-rotation", "rotation-deferred").await;
+    core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = core.scheduled_tasks.request(ScheduledTasksRequest::List).await.unwrap();
+    let deferred = snapshot.runs.iter().find(|r| r.id == second.id).unwrap();
+    assert_eq!(deferred.state, ScheduledRunState::Launching);
+    assert!(deferred.chat_id.is_none());
+    drop(guard);
+    core.shutdown().await;
+    drop(core);
+
+    let (reopened, _, _) = item_core(&root).await;
+    wait_for_run_state(&reopened, &second, ScheduledRunState::Completed).await;
+    let after = reopened.workspace.standing_role_chat(StandingRoleKind::Assistant, &item).unwrap();
+    assert_ne!(before, after);
+    let message = mast_proto::derive_id(&second.id, mast_proto::roles::MESSAGE);
+    let commands = reopened.doc_host.open(&after).unwrap().doc().read_commands().unwrap();
+    assert_eq!(commands.iter().filter(|command| match &command.payload {
+        mast_doc::SessionCommandPayload::Run { message_id, .. }
+        | mast_doc::SessionCommandPayload::RunWithInstructions { message_id, .. } => message_id == &message,
+        _ => false,
+    }).count(), 1);
+    reopened.shutdown().await;
 }
 
 #[tokio::test]

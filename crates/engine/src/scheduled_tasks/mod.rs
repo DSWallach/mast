@@ -563,6 +563,8 @@ impl ScheduledTasks {
             if r.snapshot.output == ScheduledTaskOutput::Interactive
                 && r.snapshot.chat_mode == ScheduledTaskChatMode::ContinueChat {
                 let outcome = store::blocking(|| self.0.sessions.message_turn_outcome(&chat, &msg))?;
+                let finalizing = self.0.sessions.message_outcome_finalizing(&chat, &msg)
+                    || self.0.sessions.message_restart_pending(&chat);
                 r.state = match outcome {
                     Some(DoneStatus::Completed) => ScheduledRunState::Completed,
                     Some(DoneStatus::Errored) => ScheduledRunState::Failed,
@@ -570,15 +572,31 @@ impl ScheduledTasks {
                     None => match command.as_ref().map(|c| c.status) {
                         Some(SessionCommandStatus::Rejected | SessionCommandStatus::Expired) => ScheduledRunState::Failed,
                         Some(SessionCommandStatus::Cancelled | SessionCommandStatus::Superseded) => ScheduledRunState::Cancelled,
-                        Some(SessionCommandStatus::Pending) | None => ScheduledRunState::Queued,
+                        Some(SessionCommandStatus::Pending) => ScheduledRunState::Queued,
+                        None if landed => match self.0.sessions.session_status(&chat) {
+                            Some(s) if s.status == SessionStatus::AwaitingInput => {
+                                awaiting = s.awaiting_input;
+                                ScheduledRunState::AwaitingInput
+                            }
+                            Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
+                        },
+                        None => ScheduledRunState::Queued,
                         Some(SessionCommandStatus::Applied) => match self.0.sessions.session_status(&chat) {
                             Some(s) if s.status == SessionStatus::AwaitingInput => {
                                 awaiting = s.awaiting_input;
                                 ScheduledRunState::AwaitingInput
                             }
                             Some(s) if s.status == SessionStatus::Working => ScheduledRunState::Running,
-                            // A prior turn's idle status cannot complete this run.
-                            _ => ScheduledRunState::Queued,
+                            _ if finalizing => ScheduledRunState::Queued,
+                            _ => {
+                                r.detail = Some(format!("Outcome unknown for run {} in chat {}; not automatically retried", r.id, chat));
+                                ScheduledRunState::Failed
+                            }
                         },
                     },
                 };
@@ -619,7 +637,9 @@ impl ScheduledTasks {
                     _ => ScheduledRunState::Interrupted,
                 };
             }
-            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled) {
+            if matches!(r.state, ScheduledRunState::Failed | ScheduledRunState::Cancelled)
+                && !r.detail.as_deref().is_some_and(|detail| detail.starts_with("Outcome unknown for run "))
+            {
                 r.detail = command.and_then(|c| c.resolution);
             }
             let request = awaiting.as_ref().map(|a| a.request_id.clone());

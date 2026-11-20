@@ -180,6 +180,8 @@ struct Inner {
     // Removed runs hand off under the transition fence; only the queue host
     // retires these entries after a checked flush under its drain lock.
     queued_steer_recovery: Mutex<HashMap<String, Vec<QueuedSteer>>>,
+    /// Message outcomes currently crossing the fenced publication boundary.
+    outcome_finalizing: Mutex<HashSet<(String, String)>>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
@@ -417,6 +419,7 @@ impl SessionsEngine {
                 transitions: Mutex::new(HashMap::new()),
                 status_publication: Mutex::new(()),
                 queued_steer_recovery: Mutex::new(HashMap::new()),
+                outcome_finalizing: Mutex::new(HashSet::new()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 usage_limits: Mutex::new(HashMap::new()),
@@ -746,6 +749,26 @@ impl SessionsEngine {
             return Ok(None);
         }
         Ok(outcome)
+    }
+
+    pub(crate) fn message_outcome_finalizing(&self, chat_id: &str, message_id: &str) -> bool {
+        lock(&self.inner.outcome_finalizing).contains(&(chat_id.to_owned(), message_id.to_owned()))
+    }
+
+    pub(crate) fn message_restart_pending(&self, chat_id: &str) -> bool {
+        self.inner.journal.graceful_restart_marked(chat_id)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_message_turn_outcome(&self, chat_id: &str, message_id: &str) -> Result<Option<DoneStatus>, EngineError> {
+        self.message_turn_outcome(chat_id, message_id)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_outcome_journal_fault(&self, fault: u8) {
+        self.inner.journal.test_outcome_fault(fault);
     }
 
     pub(crate) fn harness_installed(&self, harness: HarnessId) -> bool {
@@ -2150,6 +2173,14 @@ impl Inner {
     }
 
     fn publish_for_messages(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String]) -> u64 {
+        self.publish_record(chat_id, event, message_ids, None)
+    }
+
+    fn publish_observation(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], observation_id: &str) -> u64 {
+        self.publish_record(chat_id, event, message_ids, Some(observation_id))
+    }
+
+    fn publish_record(&self, chat_id: &str, event: &AgentEvent, message_ids: &[String], observation_id: Option<&str>) -> u64 {
         if let Some(usage) = self.token_usage.get() { usage.observe(chat_id, event); }
         let mut leaf=event;
         while let AgentEvent::Subagent {event,..}=leaf {leaf=event;}
@@ -2162,7 +2193,11 @@ impl Inner {
             *space_id = self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten())
                 .and_then(|chat| chat.space_id);
         }
-        let seq = match self.journal.append_for_messages(chat_id, &journal_event, message_ids) {
+        let appended = match observation_id {
+            Some(id) => self.journal.append_observation(chat_id, &journal_event, message_ids, id, false),
+            None => self.journal.append_for_messages(chat_id, &journal_event, message_ids),
+        };
+        let seq = match appended {
             Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
@@ -3337,6 +3372,34 @@ struct RunRetirement {
     run_id: String,
 }
 
+/// Keeps the scheduler from mistaking the short observation-to-commit window
+/// for a lost outcome. Drop exposes an unknown outcome after driver failure.
+struct OutcomeFinalization {
+    inner: Arc<Inner>,
+    chat_id: String,
+    message_ids: Vec<String>,
+}
+
+impl OutcomeFinalization {
+    fn track(&mut self, ids: &[String]) {
+        let mut active = lock(&self.inner.outcome_finalizing);
+        for id in ids {
+            active.insert((self.chat_id.clone(), id.clone()));
+            if !self.message_ids.contains(id) { self.message_ids.push(id.clone()); }
+        }
+    }
+    fn clear(&mut self) {
+        let mut active = lock(&self.inner.outcome_finalizing);
+        for id in self.message_ids.drain(..) {
+            active.remove(&(self.chat_id.clone(), id));
+        }
+    }
+}
+
+impl Drop for OutcomeFinalization {
+    fn drop(&mut self) { self.clear(); }
+}
+
 impl Drop for RunRetirement {
     fn drop(&mut self) {
         self.inner.retire_run(&self.chat_id, &self.run_id, Some((SessionStatus::Errored, None)));
@@ -3362,6 +3425,8 @@ async fn drive_run(
     // their durable ids with the terminal event rather than attributing a
     // chat-wide Done to whichever scheduled run happens to inspect it.
     let mut turn_messages = vec![resume_state.user_message_id.clone()];
+    let mut staged_observations: Vec<String> = Vec::new();
+    let mut finalizing = OutcomeFinalization { inner: inner.clone(), chat_id: chat_id.clone(), message_ids: Vec::new() };
     // The token lives exactly as long as this Run's driver: dropping the
     // lease (any return path below) revokes it.
     let (agent_token, agent_tools) = match agent_tools {
@@ -3742,6 +3807,16 @@ async fn drive_run(
                     let completed_turn = (!folded.is_empty() || writer.is_some())
                         .then(|| entry_id.clone());
                     let completed = completed_turn.is_some();
+                    if completed && !turn_messages.is_empty() {
+                        finalizing.track(&turn_messages);
+                        let observation = new_id();
+                        let event = AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+                        match inner.journal.append_observation(&chat_id, &event, &turn_messages, &observation, true) {
+                            Ok(_) => staged_observations.push(observation),
+                            Err(error) => tracing::warn!(chat = %chat_id, %error, "could not observe turn outcome"),
+                        }
+                        turn_messages.clear();
+                    }
                     if !folded.is_empty() || writer.is_some() {
                         if let Err(err) = finish_segment(
                             doc_ref,
@@ -3763,12 +3838,13 @@ async fn drive_run(
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     let no_pending = inner.park_run(&chat_id, &run_id, completed_turn);
-                    if completed && no_pending && !turn_messages.is_empty() {
-                        if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, DoneStatus::Completed) {
-                            tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
-                        } else {
-                            turn_messages.clear();
+                    if completed && no_pending {
+                        for observation in staged_observations.drain(..) {
+                            if let Err(error) = inner.journal.commit_observation(&chat_id, &observation) {
+                                tracing::warn!(chat = %chat_id, %error, "could not commit turn outcome");
+                            }
                         }
+                        finalizing.clear();
                     }
                     continue;
                 }
@@ -4467,7 +4543,12 @@ async fn drive_run(
             }
             // The Manager fence decides whether an accepted steer has taken
             // ownership before a scheduled message gets a terminal outcome.
-            inner.publish(&chat_id, &event);
+            finalizing.track(&turn_messages);
+            let observation = new_id();
+            if inner.publish_observation(&chat_id, &event, &turn_messages, &observation) != 0 {
+                staged_observations.push(observation);
+            }
+            turn_messages.clear();
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival
                 // budget: only consecutive crash-revive-crash cycles spend it.
@@ -4501,12 +4582,13 @@ async fn drive_run(
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                if inner.park_run(&chat_id, &run_id, completed_turn) && !turn_messages.is_empty() {
-                    if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, *status) {
-                        tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
-                    } else {
-                        turn_messages.clear();
+                if inner.park_run(&chat_id, &run_id, completed_turn) {
+                    for observation in staged_observations.drain(..) {
+                        if let Err(error) = inner.journal.commit_observation(&chat_id, &observation) {
+                            tracing::warn!(chat = %chat_id, %error, "could not commit turn outcome");
+                        }
                     }
+                    finalizing.clear();
                 }
                 continue;
             }
@@ -4545,9 +4627,23 @@ async fn drive_run(
     }
 
     let no_pending = inner.retire_run(&chat_id, &run_id, Some((final_status, final_completed_turn)));
-    if no_pending && let Some(outcome) = final_outcome && !turn_messages.is_empty() {
-        if let Err(error) = inner.journal.append_internal_outcome(&chat_id, &turn_messages, outcome) {
-            tracing::warn!(chat = %chat_id, %error, "could not record turn outcome");
+    if no_pending {
+        for observation in staged_observations.drain(..) {
+            if let Err(error) = inner.journal.commit_observation(&chat_id, &observation) {
+                tracing::warn!(chat = %chat_id, %error, "could not commit turn outcome");
+            }
+        }
+    } else if final_outcome.is_some() && !finalizing.message_ids.is_empty() {
+        // The accepted steer remains in recovery; the prior run is not a
+        // success. Commit a distinct Interrupted observation after retirement.
+        let ids: Vec<String> = finalizing.message_ids.iter().cloned().collect();
+        let event = AgentEvent::Done { status: DoneStatus::Interrupted, result: None, error: None, session_id: None };
+        let observation = new_id();
+        match inner.journal.append_observation(&chat_id, &event, &ids, &observation, true) {
+            Ok(_) => if let Err(error) = inner.journal.commit_observation(&chat_id, &observation) {
+                tracing::warn!(chat = %chat_id, %error, "could not commit interrupted outcome");
+            },
+            Err(error) => tracing::warn!(chat = %chat_id, %error, "could not observe interrupted outcome"),
         }
     }
 }
