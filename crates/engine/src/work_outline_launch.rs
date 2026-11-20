@@ -50,6 +50,7 @@ use serde::Serialize;
 
 use crate::EngineError;
 use crate::doc_host::DocHost;
+use crate::handoff_roles::{AutomaticHandoff, PendingHandoff, RoleObservations};
 use crate::execution_scope::{
     ExecutionScopeService, canonical_lenient, describe_repository, rejection_message,
 };
@@ -305,6 +306,7 @@ pub enum LaunchStep {
     ChatCreated,
     Assigned,
     BindingCaptured,
+    WorkersTransferred,
     RevisionCreated,
     RevisionApplied,
     /// The provisional chat, its binding and records are saved (role launches).
@@ -514,7 +516,7 @@ impl WorkItemLaunchService {
         &self,
         p: &CreateChatForWorkItemParams,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
-        self.launch_chat_for_work_item(p, None).await
+        self.launch_chat_for_work_item(p, None, None).await
     }
 
     pub(crate) async fn create_orchestrator_successor(
@@ -524,33 +526,8 @@ impl WorkItemLaunchService {
         source: &str,
         origin: HandOffOrigin<'_>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
-        let source_chat = self
-            .workspace
-            .chat(source)
-            .map_err(engine_error)?
-            .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
         let requested_successor = derive_id(&p.operation_id, roles::CHAT);
-        let mut successor = p.clone();
-        let configuration = match self
-            .workspace
-            .checked_chat_execution_binding(source)
-            .map_err(engine_error)?
-        {
-            Some(binding) => binding.resolved.configuration,
-            None => mast_proto::ExecutionConfiguration::implicit(
-                self.sessions
-                    .resolve_cwd(source, source_chat.cwd.as_deref().unwrap_or("~"))
-                    .map_err(engine_error)?,
-            ),
-        };
-        successor.execution_override = Some(ExecutionOverride { configuration });
-        successor.parent_chat_id = source_chat.parent_chat_id;
-        let harness = successor
-            .config
-            .as_ref()
-            .map(|config| config.harness)
-            .unwrap_or_else(|| self.doc_host.harness_for(source));
-        successor.account_id = self.sessions.chat_account_pin(source, harness);
+        let mut successor = self.handoff_successor_request(p, source)?;
         // A hand-off that stopped after workers moved is finished by asking
         // again with the same summary and settings, even from a reopened
         // dialog or after a restart that minted a fresh operation id.
@@ -579,8 +556,164 @@ impl WorkItemLaunchService {
                 successor.operation_id = pending.operation_id;
             }
         }
-        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)))
+        self.launch_chat_for_work_item(&successor, Some((wakes, source, origin, &requested_successor)), None)
             .await
+    }
+
+    fn handoff_successor_request(
+        &self, p: &CreateChatForWorkItemParams, source: &str,
+    ) -> Result<CreateChatForWorkItemParams, WorkOutlineError> {
+        let source_chat = self
+            .workspace
+            .chat(source)
+            .map_err(engine_error)?
+            .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "Source chat not found"))?;
+        let mut successor = p.clone();
+        let configuration = match self
+            .workspace
+            .checked_chat_execution_binding(source)
+            .map_err(engine_error)?
+        {
+            Some(binding) => binding.resolved.configuration,
+            None => mast_proto::ExecutionConfiguration::implicit(
+                self.sessions
+                    .resolve_cwd(source, source_chat.cwd.as_deref().unwrap_or("~"))
+                    .map_err(engine_error)?,
+            ),
+        };
+        successor.execution_override = Some(ExecutionOverride { configuration });
+        successor.parent_chat_id = source_chat.parent_chat_id;
+        let harness = successor
+            .config
+            .as_ref()
+            .map(|config| config.harness)
+            .unwrap_or_else(|| self.doc_host.harness_for(source));
+        successor.account_id = self.sessions.chat_account_pin(source, harness);
+        Ok(successor)
+    }
+
+    fn prepare_launch_model(&self, p: &CreateChatForWorkItemParams, chat_id: &str) -> CreateChatForWorkItemParams {
+        let mut filled = with_default_model(p, self.doc_host.harness_for(chat_id), chat_id);
+        let parent_rules = p.parent_chat_id.as_deref()
+            .and_then(|id| self.workspace.chat_config(id))
+            .is_some_and(|config| config.approval_rules && !config.auto_approve);
+        if let Some(config) = filled.config.as_mut().filter(|_| parent_rules) {
+            if !config.auto_approve {
+                config.approval_rules = true;
+            }
+        }
+        filled
+    }
+
+    pub(crate) async fn prepare_automatic_handoff(
+        &self, request: &CreateChatForWorkItemParams, source: &str, space: &str,
+        observations: RoleObservations,
+    ) -> Result<AutomaticHandoff, WorkOutlineError> {
+        let request = self.handoff_successor_request(request, source)?;
+        let successor = derive_id(&request.operation_id, roles::CHAT);
+        let request = self.prepare_launch_model(&request, &successor);
+        let execution = self.effective_configuration(&request, space).await?;
+        let snapshot = mast_doc::materialize_work_outline(space, &self.workspace.work_outline_inputs(space));
+        let instructions = snapshot.effective_instructions(&request.work_item_id);
+        let workers = self.workspace.read_chats().map_err(engine_error)?.into_iter()
+            .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(source))
+            .map(|chat| chat.id).collect::<Vec<_>>();
+        let worker_appendix = self.handoff_worker_appendix(space, workers)?;
+        Ok(AutomaticHandoff { source: source.into(), request, execution, instructions,
+            worker_appendix, observations, parked: false })
+    }
+
+    pub(crate) fn automatic_handoff_committed(&self, intent: &AutomaticHandoff) -> bool {
+        let successor = derive_id(&intent.request.operation_id, roles::CHAT);
+        self.workspace.completed_user_hand_off_to(
+            &intent.source, &successor, self.workspace.device_id(), &intent.execution.space_id, Some(true),
+        ).as_deref() == Some(successor.as_str())
+    }
+
+    pub(crate) async fn resume_automatic_handoff(
+        &self, intent: &AutomaticHandoff, wakes: &crate::orchestrator_wakes::OrchestratorWakes,
+    ) -> Result<WorkItemLaunchState, WorkOutlineError> {
+        let successor = derive_id(&intent.request.operation_id, roles::CHAT);
+        if self.automatic_handoff_committed(intent) {
+            let source = self.workspace.chat(&intent.source).map_err(engine_error)?
+                .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+            let pending = PendingHandoff::new(&source, &successor, Some(true))
+                .ok_or_else(|| conflict("The original Manager no longer belongs to a Space"))?;
+            let tokens = self.sessions.agent_tokens();
+            self.workspace.persist_registry_now().map_err(engine_error)?;
+            tokens.pending_handoffs.finish(&self.workspace, &tokens, &pending, &successor)
+                .map_err(engine_error)?;
+            wakes.finish_orchestrator_hand_off(&successor);
+            wakes.evaluate(&successor, false).await;
+            return Ok(WorkItemLaunchState::Started);
+        }
+        let reply = self.launch_chat_for_work_item(
+            &intent.request,
+            Some((wakes, &intent.source, HandOffOrigin::User {
+                archive: Some(true), observed_roles: &intent.observations,
+            }, &successor)),
+            Some(intent),
+        ).await?;
+        Ok(reply.state)
+    }
+
+    pub(crate) fn automatic_handoff_still_owned(&self, intent: &AutomaticHandoff) -> bool {
+        let successor = derive_id(&intent.request.operation_id, roles::CHAT);
+        self.check_automatic_handoff(intent, &successor).is_ok()
+    }
+
+    fn check_automatic_handoff(&self, intent: &AutomaticHandoff, successor: &str) -> Result<(), WorkOutlineError> {
+        let p = &intent.request;
+        let kind = mast_proto::StandingRoleKind::Manager;
+        let role = self.workspace.standing_role(kind, &p.work_item_id)
+            .filter(|role| role.current_chat_id.as_deref() == Some(intent.source.as_str()))
+            .ok_or_else(|| conflict("The Manager role changed during automatic handoff"))?;
+        let reservation = self.workspace.pending_standing_hand_off(kind, &p.work_item_id);
+        let own = reservation.as_ref().is_some_and(|reservation| {
+            reservation.from_chat_id == intent.source && reservation.to_chat_id == successor
+                && reservation.operation_id == p.operation_id
+        });
+        if (reservation.is_some() && !own)
+            || (role.state != mast_proto::StandingRoleState::Idle && !own)
+        {
+            return Err(conflict("Another handoff owns the Manager role"));
+        }
+        let source = self.workspace.chat(&intent.source).map_err(engine_error)?
+            .ok_or_else(|| conflict("The original Manager no longer exists"))?;
+        if source.archived || source.device_id != self.workspace.device_id()
+            || source.space_id.as_deref() != Some(intent.execution.space_id.as_str())
+            || self.workspace.work_item_space(&p.work_item_id).as_deref() != source.space_id.as_deref()
+        {
+            return Err(conflict("The original Manager no longer belongs to this project and device"));
+        }
+        Ok(())
+    }
+
+    fn handoff_worker_appendix(&self, space: &str, workers: Vec<String>) -> Result<String, WorkOutlineError> {
+        let sessions = self.workspace.read_sessions().map_err(engine_error)?;
+        let current = mast_doc::materialize_work_outline(space, &self.workspace.work_outline_inputs(space));
+        let mut appendix = String::from("
+
+[Mast: reparented workers and their open Required Actions]");
+        if workers.is_empty() {
+            appendix.push_str("
+No active workers.");
+        }
+        for worker in workers {
+            let chat = self.workspace.chat(&worker).map_err(engine_error)?;
+            let title = chat.as_ref().and_then(|chat| chat.title.as_deref()).unwrap_or("Untitled");
+            let status = sessions.iter().find(|session| session.chat_id == worker)
+                .map(|session| format!("{:?}", session.status)).unwrap_or_else(|| "Unknown".into());
+            appendix.push_str(&format!("
+- {worker} | {title} | {status}"));
+            for action in current.user_action_requests.iter().filter(|action| {
+                action.chat_id == worker && action.is_unresolved()
+            }) {
+                appendix.push_str(&format!("
+  - Required Action {}: {}", action.id, action.text));
+            }
+        }
+        Ok(appendix)
     }
 
     async fn launch_chat_for_work_item(
@@ -592,6 +725,7 @@ impl WorkItemLaunchService {
             HandOffOrigin<'_>,
             &str,
         )>,
+        automatic: Option<&AutomaticHandoff>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         if crate::work_outline::writes_disabled() {
             return Err(error(
@@ -619,20 +753,11 @@ impl WorkItemLaunchService {
         // The hash above covers what the caller sent; from here on the chat
         // always carries a concrete model, so the harness never inherits its
         // CLI default (a retry derives the same fill).
-        let mut filled = with_default_model(p, self.doc_host.harness_for(&chat_id), &chat_id);
-        // Ask doesn't gate Claude or ACP agents at all, so a child of a Rules
-        // chat that isn't Auto keeps the parent's rules.
-        let parent_rules = p
-            .parent_chat_id
-            .as_deref()
-            .and_then(|id| self.workspace.chat_config(id))
-            .is_some_and(|c| c.approval_rules && !c.auto_approve);
-        if let Some(config) = filled.config.as_mut().filter(|_| parent_rules) {
-            if !config.auto_approve {
-                config.approval_rules = true;
-            }
+        let filled = automatic.is_none().then(|| self.prepare_launch_model(p, &chat_id));
+        let p = filled.as_ref().unwrap_or(p);
+        if let Some(intent) = automatic {
+            self.check_automatic_handoff(intent, &chat_id)?;
         }
-        let p = &filled;
 
         // Ownership: the Space must live on this device (the RPC layer
         // forwards everything else to the owner).
@@ -737,15 +862,16 @@ impl WorkItemLaunchService {
         // (no selection exists, so ingestion pins nothing), so harnesses
         // without instruction support can launch; instructions added later
         // reach the Chat through drift + Apply.
-        let deliver_instructions = self.launch_delivers_instructions(
-            &chat_id,
-            &message_id,
-            op,
-            snapshot
-                .effective_instructions(&p.work_item_id)
-                .entries
-                .is_empty(),
-        )?;
+        let effective = snapshot.effective_instructions(&p.work_item_id);
+        if let Some(intent) = automatic
+            && effective != intent.instructions
+            && !intent.instructions.entries.is_empty()
+            && self.workspace.instruction_revision(&derive_id(op, roles::REVISION)).is_none()
+        {
+            return Err(conflict("Work item instructions changed before the automatic launch captured its revision"));
+        }
+        let no_effective = automatic.map_or(effective.entries.is_empty(), |intent| intent.instructions.entries.is_empty());
+        let deliver_instructions = self.launch_delivers_instructions(&chat_id, &message_id, op, no_effective)?;
         // Capability before anything is written (ledger included).
         let harness = self.doc_host.harness_for_request(
             &chat_id,
@@ -812,9 +938,15 @@ impl WorkItemLaunchService {
                         "This Chat's execution binding was captured by another operation",
                     ));
                 }
+                if automatic.is_some_and(|intent| intent.execution != binding.resolved) {
+                    return Err(conflict("The automatic successor's execution binding changed"));
+                }
                 binding.resolved.clone()
             }
-            None => self.effective_configuration(p, &space_id).await?,
+            None => match automatic {
+                Some(intent) => intent.execution.clone(),
+                None => self.effective_configuration(p, &space_id).await?,
+            },
         };
         let validated = self
             .execution_scope
@@ -823,6 +955,9 @@ impl WorkItemLaunchService {
             .map_err(|errors| validation_error(&errors))?;
         let mut request = self.launch_request(p, &validated);
         self.checkpoint(LaunchStep::Validated)?;
+        if let Some(intent) = automatic {
+            self.check_automatic_handoff(intent, &chat_id)?;
+        }
 
         // ── 3. Chat ──
         self.ensure_chat(
@@ -868,24 +1003,12 @@ impl WorkItemLaunchService {
         if let Some((wakes, source, _, _)) = hand_off {
             request.prompt.insert_str(0, "[Mast system message, not from the user: coordinator hand-off.]\n");
             request.prompt.push_str(&format!("\n\n[Mast: source chat {source}. Read it with read_chat for the previous conversation and decisions.]"));
-            let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
-                .map_err(|detail| error(WorkOutlineErrorCode::Invalid, &detail))?;
-            let sessions = self.workspace.read_sessions().map_err(engine_error)?;
-            let current = mast_doc::materialize_work_outline(
-                &space_id, &self.workspace.work_outline_inputs(&space_id));
-            request.prompt.push_str("\n\n[Mast: reparented workers and their open Required Actions]");
-            if workers.is_empty() {
-                request.prompt.push_str("\nNo active workers.");
-            }
-            for worker in workers {
-                let chat = self.workspace.chat(&worker).map_err(engine_error)?;
-                let title = chat.as_ref().and_then(|c| c.title.as_deref()).unwrap_or("Untitled");
-                let status = sessions.iter().find(|s| s.chat_id == worker)
-                    .map(|s| format!("{:?}", s.status)).unwrap_or_else(|| "Unknown".into());
-                request.prompt.push_str(&format!("\n- {worker} | {title} | {status}"));
-                for action in current.user_action_requests.iter().filter(|a| a.chat_id == worker && a.is_unresolved()) {
-                    request.prompt.push_str(&format!("\n  - Required Action {}: {}", action.id, action.text));
-                }
+            if let Some(intent) = automatic {
+                request.prompt.push_str(&intent.worker_appendix);
+            } else {
+                let workers = wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
+                    .map_err(|detail| error(WorkOutlineErrorCode::Invalid, detail))?;
+                request.prompt.push_str(&self.handoff_worker_appendix(&space_id, workers)?);
             }
         }
 
@@ -957,7 +1080,19 @@ impl WorkItemLaunchService {
         if p.standing_role.is_some() {
             self.workspace.persist_registry_now().map_err(engine_error)?;
         }
+        if let Some(intent) = automatic {
+            self.check_automatic_handoff(intent, &chat_id)?;
+            if let Some((wakes, source, _, _)) = hand_off {
+                wakes.hand_off_orchestrator_without_delivery(source, &chat_id, source).await
+                    .map_err(|detail| error(WorkOutlineErrorCode::Invalid, detail))?;
+            }
+            self.workspace.persist_registry_now().map_err(engine_error)?;
+            self.checkpoint(LaunchStep::WorkersTransferred)?;
+        }
         self.checkpoint(LaunchStep::RegistryPersisted)?;
+        if let Some(intent) = automatic {
+            self.check_automatic_handoff(intent, &chat_id)?;
+        }
         self.ensure_turn_queued(&chat_id, &command_id, &message_id, payload)?;
         self.checkpoint(LaunchStep::TurnQueued)?;
 
@@ -970,9 +1105,31 @@ impl WorkItemLaunchService {
         }
         self.checkpoint(LaunchStep::RoleAdopted)?;
 
-        let (state, detail) = self.turn_state(&chat_id, &message_id)?;
-        if let Some((wakes, source, origin, requested)) = hand_off {
+        let (mut state, mut detail) = self.turn_state(&chat_id, &message_id)?;
+        if automatic.is_some() && state == WorkItemLaunchState::Queued {
+            // During the normal fast path, keep the source send gate until
+            // rotation commits. A stalled or rejected successor is retried
+            // from its durable intent without blocking the source indefinitely.
+            let settle = async {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let result = self.turn_state(&chat_id, &message_id)?;
+                    if result.0 != WorkItemLaunchState::Queued {
+                        return Ok::<_, WorkOutlineError>(result);
+                    }
+                }
+            };
+            if let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(1), settle).await {
+                (state, detail) = result?;
+            }
+        }
+        if let Some((wakes, source, origin, requested)) = hand_off
+            && (automatic.is_none() || state == WorkItemLaunchState::Started)
+        {
             if state != WorkItemLaunchState::Rejected {
+                if let Some(intent) = automatic {
+                    self.check_automatic_handoff(intent, &chat_id)?;
+                }
                 let handle = self.doc_host.open(source).map_err(engine_error)?;
                 handle
                     .write_user_message(

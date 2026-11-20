@@ -6,14 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mast_proto::{Session, SessionStatus, StandingRoleKind, StandingRoleState};
+use mast_proto::{Session, SessionStatus, StandingRoleKind, StandingRoleState, WorkItemLaunchState};
+use mast_proto::work_outline::WorkOutlineErrorCode;
 use tokio_util::sync::CancellationToken;
 
 use crate::artifacts::ArtifactsService;
 use crate::briefing::{self, BriefingKind, BriefingQuery, ProjectSubtreeScope};
 use crate::orchestrator_wakes::OrchestratorWakes;
 use crate::sessions::SessionsEngine;
-use crate::work_outline_launch::{HandOffOrigin, WorkItemLaunchService};
+use crate::work_outline_launch::WorkItemLaunchService;
 use crate::{DocHost, WorkspaceHost};
 
 struct Checkpoint {
@@ -77,13 +78,71 @@ fn start_inner(
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut checkpoints: HashMap<String, Checkpoint> = HashMap::new();
         let mut deferred = HashSet::new();
+        let mut retries = HashMap::<String, tokio::time::Instant>::new();
+        let tokens = sessions.agent_tokens();
         let mut rescan_all = true;
         loop {
             if stopped.is_cancelled() { break; }
+            // Durable intents are independent of the current completion and
+            // of the session-watch baseline captured at startup.
+            let pending = tokens.pending_handoffs.automatic_intents();
+            let pending_sources: HashSet<_> = pending.iter().map(|intent| intent.source.as_str()).collect();
+            for intent in &pending {
+                let committed = launch.automatic_handoff_committed(intent);
+                if intent.parked && !committed {
+                    continue;
+                }
+                let now = tokio::time::Instant::now();
+                if retries.get(&intent.source).is_some_and(|retry| *retry > now) {
+                    continue;
+                }
+                let Ok(handle) = host.open(&intent.source) else { continue; };
+                let Ok(_source_queue) = handle.drain_lock.try_lock() else { continue; };
+                if !committed && launch.automatic_handoff_still_owned(intent)
+                    && !source_ready(&sessions, &handle)
+                {
+                    continue;
+                }
+                if tokens.manager_status().test_hook("automatic_handoff_attempt", &intent.source) {
+                    continue;
+                }
+                retries.insert(intent.source.clone(), now + std::time::Duration::from_secs(1));
+                let result = launch.resume_automatic_handoff(intent, &wakes).await;
+                let operation = &intent.request.operation_id;
+                match result {
+                    Ok(WorkItemLaunchState::Started) => {
+                        if let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, false) {
+                            tracing::warn!(chat = %intent.source, %error, "completed automatic handoff intent could not be cleared");
+                        }
+                        checkpoints.remove(&intent.source);
+                    }
+                    Ok(WorkItemLaunchState::Queued) => {}
+                    Ok(WorkItemLaunchState::Rejected) => {
+                        let _ = notify_handoff_retry(&handle, operation,
+                            "The successor’s first turn was rejected. Mast will retry this handoff with the same successor.");
+                    }
+                    Err(error) => {
+                        tracing::warn!(chat = %intent.source, %error, "automatic Manager handoff did not complete");
+                        if error.code == WorkOutlineErrorCode::OperationConflict && !launch.automatic_handoff_committed(intent) {
+                            if notify_handoff_retry(&handle, operation,
+                                &format!("Automatic handoff paused. {}", error.message)).is_ok()
+                                && host.persist_chat_now(&intent.source).is_ok()
+                                && let Err(error) = tokens.pending_handoffs.settle_automatic(&intent.source, operation, true)
+                            {
+                                tracing::warn!(chat = %intent.source, %error, "automatic handoff could not be parked");
+                            }
+                        }
+                    }
+                }
+            }
+            retries.retain(|source, _| pending_sources.contains(source.as_str()));
             // A deferred-only pass does not visit every session. Do not mark
             // a concurrently arrived watch version seen until a full pass.
             let rows: Vec<Session> = if rescan_all { rx.borrow_and_update().clone() } else { rx.borrow().clone() };
             for session in rows {
+                if pending_sources.contains(session.chat_id.as_str()) {
+                    continue;
+                }
                 if !rescan_all && !deferred.contains(&session.chat_id) { continue; }
                 let old = previous.get(&session.chat_id);
                 let Some(turn) = session.last_completed_turn.as_deref() else {
@@ -124,19 +183,12 @@ fn start_inner(
                 }
                 // Let the current Manager consume queued input before rotating
                 // its role. An unreadable queue must also defer the handoff.
-                if sessions.turn_in_flight(&session.chat_id)
-                    || sessions.has_queued_steer_recovery(&session.chat_id)
-                    || source_handle.doc().read_queue().ok()
-                        .is_none_or(|queue| !queue.is_empty())
-                    || source_handle.doc().read_commands().ok().is_none_or(|commands| commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Pending))
-                {
+                if !source_ready(&sessions, &source_handle) {
                     continue;
                 }
                 let Some(space) = chat.space_id.as_deref() else {
                     continue;
                 };
-                deferred.remove(&session.chat_id);
-                previous.insert(session.chat_id.clone(), session.last_completed_turn.clone());
                 let status = || {
                     briefing::read(
                         &artifacts,
@@ -160,7 +212,10 @@ fn start_inner(
                         chrono::Utc::now().timestamp_millis(),
                     ) {
                         tracing::warn!(chat = %session.chat_id, %error, "could not report missing Manager context window");
+                        continue;
                     }
+                    deferred.remove(&session.chat_id);
+                    previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
                 let checkpoint = checkpoints.get(&session.chat_id);
@@ -199,10 +254,13 @@ fn start_inner(
                                 );
                             }
                             Err(error) => {
-                                tracing::warn!(chat = %session.chat_id, %error, "Manager handoff checkpoint could not be queued")
+                                tracing::warn!(chat = %session.chat_id, %error, "Manager handoff checkpoint could not be queued");
+                                continue;
                             }
                         }
                     }
+                    deferred.remove(&session.chat_id);
+                    previous.insert(session.chat_id.clone(), Some(turn.into()));
                     continue;
                 }
                 let status = status().and_then(|entry| entry.content).unwrap_or_else(|| {
@@ -233,7 +291,7 @@ fn start_inner(
                 });
                 let observations = crate::handoff_roles::RoleObservations::capture(
                     &workspace,
-                    &sessions.agent_tokens(),
+                    &tokens,
                     &chat,
                 );
                 let request = mast_proto::CreateChatForWorkItemParams {
@@ -256,23 +314,17 @@ fn start_inner(
                     account_id: None,
                     standing_role: None,
                 };
-                match launch
-                    .create_orchestrator_successor(
-                        &request,
-                        &wakes,
-                        &session.chat_id,
-                        HandOffOrigin::User {
-                            archive: Some(true),
-                            observed_roles: &observations,
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        checkpoints.remove(&session.chat_id);
+                match launch.prepare_automatic_handoff(&request, &session.chat_id, space, observations).await {
+                    Ok(intent) => {
+                        if let Err(error) = tokens.pending_handoffs.remember_automatic(intent) {
+                            tracing::warn!(chat = %session.chat_id, %error, "automatic handoff intent could not be saved");
+                            continue;
+                        }
+                        deferred.remove(&session.chat_id);
+                        previous.insert(session.chat_id.clone(), Some(turn.into()));
                     }
                     Err(error) => {
-                        tracing::warn!(chat = %session.chat_id, %error, "automatic Manager handoff failed")
+                        tracing::warn!(chat = %session.chat_id, %error, "automatic handoff intent could not be prepared");
                     }
                 }
             }
@@ -291,4 +343,25 @@ fn start_inner(
         }
     });
     cancel
+}
+
+
+fn source_ready(sessions: &SessionsEngine, handle: &crate::doc_host::ChatDocHandle) -> bool {
+    let chat_id = handle.chat_id();
+    !sessions.turn_in_flight(chat_id)
+        && !sessions.has_queued_steer_recovery(chat_id)
+        && handle.doc().read_queue().is_ok_and(|queue| queue.is_empty())
+        && handle.doc().read_commands().is_ok_and(|commands| commands.iter()
+            .all(|command| command.status != mast_doc::SessionCommandStatus::Pending))
+}
+
+fn notify_handoff_retry(
+    source: &crate::doc_host::ChatDocHandle, operation: &str, message: &str,
+) -> Result<(), mast_doc::DocError> {
+    let id = mast_proto::derive_id(operation, message);
+    source.write_system_notice(
+        &id,
+        &format!("[Mast system message: {message}]"),
+        chrono::Utc::now().timestamp_millis(),
+    )
 }

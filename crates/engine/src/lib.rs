@@ -260,6 +260,12 @@ impl EngineCore {
     pub async fn test_work_item_launch_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.work_item_launch.test_gate().await
     }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn test_inject_work_item_launch_fault(&self, step: work_outline_launch::LaunchStep) {
+        self.work_item_launch.inject_fault(Some(step));
+    }
+
     /// Replace the automatic watcher with one paused after registration.
     #[cfg(debug_assertions)]
     #[doc(hidden)]

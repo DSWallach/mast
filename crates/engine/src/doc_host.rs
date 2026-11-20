@@ -5803,6 +5803,16 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         if matches!(
+                &entry.payload,
+                SessionCommandPayload::Run { request, .. }
+                    | SessionCommandPayload::RunWithInstructions { request, .. }
+                    if request.prompt.starts_with("[Mast system message, not from the user: coordinator hand-off.]")
+            )
+            && sessions.agent_tokens().manager_status().test_hook("automatic_handoff_turn_reject", chat_id)
+        {
+            return Ok((SessionCommandStatus::Rejected, Some("injected first turn rejection".into())));
+        }
+        if matches!(
             &entry.payload,
             SessionCommandPayload::Run { .. }
                 | SessionCommandPayload::RunWithInstructions { .. }

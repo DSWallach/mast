@@ -2096,12 +2096,22 @@ async fn manager_eighty_percent_checkpoints_then_hands_off() {
     let source = launch(&rig, &manager_params(&rig, "checkpoint-manager", "Start managing")).await.unwrap().chat_id;
     wait_for(|| manager_chat(&rig).as_deref() == Some(source.as_str()), "Manager role").await;
     settle(&rig, &source).await;
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = attempts.clone();
+    let owner = source.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        event == "queue" && chat == owner
+            && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+    })));
     rig.mock.hold_matching(Some("Your last turn changed state"));
     rig.client.call(methods::CONTINUE_CHAT_FOR_WORK_ITEM, json!({ "chatId": source, "prompt": { "text": "Threshold work [hold]" }, "operationId": "checkpoint-trigger" })).await.unwrap();
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Threshold work [hold]")), "threshold turn").await;
     rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(80), Some(100)).unwrap();
     rig.mock.release();
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("Your last turn changed state")), "checkpoint turn").await;
+    assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    tokens.manager_status().set_test_hook(None);
     assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
     let lease = rig.core.sessions.agent_tokens().mint(&source, "checkpoint-run", SPACE, &rig.core.device_id);
     let sections = mast_proto::MANAGER_STATUS_SECTIONS.iter().map(|section| format!("## {section}\ncheckpoint evidence\n\n")).collect::<String>();
@@ -2112,6 +2122,149 @@ async fn manager_eighty_percent_checkpoints_then_hands_off() {
     rig.mock.release();
     wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != source), "successor after checkpoint").await;
     wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains("checkpoint evidence")), "successor status").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_handoff_resumes_frozen_intent_after_transfer_and_restart() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "retry-source", "Start managing")).await.unwrap().chat_id;
+    settle(&rig, &source).await;
+    rig.core.workspace.create_chat_with_parent(
+        "retry-worker", Some(SPACE), Some(DEVICE), None, None, Some(source.clone()),
+    ).unwrap();
+    rig.core.workspace.rename_chat("retry-worker", "Original worker title").unwrap();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.admin().grant(&source, SPACE, None, true);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let owner = source.clone();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, chat| {
+        event == "automatic_handoff_attempt" && chat == owner && attempts.fetch_add(1, SeqCst) > 0
+    })));
+    rig.core.test_inject_work_item_launch_fault(LaunchStep::WorkersTransferred);
+
+    let threshold = "Original status source turn";
+    rig.mock.hold_matching(Some(threshold));
+    continue_chat(&rig, &source, "retry-first-turn", threshold).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(threshold)), "threshold turn").await;
+    rig.core.doc_host.open(&source).unwrap().doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| rig.core.workspace.part_done_hand_off_from(&source).is_some(), "durable worker transfer").await;
+    let pending = rig.core.workspace.part_done_hand_off_from(&source).unwrap();
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    assert_eq!(rig.core.workspace.chat("retry-worker").unwrap().unwrap().parent_chat_id.as_deref(), Some(pending.to_chat_id.as_str()));
+
+    // Inputs and role grants can change before the recovery attempt. The
+    // successor must still use the original prepared launch and owner.
+    rig.core.workspace.rename_chat("retry-worker", "Later worker title").unwrap();
+    let intervening_grant = tokens.admin().grant(&source, SPACE, None, false);
+    let later_turn = "New source input after transfer with a new operation";
+    continue_chat(&rig, &source, "retry-later-turn", later_turn).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(later_turn)), "later source turn").await;
+    settle(&rig, &source).await;
+    assert_eq!(rig.core.workspace.part_done_hand_off_from(&source).unwrap(), pending);
+
+    let Rig { _tmp, core, mock, client, root, item, .. } = rig;
+    drop(tokens);
+    drop(client);
+    core.shutdown().await;
+    drop(core);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(mock.clone()));
+    let restarted = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    wait_for(|| restarted.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item).as_deref()
+        == Some(pending.to_chat_id.as_str()), "original successor after restart").await;
+    let successors = mock.turns().into_iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).collect::<Vec<_>>();
+    assert_eq!(successors.len(), 1);
+    assert!(successors[0].prompt.contains("Original worker title"));
+    assert!(!successors[0].prompt.contains("Later worker title"));
+    assert!(!successors[0].prompt.contains(later_turn));
+    let tokens = restarted.sessions.agent_tokens();
+    assert_eq!(tokens.admin().live(&source), Some(intervening_grant));
+    assert!(tokens.admin().live(&pending.to_chat_id).is_none());
+    assert!(restarted.workspace.chat(&source).unwrap().unwrap().archived);
+    restarted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_handoff_retries_rejected_first_turn_on_same_successor() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "rejected-source", "Start managing")).await.unwrap().chat_id;
+    settle(&rig, &source).await;
+    let reject = Arc::new(AtomicBool::new(true));
+    let rejecting = reject.clone();
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(move |event, _| {
+        event == "automatic_handoff_turn_reject" && rejecting.load(SeqCst)
+    })));
+    let threshold = "Threshold with a rejected successor";
+    rig.mock.hold_matching(Some(threshold));
+    continue_chat(&rig, &source, "rejected-trigger", threshold).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(threshold)), "rejection threshold").await;
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    handle.doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    wait_for(|| handle.doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter()
+        .any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("first turn was rejected")))),
+        "visible rejected successor notice").await;
+    let pending = rig.core.workspace.part_done_hand_off_from(&source).unwrap();
+    assert_eq!(manager_chat(&rig).as_deref(), Some(source.as_str()));
+    reject.store(false, SeqCst);
+    wait_for(|| manager_chat(&rig).as_deref() == Some(pending.to_chat_id.as_str()), "same successor to take the role").await;
+    tokens.manager_status().set_test_hook(None);
+    let successor = rig.core.doc_host.open(&pending.to_chat_id).unwrap();
+    let commands = successor.doc().read_commands().unwrap();
+    assert!(commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Rejected));
+    assert!(commands.iter().any(|command| command.status == mast_doc::SessionCommandStatus::Applied));
+    let logical_message = derive_id(&pending.operation_id, roles::MESSAGE);
+    assert_eq!(successor.doc().read_entries().unwrap().iter().filter(|entry| entry.id == logical_message).count(), 1);
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).count(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_handoff_parks_when_a_manual_handoff_changes_the_owner() {
+    let rig = rig().await;
+    mark_project(&rig).await;
+    let source = launch(&rig, &manager_params(&rig, "parked-intent-source", "Start managing")).await.unwrap().chat_id;
+    settle(&rig, &source).await;
+    let tokens = rig.core.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, _| event == "automatic_handoff_attempt")));
+    let threshold = "Prepare the automatic intent";
+    rig.mock.hold_matching(Some(threshold));
+    continue_chat(&rig, &source, "parked-intent-trigger", threshold).await.unwrap();
+    wait_for(|| rig.mock.turns().iter().any(|turn| turn.prompt.contains(threshold)), "prepared threshold turn").await;
+    let handle = rig.core.doc_host.open(&source).unwrap();
+    handle.doc().update_context_usage(Some(92), Some(100)).unwrap();
+    rig.mock.hold_matching(None);
+    rig.mock.release();
+    let intents_path = rig.root.join("data/automatic-manager-handoffs.json");
+    wait_for(|| intents_path.is_file(), "on-disk automatic intent before reservation").await;
+
+    let operation = "manual-operation-after-intent";
+    rig.client.call(methods::HAND_OFF_ORCHESTRATOR, json!({
+        "chatId": source, "summary": "Choose the manual successor", "operationId": operation, "archive": true
+    })).await.unwrap();
+    let manual = derive_id(operation, roles::CHAT);
+    wait_for(|| manager_chat(&rig).as_deref() == Some(manual.as_str()), "manual successor").await;
+    tokens.manager_status().set_test_hook(None);
+    wait_for(|| handle.doc().read_entries().unwrap().iter().any(|entry| entry.parts.iter()
+        .any(|part| matches!(part, mast_doc::MessagePart::Text { text, .. } if text.contains("Automatic handoff paused")))),
+        "stale automatic intent to park visibly").await;
+    assert_eq!(manager_chat(&rig).as_deref(), Some(manual.as_str()));
+    wait_for(|| std::fs::read(&intents_path).ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|intent| intent[0]["source"] == source && intent[0]["parked"] == true),
+        "disabled intent retained on the original source").await;
+    assert_eq!(rig.mock.turns().iter().filter(|turn| turn.prompt.contains("coordinator hand-off")).count(), 1);
     rig.core.shutdown().await;
 }
 
