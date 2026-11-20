@@ -6505,6 +6505,7 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     let direct_id = "startup-direct";
     let warm_id = "startup-warm";
     let discarded_id = "startup-discarded";
+    let removed_id = "startup-removed";
     assert_eq!(
         rig.core.sessions.steer(CHAT, "direct follow-up", Some(direct_id.into())).await.unwrap(),
         SteerOutcome::Accepted
@@ -6513,11 +6514,12 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     request.prompt = "warm follow-up".into();
     rig.core.sessions.dispatch(CHAT, HarnessId::Mock, request, Some(warm_id.into())).await.unwrap();
     rig.core.sessions.steer(CHAT, "discard this private draft", Some(discarded_id.into())).await.unwrap();
+    rig.core.sessions.steer(CHAT, "remove this private draft", Some(removed_id.into())).await.unwrap();
     fail.notify_one();
     wait_for(|| !rig.core.sessions.has_live_run(CHAT), "primary startup to fail").await;
     host.drain_queue(&handle).await;
     let rows = handle.doc().read_queue().unwrap();
-    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id, discarded_id]);
+    assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), [direct_id, warm_id, discarded_id, removed_id]);
     assert!(rows.iter().all(|row| row.delivery_gate.is_some()));
     assert_eq!(rows[0].text, "direct follow-up");
     assert_eq!(rows[1].text, "warm follow-up");
@@ -6553,6 +6555,11 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
         "chatId": CHAT, "id": warm_id, "leaseId": warm_lease, "action": "releaseUnchanged"
     })).await.unwrap()["outcome"], "released");
 
+    let (remove_lease, _) = begin_recovered_review(&rig.client, removed_id).await;
+    assert_eq!(rig.client.call(methods::FINISH_QUEUED_MESSAGE_EDIT, json!({
+        "chatId": CHAT, "id": removed_id, "leaseId": remove_lease, "action": "releaseUnchanged"
+    })).await.unwrap()["outcome"], "released");
+
     let (before_restart, _) = begin_recovered_review(&rig.client, direct_id).await;
     let Rig { _tmp, core, client, harness, service, .. } = rig;
     drop(handle);
@@ -6580,7 +6587,16 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
         .find(|entry| entry.id == warm_id).unwrap().parts[0],
         mast_doc::MessagePart::Text { id: "t0".into(), text: changed.into() });
     wait_for(|| host.update_queued_message(CHAT, warm_id, "   ").is_ok(), "discard approved recovery row").await;
-    for id in [warm_id, discarded_id] {
+    let client = mast_rpc::memory_client(restarted.rpc_service());
+    let tokens = restarted.sessions.agent_tokens();
+    tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
+        event == "recovered_steer_disposition_flush" && chat == CHAT
+    })));
+    let remove = json!({ "chatId": CHAT, "id": removed_id });
+    assert!(client.call(methods::REMOVE_QUEUED_MESSAGE, remove.clone()).await.is_err());
+    tokens.manager_status().set_test_hook(None);
+    assert_eq!(client.call(methods::REMOVE_QUEUED_MESSAGE, remove).await.unwrap()["removed"], true);
+    for id in [warm_id, discarded_id, removed_id] {
         let entries = handle.doc().read_entries().unwrap();
         let discarded = entries.iter().find(|entry| entry.id == id).unwrap();
         assert_eq!(discarded.role, mast_doc::MessageRole::System);
@@ -6590,7 +6606,6 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
     }
 
     // Exercise the saved lease after a fresh engine owns the queue.
-    let client = mast_rpc::memory_client(restarted.rpc_service());
     let release = |lease: &str| json!({
         "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "releaseUnchanged"
     });
@@ -6624,7 +6639,6 @@ async fn startup_failure_recovers_direct_steer_and_warm_run_for_one_reviewed_dis
         "chatId": CHAT, "id": direct_id, "leaseId": lease, "action": "commit",
         "text": approved, "expectedTextHash": hash, "attachments": attachments
     });
-    let tokens = restarted.sessions.agent_tokens();
     tokens.manager_status().set_test_hook(Some(Arc::new(|event, chat| {
         event == "recovered_steer_disposition_flush" && chat == CHAT
     })));

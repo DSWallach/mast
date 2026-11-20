@@ -3548,13 +3548,14 @@ impl DocHost {
         if durable {
             self.persist_recovered_steer_disposition(&handle)?;
         }
-        if changed {
+        let discarded = text.trim().is_empty() && handle.doc.was_discarded_steer(id);
+        if changed || discarded {
             handle.publish_queue();
             if text.trim().is_empty() {
                 self.forget_side_absorb_row(chat_id, id);
             }
         }
-        Ok(changed)
+        Ok(changed || discarded)
     }
 
     /// Reorder a queued message (drag, or the up/down buttons).
@@ -3596,7 +3597,7 @@ impl DocHost {
         if discarded {
             self.persist_recovered_steer_disposition(&handle)?;
         }
-        if removed {
+        if removed || discarded {
             handle.publish_queue();
             self.forget_side_absorb_row(chat_id, id);
         }
@@ -3804,6 +3805,10 @@ impl DocHost {
             self.with_queue_row_available(chat_id, id, || Ok(()))?;
             if handle.doc.recovered_steer_edit_matches(id, &receipt) {
                 self.persist_recovered_steer_disposition(&handle)?;
+                handle.publish_queue();
+                if handle.doc.was_discarded_steer(id) {
+                    self.forget_side_absorb_row(chat_id, id);
+                }
                 drop(drain);
                 self.drain_queue(&handle).await;
                 return Ok(outcome_for_action);
