@@ -2743,13 +2743,26 @@ impl FilesSurface {
                     let Some(provider) = this.preview.active.as_ref().and_then(|path| this.definition_providers.get(path)).cloned() else { return; };
                     if provider.take_navigation_handled() { provider.start_watch(cx); return; }
                     let editor = click_editor.read(cx);
-                    if !super::editor::pointer_in_text(editor, event.position) || !provider.has_identifier_at(editor.cursor()) { return; }
-                    provider.start_watch(cx);
-                    if provider.is_indexing() {
-                        this.show_definition_notice("Indexing…".into(), true, cx);
-                    } else {
-                        this.go_to_definition(cx);
-                    }
+                    if !super::editor::pointer_in_text(editor, event.position) { return; }
+                    let cursor = editor.cursor();
+                    let source = editor.value().to_string();
+                    let path = this.preview.active.clone();
+                    let click_editor = click_editor.clone();
+                    let check = provider.check_identifier_at(source.clone(), cursor, cx);
+                    cx.spawn(async move |surface, cx| {
+                        if !check.await { return; }
+                        let _ = surface.update(cx, |surface, cx| {
+                            if surface.preview.active != path { return; }
+                            let current = click_editor.read(cx);
+                            if current.cursor() != cursor || current.value().as_ref() != source { return; }
+                            provider.start_watch(cx);
+                            if provider.is_indexing() {
+                                surface.show_definition_notice("Indexing…".into(), true, cx);
+                            } else {
+                                surface.go_to_definition(cx);
+                            }
+                        });
+                    }).detach();
                 }))
                 .flex_1()
                 .min_w_0()

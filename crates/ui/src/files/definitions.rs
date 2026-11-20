@@ -123,8 +123,19 @@ impl SymbolDefinitionProvider {
         state.selected.clear();
     }
 
-    pub fn has_identifier_at(&self, offset: usize) -> bool {
-        self.state.borrow().parsed.as_ref().is_some_and(|(_, ranges)| {
+    pub fn check_identifier_at(&self, source: String, offset: usize, cx: &mut App) -> Task<bool> {
+        let state = self.state.clone();
+        let generation = state.borrow().path_generation;
+        let cached = state.borrow().parsed.as_ref().filter(|(key, _)| *key == generation).map(|(_, ranges)| ranges.clone());
+        let path = self.path.borrow().clone();
+        cx.spawn(async move |cx| {
+            let ranges = if let Some(ranges) = cached { ranges } else {
+                let ranges = Rc::new(cx.background_executor().spawn(async move { mast_syntax::symbols::identifier_ranges(&source, &path) }).await);
+                if state.borrow().path_generation != generation { return false; }
+                state.borrow_mut().parsed = Some((generation, ranges.clone()));
+                ranges
+            };
+            if state.borrow().path_generation != generation { return false; }
             let index = ranges.partition_point(|range| range.end <= offset);
             ranges.get(index).is_some_and(|range| range.contains(&offset))
         })
@@ -408,7 +419,6 @@ mod tests {
         let context = FilesRequestContext { target: mast_proto::WorkspaceTarget { chat_id: Some("click-chat".into()), space_id: None, checkout_path: None }, target_device_id: None, cwd: "/click-fixture".into(), checkout_id: Some("checkout".into()) };
         let provider = SymbolDefinitionProvider::new(WorkspaceFilesClient::with_transport(transport.clone(), context), "a.rs".into());
         let source = "fn value() {} // value\nlet s = \"value\";";
-        provider.state.borrow_mut().parsed = Some((0, Rc::new(mast_syntax::symbols::identifier_ranges(source, "a.rs"))));
         cx.update(|cx| { gpui_base::init(cx); cx.set_global(crate::theme::Theme::default()); });
         let host = cx.add_window(|_, cx| { let state = cx.new(|_| crate::state::AppState::new()); super::super::FilesSurface::new_editor(state, "click-chat".into(), "a.rs".into(), false, 1000, 13.0, false, false, cx) });
         let editor = host.update(cx, |surface, window, cx| {
@@ -424,6 +434,7 @@ mod tests {
         }).unwrap();
         cx.update_window(host.into(), |_, window, cx| { window.refresh(); let _ = window.draw(cx); }).unwrap();
         for offset in [source.find("// value").unwrap() + 4, source.rfind("value").unwrap() + 1] {
+            provider.invalidate_source();
             cx.update_window(host.into(), |_, window, cx| {
                 let position = editor.read(cx).range_to_bounds(&(offset..offset + 1)).unwrap().center();
                 window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent { position, button: gpui::MouseButton::Left, click_count: 1, modifiers: gpui::Modifiers::secondary_key(), ..Default::default() }), cx);
@@ -432,6 +443,15 @@ mod tests {
         }
         assert_eq!(transport.subscriptions.load(Ordering::SeqCst), 0);
         assert_eq!(transport.queries.load(Ordering::SeqCst), 0);
+        provider.invalidate_source();
+        cx.update_window(host.into(), |_, window, cx| {
+            let offset = source.find("value").unwrap() + 1;
+            let position = editor.read(cx).range_to_bounds(&(offset..offset + 1)).unwrap().center();
+            window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent { position, button: gpui::MouseButton::Left, click_count: 1, modifiers: gpui::Modifiers::secondary_key(), ..Default::default() }), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        assert_eq!(transport.subscriptions.load(Ordering::SeqCst), 1);
+        host.update(cx, |surface, _, _| assert_eq!(surface.definition_notice.as_deref(), Some("Indexing…"))).unwrap();
     }
 
     #[gpui::test]
