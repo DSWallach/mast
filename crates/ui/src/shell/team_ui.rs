@@ -881,8 +881,8 @@ impl Shell {
     /// The engine's PR cache published new results: chat link statuses read
     /// before it are stale, so mark them due (the fetch stays rate limited by
     /// `board_links_due`) and rebuild the rows once.
-    pub(super) fn on_tracker_pr_cache_changed(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        self.expire_chat_header_links();
+    pub(super) fn on_tracker_pr_cache_changed(&mut self, chat_id: &str, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>, cx: &mut Context<Self>) {
+        self.expire_chat_header_links(update);
         self.tracker.health_key = None;
         self.tracker.key = None;
         self.load_tracker_health(chat_id, cx);
@@ -905,11 +905,12 @@ impl Shell {
                         continue;
                     }
                 };
-                while subscription.recv().await.is_some() {
+                while let Some(value) = subscription.recv().await {
                     attempt = 0;
+                    let update = serde_json::from_value::<mast_engine::pr_ticket_cache::PrCacheUpdate>(value).ok();
                     if shell.update(cx, |shell, cx| {
                         if shell.active_chat == chat_id && shell.right_pane_open(cx) && shell.resolved_right_active(cx) == RightSurface::Team {
-                            shell.on_tracker_pr_cache_changed(&chat_id, cx);
+                            shell.on_tracker_pr_cache_changed(&chat_id, update.as_ref(), cx);
                         }
                     }).is_err() { return; }
                 }

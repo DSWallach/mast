@@ -1266,48 +1266,112 @@ fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkSta
         "prLinks": [{"url": "https://github.com/example/project/pull/57", "source": "created_in_chat", "detail": pr}] })).unwrap()
 }
 
-fn set_link_status(shell: &Entity<Shell>, vcx: &mut VisualTestContext, status: Option<mast_engine::pr_ticket_cache::ChatLinkStatus>) {
-    shell.update(vcx, |shell, cx| {
-        shell.chat_header_links.insert("w-0".into(), ChatHeaderLinkCache { checkout: None, status, fetched_at: Instant::now() });
-        shell.board_links_revision = shell.board_links_revision.wrapping_add(1);
-        cx.notify();
-    });
-    draw(vcx);
+fn pr_update(urls: &[&str]) -> mast_engine::pr_ticket_cache::PrCacheUpdate {
+    mast_engine::pr_ticket_cache::PrCacheUpdate { revision: 1, urls: urls.iter().map(|url| (*url).to_owned()).collect(), any_branch: false }
+}
+
+const PR_57: &str = "https://github.com/example/project/pull/57";
+
+fn stage_counts(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> [usize; 6] {
+    shell.read_with(vcx, |shell, _| shell.tracker.counts)
 }
 
 #[gpui::test]
-fn tracker_stage_follows_the_chats_pr_from_building_to_merged(cx: &mut TestAppContext) {
+fn a_pr_cache_update_refetches_the_chats_link_status_and_moves_its_stage(cx: &mut TestAppContext) {
     use crate::tracker_lifecycle::LifecycleStage as Stage;
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
     add_workers(&shell, vcx, 1);
     shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
     draw(vcx);
-    let counts = |vcx: &mut VisualTestContext| shell.read_with(vcx, |shell, _| shell.tracker.counts);
-    let building = counts(vcx);
+    let building = stage_counts(&shell, vcx);
     assert!(building[Stage::Building.index()] >= 1, "{building:?}");
-    set_link_status(&shell, vcx, Some(link_status_with_pr("OPEN")));
+
+    // The engine's PR cache now knows the chat's PR is open: the Tracker must
+    // ask for the chat's link status again, then show the new stage.
+    let mut answer = |vcx: &mut VisualTestContext, state: &str| {
+        let request = loop {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+            let Ok(line) = requests.try_recv() else { panic!("no link status refetch was requested") };
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS && request["params"]["chatId"] == "w-0" { break request; }
+        };
+        replies.try_send(serde_json::json!({"id": request["id"], "ok": link_status_with_pr(state)}).to_string()).unwrap();
+        for _ in 0..20 {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+        }
+        vcx.executor().advance_clock(Duration::from_millis(500));
+        vcx.run_until_parked();
+        draw(vcx);
+    };
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, None, cx));
+    draw(vcx);
+    answer(vcx, "OPEN");
     let mut expected = building;
     expected[Stage::Building.index()] -= 1;
     expected[Stage::PrReview.index()] += 1;
-    assert_eq!(counts(vcx), expected, "an open PR moves the ticket to PR review");
-    set_link_status(&shell, vcx, Some(link_status_with_pr("MERGED")));
+    assert_eq!(stage_counts(&shell, vcx), expected, "an open PR moves the ticket to PR review");
+
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx));
+    draw(vcx);
+    answer(vcx, "MERGED");
     expected[Stage::PrReview.index()] -= 1;
     expected[Stage::Done.index()] += 1;
-    assert_eq!(counts(vcx), expected, "a merged PR moves the ticket to Done");
+    assert_eq!(stage_counts(&shell, vcx), expected, "a merged PR moves the ticket to Done");
+    drop(guard);
 }
 
 #[gpui::test]
-fn tracker_refetches_stale_link_statuses_when_the_pr_cache_changes(cx: &mut TestAppContext) {
+fn a_pr_cache_update_expires_only_the_chats_it_touches(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
-    add_workers(&shell, vcx, 1);
-    // A status read just before the PR cache filled in: no PR details yet.
-    set_link_status(&shell, vcx, Some(serde_json::from_value(serde_json::json!({
-        "isWorktree": false, "prLinks": [{"url": "https://github.com/example/project/pull/57", "source": "created_in_chat"}] })).unwrap()));
+    add_workers(&shell, vcx, 3);
+    let other = "https://github.com/example/project/pull/58";
     shell.update(vcx, |shell, cx| {
-        assert!(shell.board_links_due(&["w-0".into()], cx).is_empty(), "fresh status is not refetched on its own");
-        shell.on_tracker_pr_cache_changed("w-0", cx);
-        assert_eq!(shell.board_links_due(&["w-0".into()], cx), vec!["w-0"]);
-        assert!(shell.chat_header_links["w-0"].status.is_some(), "last known status stays visible meanwhile");
+        let unlinked = mast_engine::pr_ticket_cache::ChatLinkStatus::default();
+        for (id, status) in [("w-0", link_status_with_pr("OPEN")), ("w-1", {
+            let mut status = link_status_with_pr("OPEN");
+            for link in &mut status.pr_links { link.url = other.into(); }
+            status.pr.as_mut().unwrap().url = Some(other.into());
+            status
+        }), ("w-2", unlinked)] {
+            shell.chat_header_links.insert(id.into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        }
+        let ids: Vec<String> = ["w-0", "w-1", "w-2"].map(String::from).to_vec();
+        assert!(shell.board_links_due(&ids, cx).is_empty());
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx);
+        assert_eq!(shell.board_links_due(&ids, cx), vec!["w-0"], "only the chat linked to the changed PR is due");
+        let mut update = pr_update(&[]);
+        update.any_branch = true;
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&update), cx);
+        let mut due = shell.board_links_due(&ids, cx);
+        due.sort();
+        assert_eq!(due, vec!["w-0", "w-2"], "a branch change also reaches chats with no PR yet");
+    });
+}
+
+#[gpui::test]
+fn a_batch_of_link_status_changes_rebuilds_the_tracker_once(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 3);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let (revision, rebuilds) = shell.read_with(vcx, |shell, _| (shell.board_links_revision, shell.tracker.rebuilds));
+    shell.update(vcx, |shell, cx| {
+        for id in ["w-0", "w-1", "w-2"] { shell.mark_board_links_dirty(id.into(), cx); }
+    });
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    vcx.run_until_parked();
+    draw(vcx);
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.board_links_revision, revision.wrapping_add(1), "one revision bump for the batch");
+        assert_eq!(shell.tracker.rebuilds, rebuilds + 1);
     });
 }
 
