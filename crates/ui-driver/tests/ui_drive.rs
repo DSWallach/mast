@@ -4,6 +4,7 @@
 //! and runs `drive_serve` (this same binary) inside `run_isolated`.
 //! `scripts/ui-drive` starts the launcher; the tests below start it the same
 //! way and talk through `Client`, which is the protocol the CLI speaks.
+#![cfg(target_os = "macos")] // needs mast_ui::snapshot (macOS only)
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods)]
 

@@ -312,7 +312,7 @@ fn pre_title(core: &EngineCore) {
 
 #[tokio::test]
 async fn retry_errored_turn_resends_once_with_attachments() {
-    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let failures = Arc::new(Mutex::new(1));
     let core = assemble(&tmp.path().join("data"), RecordingHarness {
@@ -341,7 +341,7 @@ async fn retry_errored_turn_resends_once_with_attachments() {
 
 #[tokio::test]
 async fn retry_errored_turn_refuses_live_run() {
-    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(RestartInterruptedHarness));
     let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();
@@ -354,7 +354,7 @@ async fn retry_errored_turn_refuses_live_run() {
 
 #[tokio::test]
 async fn retry_falls_back_to_fresh_when_saved_session_is_rejected() {
-    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(ResumeRejectingHarness { requests: requests.clone() }));
@@ -379,7 +379,7 @@ async fn retry_falls_back_to_fresh_when_saved_session_is_rejected() {
 
 #[tokio::test]
 async fn repeated_command_identity_dispatches_only_once() {
-    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(&tmp.path().join("data"), RecordingHarness {
         requests: requests.clone(), session_id: "command-session".into(), fail_starts: Default::default(),
@@ -398,7 +398,7 @@ async fn repeated_command_identity_dispatches_only_once() {
 
 #[tokio::test]
 async fn repeated_queue_identity_adds_one_message() {
-    let tmp = tempfile::Builder::new().tempdir_in("/private/tmp").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(RestartInterruptedHarness));
     let core = EngineCore::assemble(&tmp.path().join("data"), Arc::new(registry), HarnessId::Mock, None).unwrap();

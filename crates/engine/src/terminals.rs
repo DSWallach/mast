@@ -40,6 +40,8 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 struct LiveTerminal {
     // Keep the private action script alive until the shell exits or the tab is closed.
     initial_script: Option<tempfile::NamedTempFile>,
+    // Keep a fallback ZDOTDIR alive when HOME has no zsh startup files (prevents zsh-newuser-install).
+    _fallback_zdotdir: Option<tempfile::TempDir>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -78,6 +80,7 @@ impl LiveTerminal {
         self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
         if matches!(event, TerminalEvent::Exit { .. }) {
             self.initial_script.take();
+            self._fallback_zdotdir.take();
             self.exited = true;
             self.subscribers.clear();
         }
@@ -130,6 +133,34 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
         pixel_width: 0,
         pixel_height: 0,
     }
+}
+
+/// When `ZDOTDIR` is unset and `HOME` has no zsh startup files (e.g. isolated test homes),
+/// zsh launches `zsh-newuser-install` interactively and consumes initial PTY input.
+/// Providing a temporary `ZDOTDIR` with an empty `.zshrc` suppresses it without touching `HOME`.
+#[cfg(not(windows))]
+fn empty_home_zdotdir(
+    environment: &HashMap<String, String>,
+) -> Result<Option<tempfile::TempDir>, EngineError> {
+    if environment.contains_key("ZDOTDIR") || std::env::var_os("ZDOTDIR").is_some() {
+        return Ok(None);
+    }
+    let home = environment
+        .get("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from));
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    let has_zsh_rc = [".zshenv", ".zprofile", ".zshrc", ".zlogin"]
+        .iter()
+        .any(|name| home.join(name).exists());
+    if has_zsh_rc {
+        return Ok(None);
+    }
+    let dir = tempfile::Builder::new().prefix("mast-zdotdir-").tempdir()?;
+    std::fs::write(dir.path().join(".zshrc"), "")?;
+    Ok(Some(dir))
 }
 
 /// The user's interactive shell: `$SHELL`, else the platform default.
@@ -260,6 +291,11 @@ impl Terminals {
             (None, None)
         };
 
+        #[cfg(not(windows))]
+        let fallback_zdotdir = empty_home_zdotdir(environment)?;
+        #[cfg(windows)]
+        let fallback_zdotdir: Option<tempfile::TempDir> = None;
+
         #[cfg(windows)]
         let (master, mut child) =
             windows::open(&shell, cwd, clamp_size(cols, rows), environment)
@@ -280,6 +316,9 @@ impl Terminals {
             cmd.env("TERM_PROGRAM", "Zeron");
             for (name, value) in environment {
                 cmd.env(name, value);
+            }
+            if let Some(zdotdir) = fallback_zdotdir.as_ref() {
+                cmd.env("ZDOTDIR", zdotdir.path());
             }
             if let Some(script) = initial_script.as_ref() {
                 cmd.env("MAST_ACTION_SCRIPT", script.path());
@@ -302,6 +341,7 @@ impl Terminals {
         let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
             initial_script,
+            _fallback_zdotdir: fallback_zdotdir,
             master: Some(master),
             writer: Some(writer),
             killer,
@@ -490,6 +530,7 @@ fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
         tracing::debug!(error = %err, "terminal kill failed (already exited?)");
     }
     session.initial_script.take();
+    session._fallback_zdotdir.take();
     #[cfg(windows)]
     {
         let cleanup = windows::Cleanup::start(&mut session);

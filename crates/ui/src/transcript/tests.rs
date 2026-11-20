@@ -4531,7 +4531,7 @@ fn authentication_notice_offers_sign_in_for_managed_and_default_chats(
     }
     let dir = tempfile::Builder::new()
         .prefix("mast-first-run-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -4620,7 +4620,7 @@ fn retry_action_is_limited_to_latest_errored_turn(cx: &mut gpui::TestAppContext)
     }
     let dir = tempfile::Builder::new()
         .prefix("mast-retry-")
-        .tempdir_in("/private/tmp")
+        .tempdir()
         .unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
