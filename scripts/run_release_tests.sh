@@ -127,8 +127,7 @@ echo "test wall time: $(( $(date +%s) - started )) s"
 if [ "$run_scenarios" = 1 ]; then
   echo "== ui-driver scenarios (report only)"
   with_time_limit cargo test -p mast-ui-driver --test scenarios -- --ignored run_all_scenarios \
-    --test-threads=1 --nocapture 2>&1 | grep -E '^ *(ok|FAIL) +step|^(PASS|FAIL) |^ {8}|note:|artifact:|^scenarios:|panicked|error' \
-    || true
+    --test-threads=1 --nocapture 2>&1 || true
   echo "scenarios: report only, not part of RESULT"
 fi
 
